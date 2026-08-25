@@ -131,5 +131,52 @@ public sealed class ParserTests
         Assert.True(returnStatement.SemicolonToken.IsMissing);
     }
 
+    [Fact]
+    public void Parser_ParsesControlFlowAndPostfixIncrement()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            int Sum(int count)
+            {
+                int total = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    if (i == 2)
+                        continue;
+                    else
+                        total += i;
+                }
+
+                while (total < 100)
+                {
+                    total++;
+                    if (total == 50)
+                        break;
+                }
+
+                return total;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var @for = Assert.IsType<ForStatementSyntax>(function.Body!.Statements[1]);
+        Assert.IsType<VariableDeclarationStatementSyntax>(@for.Initializer);
+        Assert.IsType<BinaryExpressionSyntax>(@for.Condition);
+        var increment = Assert.IsType<PostfixUnaryExpressionSyntax>(@for.Increment);
+        Assert.Equal(SyntaxKind.PlusPlusToken, increment.OperatorToken.Kind);
+
+        var forBody = Assert.IsType<BlockStatementSyntax>(@for.Body);
+        var @if = Assert.IsType<IfStatementSyntax>(Assert.Single(forBody.Statements));
+        Assert.IsType<ContinueStatementSyntax>(@if.ThenStatement);
+        Assert.IsType<ExpressionStatementSyntax>(@if.ElseStatement);
+
+        var @while = Assert.IsType<WhileStatementSyntax>(function.Body.Statements[2]);
+        var whileBody = Assert.IsType<BlockStatementSyntax>(@while.Body);
+        Assert.IsType<BreakStatementSyntax>(
+            Assert.IsType<IfStatementSyntax>(whileBody.Statements[1]).ThenStatement);
+    }
+
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));
 }

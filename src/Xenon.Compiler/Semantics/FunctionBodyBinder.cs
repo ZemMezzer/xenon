@@ -12,6 +12,7 @@ internal sealed class FunctionBodyBinder
     private readonly FunctionSymbol _function;
     private readonly DiagnosticBag _diagnostics;
     private BoundScope _scope = new(null);
+    private int _loopDepth;
 
     public FunctionBodyBinder(FunctionSymbol function, DiagnosticBag diagnostics)
     {
@@ -67,8 +68,94 @@ internal sealed class FunctionBodyBinder
         VariableDeclarationStatementSyntax variable => BindVariableDeclaration(variable),
         ReturnStatementSyntax @return => BindReturnStatement(@return),
         ExpressionStatementSyntax expression => new BoundExpressionStatement(BindExpression(expression.Expression)),
+        IfStatementSyntax @if => BindIfStatement(@if),
+        WhileStatementSyntax @while => BindWhileStatement(@while),
+        ForStatementSyntax @for => BindForStatement(@for),
+        BreakStatementSyntax @break => BindBreakStatement(@break),
+        ContinueStatementSyntax @continue => BindContinueStatement(@continue),
         _ => throw new InvalidOperationException($"Unexpected statement syntax '{syntax.Kind}'."),
     };
+
+    private BoundIfStatement BindIfStatement(IfStatementSyntax syntax)
+    {
+        BoundExpression condition = BindBooleanCondition(syntax.Condition);
+        BoundStatement thenStatement = BindEmbeddedStatement(syntax.ThenStatement);
+        BoundStatement? elseStatement = syntax.ElseStatement is null
+            ? null
+            : BindEmbeddedStatement(syntax.ElseStatement);
+        return new BoundIfStatement(condition, thenStatement, elseStatement);
+    }
+
+    private BoundWhileStatement BindWhileStatement(WhileStatementSyntax syntax)
+    {
+        BoundExpression condition = BindBooleanCondition(syntax.Condition);
+        _loopDepth++;
+        BoundStatement body = BindEmbeddedStatement(syntax.Body);
+        _loopDepth--;
+        return new BoundWhileStatement(condition, body);
+    }
+
+    private BoundForStatement BindForStatement(ForStatementSyntax syntax)
+    {
+        BoundScope previous = _scope;
+        _scope = new BoundScope(previous);
+
+        BoundStatement? initializer = syntax.Initializer is null ? null : BindStatement(syntax.Initializer);
+        BoundExpression? condition = syntax.Condition is null ? null : BindBooleanCondition(syntax.Condition);
+        BoundExpression? increment = syntax.Increment is null ? null : BindExpression(syntax.Increment);
+
+        _loopDepth++;
+        BoundStatement body = BindEmbeddedStatement(syntax.Body);
+        _loopDepth--;
+
+        _scope = previous;
+        return new BoundForStatement(initializer, condition, increment, body);
+    }
+
+    private BoundBreakStatement BindBreakStatement(BreakStatementSyntax syntax)
+    {
+        if (_loopDepth == 0)
+        {
+            _diagnostics.Report(syntax.BreakKeyword.Location, "'break' can only be used inside a loop");
+        }
+
+        return new BoundBreakStatement();
+    }
+
+    private BoundContinueStatement BindContinueStatement(ContinueStatementSyntax syntax)
+    {
+        if (_loopDepth == 0)
+        {
+            _diagnostics.Report(syntax.ContinueKeyword.Location, "'continue' can only be used inside a loop");
+        }
+
+        return new BoundContinueStatement();
+    }
+
+    private BoundStatement BindEmbeddedStatement(StatementSyntax syntax)
+    {
+        if (syntax is BlockStatementSyntax)
+        {
+            return BindStatement(syntax);
+        }
+
+        BoundScope previous = _scope;
+        _scope = new BoundScope(previous);
+        BoundStatement statement = BindStatement(syntax);
+        _scope = previous;
+        return statement;
+    }
+
+    private BoundExpression BindBooleanCondition(ExpressionSyntax syntax)
+    {
+        BoundExpression condition = BindExpression(syntax);
+        if (!ReferenceEquals(condition.Type, BuiltinTypes.Bool) && !ReferenceEquals(condition.Type, BuiltinTypes.Error))
+        {
+            _diagnostics.Report(GetLocation(syntax), $"condition must have type 'bool', but has type '{condition.Type.Name}'");
+        }
+
+        return condition;
+    }
 
     private BoundVariableDeclarationStatement BindVariableDeclaration(VariableDeclarationStatementSyntax syntax)
     {
@@ -124,6 +211,7 @@ internal sealed class FunctionBodyBinder
         NameExpressionSyntax name => BindNameExpression(name),
         ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
         UnaryExpressionSyntax unary => BindUnaryExpression(unary),
+        PostfixUnaryExpressionSyntax postfix => BindPostfixUnaryExpression(postfix),
         BinaryExpressionSyntax binary => BindBinaryExpression(binary),
         AssignmentExpressionSyntax assignment => BindAssignmentExpression(assignment),
         CallExpressionSyntax call => BindCallExpression(call),
@@ -167,7 +255,21 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindUnaryExpression(UnaryExpressionSyntax syntax)
     {
         BoundExpression operand = BindExpression(syntax.Operand);
-        TypeSymbol? resultType = syntax.OperatorToken.Kind switch
+        return BindUnaryExpression(syntax.OperatorToken, operand, isPostfix: false);
+    }
+
+    private BoundExpression BindPostfixUnaryExpression(PostfixUnaryExpressionSyntax syntax)
+    {
+        BoundExpression operand = BindExpression(syntax.Operand);
+        return BindUnaryExpression(syntax.OperatorToken, operand, isPostfix: true);
+    }
+
+    private BoundExpression BindUnaryExpression(
+        SyntaxToken operatorToken,
+        BoundExpression operand,
+        bool isPostfix)
+    {
+        TypeSymbol? resultType = operatorToken.Kind switch
         {
             SyntaxKind.PlusToken or SyntaxKind.MinusToken when TypeFacts.IsNumeric(operand.Type) => operand.Type,
             SyntaxKind.BangToken when ReferenceEquals(operand.Type, BuiltinTypes.Bool) => BuiltinTypes.Bool,
@@ -185,14 +287,14 @@ internal sealed class FunctionBodyBinder
             if (!ReferenceEquals(operand.Type, BuiltinTypes.Error))
             {
                 _diagnostics.Report(
-                    syntax.OperatorToken.Location,
-                    $"unary operator '{syntax.OperatorToken.Text}' is not defined for type '{operand.Type.Name}'");
+                    operatorToken.Location,
+                    $"unary operator '{operatorToken.Text}' is not defined for type '{operand.Type.Name}'");
             }
 
             return new BoundErrorExpression();
         }
 
-        return new BoundUnaryExpression(syntax.OperatorToken.Kind, operand, resultType);
+        return new BoundUnaryExpression(operatorToken.Kind, operand, resultType, isPostfix);
     }
 
     private BoundExpression BindBinaryExpression(BinaryExpressionSyntax syntax)
@@ -383,6 +485,7 @@ internal sealed class FunctionBodyBinder
         NameExpressionSyntax name => name.IdentifierToken.Location,
         ParenthesizedExpressionSyntax parenthesized => parenthesized.OpenParenthesisToken.Location,
         UnaryExpressionSyntax unary => unary.OperatorToken.Location,
+        PostfixUnaryExpressionSyntax postfix => postfix.OperatorToken.Location,
         BinaryExpressionSyntax binary => binary.OperatorToken.Location,
         AssignmentExpressionSyntax assignment => assignment.OperatorToken.Location,
         CallExpressionSyntax call => call.OpenParenthesisToken.Location,
@@ -400,7 +503,18 @@ internal sealed class FunctionBodyBinder
         {
             BoundReturnStatement => true,
             BoundBlockStatement nested => AlwaysReturns(nested),
+            BoundIfStatement { ElseStatement: not null } @if =>
+                AlwaysReturns(@if.ThenStatement) && AlwaysReturns(@if.ElseStatement),
             _ => false,
         };
     }
+
+    private static bool AlwaysReturns(BoundStatement statement) => statement switch
+    {
+        BoundReturnStatement => true,
+        BoundBlockStatement block => AlwaysReturns(block),
+        BoundIfStatement { ElseStatement: not null } @if =>
+            AlwaysReturns(@if.ThenStatement) && AlwaysReturns(@if.ElseStatement),
+        _ => false,
+    };
 }

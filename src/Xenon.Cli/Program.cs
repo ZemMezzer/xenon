@@ -1,8 +1,10 @@
+using System.Collections.Immutable;
 using System.Text;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
+using Xenon.ProjectSystem;
 
 namespace Xenon.Cli;
 
@@ -14,10 +16,10 @@ internal static class Program
 
     public static int Main(string[] args)
     {
-        if (args.Length == 0 || args.Contains("--help", StringComparer.Ordinal))
+        if (args.Contains("--help", StringComparer.Ordinal))
         {
             PrintUsage();
-            return args.Length == 0 ? UsageError : Success;
+            return Success;
         }
 
         if (args.Contains("--version", StringComparer.Ordinal))
@@ -26,43 +28,99 @@ internal static class Program
             return Success;
         }
 
-        bool dumpTokens = args.Contains("--dump-tokens", StringComparer.Ordinal);
-        bool emitLlvm = args.Contains("--emit-llvm", StringComparer.Ordinal);
-        string[] unknownOptions = args
-            .Where(argument => argument.StartsWith("-", StringComparison.Ordinal))
-            .Where(argument => argument is not "--dump-tokens" and not "--emit-llvm")
-            .ToArray();
+        bool buildCommand = args.Length > 0 && string.Equals(args[0], "build", StringComparison.Ordinal);
+        int argumentIndex = buildCommand ? 1 : 0;
+        bool dumpTokens = false;
+        bool emitLlvm = false;
+        string profileName = "debug";
+        var inputs = new List<string>();
 
-        if (unknownOptions.Length > 0)
+        while (argumentIndex < args.Length)
         {
-            Console.Error.WriteLine($"error: unknown option '{unknownOptions[0]}'");
+            string argument = args[argumentIndex++];
+            switch (argument)
+            {
+                case "--dump-tokens":
+                    dumpTokens = true;
+                    break;
+                case "--emit-llvm":
+                    emitLlvm = true;
+                    break;
+                case "--release":
+                    profileName = "release";
+                    break;
+                case "--profile":
+                    if (argumentIndex == args.Length)
+                    {
+                        return WriteUsageError("option '--profile' requires a value");
+                    }
+
+                    profileName = args[argumentIndex++];
+                    break;
+                default:
+                    if (argument.StartsWith("--profile=", StringComparison.Ordinal))
+                    {
+                        profileName = argument["--profile=".Length..];
+                    }
+                    else if (argument.StartsWith("-", StringComparison.Ordinal))
+                    {
+                        return WriteUsageError($"unknown option '{argument}'");
+                    }
+                    else
+                    {
+                        inputs.Add(argument);
+                    }
+
+                    break;
+            }
+        }
+
+        if (profileName is not "debug" and not "release")
+        {
+            return WriteUsageError($"unknown build profile '{profileName}'");
+        }
+
+        if (buildCommand)
+        {
+            if (inputs.Count > 1)
+            {
+                return WriteUsageError("'xenon build' accepts at most one file, project, or directory");
+            }
+
+            if (inputs.Count == 0)
+            {
+                inputs.Add(Directory.GetCurrentDirectory());
+            }
+        }
+        else if (inputs.Count == 0)
+        {
+            PrintUsage();
             return UsageError;
         }
 
-        string[] sourcePaths = args.Where(argument => !argument.StartsWith("-", StringComparison.Ordinal)).ToArray();
-        if (sourcePaths.Length == 0)
+        CompilationInput input;
+        try
         {
-            Console.Error.WriteLine("error: no input files");
+            input = ResolveInput(inputs, profileName);
+        }
+        catch (ProjectSystemException exception)
+        {
+            Console.Error.WriteLine($"error: {exception.Message}");
             return UsageError;
         }
 
-        var sources = new List<SourceText>(sourcePaths.Length);
-        foreach (string sourcePath in sourcePaths)
+        var sources = new List<SourceText>(input.SourceFiles.Length);
+        try
         {
-            if (!string.Equals(Path.GetExtension(sourcePath), ".xe", StringComparison.OrdinalIgnoreCase))
+            foreach (string sourcePath in input.SourceFiles)
             {
-                Console.Error.WriteLine($"error: input file '{sourcePath}' must use the .xe extension");
-                return UsageError;
+                sources.Add(SourceText.From(File.ReadAllText(sourcePath, Encoding.UTF8), sourcePath));
             }
-
-            if (!File.Exists(sourcePath))
-            {
-                Console.Error.WriteLine($"error: input file '{sourcePath}' does not exist");
-                return UsageError;
-            }
-
-            string fullPath = Path.GetFullPath(sourcePath);
-            sources.Add(SourceText.From(File.ReadAllText(fullPath, Encoding.UTF8), fullPath));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"error: cannot read source file: {exception.Message}");
+            return CompilationError;
         }
 
         Compilation compilation = Compilation.Create([.. sources]);
@@ -86,11 +144,12 @@ internal static class Program
         {
             try
             {
-                string moduleName = Path.GetFileNameWithoutExtension(sources[0].Path);
-                string llvmIr = new LlvmIrGenerator().Generate(compilation, moduleName);
-                string outputPath = Path.ChangeExtension(sources[0].Path, ".ll");
-                File.WriteAllText(outputPath, llvmIr, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-                Console.WriteLine($"Wrote LLVM IR to '{outputPath}'.");
+                string llvmIr = new LlvmIrGenerator().Generate(compilation, input.Name);
+                File.WriteAllText(
+                    input.LlvmOutputPath,
+                    llvmIr,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                Console.WriteLine($"Wrote LLVM IR to '{input.LlvmOutputPath}'.");
             }
             catch (LlvmCodeGenerationException exception)
             {
@@ -106,8 +165,59 @@ internal static class Program
 
         int tokenCount = compilation.SyntaxTrees.Sum(tree => tree.Tokens.Length - 1);
         int memberCount = compilation.SyntaxTrees.Sum(tree => tree.Root.Members.Length);
-        Console.WriteLine($"Analyzed {compilation.SyntaxTrees.Length} file(s), {memberCount} declaration(s), {tokenCount} token(s).");
+        string projectKind = input.IsImplicit ? "implicit" : "explicit";
+        Console.WriteLine(
+            $"Analyzed {projectKind} project '{input.Name}' ({profileName}): " +
+            $"{compilation.SyntaxTrees.Length} file(s), {memberCount} declaration(s), {tokenCount} token(s).");
         return Success;
+    }
+
+    private static CompilationInput ResolveInput(IReadOnlyList<string> inputs, string profileName)
+    {
+        if (inputs.Count == 1)
+        {
+            XenonProject project = XenonProjectLoader.Resolve(inputs[0]);
+            _ = project.GetProfile(profileName);
+            string llvmOutputPath = project.IsImplicit && project.SourceFiles.Length == 1
+                ? Path.ChangeExtension(project.SourceFiles[0], ".ll")
+                : Path.Combine(project.RootDirectory, $"{project.Name}.ll");
+            return new CompilationInput(
+                project.Name,
+                project.IsImplicit,
+                project.SourceFiles,
+                llvmOutputPath);
+        }
+
+        var sourceFiles = ImmutableArray.CreateBuilder<string>(inputs.Count);
+        foreach (string input in inputs)
+        {
+            if (!string.Equals(Path.GetExtension(input), ".xe", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ProjectSystemException(
+                    "multiple inputs must all be explicit .xe source files");
+            }
+
+            string fullPath = Path.GetFullPath(input);
+            if (!File.Exists(fullPath))
+            {
+                throw new ProjectSystemException($"input file '{input}' does not exist");
+            }
+
+            sourceFiles.Add(fullPath);
+        }
+
+        string firstSource = sourceFiles[0];
+        return new CompilationInput(
+            Path.GetFileNameWithoutExtension(firstSource),
+            IsImplicit: true,
+            sourceFiles.ToImmutable(),
+            Path.ChangeExtension(firstSource, ".ll"));
+    }
+
+    private static int WriteUsageError(string message)
+    {
+        Console.Error.WriteLine($"error: {message}");
+        return UsageError;
     }
 
     private static void DumpTokens(Compilation compilation)
@@ -134,8 +244,17 @@ internal static class Program
         Console.WriteLine("Xenon compiler");
         Console.WriteLine();
         Console.WriteLine("Usage:");
+        Console.WriteLine("  xenon build [path] [--profile debug|release] [--dump-tokens] [--emit-llvm]");
         Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] <source.xe> [additional.xe ...]");
         Console.WriteLine("  xenon --version");
         Console.WriteLine("  xenon --help");
+        Console.WriteLine();
+        Console.WriteLine("If 'path' is a directory without a .xeproj, all .xe files below it form an implicit executable project.");
     }
+
+    private sealed record CompilationInput(
+        string Name,
+        bool IsImplicit,
+        ImmutableArray<string> SourceFiles,
+        string LlvmOutputPath);
 }

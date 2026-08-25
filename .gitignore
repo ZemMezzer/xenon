@@ -62,3 +62,5 @@ src/Xenon.CodeGen.LLVM/bin
 src/Xenon.CodeGen.LLVM/obj
 src/Xenon.Compiler/bin
 src/Xenon.Compiler/obj
+src/Xenon.ProjectSystem/bin
+src/Xenon.ProjectSystem/obj

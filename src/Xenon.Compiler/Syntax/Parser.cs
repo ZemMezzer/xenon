@@ -161,6 +161,31 @@ internal sealed class Parser
             return ParseReturnStatement();
         }
 
+        if (Current.Kind == SyntaxKind.IfKeyword)
+        {
+            return ParseIfStatement();
+        }
+
+        if (Current.Kind == SyntaxKind.WhileKeyword)
+        {
+            return ParseWhileStatement();
+        }
+
+        if (Current.Kind == SyntaxKind.ForKeyword)
+        {
+            return ParseForStatement();
+        }
+
+        if (Current.Kind == SyntaxKind.BreakKeyword)
+        {
+            return ParseBreakStatement();
+        }
+
+        if (Current.Kind == SyntaxKind.ContinueKeyword)
+        {
+            return ParseContinueStatement();
+        }
+
         if (IsVariableDeclaration())
         {
             return ParseVariableDeclarationStatement();
@@ -177,6 +202,102 @@ internal sealed class Parser
             : ParseExpression();
         SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
         return new ReturnStatementSyntax(returnKeyword, expression, semicolon);
+    }
+
+    private IfStatementSyntax ParseIfStatement()
+    {
+        SyntaxToken ifKeyword = MatchToken(SyntaxKind.IfKeyword);
+        SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        ExpressionSyntax condition = ParseExpression();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        StatementSyntax thenStatement = ParseStatement();
+        SyntaxToken? elseKeyword = null;
+        StatementSyntax? elseStatement = null;
+
+        if (Current.Kind == SyntaxKind.ElseKeyword)
+        {
+            elseKeyword = NextToken();
+            elseStatement = ParseStatement();
+        }
+
+        return new IfStatementSyntax(
+            ifKeyword,
+            openParenthesis,
+            condition,
+            closeParenthesis,
+            thenStatement,
+            elseKeyword,
+            elseStatement);
+    }
+
+    private WhileStatementSyntax ParseWhileStatement()
+    {
+        SyntaxToken whileKeyword = MatchToken(SyntaxKind.WhileKeyword);
+        SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        ExpressionSyntax condition = ParseExpression();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        StatementSyntax body = ParseStatement();
+        return new WhileStatementSyntax(whileKeyword, openParenthesis, condition, closeParenthesis, body);
+    }
+
+    private ForStatementSyntax ParseForStatement()
+    {
+        SyntaxToken forKeyword = MatchToken(SyntaxKind.ForKeyword);
+        SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        StatementSyntax? initializer = null;
+        SyntaxToken firstSemicolon;
+
+        if (Current.Kind == SyntaxKind.SemicolonToken)
+        {
+            firstSemicolon = NextToken();
+        }
+        else if (IsVariableDeclaration())
+        {
+            var declaration = ParseVariableDeclarationStatement();
+            initializer = declaration;
+            firstSemicolon = declaration.SemicolonToken;
+        }
+        else
+        {
+            ExpressionSyntax expression = ParseExpression();
+            firstSemicolon = MatchToken(SyntaxKind.SemicolonToken);
+            initializer = new ExpressionStatementSyntax(expression, firstSemicolon);
+        }
+
+        ExpressionSyntax? condition = Current.Kind == SyntaxKind.SemicolonToken
+            ? null
+            : ParseExpression();
+        SyntaxToken secondSemicolon = MatchToken(SyntaxKind.SemicolonToken);
+        ExpressionSyntax? increment = Current.Kind == SyntaxKind.CloseParenthesisToken
+            ? null
+            : ParseExpression();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        StatementSyntax body = ParseStatement();
+
+        return new ForStatementSyntax(
+            forKeyword,
+            openParenthesis,
+            initializer,
+            firstSemicolon,
+            condition,
+            secondSemicolon,
+            increment,
+            closeParenthesis,
+            body);
+    }
+
+    private BreakStatementSyntax ParseBreakStatement()
+    {
+        SyntaxToken keyword = MatchToken(SyntaxKind.BreakKeyword);
+        SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
+        return new BreakStatementSyntax(keyword, semicolon);
+    }
+
+    private ContinueStatementSyntax ParseContinueStatement()
+    {
+        SyntaxToken keyword = MatchToken(SyntaxKind.ContinueKeyword);
+        SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
+        return new ContinueStatementSyntax(keyword, semicolon);
     }
 
     private VariableDeclarationStatementSyntax ParseVariableDeclarationStatement()
@@ -258,6 +379,11 @@ internal sealed class Parser
         while (Current.Kind == SyntaxKind.OpenParenthesisToken)
         {
             expression = ParseCallExpression(expression);
+        }
+
+        if (Current.Kind is SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken)
+        {
+            expression = new PostfixUnaryExpressionSyntax(expression, NextToken());
         }
 
         return expression;

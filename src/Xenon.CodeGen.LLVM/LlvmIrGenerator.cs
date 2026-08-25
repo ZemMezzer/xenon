@@ -160,9 +160,11 @@ public sealed class LlvmIrGenerator
         private readonly LLVMContextRef _context;
         private readonly LLVMBuilderRef _builder;
         private readonly FunctionSymbol _function;
+        private readonly LLVMValueRef _llvmFunction;
         private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions;
         private readonly Func<TypeSymbol, LLVMTypeRef> _mapType;
         private readonly Dictionary<VariableSymbol, LLVMValueRef> _addresses = [];
+        private readonly Stack<LoopTargets> _loopTargets = [];
         private bool _terminated;
 
         public FunctionEmitter(
@@ -176,6 +178,7 @@ public sealed class LlvmIrGenerator
             _context = context;
             _builder = builder;
             _function = function;
+            _llvmFunction = llvmFunction;
             _functions = functions;
             _mapType = mapType;
 
@@ -190,12 +193,50 @@ public sealed class LlvmIrGenerator
 
         public void Emit(BoundBlockStatement body)
         {
+            AllocateLocals(body);
             EmitBlock(body);
 
             if (!_terminated && ReferenceEquals(_function.ReturnType, BuiltinTypes.Void))
             {
                 _builder.BuildRetVoid();
                 _terminated = true;
+            }
+        }
+
+        private void AllocateLocals(BoundStatement statement)
+        {
+            switch (statement)
+            {
+                case BoundBlockStatement block:
+                    foreach (BoundStatement child in block.Statements)
+                    {
+                        AllocateLocals(child);
+                    }
+
+                    break;
+                case BoundVariableDeclarationStatement variable:
+                    LLVMValueRef address = _builder.BuildAlloca(_mapType(variable.Variable.Type), variable.Variable.Name);
+                    _addresses.Add(variable.Variable, address);
+                    break;
+                case BoundIfStatement @if:
+                    AllocateLocals(@if.ThenStatement);
+                    if (@if.ElseStatement is not null)
+                    {
+                        AllocateLocals(@if.ElseStatement);
+                    }
+
+                    break;
+                case BoundWhileStatement @while:
+                    AllocateLocals(@while.Body);
+                    break;
+                case BoundForStatement @for:
+                    if (@for.Initializer is not null)
+                    {
+                        AllocateLocals(@for.Initializer);
+                    }
+
+                    AllocateLocals(@for.Body);
+                    break;
             }
         }
 
@@ -228,15 +269,163 @@ public sealed class LlvmIrGenerator
                 case BoundReturnStatement @return:
                     EmitReturn(@return);
                     break;
+                case BoundIfStatement @if:
+                    EmitIf(@if);
+                    break;
+                case BoundWhileStatement @while:
+                    EmitWhile(@while);
+                    break;
+                case BoundForStatement @for:
+                    EmitFor(@for);
+                    break;
+                case BoundBreakStatement:
+                    EmitLoopBranch(_loopTargets.Peek().BreakTarget);
+                    break;
+                case BoundContinueStatement:
+                    EmitLoopBranch(_loopTargets.Peek().ContinueTarget);
+                    break;
                 default:
                     throw new LlvmCodeGenerationException($"Bound statement '{statement.Kind}' is not supported by LLVM code generation.");
             }
         }
 
+        private void EmitIf(BoundIfStatement statement)
+        {
+            LLVMValueRef condition = EmitExpression(statement.Condition);
+            LLVMBasicBlockRef thenBlock = _llvmFunction.AppendBasicBlock("if.then");
+
+            if (statement.ElseStatement is null)
+            {
+                LLVMBasicBlockRef endBlock = _llvmFunction.AppendBasicBlock("if.end");
+                _builder.BuildCondBr(condition, thenBlock, endBlock);
+
+                _builder.PositionAtEnd(thenBlock);
+                _terminated = false;
+                EmitStatement(statement.ThenStatement);
+                if (!_terminated)
+                {
+                    _builder.BuildBr(endBlock);
+                }
+
+                _builder.PositionAtEnd(endBlock);
+                _terminated = false;
+                return;
+            }
+
+            LLVMBasicBlockRef elseBlock = _llvmFunction.AppendBasicBlock("if.else");
+            _builder.BuildCondBr(condition, thenBlock, elseBlock);
+
+            _builder.PositionAtEnd(thenBlock);
+            _terminated = false;
+            EmitStatement(statement.ThenStatement);
+            bool thenFallsThrough = !_terminated;
+            LLVMBasicBlockRef thenEnd = _builder.InsertBlock;
+
+            _builder.PositionAtEnd(elseBlock);
+            _terminated = false;
+            EmitStatement(statement.ElseStatement);
+            bool elseFallsThrough = !_terminated;
+            LLVMBasicBlockRef elseEnd = _builder.InsertBlock;
+
+            if (!thenFallsThrough && !elseFallsThrough)
+            {
+                _terminated = true;
+                return;
+            }
+
+            LLVMBasicBlockRef mergeBlock = _llvmFunction.AppendBasicBlock("if.end");
+            if (thenFallsThrough)
+            {
+                _builder.PositionAtEnd(thenEnd);
+                _builder.BuildBr(mergeBlock);
+            }
+
+            if (elseFallsThrough)
+            {
+                _builder.PositionAtEnd(elseEnd);
+                _builder.BuildBr(mergeBlock);
+            }
+
+            _builder.PositionAtEnd(mergeBlock);
+            _terminated = false;
+        }
+
+        private void EmitWhile(BoundWhileStatement statement)
+        {
+            LLVMBasicBlockRef conditionBlock = _llvmFunction.AppendBasicBlock("while.condition");
+            LLVMBasicBlockRef bodyBlock = _llvmFunction.AppendBasicBlock("while.body");
+            LLVMBasicBlockRef endBlock = _llvmFunction.AppendBasicBlock("while.end");
+            _builder.BuildBr(conditionBlock);
+
+            _builder.PositionAtEnd(conditionBlock);
+            LLVMValueRef condition = EmitExpression(statement.Condition);
+            _builder.BuildCondBr(condition, bodyBlock, endBlock);
+
+            _builder.PositionAtEnd(bodyBlock);
+            _terminated = false;
+            _loopTargets.Push(new LoopTargets(endBlock, conditionBlock));
+            EmitStatement(statement.Body);
+            _loopTargets.Pop();
+            if (!_terminated)
+            {
+                _builder.BuildBr(conditionBlock);
+            }
+
+            _builder.PositionAtEnd(endBlock);
+            _terminated = false;
+        }
+
+        private void EmitFor(BoundForStatement statement)
+        {
+            if (statement.Initializer is not null)
+            {
+                EmitStatement(statement.Initializer);
+            }
+
+            LLVMBasicBlockRef conditionBlock = _llvmFunction.AppendBasicBlock("for.condition");
+            LLVMBasicBlockRef bodyBlock = _llvmFunction.AppendBasicBlock("for.body");
+            LLVMBasicBlockRef incrementBlock = _llvmFunction.AppendBasicBlock("for.increment");
+            LLVMBasicBlockRef endBlock = _llvmFunction.AppendBasicBlock("for.end");
+            _builder.BuildBr(conditionBlock);
+
+            _builder.PositionAtEnd(conditionBlock);
+            LLVMValueRef condition = statement.Condition is null
+                ? LLVMValueRef.CreateConstInt(_context.Int1Type, 1, false)
+                : EmitExpression(statement.Condition);
+            _builder.BuildCondBr(condition, bodyBlock, endBlock);
+
+            _builder.PositionAtEnd(bodyBlock);
+            _terminated = false;
+            _loopTargets.Push(new LoopTargets(endBlock, incrementBlock));
+            EmitStatement(statement.Body);
+            _loopTargets.Pop();
+            if (!_terminated)
+            {
+                _builder.BuildBr(incrementBlock);
+            }
+
+            _builder.PositionAtEnd(incrementBlock);
+            _terminated = false;
+            if (statement.Increment is not null)
+            {
+                EmitExpression(statement.Increment);
+            }
+
+            _builder.BuildBr(conditionBlock);
+
+            _builder.PositionAtEnd(endBlock);
+            _terminated = false;
+        }
+
+        private void EmitLoopBranch(LLVMBasicBlockRef target)
+        {
+            _builder.BuildBr(target);
+            _terminated = true;
+        }
+
         private void EmitVariableDeclaration(BoundVariableDeclarationStatement statement)
         {
-            LLVMValueRef address = _builder.BuildAlloca(_mapType(statement.Variable.Type), statement.Variable.Name);
-            _addresses.Add(statement.Variable, address);
+            LLVMValueRef address = GetAddress(statement.Variable);
 
             if (statement.Initializer is not null)
             {
@@ -356,14 +545,14 @@ public sealed class LlvmIrGenerator
                 ? EmitArithmetic(SyntaxKind.PlusToken, expression.Type, operand, one)
                 : EmitArithmetic(SyntaxKind.MinusToken, expression.Type, operand, one);
             _builder.BuildStore(result, GetAddress(variable.Variable));
-            return result;
+            return expression.IsPostfix ? operand : result;
         }
 
         private LLVMValueRef EmitBinary(BoundBinaryExpression expression)
         {
             if (expression.OperatorKind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken)
             {
-                throw new LlvmCodeGenerationException("Short-circuit boolean operators require control-flow lowering.");
+                return EmitShortCircuit(expression);
             }
 
             LLVMValueRef left = EmitExpression(expression.Left);
@@ -377,6 +566,41 @@ public sealed class LlvmIrGenerator
             }
 
             return EmitArithmetic(expression.OperatorKind, expression.Left.Type, left, right);
+        }
+
+        private LLVMValueRef EmitShortCircuit(BoundBinaryExpression expression)
+        {
+            LLVMValueRef left = EmitExpression(expression.Left);
+            LLVMBasicBlockRef leftBlock = _builder.InsertBlock;
+            LLVMBasicBlockRef rightBlock = _llvmFunction.AppendBasicBlock("logic.rhs");
+            LLVMBasicBlockRef mergeBlock = _llvmFunction.AppendBasicBlock("logic.end");
+            bool isAnd = expression.OperatorKind == SyntaxKind.AmpersandAmpersandToken;
+
+            if (isAnd)
+            {
+                _builder.BuildCondBr(left, rightBlock, mergeBlock);
+            }
+            else
+            {
+                _builder.BuildCondBr(left, mergeBlock, rightBlock);
+            }
+
+            _builder.PositionAtEnd(rightBlock);
+            LLVMValueRef right = EmitExpression(expression.Right);
+            LLVMBasicBlockRef rightEnd = _builder.InsertBlock;
+            _builder.BuildBr(mergeBlock);
+
+            _builder.PositionAtEnd(mergeBlock);
+            LLVMValueRef shortCircuitValue = LLVMValueRef.CreateConstInt(
+                _context.Int1Type,
+                isAnd ? 0UL : 1UL,
+                false);
+            LLVMValueRef result = _builder.BuildPhi(_context.Int1Type, "logic");
+            result.AddIncoming(
+                [shortCircuitValue, right],
+                [leftBlock, rightEnd],
+                2);
+            return result;
         }
 
         private LLVMValueRef EmitArithmetic(
@@ -507,5 +731,9 @@ public sealed class LlvmIrGenerator
             SyntaxKind.GreaterGreaterEqualsToken => SyntaxKind.GreaterGreaterToken,
             _ => throw new LlvmCodeGenerationException($"Invalid compound assignment operator '{kind}'."),
         };
+
+        private readonly record struct LoopTargets(
+            LLVMBasicBlockRef BreakTarget,
+            LLVMBasicBlockRef ContinueTarget);
     }
 }

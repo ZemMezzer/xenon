@@ -78,6 +78,75 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("contains errors", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Generator_EmitsAndVerifiesControlFlow()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            int Choose(bool condition)
+            {
+                if (condition)
+                    return 1;
+                else
+                    return 2;
+            }
+
+            int Sum(int count)
+            {
+                int total = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    if (i == 2)
+                        continue;
+
+                    total += i;
+                }
+
+                while (total > 100)
+                {
+                    total--;
+                    if (total == 110)
+                        break;
+                }
+
+                return total;
+            }
+            """);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "control-flow");
+
+        Assert.Contains("for.condition:", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("while.condition:", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("if.then:", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("if.else:", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("br i1", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_UsesPhiNodesForShortCircuitBooleanOperators()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            bool Both(bool left, bool right)
+            {
+                return left && right;
+            }
+
+            bool Either(bool left, bool right)
+            {
+                return left || right;
+            }
+            """);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "short-circuit");
+
+        Assert.Contains("logic.rhs:", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("phi i1", llvmIr, StringComparison.Ordinal);
+        Assert.Equal(2, llvmIr.Split("phi i1", StringSplitOptions.None).Length - 1);
+    }
+
     private static Compilation CreateCompilation(string source) =>
         Compilation.Create(SourceText.From(source, "test.xe"));
 }

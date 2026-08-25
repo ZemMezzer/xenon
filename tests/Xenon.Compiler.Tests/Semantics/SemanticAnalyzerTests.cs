@@ -204,6 +204,89 @@ public sealed class SemanticAnalyzerTests
             diagnostic => diagnostic.Message == "not all code paths in function 'Main' return a value");
     }
 
+    [Fact]
+    public void Analyzer_BindsControlFlowAndAcceptsReturningIfElse()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            int Choose(bool condition)
+            {
+                if (condition)
+                    return 1;
+                else
+                    return 2;
+            }
+
+            int Sum(int count)
+            {
+                int total = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    if (i == 2)
+                        continue;
+
+                    total += i;
+                }
+
+                while (total > 100)
+                    break;
+
+                return total;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction choose = compilation.SemanticModel.Functions[0];
+        var @if = Assert.IsType<BoundIfStatement>(Assert.Single(choose.Body.Statements));
+        Assert.IsType<BoundReturnStatement>(@if.ThenStatement);
+        Assert.IsType<BoundReturnStatement>(@if.ElseStatement);
+
+        BoundFunction sum = compilation.SemanticModel.Functions[1];
+        Assert.IsType<BoundForStatement>(sum.Body.Statements[1]);
+        Assert.IsType<BoundWhileStatement>(sum.Body.Statements[2]);
+    }
+
+    [Fact]
+    public void Analyzer_ReportsInvalidLoopUsageAndConditionTypes()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            int Main()
+            {
+                if (1)
+                    break;
+
+                while (2)
+                {
+                }
+
+                continue;
+
+                for (int i = 0; 3; i++)
+                {
+                }
+
+                return i;
+            }
+            """);
+
+        Assert.Equal(
+            3,
+            compilation.Diagnostics.Count(diagnostic =>
+                diagnostic.Message == "condition must have type 'bool', but has type 'int'"));
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "'break' can only be used inside a loop");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "'continue' can only be used inside a loop");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "unknown identifier 'i'");
+    }
+
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(
         sources.Select((source, index) => SourceText.From(source, $"test{index}.xe")).ToArray());
 }

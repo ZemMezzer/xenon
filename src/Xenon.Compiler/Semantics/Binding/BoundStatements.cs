@@ -27,3 +27,37 @@ public sealed record BoundExpressionStatement(
 {
     public override BoundKind Kind => BoundKind.ExpressionStatement;
 }
+
+public sealed record BoundIfStatement(
+    BoundExpression Condition,
+    BoundStatement ThenStatement,
+    BoundStatement? ElseStatement) : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.IfStatement;
+}
+
+public sealed record BoundWhileStatement(
+    BoundExpression Condition,
+    BoundStatement Body) : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.WhileStatement;
+}
+
+public sealed record BoundForStatement(
+    BoundStatement? Initializer,
+    BoundExpression? Condition,
+    BoundExpression? Increment,
+    BoundStatement Body) : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.ForStatement;
+}
+
+public sealed record BoundBreakStatement() : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.BreakStatement;
+}
+
+public sealed record BoundContinueStatement() : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.ContinueStatement;
+}

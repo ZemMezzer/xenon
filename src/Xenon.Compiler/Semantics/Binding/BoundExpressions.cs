@@ -20,7 +20,8 @@ public sealed record BoundVariableExpression(
 public sealed record BoundUnaryExpression(
     SyntaxKind OperatorKind,
     BoundExpression Operand,
-    TypeSymbol ResultType) : BoundExpression(ResultType)
+    TypeSymbol ResultType,
+    bool IsPostfix = false) : BoundExpression(ResultType)
 {
     public override BoundKind Kind => BoundKind.UnaryExpression;
 }

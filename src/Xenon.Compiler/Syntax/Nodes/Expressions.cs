@@ -19,6 +19,13 @@ public sealed record UnaryExpressionSyntax(
     public override SyntaxKind Kind => SyntaxKind.UnaryExpression;
 }
 
+public sealed record PostfixUnaryExpressionSyntax(
+    ExpressionSyntax Operand,
+    SyntaxToken OperatorToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.PostfixUnaryExpression;
+}
+
 public sealed record BinaryExpressionSyntax(
     ExpressionSyntax Left,
     SyntaxToken OperatorToken,

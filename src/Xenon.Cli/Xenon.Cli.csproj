@@ -9,5 +9,6 @@
   <ItemGroup>
     <ProjectReference Include="../Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
     <ProjectReference Include="../Xenon.Compiler/Xenon.Compiler.csproj" />
+    <ProjectReference Include="../Xenon.ProjectSystem/Xenon.ProjectSystem.csproj" />
   </ItemGroup>
 </Project>
