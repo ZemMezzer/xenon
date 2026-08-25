@@ -1,0 +1,511 @@
+using System.Collections.Immutable;
+using LLVMSharp.Interop;
+using Xenon.Compiler;
+using Xenon.Compiler.Semantics.Binding;
+using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Syntax;
+
+namespace Xenon.CodeGen.LLVM;
+
+public sealed class LlvmIrGenerator
+{
+    private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
+    private LLVMContextRef _context;
+    private LLVMModuleRef _module;
+
+    public string Generate(Compilation compilation, string moduleName = "xenon")
+    {
+        ArgumentNullException.ThrowIfNull(compilation);
+
+        if (compilation.HasErrors)
+        {
+            throw new LlvmCodeGenerationException("LLVM IR cannot be generated while the compilation contains errors.");
+        }
+
+        _context = LLVMContextRef.Create();
+        _module = _context.CreateModuleWithName(moduleName);
+
+        try
+        {
+            DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
+            EmitFunctionBodies(compilation.SemanticModel.Functions);
+            _module.Verify(LLVMVerifierFailureAction.LLVMReturnStatusAction);
+            return _module.PrintToString();
+        }
+        catch (LlvmCodeGenerationException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new LlvmCodeGenerationException("LLVM failed to generate or verify the module.", exception);
+        }
+        finally
+        {
+            _module.Dispose();
+            _context.Dispose();
+            _functions.Clear();
+        }
+    }
+
+    private void DeclareFunctions(NamespaceSymbol @namespace)
+    {
+        foreach (FunctionSymbol function in @namespace.Functions)
+        {
+            LLVMTypeRef returnType = MapType(function.ReturnType);
+            LLVMTypeRef[] parameterTypes = function.Parameters
+                .Select(parameter => MapType(parameter.Type))
+                .ToArray();
+            LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, parameterTypes, false);
+            LLVMValueRef value = _module.AddFunction(GetNativeName(function), functionType);
+            _functions.Add(function, new LlvmFunction(value, functionType));
+        }
+
+        foreach (NamespaceSymbol child in @namespace.Namespaces)
+        {
+            DeclareFunctions(child);
+        }
+    }
+
+    private void EmitFunctionBodies(ImmutableArray<BoundFunction> functions)
+    {
+        foreach (BoundFunction function in functions)
+        {
+            LlvmFunction declaration = _functions[function.Symbol];
+            using LLVMBuilderRef builder = _context.CreateBuilder();
+            LLVMBasicBlockRef entry = declaration.Value.AppendBasicBlock("entry");
+            builder.PositionAtEnd(entry);
+
+            var emitter = new FunctionEmitter(
+                _context,
+                builder,
+                function.Symbol,
+                declaration.Value,
+                _functions,
+                MapType);
+            emitter.Emit(function.Body);
+        }
+    }
+
+    private LLVMTypeRef MapType(TypeSymbol type)
+    {
+        if (ReferenceEquals(type, BuiltinTypes.Void))
+        {
+            return _context.VoidType;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Bool))
+        {
+            return _context.Int1Type;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Byte) || ReferenceEquals(type, BuiltinTypes.SByte))
+        {
+            return _context.Int8Type;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Short) || ReferenceEquals(type, BuiltinTypes.UShort))
+        {
+            return _context.Int16Type;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Int) || ReferenceEquals(type, BuiltinTypes.UInt))
+        {
+            return _context.Int32Type;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Long) || ReferenceEquals(type, BuiltinTypes.ULong))
+        {
+            return _context.Int64Type;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Float))
+        {
+            return _context.FloatType;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Double))
+        {
+            return _context.DoubleType;
+        }
+
+        if (type is PointerTypeSymbol pointer)
+        {
+            return LLVMTypeRef.CreatePointer(MapType(pointer.ElementType), 0);
+        }
+
+        throw new LlvmCodeGenerationException(
+            $"Type '{type.Name}' requires target information and cannot be lowered by the target-independent LLVM milestone.");
+    }
+
+    private static string GetNativeName(FunctionSymbol function)
+    {
+        if (function.IsExtern)
+        {
+            return function.Name;
+        }
+
+        if (function.IsExport)
+        {
+            return function.FullName.Replace('.', '_');
+        }
+
+        return function.FullName;
+    }
+
+    private readonly record struct LlvmFunction(LLVMValueRef Value, LLVMTypeRef Type);
+
+    private sealed class FunctionEmitter
+    {
+        private readonly LLVMContextRef _context;
+        private readonly LLVMBuilderRef _builder;
+        private readonly FunctionSymbol _function;
+        private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions;
+        private readonly Func<TypeSymbol, LLVMTypeRef> _mapType;
+        private readonly Dictionary<VariableSymbol, LLVMValueRef> _addresses = [];
+        private bool _terminated;
+
+        public FunctionEmitter(
+            LLVMContextRef context,
+            LLVMBuilderRef builder,
+            FunctionSymbol function,
+            LLVMValueRef llvmFunction,
+            Dictionary<FunctionSymbol, LlvmFunction> functions,
+            Func<TypeSymbol, LLVMTypeRef> mapType)
+        {
+            _context = context;
+            _builder = builder;
+            _function = function;
+            _functions = functions;
+            _mapType = mapType;
+
+            for (int index = 0; index < function.Parameters.Length; index++)
+            {
+                ParameterSymbol parameter = function.Parameters[index];
+                LLVMValueRef address = _builder.BuildAlloca(_mapType(parameter.Type), parameter.Name);
+                _builder.BuildStore(llvmFunction.GetParam((uint)index), address);
+                _addresses.Add(parameter, address);
+            }
+        }
+
+        public void Emit(BoundBlockStatement body)
+        {
+            EmitBlock(body);
+
+            if (!_terminated && ReferenceEquals(_function.ReturnType, BuiltinTypes.Void))
+            {
+                _builder.BuildRetVoid();
+                _terminated = true;
+            }
+        }
+
+        private void EmitBlock(BoundBlockStatement block)
+        {
+            foreach (BoundStatement statement in block.Statements)
+            {
+                if (_terminated)
+                {
+                    break;
+                }
+
+                EmitStatement(statement);
+            }
+        }
+
+        private void EmitStatement(BoundStatement statement)
+        {
+            switch (statement)
+            {
+                case BoundBlockStatement block:
+                    EmitBlock(block);
+                    break;
+                case BoundVariableDeclarationStatement variable:
+                    EmitVariableDeclaration(variable);
+                    break;
+                case BoundExpressionStatement expression:
+                    EmitExpression(expression.Expression);
+                    break;
+                case BoundReturnStatement @return:
+                    EmitReturn(@return);
+                    break;
+                default:
+                    throw new LlvmCodeGenerationException($"Bound statement '{statement.Kind}' is not supported by LLVM code generation.");
+            }
+        }
+
+        private void EmitVariableDeclaration(BoundVariableDeclarationStatement statement)
+        {
+            LLVMValueRef address = _builder.BuildAlloca(_mapType(statement.Variable.Type), statement.Variable.Name);
+            _addresses.Add(statement.Variable, address);
+
+            if (statement.Initializer is not null)
+            {
+                _builder.BuildStore(EmitExpression(statement.Initializer), address);
+            }
+        }
+
+        private void EmitReturn(BoundReturnStatement statement)
+        {
+            if (statement.Expression is null)
+            {
+                _builder.BuildRetVoid();
+            }
+            else
+            {
+                _builder.BuildRet(EmitExpression(statement.Expression));
+            }
+
+            _terminated = true;
+        }
+
+        private LLVMValueRef EmitExpression(BoundExpression expression) => expression switch
+        {
+            BoundLiteralExpression literal => EmitLiteral(literal),
+            BoundVariableExpression variable => EmitVariable(variable),
+            BoundUnaryExpression unary => EmitUnary(unary),
+            BoundBinaryExpression binary => EmitBinary(binary),
+            BoundAssignmentExpression assignment => EmitAssignment(assignment),
+            BoundCallExpression call => EmitCall(call),
+            _ => throw new LlvmCodeGenerationException($"Bound expression '{expression.Kind}' is not supported by LLVM code generation."),
+        };
+
+        private LLVMValueRef EmitLiteral(BoundLiteralExpression expression)
+        {
+            LLVMTypeRef type = _mapType(expression.Type);
+
+            if (ReferenceEquals(expression.Type, BuiltinTypes.Bool))
+            {
+                return LLVMValueRef.CreateConstInt(type, expression.Value is true ? 1UL : 0UL, false);
+            }
+
+            if (expression.Type is PrimitiveTypeSymbol { IsInteger: true })
+            {
+                ulong value = expression.Value switch
+                {
+                    int integer => unchecked((ulong)integer),
+                    long integer => unchecked((ulong)integer),
+                    ulong integer => integer,
+                    _ => throw new LlvmCodeGenerationException("Invalid bound integer literal."),
+                };
+                return LLVMValueRef.CreateConstInt(type, value, true);
+            }
+
+            if (expression.Type is PrimitiveTypeSymbol { IsFloatingPoint: true })
+            {
+                double value = expression.Value switch
+                {
+                    float single => single,
+                    double @double => @double,
+                    _ => throw new LlvmCodeGenerationException("Invalid bound floating-point literal."),
+                };
+                return LLVMValueRef.CreateConstReal(type, value);
+            }
+
+            if (expression.Value is string text)
+            {
+                return _builder.BuildGlobalStringPtr(text, "str");
+            }
+
+            if (expression.Type is PointerTypeSymbol && expression.Value is null)
+            {
+                return LLVMValueRef.CreateConstPointerNull(type);
+            }
+
+            throw new LlvmCodeGenerationException($"Literal of type '{expression.Type.Name}' is not supported.");
+        }
+
+        private LLVMValueRef EmitVariable(BoundVariableExpression expression)
+        {
+            LLVMValueRef address = GetAddress(expression.Variable);
+            return _builder.BuildLoad2(_mapType(expression.Type), address, expression.Variable.Name);
+        }
+
+        private LLVMValueRef EmitUnary(BoundUnaryExpression expression)
+        {
+            if (expression.OperatorKind == SyntaxKind.AmpersandToken && expression.Operand is BoundVariableExpression variable)
+            {
+                return GetAddress(variable.Variable);
+            }
+
+            LLVMValueRef operand = EmitExpression(expression.Operand);
+            return expression.OperatorKind switch
+            {
+                SyntaxKind.PlusToken => operand,
+                SyntaxKind.MinusToken when expression.Type is PrimitiveTypeSymbol { IsFloatingPoint: true } =>
+                    _builder.BuildFNeg(operand, "fneg"),
+                SyntaxKind.MinusToken => _builder.BuildNeg(operand, "neg"),
+                SyntaxKind.BangToken or SyntaxKind.TildeToken => _builder.BuildNot(operand, "not"),
+                SyntaxKind.StarToken when expression.Operand.Type is PointerTypeSymbol pointer =>
+                    _builder.BuildLoad2(_mapType(pointer.ElementType), operand, "deref"),
+                SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken => EmitIncrement(expression, operand),
+                _ => throw new LlvmCodeGenerationException($"Unary operator '{expression.OperatorKind}' is not supported."),
+            };
+        }
+
+        private LLVMValueRef EmitIncrement(BoundUnaryExpression expression, LLVMValueRef operand)
+        {
+            if (expression.Operand is not BoundVariableExpression variable)
+            {
+                throw new LlvmCodeGenerationException("Increment and decrement require a variable.");
+            }
+
+            LLVMValueRef one = expression.Type is PrimitiveTypeSymbol { IsFloatingPoint: true }
+                ? LLVMValueRef.CreateConstReal(_mapType(expression.Type), 1.0)
+                : LLVMValueRef.CreateConstInt(_mapType(expression.Type), 1, false);
+            LLVMValueRef result = expression.OperatorKind == SyntaxKind.PlusPlusToken
+                ? EmitArithmetic(SyntaxKind.PlusToken, expression.Type, operand, one)
+                : EmitArithmetic(SyntaxKind.MinusToken, expression.Type, operand, one);
+            _builder.BuildStore(result, GetAddress(variable.Variable));
+            return result;
+        }
+
+        private LLVMValueRef EmitBinary(BoundBinaryExpression expression)
+        {
+            if (expression.OperatorKind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken)
+            {
+                throw new LlvmCodeGenerationException("Short-circuit boolean operators require control-flow lowering.");
+            }
+
+            LLVMValueRef left = EmitExpression(expression.Left);
+            LLVMValueRef right = EmitExpression(expression.Right);
+
+            if (expression.OperatorKind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken or
+                SyntaxKind.LessToken or SyntaxKind.LessOrEqualsToken or
+                SyntaxKind.GreaterToken or SyntaxKind.GreaterOrEqualsToken)
+            {
+                return EmitComparison(expression, left, right);
+            }
+
+            return EmitArithmetic(expression.OperatorKind, expression.Left.Type, left, right);
+        }
+
+        private LLVMValueRef EmitArithmetic(
+            SyntaxKind operatorKind,
+            TypeSymbol operandType,
+            LLVMValueRef left,
+            LLVMValueRef right)
+        {
+            if (operandType is PrimitiveTypeSymbol { IsFloatingPoint: true })
+            {
+                return operatorKind switch
+                {
+                    SyntaxKind.PlusToken => _builder.BuildFAdd(left, right, "fadd"),
+                    SyntaxKind.MinusToken => _builder.BuildFSub(left, right, "fsub"),
+                    SyntaxKind.StarToken => _builder.BuildFMul(left, right, "fmul"),
+                    SyntaxKind.SlashToken => _builder.BuildFDiv(left, right, "fdiv"),
+                    SyntaxKind.PercentToken => _builder.BuildFRem(left, right, "frem"),
+                    _ => throw new LlvmCodeGenerationException($"Floating-point operator '{operatorKind}' is not supported."),
+                };
+            }
+
+            bool signed = operandType is PrimitiveTypeSymbol { IsSigned: true };
+            return operatorKind switch
+            {
+                SyntaxKind.PlusToken => _builder.BuildAdd(left, right, "add"),
+                SyntaxKind.MinusToken => _builder.BuildSub(left, right, "sub"),
+                SyntaxKind.StarToken => _builder.BuildMul(left, right, "mul"),
+                SyntaxKind.SlashToken when signed => _builder.BuildSDiv(left, right, "sdiv"),
+                SyntaxKind.SlashToken => _builder.BuildUDiv(left, right, "udiv"),
+                SyntaxKind.PercentToken when signed => _builder.BuildSRem(left, right, "srem"),
+                SyntaxKind.PercentToken => _builder.BuildURem(left, right, "urem"),
+                SyntaxKind.AmpersandToken => _builder.BuildAnd(left, right, "and"),
+                SyntaxKind.PipeToken => _builder.BuildOr(left, right, "or"),
+                SyntaxKind.CaretToken => _builder.BuildXor(left, right, "xor"),
+                SyntaxKind.LessLessToken => _builder.BuildShl(left, right, "shl"),
+                SyntaxKind.GreaterGreaterToken when signed => _builder.BuildAShr(left, right, "ashr"),
+                SyntaxKind.GreaterGreaterToken => _builder.BuildLShr(left, right, "lshr"),
+                _ => throw new LlvmCodeGenerationException($"Integer operator '{operatorKind}' is not supported."),
+            };
+        }
+
+        private LLVMValueRef EmitComparison(
+            BoundBinaryExpression expression,
+            LLVMValueRef left,
+            LLVMValueRef right)
+        {
+            if (expression.Left.Type is PrimitiveTypeSymbol { IsFloatingPoint: true })
+            {
+                LLVMRealPredicate realPredicate = expression.OperatorKind switch
+                {
+                    SyntaxKind.EqualsEqualsToken => LLVMRealPredicate.LLVMRealOEQ,
+                    SyntaxKind.BangEqualsToken => LLVMRealPredicate.LLVMRealONE,
+                    SyntaxKind.LessToken => LLVMRealPredicate.LLVMRealOLT,
+                    SyntaxKind.LessOrEqualsToken => LLVMRealPredicate.LLVMRealOLE,
+                    SyntaxKind.GreaterToken => LLVMRealPredicate.LLVMRealOGT,
+                    SyntaxKind.GreaterOrEqualsToken => LLVMRealPredicate.LLVMRealOGE,
+                    _ => throw new LlvmCodeGenerationException("Invalid floating-point comparison."),
+                };
+                return _builder.BuildFCmp(realPredicate, left, right, "fcmp");
+            }
+
+            bool signed = expression.Left.Type is PrimitiveTypeSymbol { IsSigned: true };
+            LLVMIntPredicate intPredicate = expression.OperatorKind switch
+            {
+                SyntaxKind.EqualsEqualsToken => LLVMIntPredicate.LLVMIntEQ,
+                SyntaxKind.BangEqualsToken => LLVMIntPredicate.LLVMIntNE,
+                SyntaxKind.LessToken when signed => LLVMIntPredicate.LLVMIntSLT,
+                SyntaxKind.LessToken => LLVMIntPredicate.LLVMIntULT,
+                SyntaxKind.LessOrEqualsToken when signed => LLVMIntPredicate.LLVMIntSLE,
+                SyntaxKind.LessOrEqualsToken => LLVMIntPredicate.LLVMIntULE,
+                SyntaxKind.GreaterToken when signed => LLVMIntPredicate.LLVMIntSGT,
+                SyntaxKind.GreaterToken => LLVMIntPredicate.LLVMIntUGT,
+                SyntaxKind.GreaterOrEqualsToken when signed => LLVMIntPredicate.LLVMIntSGE,
+                SyntaxKind.GreaterOrEqualsToken => LLVMIntPredicate.LLVMIntUGE,
+                _ => throw new LlvmCodeGenerationException("Invalid integer comparison."),
+            };
+            return _builder.BuildICmp(intPredicate, left, right, "icmp");
+        }
+
+        private LLVMValueRef EmitAssignment(BoundAssignmentExpression expression)
+        {
+            LLVMValueRef value = EmitExpression(expression.Expression);
+            LLVMValueRef address = GetAddress(expression.Variable);
+
+            if (expression.OperatorKind != SyntaxKind.EqualsToken)
+            {
+                LLVMValueRef current = _builder.BuildLoad2(_mapType(expression.Variable.Type), address, expression.Variable.Name);
+                value = EmitArithmetic(
+                    GetBinaryOperatorForCompoundAssignment(expression.OperatorKind),
+                    expression.Variable.Type,
+                    current,
+                    value);
+            }
+
+            _builder.BuildStore(value, address);
+            return value;
+        }
+
+        private LLVMValueRef EmitCall(BoundCallExpression expression)
+        {
+            LlvmFunction function = _functions[expression.Function];
+            LLVMValueRef[] arguments = expression.Arguments.Select(EmitExpression).ToArray();
+            string name = ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "call";
+            return _builder.BuildCall2(function.Type, function.Value, arguments, name);
+        }
+
+        private LLVMValueRef GetAddress(VariableSymbol variable)
+        {
+            if (!_addresses.TryGetValue(variable, out LLVMValueRef address))
+            {
+                throw new LlvmCodeGenerationException($"No storage was allocated for variable '{variable.Name}'.");
+            }
+
+            return address;
+        }
+
+        private static SyntaxKind GetBinaryOperatorForCompoundAssignment(SyntaxKind kind) => kind switch
+        {
+            SyntaxKind.PlusEqualsToken => SyntaxKind.PlusToken,
+            SyntaxKind.MinusEqualsToken => SyntaxKind.MinusToken,
+            SyntaxKind.StarEqualsToken => SyntaxKind.StarToken,
+            SyntaxKind.SlashEqualsToken => SyntaxKind.SlashToken,
+            SyntaxKind.PercentEqualsToken => SyntaxKind.PercentToken,
+            SyntaxKind.AmpersandEqualsToken => SyntaxKind.AmpersandToken,
+            SyntaxKind.PipeEqualsToken => SyntaxKind.PipeToken,
+            SyntaxKind.CaretEqualsToken => SyntaxKind.CaretToken,
+            SyntaxKind.LessLessEqualsToken => SyntaxKind.LessLessToken,
+            SyntaxKind.GreaterGreaterEqualsToken => SyntaxKind.GreaterGreaterToken,
+            _ => throw new LlvmCodeGenerationException($"Invalid compound assignment operator '{kind}'."),
+        };
+    }
+}

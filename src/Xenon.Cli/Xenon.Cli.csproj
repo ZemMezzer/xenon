@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>xenon</AssemblyName>
+    <RootNamespace>Xenon.Cli</RootNamespace>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
+    <ProjectReference Include="../Xenon.Compiler/Xenon.Compiler.csproj" />
+  </ItemGroup>
+</Project>

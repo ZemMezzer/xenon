@@ -1,0 +1,135 @@
+using Xenon.Compiler.Syntax;
+using Xenon.Compiler.Text;
+using Xunit;
+
+namespace Xenon.Compiler.Tests.Syntax;
+
+public sealed class ParserTests
+{
+    [Fact]
+    public void Parser_BuildsMinimalCompilationUnit()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            int Main()
+            {
+                return 42;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        Assert.Equal("Example", tree.Root.Namespace.Name);
+
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.Equal("Main", function.IdentifierToken.Text);
+        Assert.Equal(SyntaxKind.IntKeyword, function.ReturnType.NameToken.Kind);
+        Assert.Empty(function.Parameters);
+
+        var returnStatement = Assert.IsType<ReturnStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var literal = Assert.IsType<LiteralExpressionSyntax>(returnStatement.Expression);
+        Assert.Equal(42UL, literal.LiteralToken.Value);
+    }
+
+    [Fact]
+    public void Parser_ParsesDottedNamespaceAndExternalAbiModifiers()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example.Math;
+
+            extern int puts(const byte* text);
+
+            export int Add(int a, int b)
+            {
+                return a + b;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        Assert.Equal("Example.Math", tree.Root.Namespace.Name);
+        Assert.Equal(2, tree.Root.Members.Length);
+
+        var external = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.True(external.IsExtern);
+        Assert.Null(external.Body);
+        Assert.NotNull(external.SemicolonToken);
+        ParameterSyntax parameter = Assert.Single(external.Parameters);
+        Assert.True(parameter.Type.IsConst);
+        Assert.Equal(1, parameter.Type.PointerDepth);
+
+        var exported = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.True(exported.IsExport);
+        Assert.NotNull(exported.Body);
+        Assert.Equal(2, exported.Parameters.Length);
+    }
+
+    [Fact]
+    public void Parser_RespectsBinaryOperatorPrecedence()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            int Calculate(int a, int b)
+            {
+                return a + b * 2;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var statement = Assert.IsType<ReturnStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var addition = Assert.IsType<BinaryExpressionSyntax>(statement.Expression);
+        Assert.Equal(SyntaxKind.PlusToken, addition.OperatorToken.Kind);
+
+        var multiplication = Assert.IsType<BinaryExpressionSyntax>(addition.Right);
+        Assert.Equal(SyntaxKind.StarToken, multiplication.OperatorToken.Kind);
+    }
+
+    [Fact]
+    public void Parser_ParsesVariablesCallsAndExpressionStatements()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            int Main()
+            {
+                int result = Add(20, 22);
+                puts("Hello from Xenon");
+                return result;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.Equal(3, function.Body!.Statements.Length);
+
+        var variable = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[0]);
+        var initializer = Assert.IsType<CallExpressionSyntax>(variable.Initializer);
+        Assert.Equal(2, initializer.Arguments.Length);
+
+        var expressionStatement = Assert.IsType<ExpressionStatementSyntax>(function.Body.Statements[1]);
+        Assert.IsType<CallExpressionSyntax>(expressionStatement.Expression);
+    }
+
+    [Fact]
+    public void Parser_InsertsMissingTokensAndReportsDiagnostics()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example
+
+            int Main()
+            {
+                return 42
+            }
+            """);
+
+        Assert.Equal(2, tree.Diagnostics.Length);
+        Assert.True(tree.Root.Namespace.SemicolonToken.IsMissing);
+
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var returnStatement = Assert.IsType<ReturnStatementSyntax>(Assert.Single(function.Body!.Statements));
+        Assert.True(returnStatement.SemicolonToken.IsMissing);
+    }
+
+    private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));
+}

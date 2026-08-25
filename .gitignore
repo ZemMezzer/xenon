@@ -53,3 +53,12 @@ dkms.conf
 
 # debug information files
 *.dwo
+.idea
+tests/Xenon.Compiler.Tests/bin
+tests/Xenon.Compiler.Tests/obj
+src/Xenon.Cli/bin
+src/Xenon.Cli/obj
+src/Xenon.CodeGen.LLVM/bin
+src/Xenon.CodeGen.LLVM/obj
+src/Xenon.Compiler/bin
+src/Xenon.Compiler/obj

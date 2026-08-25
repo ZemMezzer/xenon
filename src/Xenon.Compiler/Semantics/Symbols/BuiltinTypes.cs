@@ -1,0 +1,54 @@
+using System.Collections.Concurrent;
+using Xenon.Compiler.Syntax;
+
+namespace Xenon.Compiler.Semantics.Symbols;
+
+public static class BuiltinTypes
+{
+    private static readonly ConcurrentDictionary<(TypeSymbol Element, bool IsConst), PointerTypeSymbol> PointerTypes = new();
+
+    public static PrimitiveTypeSymbol Void { get; } = new("void");
+    public static PrimitiveTypeSymbol Bool { get; } = new("bool");
+    public static PrimitiveTypeSymbol Byte { get; } = new("byte", true, false, 8);
+    public static PrimitiveTypeSymbol SByte { get; } = new("sbyte", true, true, 8);
+    public static PrimitiveTypeSymbol Short { get; } = new("short", true, true, 16);
+    public static PrimitiveTypeSymbol UShort { get; } = new("ushort", true, false, 16);
+    public static PrimitiveTypeSymbol Int { get; } = new("int", true, true, 32);
+    public static PrimitiveTypeSymbol UInt { get; } = new("uint", true, false, 32);
+    public static PrimitiveTypeSymbol Long { get; } = new("long", true, true, 64);
+    public static PrimitiveTypeSymbol ULong { get; } = new("ulong", true, false, 64);
+    public static PrimitiveTypeSymbol Float { get; } = new("float", isFloatingPoint: true, bitWidth: 32);
+    public static PrimitiveTypeSymbol Double { get; } = new("double", isFloatingPoint: true, bitWidth: 64);
+    public static PrimitiveTypeSymbol NInt { get; } = new("nint", true, true);
+    public static PrimitiveTypeSymbol NUInt { get; } = new("nuint", true, false);
+    public static PrimitiveTypeSymbol CLong { get; } = new("clong", true, true);
+    public static PrimitiveTypeSymbol CULong { get; } = new("culong", true, false);
+
+    internal static TypeSymbol Error { get; } = new SpecialTypeSymbol("<error>");
+
+    internal static TypeSymbol Null { get; } = new SpecialTypeSymbol("<null>");
+
+    public static PointerTypeSymbol PointerTo(TypeSymbol elementType, bool isConst = false) =>
+        PointerTypes.GetOrAdd((elementType, isConst), key => new PointerTypeSymbol(key.Element, key.IsConst));
+
+    internal static TypeSymbol? FromSyntaxKind(SyntaxKind kind) => kind switch
+    {
+        SyntaxKind.VoidKeyword => Void,
+        SyntaxKind.BoolKeyword => Bool,
+        SyntaxKind.ByteKeyword => Byte,
+        SyntaxKind.SByteKeyword => SByte,
+        SyntaxKind.ShortKeyword => Short,
+        SyntaxKind.UShortKeyword => UShort,
+        SyntaxKind.IntKeyword => Int,
+        SyntaxKind.UIntKeyword => UInt,
+        SyntaxKind.LongKeyword => Long,
+        SyntaxKind.ULongKeyword => ULong,
+        SyntaxKind.FloatKeyword => Float,
+        SyntaxKind.DoubleKeyword => Double,
+        SyntaxKind.NIntKeyword => NInt,
+        SyntaxKind.NUIntKeyword => NUInt,
+        SyntaxKind.CLongKeyword => CLong,
+        SyntaxKind.CULongKeyword => CULong,
+        _ => null,
+    };
+}
