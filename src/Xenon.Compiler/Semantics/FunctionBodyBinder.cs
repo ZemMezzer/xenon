@@ -159,7 +159,7 @@ internal sealed class FunctionBodyBinder
 
     private BoundVariableDeclarationStatement BindVariableDeclaration(VariableDeclarationStatementSyntax syntax)
     {
-        TypeSymbol type = TypeResolver.Resolve(syntax.Type, _diagnostics);
+        TypeSymbol type = TypeResolver.Resolve(syntax.Type, _function.ContainingNamespace, _diagnostics);
         if (ReferenceEquals(type, BuiltinTypes.Void))
         {
             _diagnostics.Report(syntax.Type.NameToken.Location, "local variable type cannot be 'void'");
@@ -215,6 +215,9 @@ internal sealed class FunctionBodyBinder
         BinaryExpressionSyntax binary => BindBinaryExpression(binary),
         AssignmentExpressionSyntax assignment => BindAssignmentExpression(assignment),
         CallExpressionSyntax call => BindCallExpression(call),
+        MemberAccessExpressionSyntax member => BindMemberAccessExpression(member),
+        NewExpressionSyntax @new => BindNewExpression(@new),
+        FreeExpressionSyntax free => BindFreeExpression(free),
         _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
     };
 
@@ -275,10 +278,9 @@ internal sealed class FunctionBodyBinder
             SyntaxKind.BangToken when ReferenceEquals(operand.Type, BuiltinTypes.Bool) => BuiltinTypes.Bool,
             SyntaxKind.TildeToken when TypeFacts.IsInteger(operand.Type) => operand.Type,
             SyntaxKind.StarToken when operand.Type is PointerTypeSymbol pointer => pointer.ElementType,
-            SyntaxKind.AmpersandToken when operand is BoundVariableExpression variable =>
-                BuiltinTypes.PointerTo(variable.Type),
+            SyntaxKind.AmpersandToken when IsAddressable(operand) => BuiltinTypes.PointerTo(operand.Type),
             SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken
-                when operand is BoundVariableExpression && TypeFacts.IsNumeric(operand.Type) => operand.Type,
+                when IsWritable(operand) && TypeFacts.IsNumeric(operand.Type) => operand.Type,
             _ => null,
         };
 
@@ -320,41 +322,71 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindAssignmentExpression(AssignmentExpressionSyntax syntax)
     {
-        if (syntax.Target is not NameExpressionSyntax name)
-        {
-            _diagnostics.Report(GetLocation(syntax.Target), "left side of assignment must be a variable");
-            BindExpression(syntax.Expression);
-            return new BoundErrorExpression();
-        }
-
-        VariableSymbol? variable = _scope.Lookup(name.IdentifierToken.Text);
+        BoundExpression target = BindExpression(syntax.Target);
         BoundExpression expression = BindExpression(syntax.Expression);
-        if (variable is null)
+        if (!IsWritable(target))
         {
-            _diagnostics.Report(name.IdentifierToken.Location, $"unknown identifier '{name.IdentifierToken.Text}'");
+            if (!ReferenceEquals(target.Type, BuiltinTypes.Error))
+            {
+                _diagnostics.Report(GetLocation(syntax.Target), "left side of assignment must be writable");
+            }
+
             return new BoundErrorExpression();
         }
 
         if (syntax.OperatorToken.Kind == SyntaxKind.EqualsToken)
         {
-            if (!TypeFacts.CanAssign(variable.Type, expression.Type))
+            if (!TypeFacts.CanAssign(target.Type, expression.Type))
             {
-                ReportCannotConvert(GetLocation(syntax.Expression), expression.Type, variable.Type);
+                ReportCannotConvert(GetLocation(syntax.Expression), expression.Type, target.Type);
             }
         }
         else
         {
             SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
-            TypeSymbol? resultType = GetBinaryResultType(variable.Type, binaryOperator, expression.Type);
-            if (!ReferenceEquals(resultType, variable.Type))
+            TypeSymbol? resultType = GetBinaryResultType(target.Type, binaryOperator, expression.Type);
+            if (!ReferenceEquals(resultType, target.Type))
             {
                 _diagnostics.Report(
                     syntax.OperatorToken.Location,
-                    $"operator '{syntax.OperatorToken.Text}' is not defined for types '{variable.Type.Name}' and '{expression.Type.Name}'");
+                    $"operator '{syntax.OperatorToken.Text}' is not defined for types '{target.Type.Name}' and '{expression.Type.Name}'");
             }
         }
 
-        return new BoundAssignmentExpression(variable, syntax.OperatorToken.Kind, expression);
+        return new BoundAssignmentExpression(target, syntax.OperatorToken.Kind, expression);
+    }
+
+    private BoundExpression BindMemberAccessExpression(MemberAccessExpressionSyntax syntax)
+    {
+        BoundExpression receiver = BindExpression(syntax.Receiver);
+        bool pointerAccess = syntax.OperatorToken.Kind == SyntaxKind.ArrowToken;
+        StructTypeSymbol? structType = pointerAccess
+            ? (receiver.Type as PointerTypeSymbol)?.ElementType as StructTypeSymbol
+            : receiver.Type as StructTypeSymbol;
+
+        if (structType is null)
+        {
+            if (!ReferenceEquals(receiver.Type, BuiltinTypes.Error))
+            {
+                string expected = pointerAccess ? "pointer to struct" : "struct";
+                _diagnostics.Report(
+                    syntax.OperatorToken.Location,
+                    $"operator '{syntax.OperatorToken.Text}' requires a {expected}, but has type '{receiver.Type.Name}'");
+            }
+
+            return new BoundErrorExpression();
+        }
+
+        FieldSymbol? field = structType.FindField(syntax.MemberToken.Text);
+        if (field is null)
+        {
+            _diagnostics.Report(
+                syntax.MemberToken.Location,
+                $"struct '{structType.Name}' does not contain field '{syntax.MemberToken.Text}'");
+            return new BoundErrorExpression();
+        }
+
+        return new BoundMemberAccessExpression(receiver, field, pointerAccess);
     }
 
     private BoundExpression BindCallExpression(CallExpressionSyntax syntax)
@@ -364,6 +396,13 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(GetLocation(syntax.Target), "call target must be a function name");
             return new BoundErrorExpression();
+        }
+
+        StructTypeSymbol? structType = _function.ContainingNamespace.FindType(name.IdentifierToken.Text);
+        if (structType is not null)
+        {
+            ValidateStructArguments(structType, arguments, syntax.Arguments, name.IdentifierToken.Location);
+            return new BoundStructConstructionExpression(structType, arguments);
         }
 
         FunctionSymbol? function = _function.ContainingNamespace.FindFunction(name.IdentifierToken.Text);
@@ -390,6 +429,70 @@ internal sealed class FunctionBodyBinder
         }
 
         return new BoundCallExpression(function, arguments);
+    }
+
+    private BoundExpression BindNewExpression(NewExpressionSyntax syntax)
+    {
+        var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        TypeSymbol type = TypeResolver.Resolve(
+            syntax.Type,
+            _function.ContainingNamespace,
+            _diagnostics);
+        if (type is not StructTypeSymbol structType)
+        {
+            if (!ReferenceEquals(type, BuiltinTypes.Error))
+            {
+                _diagnostics.Report(
+                    syntax.Type.NameToken.Location,
+                    $"'new' requires a struct type, but has type '{type.Name}'");
+            }
+
+            return new BoundErrorExpression();
+        }
+
+        ValidateStructArguments(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
+        PointerTypeSymbol pointerType = BuiltinTypes.PointerTo(structType);
+        return new BoundNewExpression(structType, arguments, pointerType);
+    }
+
+    private BoundExpression BindFreeExpression(FreeExpressionSyntax syntax)
+    {
+        BoundExpression pointer = BindExpression(syntax.Pointer);
+        if (pointer.Type is not PointerTypeSymbol && !ReferenceEquals(pointer.Type, BuiltinTypes.Error))
+        {
+            _diagnostics.Report(
+                syntax.FreeKeyword.Location,
+                $"'free' requires a pointer, but has type '{pointer.Type.Name}'");
+            return new BoundErrorExpression();
+        }
+
+        return new BoundFreeExpression(pointer);
+    }
+
+    private void ValidateStructArguments(
+        StructTypeSymbol structType,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        TextLocation location)
+    {
+        if (arguments.Length != structType.Fields.Length)
+        {
+            _diagnostics.Report(
+                location,
+                $"struct '{structType.Name}' expects {structType.Fields.Length} constructor argument(s), but {arguments.Length} were provided");
+        }
+
+        int count = Math.Min(arguments.Length, structType.Fields.Length);
+        for (int index = 0; index < count; index++)
+        {
+            if (!TypeFacts.CanAssign(structType.Fields[index].Type, arguments[index].Type))
+            {
+                ReportCannotConvert(
+                    GetLocation(argumentSyntax[index]),
+                    arguments[index].Type,
+                    structType.Fields[index].Type);
+            }
+        }
     }
 
     private static TypeSymbol? GetBinaryResultType(TypeSymbol left, SyntaxKind operatorKind, TypeSymbol right)
@@ -489,8 +592,40 @@ internal sealed class FunctionBodyBinder
         BinaryExpressionSyntax binary => binary.OperatorToken.Location,
         AssignmentExpressionSyntax assignment => assignment.OperatorToken.Location,
         CallExpressionSyntax call => call.OpenParenthesisToken.Location,
+        MemberAccessExpressionSyntax member => member.OperatorToken.Location,
+        NewExpressionSyntax @new => @new.NewKeyword.Location,
+        FreeExpressionSyntax free => free.FreeKeyword.Location,
         _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
     };
+
+    private static bool IsAddressable(BoundExpression expression) => expression switch
+    {
+        BoundVariableExpression => true,
+        BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
+        BoundMemberAccessExpression { IsPointerAccess: true } => true,
+        BoundMemberAccessExpression member => IsAddressable(member.Receiver),
+        _ => false,
+    };
+
+    private static bool IsWritable(BoundExpression expression)
+    {
+        if (!IsAddressable(expression))
+        {
+            return false;
+        }
+
+        return expression switch
+        {
+            BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken, Operand.Type: PointerTypeSymbol { IsConst: true } } => false,
+            BoundMemberAccessExpression
+            {
+                IsPointerAccess: true,
+                Receiver.Type: PointerTypeSymbol { IsConst: true },
+            } => false,
+            BoundMemberAccessExpression member => IsWritable(member.Receiver),
+            _ => true,
+        };
+    }
 
     private static bool AlwaysReturns(BoundBlockStatement block)
     {

@@ -178,5 +178,68 @@ public sealed class ParserTests
             Assert.IsType<IfStatementSyntax>(whileBody.Statements[1]).ThenStatement);
     }
 
+    [Fact]
+    public void Parser_ParsesStructFieldsAndPointerMemberAccess()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            struct Vector2
+            {
+                float X;
+                float Y;
+            }
+
+            export float Sum(Vector2* value)
+            {
+                return value->X + value->Y;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        Assert.Equal(2, tree.Root.Members.Length);
+        var type = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.Equal("Vector2", type.IdentifierToken.Text);
+        Assert.Equal(["X", "Y"], type.Fields.Select(field => field.IdentifierToken.Text).ToArray());
+
+        var function = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.Equal("Vector2", Assert.Single(function.Parameters).Type.NameToken.Text);
+        var @return = Assert.IsType<ReturnStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var addition = Assert.IsType<BinaryExpressionSyntax>(@return.Expression);
+        Assert.Equal(SyntaxKind.ArrowToken, Assert.IsType<MemberAccessExpressionSyntax>(addition.Left).OperatorToken.Kind);
+        Assert.Equal(SyntaxKind.ArrowToken, Assert.IsType<MemberAccessExpressionSyntax>(addition.Right).OperatorToken.Kind);
+    }
+
+    [Fact]
+    public void Parser_ParsesStackConstructionNewAndFree()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            struct Vector3
+            {
+                float X;
+                float Y;
+                float Z;
+            }
+
+            void Build(float x, float y, float z)
+            {
+                Vector3 stack = Vector3(x, y, z);
+                Vector3* heap = new Vector3(x, y, z);
+                free(heap);
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        var stack = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
+        Assert.IsType<CallExpressionSyntax>(stack.Initializer);
+        var heap = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[1]);
+        Assert.Equal(3, Assert.IsType<NewExpressionSyntax>(heap.Initializer).Arguments.Length);
+        Assert.IsType<FreeExpressionSyntax>(
+            Assert.IsType<ExpressionStatementSyntax>(function.Body.Statements[2]).Expression);
+    }
+
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));
 }

@@ -52,6 +52,34 @@ public sealed record CallExpressionSyntax(
     public override SyntaxKind Kind => SyntaxKind.CallExpression;
 }
 
+public sealed record MemberAccessExpressionSyntax(
+    ExpressionSyntax Receiver,
+    SyntaxToken OperatorToken,
+    SyntaxToken MemberToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.MemberAccessExpression;
+}
+
+public sealed record NewExpressionSyntax(
+    SyntaxToken NewKeyword,
+    TypeSyntax Type,
+    SyntaxToken OpenParenthesisToken,
+    ImmutableArray<ExpressionSyntax> Arguments,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken CloseParenthesisToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.NewExpression;
+}
+
+public sealed record FreeExpressionSyntax(
+    SyntaxToken FreeKeyword,
+    SyntaxToken OpenParenthesisToken,
+    ExpressionSyntax Pointer,
+    SyntaxToken CloseParenthesisToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.FreeExpression;
+}
+
 public sealed record ParenthesizedExpressionSyntax(
     SyntaxToken OpenParenthesisToken,
     ExpressionSyntax Expression,

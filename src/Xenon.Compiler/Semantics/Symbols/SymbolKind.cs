@@ -5,6 +5,7 @@ public enum SymbolKind
     Namespace,
     Type,
     Function,
+    Field,
     Parameter,
     LocalVariable,
 }

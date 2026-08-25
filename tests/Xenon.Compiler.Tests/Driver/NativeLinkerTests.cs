@@ -24,6 +24,16 @@ public sealed class NativeLinkerTests
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int AddDelegate(int left, int right);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate float SumVectorDelegate(ref NativeVector2 value);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeVector2
+    {
+        public float X;
+        public float Y;
+    }
+
     [Fact]
     public void Linker_CreatesAndRunsHostExecutable()
     {
@@ -278,6 +288,189 @@ public sealed class NativeLinkerTests
                 new NativeLinkOptions(
                     Libraries: ["math"],
                     LibraryPaths: [Path.GetDirectoryName(libraryPath)!]));
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExportsStructPointerFunctionWithCLayout()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Vector2
+            {
+                float X;
+                float Y;
+            }
+
+            export float Sum(Vector2* value)
+            {
+                return value->X + value->Y;
+            }
+            """, "vector.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"vector{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "vector", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "vector", "debug", target.Triple);
+
+        try
+        {
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "vector", generateExecutableEntryPoint: false);
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: ["Example_Sum"]),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                SumVectorDelegate sum = Marshal.GetDelegateForFunctionPointer<SumVectorDelegate>(
+                    NativeLibrary.GetExport(handle, "Example_Sum"));
+                var vector = new NativeVector2 { X = 20.0f, Y = 22.0f };
+                Assert.Equal(42.0f, sum(ref vector));
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_PreservesStructValueCopiesOnStackAndAcrossCalls()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Pair
+            {
+                int X;
+                int Y;
+            }
+
+            Pair ChangeCopy(Pair value)
+            {
+                value.X = 40;
+                return value;
+            }
+
+            int ReadX(Pair* value)
+            {
+                return value->X;
+            }
+
+            int Main()
+            {
+                Pair original;
+                original.X = 20;
+                original.Y = 2;
+
+                Pair copy = original;
+                copy.Y = 22;
+
+                Pair returned = ChangeCopy(copy);
+                return original.Y + ReadX(&returned);
+            }
+            """, "struct-copy.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"struct-copy{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "struct-copy", "debug", target.Triple);
+
+        try
+        {
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "struct-copy",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ConstructsStructsOnStackAndHeapAndFreesAllocation()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Vector3
+            {
+                int X;
+                int Y;
+                int Z;
+            }
+
+            int Main()
+            {
+                Vector3 stack = Vector3(10, 12, 20);
+                Vector3* heap = new Vector3(stack.X, stack.Y, stack.Z);
+                int result = heap->X + heap->Y + heap->Z;
+                free(heap);
+                return result;
+            }
+            """, "heap-struct.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"heap-struct{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "heap-struct", "debug", target.Triple);
+
+        try
+        {
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "heap-struct",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
 
             using Process process = Process.Start(new ProcessStartInfo
             {

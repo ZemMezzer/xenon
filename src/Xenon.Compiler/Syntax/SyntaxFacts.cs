@@ -39,6 +39,8 @@ public static class SyntaxFacts
             ["null"] = SyntaxKind.NullKeyword,
             ["cast"] = SyntaxKind.CastKeyword,
             ["bitcast"] = SyntaxKind.BitCastKeyword,
+            ["new"] = SyntaxKind.NewKeyword,
+            ["free"] = SyntaxKind.FreeKeyword,
         };
 
     public static SyntaxKind GetKeywordKind(string text) =>

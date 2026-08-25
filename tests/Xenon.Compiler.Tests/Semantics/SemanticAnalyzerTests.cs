@@ -287,6 +287,192 @@ public sealed class SemanticAnalyzerTests
             diagnostic => diagnostic.Message == "unknown identifier 'i'");
     }
 
+    [Fact]
+    public void Analyzer_BindsStructValueAndPointerMemberAccess()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector2
+            {
+                float X;
+                float Y;
+            }
+
+            export float Sum(Vector2* value)
+            {
+                return value->X + value->Y;
+            }
+
+            Vector2 Copy(Vector2 value)
+            {
+                Vector2 copy = value;
+                copy.X = value.Y;
+                return copy;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NamespaceSymbol example = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        StructTypeSymbol vector = Assert.Single(example.Types);
+        Assert.Equal("Example.Vector2", vector.FullName);
+        Assert.Equal(["X", "Y"], vector.Fields.Select(field => field.Name).ToArray());
+
+        BoundFunction sum = compilation.SemanticModel.Functions[0];
+        var @return = Assert.IsType<BoundReturnStatement>(Assert.Single(sum.Body.Statements));
+        var addition = Assert.IsType<BoundBinaryExpression>(@return.Expression);
+        Assert.True(Assert.IsType<BoundMemberAccessExpression>(addition.Left).IsPointerAccess);
+
+        BoundFunction copy = compilation.SemanticModel.Functions[1];
+        var assignment = Assert.IsType<BoundExpressionStatement>(copy.Body.Statements[1]);
+        Assert.IsType<BoundMemberAccessExpression>(
+            Assert.IsType<BoundAssignmentExpression>(assignment.Expression).Target);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsRecursiveByValueStruct()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Node
+            {
+                Node Next;
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message ==
+                "struct 'Node' has a recursive by-value field 'Next'; use a pointer instead");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsWritesThroughConstStructPointer()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector2
+            {
+                float X;
+                float Y;
+            }
+
+            void Mutate(const Vector2* value)
+            {
+                value->X = 1.0f;
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "left side of assignment must be writable");
+    }
+
+    [Fact]
+    public void Analyzer_RequiresPointersForStructsInExternalAbi()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector2
+            {
+                float X;
+                float Y;
+            }
+
+            export Vector2 Copy(Vector2 value)
+            {
+                return value;
+            }
+            """);
+
+        Assert.Equal(
+            2,
+            compilation.Diagnostics.Count(diagnostic => diagnostic.Message ==
+                "external ABI does not yet support struct 'Vector2' by value; use a pointer instead"));
+    }
+
+    [Fact]
+    public void Analyzer_BindsStackConstructionNewAndFree()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector3
+            {
+                float X;
+                float Y;
+                float Z;
+            }
+
+            void Build(float x, float y, float z)
+            {
+                Vector3 stack = Vector3(x, y, z);
+                Vector3* heap = new Vector3(x, y, z);
+                free(heap);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction function = Assert.Single(compilation.SemanticModel.Functions);
+        Assert.IsType<BoundStructConstructionExpression>(
+            Assert.IsType<BoundVariableDeclarationStatement>(function.Body.Statements[0]).Initializer);
+        var allocation = Assert.IsType<BoundNewExpression>(
+            Assert.IsType<BoundVariableDeclarationStatement>(function.Body.Statements[1]).Initializer);
+        Assert.IsType<PointerTypeSymbol>(allocation.Type);
+        Assert.IsType<BoundFreeExpression>(
+            Assert.IsType<BoundExpressionStatement>(function.Body.Statements[2]).Expression);
+    }
+
+    [Fact]
+    public void Analyzer_ValidatesStructConstructorAndFreeArguments()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Pair
+            {
+                int X;
+                int Y;
+            }
+
+            void Invalid()
+            {
+                Pair pair = Pair(1);
+                Pair* heap = new Pair(1, 2.0);
+                free(pair);
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message ==
+                "struct 'Pair' expects 2 constructor argument(s), but 1 were provided");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "cannot implicitly convert 'double' to 'int'");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "'free' requires a pointer, but has type 'Pair'");
+    }
+
+    [Fact]
+    public void Analyzer_ReservesNativeMallocForNew()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            extern void* malloc(nuint size);
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message ==
+                "native symbol 'malloc' is reserved for the built-in 'new' operation");
+    }
+
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(
         sources.Select((source, index) => SourceText.From(source, $"test{index}.xe")).ToArray());
 }

@@ -148,6 +148,62 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_EmitsStructLayoutAndMemberAccess()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector2
+            {
+                float X;
+                float Y;
+            }
+
+            export float Sum(Vector2* value)
+            {
+                return value->X + value->Y;
+            }
+            """);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "structs");
+
+        Assert.Contains("%Example.Vector2 = type { float, float }", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define float @Example_Sum(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Equal(2, llvmIr.Split("%Example.Vector2, ptr", StringSplitOptions.None).Length - 1);
+        Assert.Contains("fadd float", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsStructConstructionAllocationAndFree()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Pair
+            {
+                int X;
+                int Y;
+            }
+
+            int Main()
+            {
+                Pair stack = Pair(20, 22);
+                Pair* heap = new Pair(stack.X, stack.Y);
+                int result = heap->X + heap->Y;
+                free(heap);
+                return result;
+            }
+            """);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, target, "heap-struct");
+
+        Assert.Contains("insertvalue %Example.Pair", llvmIr, StringComparison.Ordinal);
+        Assert.Contains($"call ptr @malloc(i{IntPtr.Size * 8} 8)", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @free", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_EmitsTargetedIrWithNativeEntryPoint()
     {
         Compilation compilation = CreateCompilation("""

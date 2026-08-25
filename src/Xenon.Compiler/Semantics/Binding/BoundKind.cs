@@ -17,5 +17,9 @@ public enum BoundKind
     BinaryExpression,
     AssignmentExpression,
     CallExpression,
+    MemberAccessExpression,
+    StructConstructionExpression,
+    NewExpression,
+    FreeExpression,
     ErrorExpression,
 }

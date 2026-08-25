@@ -40,6 +40,24 @@ public sealed record ParameterSyntax(
     public override SyntaxKind Kind => SyntaxKind.Parameter;
 }
 
+public sealed record FieldDeclarationSyntax(
+    TypeSyntax Type,
+    SyntaxToken IdentifierToken,
+    SyntaxToken SemicolonToken) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.FieldDeclaration;
+}
+
+public sealed record StructDeclarationSyntax(
+    SyntaxToken StructKeyword,
+    SyntaxToken IdentifierToken,
+    SyntaxToken OpenBraceToken,
+    ImmutableArray<FieldDeclarationSyntax> Fields,
+    SyntaxToken CloseBraceToken) : MemberDeclarationSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.StructDeclaration;
+}
+
 public sealed record FunctionDeclarationSyntax(
     SyntaxToken? ModifierToken,
     TypeSyntax ReturnType,

@@ -89,9 +89,13 @@ public enum SyntaxKind
     NullKeyword,
     CastKeyword,
     BitCastKeyword,
+    NewKeyword,
+    FreeKeyword,
 
     CompilationUnit,
     NamespaceDeclaration,
+    StructDeclaration,
+    FieldDeclaration,
     FunctionDeclaration,
     Parameter,
     Type,
@@ -111,5 +115,8 @@ public enum SyntaxKind
     BinaryExpression,
     AssignmentExpression,
     CallExpression,
+    MemberAccessExpression,
+    NewExpression,
+    FreeExpression,
     ParenthesizedExpression,
 }

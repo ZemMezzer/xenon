@@ -36,11 +36,40 @@ public sealed record BoundBinaryExpression(
 }
 
 public sealed record BoundAssignmentExpression(
-    VariableSymbol Variable,
+    BoundExpression Target,
     SyntaxKind OperatorKind,
-    BoundExpression Expression) : BoundExpression(Variable.Type)
+    BoundExpression Expression) : BoundExpression(Target.Type)
 {
     public override BoundKind Kind => BoundKind.AssignmentExpression;
+}
+
+public sealed record BoundMemberAccessExpression(
+    BoundExpression Receiver,
+    FieldSymbol Field,
+    bool IsPointerAccess) : BoundExpression(Field.Type)
+{
+    public override BoundKind Kind => BoundKind.MemberAccessExpression;
+}
+
+public sealed record BoundStructConstructionExpression(
+    StructTypeSymbol StructType,
+    ImmutableArray<BoundExpression> Arguments) : BoundExpression(StructType)
+{
+    public override BoundKind Kind => BoundKind.StructConstructionExpression;
+}
+
+public sealed record BoundNewExpression(
+    StructTypeSymbol StructType,
+    ImmutableArray<BoundExpression> Arguments,
+    PointerTypeSymbol PointerType) : BoundExpression(PointerType)
+{
+    public override BoundKind Kind => BoundKind.NewExpression;
+}
+
+public sealed record BoundFreeExpression(
+    BoundExpression Pointer) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.FreeExpression;
 }
 
 public sealed record BoundCallExpression(

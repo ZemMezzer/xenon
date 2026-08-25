@@ -26,7 +26,9 @@ internal sealed class Parser
         while (Current.Kind != SyntaxKind.EndOfFileToken)
         {
             int start = _position;
-            members.Add(ParseFunctionDeclaration());
+            members.Add(Current.Kind == SyntaxKind.StructKeyword
+                ? ParseStructDeclaration()
+                : ParseFunctionDeclaration());
 
             if (_position == start)
             {
@@ -36,6 +38,35 @@ internal sealed class Parser
 
         SyntaxToken endOfFile = MatchToken(SyntaxKind.EndOfFileToken);
         return new CompilationUnitSyntax(@namespace, members.ToImmutable(), endOfFile);
+    }
+
+    private StructDeclarationSyntax ParseStructDeclaration()
+    {
+        SyntaxToken structKeyword = MatchToken(SyntaxKind.StructKeyword);
+        SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
+        SyntaxToken openBrace = MatchToken(SyntaxKind.OpenBraceToken);
+        var fields = ImmutableArray.CreateBuilder<FieldDeclarationSyntax>();
+
+        while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
+        {
+            int start = _position;
+            TypeSyntax type = ParseType();
+            SyntaxToken fieldIdentifier = MatchToken(SyntaxKind.IdentifierToken);
+            SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
+            fields.Add(new FieldDeclarationSyntax(type, fieldIdentifier, semicolon));
+            if (_position == start)
+            {
+                NextToken();
+            }
+        }
+
+        SyntaxToken closeBrace = MatchToken(SyntaxKind.CloseBraceToken);
+        return new StructDeclarationSyntax(
+            structKeyword,
+            identifier,
+            openBrace,
+            fields.ToImmutable(),
+            closeBrace);
     }
 
     private NamespaceDeclarationSyntax ParseNamespaceDeclaration()
@@ -376,9 +407,23 @@ internal sealed class Parser
     {
         ExpressionSyntax expression = ParsePrimaryExpression();
 
-        while (Current.Kind == SyntaxKind.OpenParenthesisToken)
+        while (true)
         {
-            expression = ParseCallExpression(expression);
+            if (Current.Kind == SyntaxKind.OpenParenthesisToken)
+            {
+                expression = ParseCallExpression(expression);
+                continue;
+            }
+
+            if (Current.Kind is SyntaxKind.DotToken or SyntaxKind.ArrowToken)
+            {
+                SyntaxToken operatorToken = NextToken();
+                SyntaxToken memberToken = MatchToken(SyntaxKind.IdentifierToken);
+                expression = new MemberAccessExpressionSyntax(expression, operatorToken, memberToken);
+                continue;
+            }
+
+            break;
         }
 
         if (Current.Kind is SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken)
@@ -392,6 +437,19 @@ internal sealed class Parser
     private CallExpressionSyntax ParseCallExpression(ExpressionSyntax target)
     {
         SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        (ImmutableArray<ExpressionSyntax> arguments, ImmutableArray<SyntaxToken> commas) =
+            ParseArgumentList();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        return new CallExpressionSyntax(
+            target,
+            openParenthesis,
+            arguments,
+            commas,
+            closeParenthesis);
+    }
+
+    private (ImmutableArray<ExpressionSyntax> Arguments, ImmutableArray<SyntaxToken> Commas) ParseArgumentList()
+    {
         var arguments = ImmutableArray.CreateBuilder<ExpressionSyntax>();
         var commaTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
 
@@ -406,17 +464,37 @@ internal sealed class Parser
             commaTokens.Add(NextToken());
         }
 
-        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
-        return new CallExpressionSyntax(
-            target,
-            openParenthesis,
-            arguments.ToImmutable(),
-            commaTokens.ToImmutable(),
-            closeParenthesis);
+        return (arguments.ToImmutable(), commaTokens.ToImmutable());
     }
 
     private ExpressionSyntax ParsePrimaryExpression()
     {
+        if (Current.Kind == SyntaxKind.NewKeyword)
+        {
+            SyntaxToken newKeyword = NextToken();
+            TypeSyntax type = ParseType();
+            SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+            (ImmutableArray<ExpressionSyntax> arguments, ImmutableArray<SyntaxToken> commas) =
+                ParseArgumentList();
+            SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+            return new NewExpressionSyntax(
+                newKeyword,
+                type,
+                openParenthesis,
+                arguments,
+                commas,
+                closeParenthesis);
+        }
+
+        if (Current.Kind == SyntaxKind.FreeKeyword)
+        {
+            SyntaxToken freeKeyword = NextToken();
+            SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+            ExpressionSyntax pointer = ParseExpression();
+            SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+            return new FreeExpressionSyntax(freeKeyword, openParenthesis, pointer, closeParenthesis);
+        }
+
         if (Current.Kind == SyntaxKind.OpenParenthesisToken)
         {
             SyntaxToken openParenthesis = NextToken();

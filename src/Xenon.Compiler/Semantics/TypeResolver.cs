@@ -6,9 +6,13 @@ namespace Xenon.Compiler.Semantics;
 
 internal static class TypeResolver
 {
-    public static TypeSymbol Resolve(TypeSyntax syntax, DiagnosticBag diagnostics)
+    public static TypeSymbol Resolve(
+        TypeSyntax syntax,
+        NamespaceSymbol containingNamespace,
+        DiagnosticBag diagnostics)
     {
-        TypeSymbol? type = BuiltinTypes.FromSyntaxKind(syntax.NameToken.Kind);
+        TypeSymbol? type = BuiltinTypes.FromSyntaxKind(syntax.NameToken.Kind) ??
+            containingNamespace.FindType(syntax.NameToken.Text);
         if (type is null)
         {
             diagnostics.Report(syntax.NameToken.Location, $"unknown type '{syntax.NameToken.Text}'");
