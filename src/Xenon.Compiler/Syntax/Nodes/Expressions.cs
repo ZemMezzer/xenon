@@ -70,7 +70,7 @@ public sealed record IndexExpressionSyntax(
 }
 
 public sealed record StructPositionalConstructionExpressionSyntax(
-    SyntaxToken TypeNameToken,
+    TypeSyntax Type,
     SyntaxToken OpenBraceToken,
     ImmutableArray<ExpressionSyntax> Arguments,
     ImmutableArray<SyntaxToken> CommaTokens,

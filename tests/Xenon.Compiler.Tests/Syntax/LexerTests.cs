@@ -42,6 +42,15 @@ public sealed class LexerTests
     }
 
     [Fact]
+    public void Lexer_RecognizesUsingKeyword()
+    {
+        LexedSource source = LexedSource.Lex(SourceText.From("using Example.Math;"));
+
+        Assert.Empty(source.Diagnostics);
+        Assert.Equal(SyntaxKind.UsingKeyword, source.Tokens[0].Kind);
+    }
+
+    [Fact]
     public void Lexer_UsesLongestOperatorMatch()
     {
         const string source = "<<= >>= -> ++ -- == != <= >= && || += -= *= /= %= &= |= ^=";

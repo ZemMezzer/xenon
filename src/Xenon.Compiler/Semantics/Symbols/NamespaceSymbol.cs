@@ -24,6 +24,8 @@ public sealed class NamespaceSymbol : Symbol
 
     public IReadOnlyCollection<StructTypeSymbol> Types => _types.Values;
 
+    internal NamespaceSymbol? FindNamespace(string name) => _namespaces.GetValueOrDefault(name);
+
     internal NamespaceSymbol GetOrAddNamespace(string name)
     {
         if (!_namespaces.TryGetValue(name, out NamespaceSymbol? @namespace))

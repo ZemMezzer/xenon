@@ -5,6 +5,7 @@ public static class SyntaxFacts
     private static readonly IReadOnlyDictionary<string, SyntaxKind> Keywords =
         new Dictionary<string, SyntaxKind>(StringComparer.Ordinal)
         {
+            ["using"] = SyntaxKind.UsingKeyword,
             ["namespace"] = SyntaxKind.NamespaceKeyword,
             ["void"] = SyntaxKind.VoidKeyword,
             ["bool"] = SyntaxKind.BoolKeyword,

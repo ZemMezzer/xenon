@@ -20,15 +20,30 @@ internal sealed class Parser
 
     public CompilationUnitSyntax ParseCompilationUnit()
     {
+        var usings = ImmutableArray.CreateBuilder<UsingDirectiveSyntax>();
+        while (Current.Kind == SyntaxKind.UsingKeyword)
+        {
+            usings.Add(ParseUsingDirective());
+        }
+
         NamespaceDeclarationSyntax @namespace = ParseNamespaceDeclaration();
         var members = ImmutableArray.CreateBuilder<MemberDeclarationSyntax>();
 
         while (Current.Kind != SyntaxKind.EndOfFileToken)
         {
             int start = _position;
-            members.Add(Current.Kind == SyntaxKind.StructKeyword
-                ? ParseStructDeclaration()
-                : ParseFunctionDeclaration());
+
+            if (Current.Kind == SyntaxKind.UsingKeyword)
+            {
+                Diagnostics.Report(Current.Location, "using directives must appear before the namespace declaration");
+                ParseUsingDirective();
+            }
+            else
+            {
+                members.Add(Current.Kind == SyntaxKind.StructKeyword
+                    ? ParseStructDeclaration()
+                    : ParseFunctionDeclaration());
+            }
 
             if (_position == start)
             {
@@ -37,7 +52,38 @@ internal sealed class Parser
         }
 
         SyntaxToken endOfFile = MatchToken(SyntaxKind.EndOfFileToken);
-        return new CompilationUnitSyntax(@namespace, members.ToImmutable(), endOfFile);
+        return new CompilationUnitSyntax(usings.ToImmutable(), @namespace, members.ToImmutable(), endOfFile);
+    }
+
+    private UsingDirectiveSyntax ParseUsingDirective()
+    {
+        SyntaxToken usingKeyword = MatchToken(SyntaxKind.UsingKeyword);
+        SyntaxToken? alias = null;
+        SyntaxToken? equals = null;
+
+        if (Current.Kind == SyntaxKind.IdentifierToken && Peek(1).Kind == SyntaxKind.EqualsToken)
+        {
+            alias = NextToken();
+            equals = MatchToken(SyntaxKind.EqualsToken);
+        }
+
+        var nameParts = ImmutableArray.CreateBuilder<SyntaxToken>();
+        var dotTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
+        nameParts.Add(MatchToken(SyntaxKind.IdentifierToken));
+        while (Current.Kind == SyntaxKind.DotToken)
+        {
+            dotTokens.Add(NextToken());
+            nameParts.Add(MatchToken(SyntaxKind.IdentifierToken));
+        }
+
+        SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
+        return new UsingDirectiveSyntax(
+            usingKeyword,
+            alias,
+            equals,
+            nameParts.ToImmutable(),
+            dotTokens.ToImmutable(),
+            semicolon);
     }
 
     private StructDeclarationSyntax ParseStructDeclaration()
@@ -238,9 +284,22 @@ internal sealed class Parser
     private TypeSyntax ParseType(bool allowArraySuffix = true)
     {
         SyntaxToken? constKeyword = Current.Kind == SyntaxKind.ConstKeyword ? NextToken() : null;
-        SyntaxToken name = SyntaxFacts.IsTypeName(Current.Kind)
+        var nameParts = ImmutableArray.CreateBuilder<SyntaxToken>();
+        var dotTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
+
+        SyntaxToken firstName = SyntaxFacts.IsTypeName(Current.Kind)
             ? NextToken()
             : MatchToken(SyntaxKind.IdentifierToken);
+        nameParts.Add(firstName);
+
+        if (firstName.Kind == SyntaxKind.IdentifierToken)
+        {
+            while (Current.Kind == SyntaxKind.DotToken)
+            {
+                dotTokens.Add(NextToken());
+                nameParts.Add(MatchToken(SyntaxKind.IdentifierToken));
+            }
+        }
 
         var pointerTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
         while (Current.Kind == SyntaxKind.StarToken)
@@ -270,7 +329,8 @@ internal sealed class Parser
 
         return new TypeSyntax(
             constKeyword,
-            name,
+            nameParts.ToImmutable(),
+            dotTokens.ToImmutable(),
             pointerTokens.ToImmutable(),
             openBracket,
             closeBracket);
@@ -652,15 +712,15 @@ internal sealed class Parser
             return new StackArrayCreationExpressionSyntax(elementType, openBracket, length, closeBracket);
         }
 
-        if (Current.Kind == SyntaxKind.IdentifierToken && Peek(1).Kind == SyntaxKind.OpenBraceToken)
+        if (Current.Kind == SyntaxKind.IdentifierToken && IsQualifiedNameFollowedBy(SyntaxKind.OpenBraceToken))
         {
-            SyntaxToken typeName = NextToken();
+            TypeSyntax type = ParseType(allowArraySuffix: false);
             SyntaxToken openBrace = MatchToken(SyntaxKind.OpenBraceToken);
             (ImmutableArray<ExpressionSyntax> arguments, ImmutableArray<SyntaxToken> commas) =
                 ParseExpressionList(SyntaxKind.CloseBraceToken);
             SyntaxToken closeBrace = MatchToken(SyntaxKind.CloseBraceToken);
             return new StructPositionalConstructionExpressionSyntax(
-                typeName,
+                type,
                 openBrace,
                 arguments,
                 commas,
@@ -707,12 +767,22 @@ internal sealed class Parser
     private bool IsVariableDeclaration()
     {
         int offset = Current.Kind == SyntaxKind.ConstKeyword ? 1 : 0;
-        if (!SyntaxFacts.IsTypeName(Peek(offset).Kind))
+        SyntaxKind firstKind = Peek(offset).Kind;
+        if (!SyntaxFacts.IsTypeName(firstKind))
         {
             return false;
         }
 
         offset++;
+        if (firstKind == SyntaxKind.IdentifierToken)
+        {
+            while (Peek(offset).Kind == SyntaxKind.DotToken &&
+                   Peek(offset + 1).Kind == SyntaxKind.IdentifierToken)
+            {
+                offset += 2;
+            }
+        }
+
         while (Peek(offset).Kind == SyntaxKind.StarToken)
         {
             offset++;
@@ -735,6 +805,24 @@ internal sealed class Parser
         }
 
         return Peek(offset).Kind == SyntaxKind.IdentifierToken;
+    }
+
+    private bool IsQualifiedNameFollowedBy(SyntaxKind kind)
+    {
+        int offset = 0;
+        if (Peek(offset).Kind != SyntaxKind.IdentifierToken)
+        {
+            return false;
+        }
+
+        offset++;
+        while (Peek(offset).Kind == SyntaxKind.DotToken &&
+               Peek(offset + 1).Kind == SyntaxKind.IdentifierToken)
+        {
+            offset += 2;
+        }
+
+        return Peek(offset).Kind == kind;
     }
 
     private static bool IsBuiltinTypeKeyword(SyntaxKind kind) => kind is

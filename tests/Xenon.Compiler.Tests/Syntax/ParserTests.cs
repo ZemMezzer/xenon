@@ -64,6 +64,83 @@ public sealed class ParserTests
     }
 
     [Fact]
+    public void Parser_ParsesUsingDirectivesBeforeNamespace()
+    {
+        SyntaxTree tree = Parse("""
+            using Xenon.Math;
+            using Vec = Xenon.Math.Vector2;
+            using Gfx = Graphics;
+
+            namespace Example;
+
+            int Main()
+            {
+                return 0;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        Assert.Equal(3, tree.Root.Usings.Length);
+
+        UsingDirectiveSyntax math = tree.Root.Usings[0];
+        Assert.False(math.HasAlias);
+        Assert.Equal("Xenon.Math", math.Name);
+
+        UsingDirectiveSyntax vec = tree.Root.Usings[1];
+        Assert.True(vec.HasAlias);
+        Assert.Equal("Vec", vec.AliasToken!.Text);
+        Assert.Equal("Xenon.Math.Vector2", vec.Name);
+
+        UsingDirectiveSyntax gfx = tree.Root.Usings[2];
+        Assert.Equal("Gfx", gfx.AliasToken!.Text);
+        Assert.Equal("Graphics", gfx.Name);
+        Assert.Equal("Example", tree.Root.Namespace.Name);
+    }
+
+    [Fact]
+    public void Parser_ParsesQualifiedTypeNames()
+    {
+        SyntaxTree tree = Parse("""
+            using Math = Xenon.Math;
+
+            namespace Example;
+
+            Math.Vector3 Build(Math.Vector3 value)
+            {
+                Math.Vector3 copy = Math.Vector3 { 1, 2, 3 };
+                return copy;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.Equal("Math.Vector3", function.ReturnType.Name);
+        Assert.Equal("Math.Vector3", Assert.Single(function.Parameters).Type.Name);
+        var declaration = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
+        Assert.Equal("Math.Vector3", declaration.Type.Name);
+        Assert.IsType<StructPositionalConstructionExpressionSyntax>(declaration.Initializer);
+    }
+
+    [Fact]
+    public void Parser_RejectsUsingDirectiveAfterNamespace()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            using Xenon.Math;
+
+            int Main()
+            {
+                return 0;
+            }
+            """);
+
+        Assert.Contains(
+            tree.Diagnostics,
+            diagnostic => diagnostic.Message == "using directives must appear before the namespace declaration");
+    }
+
+    [Fact]
     public void Parser_ParsesTopLevelVisibilityModifiers()
     {
         SyntaxTree tree = Parse("""

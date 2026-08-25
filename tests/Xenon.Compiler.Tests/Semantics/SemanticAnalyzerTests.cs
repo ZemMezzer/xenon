@@ -715,6 +715,259 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
+    public void Analyzer_ResolvesUsingNamespacesAcrossFiles()
+    {
+        Compilation compilation = CreateCompilation(
+            """
+            namespace Library.Math;
+
+            struct Counter
+            {
+                int Value;
+
+                public Counter(int value)
+                {
+                    Value = value;
+                }
+
+                public int Read()
+                {
+                    return Value;
+                }
+            }
+
+            public int Add(int left, int right)
+            {
+                return left + right;
+            }
+            """,
+            """
+            using Library.Math;
+
+            namespace Game;
+
+            int Main()
+            {
+                Counter counter = Counter(Add(20, 22));
+                return counter.Read();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction main = Assert.Single(
+            compilation.SemanticModel.Functions.Where(function => function.Symbol.FullName == "Game.Main"));
+        var declaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[0]);
+        var constructor = Assert.IsType<BoundConstructorCallExpression>(declaration.Initializer);
+        var add = Assert.IsType<BoundCallExpression>(constructor.Arguments[0]);
+        Assert.Equal("Library.Math.Add", add.Function.FullName);
+    }
+
+    [Fact]
+    public void Analyzer_UsingIsFileLocalAndNotTransitive()
+    {
+        Compilation compilation = CreateCompilation(
+            """
+            namespace Library;
+
+            struct Value
+            {
+                int Data;
+            }
+            """,
+            """
+            using Library;
+
+            namespace Game;
+
+            public int UsesImport(Value value)
+            {
+                return 0;
+            }
+            """,
+            """
+            namespace Game;
+
+            int MissingOwnUsing(Value value)
+            {
+                return 0;
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "unknown type 'Value'");
+    }
+
+    [Fact]
+    public void Analyzer_DuplicateNamespaceUsingInOneFileIsHarmless()
+    {
+        Compilation compilation = CreateCompilation(
+            """
+            namespace Library;
+
+            struct Value
+            {
+                int Data;
+            }
+            """,
+            """
+            using Library;
+            using Library;
+
+            namespace Game;
+
+            int Read(Value value)
+            {
+                return 0;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_ReportsAmbiguousImportedTypeAndSupportsTypeAlias()
+    {
+        Compilation ambiguous = CreateCompilation(
+            """
+            namespace First;
+            struct Value { int Data; }
+            """,
+            """
+            namespace Second;
+            struct Value { int Data; }
+            """,
+            """
+            using First;
+            using Second;
+
+            namespace Game;
+
+            int Read(Value value)
+            {
+                return 0;
+            }
+            """);
+
+        Assert.Contains(
+            ambiguous.Diagnostics,
+            diagnostic => diagnostic.Message.Contains("type name 'Value' is ambiguous", StringComparison.Ordinal));
+
+        Compilation aliased = CreateCompilation(
+            """
+            namespace First;
+            struct Value { int Data; }
+            """,
+            """
+            namespace Second;
+            struct Value { int Data; }
+            """,
+            """
+            using FirstValue = First.Value;
+            using SecondValue = Second.Value;
+
+            namespace Game;
+
+            int Read(FirstValue first, SecondValue second)
+            {
+                return 42;
+            }
+            """);
+
+        Assert.Empty(aliased.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_ResolvesFullyQualifiedAndNamespaceAliasedTypes()
+    {
+        Compilation compilation = CreateCompilation(
+            """
+            namespace Library.Math;
+
+            struct Vector
+            {
+                public int X;
+                public int Y;
+            }
+            """,
+            """
+            using Math = Library.Math;
+
+            namespace Game;
+
+            int Read(Math.Vector aliased, Library.Math.Vector qualified)
+            {
+                Math.Vector local = Math.Vector { 20, 22 };
+                return local.X + qualified.Y;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_ResolvesNamespaceAliasForQualifiedFunctionCall()
+    {
+        Compilation compilation = CreateCompilation(
+            """
+            namespace Library.Math;
+
+            public int Add(int left, int right)
+            {
+                return left + right;
+            }
+            """,
+            """
+            using Math = Library.Math;
+
+            namespace Game;
+
+            int Main()
+            {
+                return Math.Add(20, 22);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction main = Assert.Single(
+            compilation.SemanticModel.Functions.Where(function => function.Symbol.FullName == "Game.Main"));
+        var @return = Assert.IsType<BoundReturnStatement>(Assert.Single(main.Body.Statements));
+        var call = Assert.IsType<BoundCallExpression>(@return.Expression);
+        Assert.Equal("Library.Math.Add", call.Function.FullName);
+    }
+
+    [Fact]
+    public void Analyzer_ImportedPrivateFunctionRemainsInaccessible()
+    {
+        Compilation compilation = CreateCompilation(
+            """
+            namespace Library;
+
+            int Hidden()
+            {
+                return 42;
+            }
+            """,
+            """
+            using Library;
+
+            namespace Game;
+
+            int Main()
+            {
+                return Hidden();
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "function 'Hidden' is private in namespace 'Library'");
+        Assert.DoesNotContain(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "unknown function 'Hidden'");
+    }
+
+    [Fact]
     public void Analyzer_BindsStructMethodsWithImplicitThisAndValueOrPointerReceivers()
     {
         Compilation compilation = CreateCompilation("""

@@ -12,9 +12,11 @@ internal sealed class SemanticAnalyzer
     private readonly DiagnosticBag _diagnostics = new();
     private readonly NamespaceSymbol _globalNamespace = new(string.Empty, null);
     private readonly Dictionary<SyntaxTree, NamespaceSymbol> _treeNamespaces = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<SyntaxTree, FileSymbolScope> _treeScopes = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<FunctionDeclarationSyntax, FunctionSymbol> _functionSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StructDeclarationSyntax, StructTypeSymbol> _structSymbols = new(ReferenceEqualityComparer.Instance);
-    private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body)> _functionBodies = [];
+    private readonly Dictionary<StructDeclarationSyntax, FileSymbolScope> _structScopes = new(ReferenceEqualityComparer.Instance);
+    private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body, FileSymbolScope Scope)> _functionBodies = [];
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees)
     {
@@ -31,6 +33,7 @@ internal sealed class SemanticAnalyzer
     {
         DeclareNamespaces();
         DeclareStructs();
+        BindUsingDirectives();
         BindStructFields();
         ValidateStructLayouts();
         DeclareStructMethods();
@@ -38,9 +41,9 @@ internal sealed class SemanticAnalyzer
         DeclareFunctions();
 
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
-        foreach ((FunctionSymbol symbol, BlockStatementSyntax body) in _functionBodies)
+        foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
         {
-            var binder = new FunctionBodyBinder(symbol, _diagnostics);
+            var binder = new FunctionBodyBinder(symbol, scope, _diagnostics);
             functions.Add(new BoundFunction(symbol, binder.BindBody(body)));
         }
 
@@ -82,17 +85,36 @@ internal sealed class SemanticAnalyzer
         }
     }
 
+    private void BindUsingDirectives()
+    {
+        foreach (SyntaxTree tree in _syntaxTrees)
+        {
+            var scope = new FileSymbolScope(_globalNamespace, _treeNamespaces[tree]);
+            scope.BindUsings(tree.Root.Usings, _diagnostics);
+            _treeScopes.Add(tree, scope);
+
+            foreach (StructDeclarationSyntax declaration in tree.Root.Members.OfType<StructDeclarationSyntax>())
+            {
+                if (_structSymbols.ContainsKey(declaration))
+                {
+                    _structScopes.Add(declaration, scope);
+                }
+            }
+        }
+    }
+
     private void BindStructFields()
     {
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
+            FileSymbolScope scope = _structScopes[declaration];
             var fields = ImmutableArray.CreateBuilder<FieldSymbol>();
             var names = new HashSet<string>(StringComparer.Ordinal);
             foreach (FieldDeclarationSyntax fieldSyntax in declaration.Fields)
             {
                 TypeSymbol fieldType = TypeResolver.Resolve(
                     fieldSyntax.Type,
-                    type.ContainingNamespace,
+                    scope,
                     _diagnostics);
                 if (ReferenceEquals(fieldType, BuiltinTypes.Void))
                 {
@@ -162,6 +184,7 @@ internal sealed class SemanticAnalyzer
     {
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
+            FileSymbolScope scope = _structScopes[declaration];
             var methods = ImmutableArray.CreateBuilder<FunctionSymbol>();
             var names = new HashSet<string>(StringComparer.Ordinal);
 
@@ -184,11 +207,11 @@ internal sealed class SemanticAnalyzer
 
                 TypeSymbol returnType = TypeResolver.Resolve(
                     methodSyntax.ReturnType,
-                    type.ContainingNamespace,
+                    scope,
                     _diagnostics);
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(
                     methodSyntax.Parameters,
-                    type.ContainingNamespace);
+                    scope);
 
                 var method = new FunctionSymbol(
                     methodSyntax.IdentifierToken.Text,
@@ -198,7 +221,7 @@ internal sealed class SemanticAnalyzer
                     methodSyntax);
 
                 methods.Add(method);
-                _functionBodies.Add((method, methodSyntax.Body));
+                _functionBodies.Add((method, methodSyntax.Body, scope));
             }
 
             type.SetMethods(methods.ToImmutable());
@@ -209,6 +232,7 @@ internal sealed class SemanticAnalyzer
     {
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
+            FileSymbolScope scope = _structScopes[declaration];
             if (declaration.Constructors.Length > 1)
             {
                 foreach (ConstructorDeclarationSyntax duplicate in declaration.Constructors.Skip(1))
@@ -224,7 +248,7 @@ internal sealed class SemanticAnalyzer
             {
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(
                     constructorSyntax.Parameters,
-                    type.ContainingNamespace);
+                    scope);
                 var constructor = new FunctionSymbol(
                     FunctionKind.Constructor,
                     type,
@@ -232,7 +256,7 @@ internal sealed class SemanticAnalyzer
                     constructorSyntax,
                     constructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
                 type.SetConstructor(constructor);
-                _functionBodies.Add((constructor, constructorSyntax.Body));
+                _functionBodies.Add((constructor, constructorSyntax.Body, scope));
             }
 
             DestructorDeclarationSyntax[] destructors = declaration.Members
@@ -265,7 +289,7 @@ internal sealed class SemanticAnalyzer
                     destructorSyntax,
                     destructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
                 type.SetDestructor(destructor);
-                _functionBodies.Add((destructor, destructorSyntax.Body));
+                _functionBodies.Add((destructor, destructorSyntax.Body, scope));
             }
         }
     }
@@ -275,6 +299,7 @@ internal sealed class SemanticAnalyzer
         foreach (SyntaxTree tree in _syntaxTrees)
         {
             NamespaceSymbol @namespace = _treeNamespaces[tree];
+            FileSymbolScope scope = _treeScopes[tree];
             foreach (FunctionDeclarationSyntax declaration in tree.Root.Members.OfType<FunctionDeclarationSyntax>())
             {
                 if (declaration.IsExtern && declaration.IdentifierToken.Text is "malloc" or "free")
@@ -284,8 +309,8 @@ internal sealed class SemanticAnalyzer
                         $"native symbol '{declaration.IdentifierToken.Text}' is reserved for Xenon memory operations");
                 }
 
-                TypeSymbol returnType = TypeResolver.Resolve(declaration.ReturnType, @namespace, _diagnostics);
-                ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration.Parameters, @namespace);
+                TypeSymbol returnType = TypeResolver.Resolve(declaration.ReturnType, scope, _diagnostics);
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration.Parameters, scope);
                 var function = new FunctionSymbol(
                     declaration.IdentifierToken.Text,
                     @namespace,
@@ -306,7 +331,7 @@ internal sealed class SemanticAnalyzer
                 _functionSymbols.Add(declaration, function);
                 if (declaration.Body is not null)
                 {
-                    _functionBodies.Add((function, declaration.Body));
+                    _functionBodies.Add((function, declaration.Body, scope));
                 }
             }
         }
@@ -355,7 +380,7 @@ internal sealed class SemanticAnalyzer
 
     private ImmutableArray<ParameterSymbol> BindParameters(
         ImmutableArray<ParameterSyntax> parameterSyntax,
-        NamespaceSymbol containingNamespace)
+        FileSymbolScope scope)
     {
         var parameters = ImmutableArray.CreateBuilder<ParameterSymbol>();
         var names = new HashSet<string>(StringComparer.Ordinal);
@@ -363,7 +388,7 @@ internal sealed class SemanticAnalyzer
         for (int index = 0; index < parameterSyntax.Length; index++)
         {
             ParameterSyntax syntax = parameterSyntax[index];
-            TypeSymbol type = TypeResolver.Resolve(syntax.Type, containingNamespace, _diagnostics);
+            TypeSymbol type = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
 
             if (ReferenceEquals(type, BuiltinTypes.Void))
             {

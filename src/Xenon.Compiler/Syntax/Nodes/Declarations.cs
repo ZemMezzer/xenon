@@ -3,11 +3,27 @@ using System.Collections.Immutable;
 namespace Xenon.Compiler.Syntax;
 
 public sealed record CompilationUnitSyntax(
+    ImmutableArray<UsingDirectiveSyntax> Usings,
     NamespaceDeclarationSyntax Namespace,
     ImmutableArray<MemberDeclarationSyntax> Members,
     SyntaxToken EndOfFileToken) : SyntaxNode
 {
     public override SyntaxKind Kind => SyntaxKind.CompilationUnit;
+}
+
+public sealed record UsingDirectiveSyntax(
+    SyntaxToken UsingKeyword,
+    SyntaxToken? AliasToken,
+    SyntaxToken? EqualsToken,
+    ImmutableArray<SyntaxToken> NameParts,
+    ImmutableArray<SyntaxToken> DotTokens,
+    SyntaxToken SemicolonToken) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.UsingDirective;
+
+    public bool HasAlias => AliasToken is not null;
+
+    public string Name => string.Join('.', NameParts.Select(part => part.Text));
 }
 
 public sealed record NamespaceDeclarationSyntax(
@@ -23,12 +39,19 @@ public sealed record NamespaceDeclarationSyntax(
 
 public sealed record TypeSyntax(
     SyntaxToken? ConstKeyword,
-    SyntaxToken NameToken,
+    ImmutableArray<SyntaxToken> NameParts,
+    ImmutableArray<SyntaxToken> DotTokens,
     ImmutableArray<SyntaxToken> PointerTokens,
     SyntaxToken? OpenBracketToken,
     SyntaxToken? CloseBracketToken) : SyntaxNode
 {
     public override SyntaxKind Kind => SyntaxKind.Type;
+
+    public SyntaxToken NameToken => NameParts[^1];
+
+    public string Name => string.Join('.', NameParts.Select(part => part.Text));
+
+    public bool IsQualifiedName => NameParts.Length > 1;
 
     public bool IsConst => ConstKeyword is not null;
 

@@ -10,14 +10,16 @@ namespace Xenon.Compiler.Semantics;
 internal sealed class FunctionBodyBinder
 {
     private readonly FunctionSymbol _function;
+    private readonly FileSymbolScope _fileScope;
     private readonly DiagnosticBag _diagnostics;
     private readonly HashSet<LocalVariableSymbol> _definitelyAssigned = [];
     private BoundScope _scope = new(null);
     private int _loopDepth;
 
-    public FunctionBodyBinder(FunctionSymbol function, DiagnosticBag diagnostics)
+    public FunctionBodyBinder(FunctionSymbol function, FileSymbolScope fileScope, DiagnosticBag diagnostics)
     {
         _function = function;
+        _fileScope = fileScope;
         _diagnostics = diagnostics;
 
         foreach (ParameterSymbol parameter in function.Parameters)
@@ -193,7 +195,7 @@ internal sealed class FunctionBodyBinder
 
     private BoundVariableDeclarationStatement BindVariableDeclaration(VariableDeclarationStatementSyntax syntax)
     {
-        TypeSymbol type = TypeResolver.Resolve(syntax.Type, _function.ContainingNamespace, _diagnostics);
+        TypeSymbol type = TypeResolver.Resolve(syntax.Type, _fileScope, _diagnostics);
         if (ReferenceEquals(type, BuiltinTypes.Void))
         {
             _diagnostics.Report(syntax.Type.NameToken.Location, "local variable type cannot be 'void'");
@@ -529,11 +531,11 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindIndexExpression(IndexExpressionSyntax syntax)
     {
-        if (syntax.Receiver is NameExpressionSyntax typeName &&
-            _scope.Lookup(typeName.IdentifierToken.Text) is null &&
-            _function.ContainingNamespace.FindType(typeName.IdentifierToken.Text) is TypeSymbol arrayElementType)
+        if (TryResolveTypeExpression(syntax.Receiver, out TypeSymbol? arrayElementType, out TextLocation typeLocation) &&
+            arrayElementType is not null &&
+            !ReferenceEquals(arrayElementType, BuiltinTypes.Error))
         {
-            return BindStackArrayCreation(arrayElementType, syntax.Index, typeName.IdentifierToken.Location);
+            return BindStackArrayCreation(arrayElementType, syntax.Index, typeLocation);
         }
 
         BoundExpression receiver = BindExpression(syntax.Receiver);
@@ -564,23 +566,67 @@ internal sealed class FunctionBodyBinder
         return new BoundIndexExpression(receiver, index, elementType);
     }
 
+    private bool TryResolveTypeExpression(
+        ExpressionSyntax syntax,
+        out TypeSymbol? type,
+        out TextLocation location)
+    {
+        type = null;
+        location = GetLocation(syntax);
+
+        if (syntax is NameExpressionSyntax name)
+        {
+            string identifier = name.IdentifierToken.Text;
+            if (_scope.Lookup(identifier) is not null ||
+                _function.ContainingType?.FindField(identifier) is not null)
+            {
+                return false;
+            }
+
+            type = _fileScope.ResolveType(identifier, name.IdentifierToken.Location, _diagnostics);
+            location = name.IdentifierToken.Location;
+            return type is not null;
+        }
+
+        if (!TryGetDottedName(syntax, out ImmutableArray<SyntaxToken> parts))
+        {
+            return false;
+        }
+
+        string firstName = parts[0].Text;
+        if (_scope.Lookup(firstName) is not null ||
+            _function.ContainingType?.FindField(firstName) is not null ||
+            !_fileScope.CanStartQualifiedName(firstName))
+        {
+            return false;
+        }
+
+        type = _fileScope.ResolveQualifiedType(parts.Select(part => part.Text).ToArray());
+        location = parts[^1].Location;
+        return type is not null;
+    }
+
     private BoundExpression BindStructPositionalConstructionExpression(StructPositionalConstructionExpressionSyntax syntax)
     {
-        StructTypeSymbol? structType = _function.ContainingNamespace.FindType(syntax.TypeNameToken.Text);
-        if (structType is null)
+        TypeSymbol resolvedType = TypeResolver.Resolve(syntax.Type, _fileScope, _diagnostics);
+        if (resolvedType is not StructTypeSymbol structType)
         {
-            _diagnostics.Report(syntax.TypeNameToken.Location, $"unknown struct '{syntax.TypeNameToken.Text}'");
+            if (!ReferenceEquals(resolvedType, BuiltinTypes.Error))
+            {
+                _diagnostics.Report(syntax.Type.NameToken.Location, $"type '{syntax.Type.Name}' is not a struct");
+            }
+
             return new BoundErrorExpression();
         }
 
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
-        arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.TypeNameToken.Location);
+        arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.Type.NameToken.Location);
         return new BoundStructConstructionExpression(structType, arguments);
     }
 
     private BoundExpression BindStackArrayCreationExpression(StackArrayCreationExpressionSyntax syntax)
     {
-        TypeSymbol elementType = TypeResolver.Resolve(syntax.ElementType, _function.ContainingNamespace, _diagnostics);
+        TypeSymbol elementType = TypeResolver.Resolve(syntax.ElementType, _fileScope, _diagnostics);
         return BindStackArrayCreation(elementType, syntax.Length, syntax.ElementType.NameToken.Location);
     }
 
@@ -602,7 +648,11 @@ internal sealed class FunctionBodyBinder
 
         if (syntax.Target is MemberAccessExpressionSyntax memberTarget)
         {
-            return BindMethodCallExpression(memberTarget, arguments, syntax.Arguments);
+            BoundExpression? qualifiedCall = TryBindQualifiedCallExpression(
+                memberTarget,
+                arguments,
+                syntax.Arguments);
+            return qualifiedCall ?? BindMethodCallExpression(memberTarget, arguments, syntax.Arguments);
         }
 
         if (syntax.Target is not NameExpressionSyntax name)
@@ -611,7 +661,10 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        StructTypeSymbol? structType = _function.ContainingNamespace.FindType(name.IdentifierToken.Text);
+        StructTypeSymbol? structType = _fileScope.ResolveType(
+            name.IdentifierToken.Text,
+            name.IdentifierToken.Location,
+            _diagnostics) as StructTypeSymbol;
         if (structType is not null)
         {
             FunctionSymbol? constructor = structType.Constructor;
@@ -647,15 +700,129 @@ internal sealed class FunctionBodyBinder
             }
         }
 
-        FunctionSymbol? function = _function.ContainingNamespace.FindFunction(name.IdentifierToken.Text);
+        FunctionSymbol? function = _fileScope.ResolveFunction(
+            name.IdentifierToken.Text,
+            name.IdentifierToken.Location,
+            _diagnostics,
+            out bool functionResolutionDiagnostic);
         if (function is null)
         {
-            _diagnostics.Report(name.IdentifierToken.Location, $"unknown function '{name.IdentifierToken.Text}'");
+            if (!functionResolutionDiagnostic)
+            {
+                _diagnostics.Report(name.IdentifierToken.Location, $"unknown function '{name.IdentifierToken.Text}'");
+            }
+
             return new BoundErrorExpression();
         }
 
         arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location);
         return new BoundCallExpression(function, arguments);
+    }
+
+    private BoundExpression? TryBindQualifiedCallExpression(
+        MemberAccessExpressionSyntax target,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax)
+    {
+        if (!TryGetDottedName(target, out ImmutableArray<SyntaxToken> nameParts))
+        {
+            return null;
+        }
+
+        string firstName = nameParts[0].Text;
+        if (_scope.Lookup(firstName) is not null)
+        {
+            return null;
+        }
+
+        if (_function.ContainingType?.FindField(firstName) is not null)
+        {
+            return null;
+        }
+
+        if (!_fileScope.CanStartQualifiedName(firstName))
+        {
+            return null;
+        }
+
+        string[] parts = nameParts.Select(part => part.Text).ToArray();
+        StructTypeSymbol? structType = _fileScope.ResolveQualifiedType(parts);
+        if (structType is not null)
+        {
+            FunctionSymbol? constructor = structType.Constructor;
+            if (constructor is null)
+            {
+                _diagnostics.Report(
+                    target.MemberToken.Location,
+                    $"struct '{structType.Name}' does not declare a constructor; use '{structType.Name} {{ ... }}' for positional construction");
+                return new BoundErrorExpression();
+            }
+
+            if (!constructor.IsPublic && !ReferenceEquals(_function.ContainingType, structType))
+            {
+                _diagnostics.Report(target.MemberToken.Location, $"constructor '{structType.Name}' is private");
+            }
+
+            arguments = ValidateFunctionArguments(constructor, arguments, argumentSyntax, target.MemberToken.Location);
+            return new BoundConstructorCallExpression(structType, constructor, arguments);
+        }
+
+        FunctionSymbol? function = _fileScope.ResolveQualifiedFunction(
+            parts,
+            target.MemberToken.Location,
+            _diagnostics,
+            out bool resolutionDiagnostic);
+        if (function is not null)
+        {
+            arguments = ValidateFunctionArguments(function, arguments, argumentSyntax, target.MemberToken.Location);
+            return new BoundCallExpression(function, arguments);
+        }
+
+        if (!resolutionDiagnostic)
+        {
+            _diagnostics.Report(
+                target.MemberToken.Location,
+                $"unknown function or struct '{string.Join('.', parts)}'");
+        }
+
+        return new BoundErrorExpression();
+    }
+
+    private static bool TryGetDottedName(
+        ExpressionSyntax syntax,
+        out ImmutableArray<SyntaxToken> parts)
+    {
+        var builder = ImmutableArray.CreateBuilder<SyntaxToken>();
+        if (!CollectDottedNameParts(syntax, builder))
+        {
+            parts = [];
+            return false;
+        }
+
+        parts = builder.ToImmutable();
+        return parts.Length > 0;
+    }
+
+    private static bool CollectDottedNameParts(
+        ExpressionSyntax syntax,
+        ImmutableArray<SyntaxToken>.Builder parts)
+    {
+        switch (syntax)
+        {
+            case NameExpressionSyntax name:
+                parts.Add(name.IdentifierToken);
+                return true;
+            case MemberAccessExpressionSyntax { OperatorToken.Kind: SyntaxKind.DotToken } member:
+                if (!CollectDottedNameParts(member.Receiver, parts))
+                {
+                    return false;
+                }
+
+                parts.Add(member.MemberToken);
+                return true;
+            default:
+                return false;
+        }
     }
 
     private BoundExpression BindMethodCallExpression(
@@ -717,7 +884,7 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindNewExpression(NewExpressionSyntax syntax)
     {
-        TypeSymbol type = TypeResolver.Resolve(syntax.Type, _function.ContainingNamespace, _diagnostics);
+        TypeSymbol type = TypeResolver.Resolve(syntax.Type, _fileScope, _diagnostics);
 
         if (syntax.IsArrayAllocation)
         {
@@ -1037,7 +1204,7 @@ internal sealed class FunctionBodyBinder
         CallExpressionSyntax call => call.OpenParenthesisToken.Location,
         MemberAccessExpressionSyntax member => member.OperatorToken.Location,
         IndexExpressionSyntax index => index.OpenBracketToken.Location,
-        StructPositionalConstructionExpressionSyntax construction => construction.TypeNameToken.Location,
+        StructPositionalConstructionExpressionSyntax construction => construction.Type.NameToken.Location,
         StackArrayCreationExpressionSyntax stackArray => stackArray.OpenBracketToken.Location,
         NewExpressionSyntax @new => @new.NewKeyword.Location,
         FreeExpressionSyntax free => free.FreeKeyword.Location,

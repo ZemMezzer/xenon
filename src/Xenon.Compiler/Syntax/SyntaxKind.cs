@@ -55,6 +55,7 @@ public enum SyntaxKind
     LessLessEqualsToken,
     GreaterGreaterEqualsToken,
 
+    UsingKeyword,
     NamespaceKeyword,
     VoidKeyword,
     BoolKeyword,
@@ -95,6 +96,7 @@ public enum SyntaxKind
     FreeKeyword,
 
     CompilationUnit,
+    UsingDirective,
     NamespaceDeclaration,
     StructDeclaration,
     FieldDeclaration,

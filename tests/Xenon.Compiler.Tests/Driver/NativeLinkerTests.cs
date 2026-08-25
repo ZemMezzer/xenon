@@ -187,6 +187,74 @@ public sealed class NativeLinkerTests
         }
     }
 
+    [Fact]
+    public void Linker_CreatesAndRunsHostExecutableAcrossFilesUsingNamespaceImport()
+    {
+        Compilation compilation = Compilation.Create(
+            SourceText.From("""
+                namespace Library.Math;
+
+                public int Add(int left, int right)
+                {
+                    return left + right;
+                }
+                """, "math.xe"),
+            SourceText.From("""
+                using Library.Math;
+
+                namespace Integration;
+
+                int Main()
+                {
+                    return Add(20, 22);
+                }
+                """, "main.xe"));
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "xenon-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        string objectPath = Path.Combine(
+            directory,
+            $"using-integration{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory,
+            "using-integration",
+            "debug",
+            target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "using-integration",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path,
+                executablePath,
+                target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [MacOsFact]
     public void Linker_CreatesAndRunsMacOsMachOExecutable()
     {

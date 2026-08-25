@@ -8,14 +8,23 @@ internal static class TypeResolver
 {
     public static TypeSymbol Resolve(
         TypeSyntax syntax,
-        NamespaceSymbol containingNamespace,
+        FileSymbolScope scope,
         DiagnosticBag diagnostics)
     {
-        TypeSymbol? type = BuiltinTypes.FromSyntaxKind(syntax.NameToken.Kind) ??
-            containingNamespace.FindType(syntax.NameToken.Text);
+        TypeSymbol? type;
+        if (!syntax.IsQualifiedName)
+        {
+            type = BuiltinTypes.FromSyntaxKind(syntax.NameToken.Kind) ??
+                scope.ResolveType(syntax.NameToken.Text, syntax.NameToken.Location, diagnostics);
+        }
+        else
+        {
+            type = scope.ResolveQualifiedType(syntax.NameParts.Select(part => part.Text).ToArray());
+        }
+
         if (type is null)
         {
-            diagnostics.Report(syntax.NameToken.Location, $"unknown type '{syntax.NameToken.Text}'");
+            diagnostics.Report(syntax.NameToken.Location, $"unknown type '{syntax.Name}'");
             type = BuiltinTypes.Error;
         }
 
