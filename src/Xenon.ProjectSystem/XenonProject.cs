@@ -29,6 +29,8 @@ public sealed class XenonProject
         string sourceRoot,
         string? projectFilePath,
         ImmutableArray<string> sourceFiles,
+        ImmutableArray<string> nativeLibraries,
+        ImmutableArray<string> nativeLibraryPaths,
         XenonBuildProfile debugProfile,
         XenonBuildProfile releaseProfile)
     {
@@ -39,6 +41,8 @@ public sealed class XenonProject
         SourceRoot = sourceRoot;
         ProjectFilePath = projectFilePath;
         SourceFiles = sourceFiles;
+        NativeLibraries = nativeLibraries;
+        NativeLibraryPaths = nativeLibraryPaths;
         DebugProfile = debugProfile;
         ReleaseProfile = releaseProfile;
     }
@@ -56,6 +60,10 @@ public sealed class XenonProject
     public string? ProjectFilePath { get; }
 
     public ImmutableArray<string> SourceFiles { get; }
+
+    public ImmutableArray<string> NativeLibraries { get; }
+
+    public ImmutableArray<string> NativeLibraryPaths { get; }
 
     public XenonBuildProfile DebugProfile { get; }
 

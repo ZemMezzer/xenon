@@ -12,6 +12,8 @@ public static class XenonProjectLoader
         "project.type",
         "project.version",
         "source.root",
+        "native.libraries",
+        "native.library-paths",
         "profile.debug.optimization",
         "profile.debug.debug-info",
         "profile.debug.checks",
@@ -144,6 +146,16 @@ public static class XenonProjectLoader
             "profile.release",
             XenonBuildProfile.Release,
             fullPath);
+        ImmutableArray<string> nativeLibraries = GetOptionalStringArray(
+            settings,
+            "native.libraries",
+            fullPath);
+        ImmutableArray<string> nativeLibraryPaths = GetOptionalStringArray(
+                settings,
+                "native.library-paths",
+                fullPath)
+            .Select(path => Path.GetFullPath(path, rootDirectory))
+            .ToImmutableArray();
 
         return new XenonProject(
             name,
@@ -153,6 +165,8 @@ public static class XenonProjectLoader
             sourceRoot,
             fullPath,
             sourceFiles,
+            nativeLibraries,
+            nativeLibraryPaths,
             debugProfile,
             releaseProfile);
     }
@@ -168,6 +182,8 @@ public static class XenonProjectLoader
             rootDirectory,
             projectFilePath: null,
             [sourceFile],
+            [],
+            [],
             XenonBuildProfile.Debug,
             XenonBuildProfile.Release);
     }
@@ -185,6 +201,8 @@ public static class XenonProjectLoader
             directory,
             projectFilePath: null,
             sourceFiles,
+            [],
+            [],
             XenonBuildProfile.Debug,
             XenonBuildProfile.Release);
     }
@@ -281,6 +299,23 @@ public static class XenonProjectLoader
 
             string name = line[..equalsIndex].Trim();
             string value = line[(equalsIndex + 1)..].Trim();
+            if (value.StartsWith("[", StringComparison.Ordinal) && !IsCompleteArray(value))
+            {
+                var valueBuilder = new StringBuilder(value);
+                while (!IsCompleteArray(valueBuilder.ToString()))
+                {
+                    if (++index == lines.Count)
+                    {
+                        throw Error(path, lineNumber, "unterminated array value");
+                    }
+
+                    valueBuilder.AppendLine();
+                    valueBuilder.Append(StripComment(lines[index]).Trim());
+                }
+
+                value = valueBuilder.ToString();
+            }
+
             string key = $"{section}.{name}";
             if (!settings.TryAdd(key, new ProjectSetting(value, lineNumber)))
             {
@@ -289,6 +324,42 @@ public static class XenonProjectLoader
         }
 
         return settings;
+    }
+
+    private static bool IsCompleteArray(string value)
+    {
+        bool insideString = false;
+        bool escaped = false;
+        int depth = 0;
+        foreach (char character in value)
+        {
+            if (insideString && escaped)
+            {
+                escaped = false;
+                continue;
+            }
+
+            if (insideString && character == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                insideString = !insideString;
+            }
+            else if (!insideString && character == '[')
+            {
+                depth++;
+            }
+            else if (!insideString && character == ']')
+            {
+                depth--;
+            }
+        }
+
+        return depth == 0 && !insideString;
     }
 
     private static string StripComment(string line)
@@ -357,6 +428,101 @@ public static class XenonProjectLoader
         catch (FormatException exception)
         {
             throw Error(path, setting.Line, exception.Message);
+        }
+    }
+
+    private static ImmutableArray<string> GetOptionalStringArray(
+        IReadOnlyDictionary<string, ProjectSetting> settings,
+        string key,
+        string path)
+    {
+        if (!settings.TryGetValue(key, out ProjectSetting setting))
+        {
+            return [];
+        }
+
+        string value = setting.Value.Trim();
+        if (value.Length < 2 || value[0] != '[' || value[^1] != ']')
+        {
+            throw Error(path, setting.Line, $"project setting '{key}' must be an array of strings");
+        }
+
+        var items = ImmutableArray.CreateBuilder<string>();
+        int index = 1;
+        while (true)
+        {
+            SkipWhitespace(value, ref index);
+            if (index == value.Length - 1)
+            {
+                return items.ToImmutable();
+            }
+
+            if (value[index] != '"')
+            {
+                throw Error(path, setting.Line, $"project setting '{key}' must contain only quoted strings");
+            }
+
+            int contentStart = ++index;
+            bool escaped = false;
+            while (index < value.Length - 1)
+            {
+                char character = value[index];
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (character == '\\')
+                {
+                    escaped = true;
+                }
+                else if (character == '"')
+                {
+                    break;
+                }
+
+                index++;
+            }
+
+            if (index >= value.Length - 1 || value[index] != '"')
+            {
+                throw Error(path, setting.Line, $"project setting '{key}' contains an unterminated string");
+            }
+
+            try
+            {
+                items.Add(Unescape(value[contentStart..index]));
+            }
+            catch (FormatException exception)
+            {
+                throw Error(path, setting.Line, exception.Message);
+            }
+
+            index++;
+            SkipWhitespace(value, ref index);
+            if (index == value.Length - 1)
+            {
+                return items.ToImmutable();
+            }
+
+            if (value[index] != ',')
+            {
+                throw Error(path, setting.Line, $"project setting '{key}' expects ',' between values");
+            }
+
+            index++;
+            SkipWhitespace(value, ref index);
+            if (index == value.Length - 1)
+            {
+                return items.ToImmutable();
+            }
+        }
+    }
+
+    private static void SkipWhitespace(string value, ref int index)
+    {
+        while (index < value.Length && char.IsWhiteSpace(value[index]))
+        {
+            index++;
         }
     }
 

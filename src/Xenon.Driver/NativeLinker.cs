@@ -3,16 +3,54 @@ using System.Runtime.InteropServices;
 
 namespace Xenon.Driver;
 
-public sealed record LinkedExecutable(
-    string Path,
-    string LinkerPath);
+public sealed record NativeLinkOptions(
+    IReadOnlyList<string>? Libraries = null,
+    IReadOnlyList<string>? LibraryPaths = null,
+    IReadOnlyList<string>? ExportedSymbols = null);
+
+public sealed record LinkedExecutable(string Path, string LinkerPath);
+
+public sealed record LinkedNativeArtifact(string Path, string ToolPath, string? ImportLibraryPath = null);
 
 public sealed class NativeLinker
 {
     public LinkedExecutable LinkExecutable(
         string objectFilePath,
         string outputPath,
-        string targetTriple)
+        string targetTriple,
+        NativeLinkOptions? options = null)
+    {
+        LinkedNativeArtifact artifact = CreateArtifact(
+            objectFilePath, outputPath, targetTriple, NativeArtifactKind.Executable,
+            options ?? new NativeLinkOptions(), importLibraryPath: null);
+        return new LinkedExecutable(artifact.Path, artifact.ToolPath);
+    }
+
+    public LinkedNativeArtifact CreateStaticLibrary(
+        string objectFilePath,
+        string outputPath,
+        string targetTriple) =>
+        CreateArtifact(
+            objectFilePath, outputPath, targetTriple, NativeArtifactKind.StaticLibrary,
+            new NativeLinkOptions(), importLibraryPath: null);
+
+    public LinkedNativeArtifact LinkSharedLibrary(
+        string objectFilePath,
+        string outputPath,
+        string targetTriple,
+        NativeLinkOptions? options = null,
+        string? importLibraryPath = null) =>
+        CreateArtifact(
+            objectFilePath, outputPath, targetTriple, NativeArtifactKind.SharedLibrary,
+            options ?? new NativeLinkOptions(), importLibraryPath);
+
+    private static LinkedNativeArtifact CreateArtifact(
+        string objectFilePath,
+        string outputPath,
+        string targetTriple,
+        NativeArtifactKind kind,
+        NativeLinkOptions options,
+        string? importLibraryPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(objectFilePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
@@ -24,84 +62,70 @@ public sealed class NativeLinker
             throw new LinkerException($"object file '{objectPath}' does not exist");
         }
 
-        string executablePath = Path.GetFullPath(outputPath);
-        string outputDirectory = Path.GetDirectoryName(executablePath)!;
-        Directory.CreateDirectory(outputDirectory);
-        string temporaryPath = Path.Combine(
-            outputDirectory,
-            $".{Path.GetFileNameWithoutExtension(executablePath)}.{Guid.NewGuid():N}.tmp{Path.GetExtension(executablePath)}");
+        string artifactPath = Path.GetFullPath(outputPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(artifactPath)!);
+        string temporaryPath = CreateTemporaryPath(artifactPath);
+        bool hasExports = (options.ExportedSymbols?.Count ?? 0) > 0;
+        string? finalImportLibraryPath = importLibraryPath is null || !hasExports
+            ? null
+            : Path.GetFullPath(importLibraryPath);
+        string? temporaryImportLibraryPath = finalImportLibraryPath is null
+            ? null
+            : CreateTemporaryPath(finalImportLibraryPath);
 
-        LinkerCommand command = CreateHostLinkerCommand(
-            objectPath,
-            temporaryPath,
-            targetTriple);
+        LinkerCommand command = CreateHostCommand(
+            objectPath, temporaryPath, targetTriple, kind, options, temporaryImportLibraryPath);
         try
         {
-            RunLinker(command);
-            if (!File.Exists(temporaryPath) || new FileInfo(temporaryPath).Length == 0)
+            RunTool(command);
+            EnsureProduced(temporaryPath, kind.ToString().ToLowerInvariant());
+            if (temporaryImportLibraryPath is not null)
             {
-                throw new LinkerException(
-                    $"linker did not produce the expected executable '{executablePath}'");
+                EnsureProduced(temporaryImportLibraryPath, "import library");
+                Directory.CreateDirectory(Path.GetDirectoryName(finalImportLibraryPath!)!);
+                File.Move(temporaryImportLibraryPath, finalImportLibraryPath!, overwrite: true);
             }
 
-            File.Move(temporaryPath, executablePath, overwrite: true);
-            return new LinkedExecutable(executablePath, command.ExecutablePath);
+            File.Move(temporaryPath, artifactPath, overwrite: true);
+            return new LinkedNativeArtifact(artifactPath, command.ExecutablePath, finalImportLibraryPath);
         }
         finally
         {
-            if (File.Exists(temporaryPath))
+            DeleteIfExists(temporaryPath);
+            DeleteIfExists(temporaryImportLibraryPath);
+            if (temporaryImportLibraryPath is not null)
             {
-                File.Delete(temporaryPath);
+                DeleteIfExists(Path.ChangeExtension(temporaryImportLibraryPath, ".exp"));
             }
         }
     }
 
-    private static LinkerCommand CreateHostLinkerCommand(
+    private static LinkerCommand CreateHostCommand(
         string objectPath,
         string outputPath,
-        string targetTriple)
+        string targetTriple,
+        NativeArtifactKind kind,
+        NativeLinkOptions options,
+        string? importLibraryPath)
     {
+        EnsureHostTarget(targetTriple);
         if (OperatingSystem.IsWindows())
         {
-            if (!IsWindowsTriple(targetTriple))
-            {
-                throw new LinkerException(
-                    $"cross-target linking for '{targetTriple}' requires a configured SDK and linker");
-            }
-
-            return CreateWindowsLinkerCommand(objectPath, outputPath, targetTriple);
+            return CreateWindowsCommand(objectPath, outputPath, targetTriple, kind, options, importLibraryPath);
         }
 
-        if (OperatingSystem.IsLinux())
-        {
-            if (!targetTriple.Contains("linux", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new LinkerException(
-                    $"cross-target linking for '{targetTriple}' requires a configured sysroot and linker");
-            }
-
-            return CreateUnixLinkerCommand(objectPath, outputPath, addNoPie: false);
-        }
-
-        if (OperatingSystem.IsMacOS())
-        {
-            if (!targetTriple.Contains("darwin", StringComparison.OrdinalIgnoreCase) &&
-                !targetTriple.Contains("macos", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new LinkerException(
-                    $"cross-target linking for '{targetTriple}' requires a configured SDK and linker");
-            }
-
-            return CreateUnixLinkerCommand(objectPath, outputPath, addNoPie: false);
-        }
-
-        throw new LinkerException("host executable linking is not supported on this operating system");
+        return kind is NativeArtifactKind.StaticLibrary
+            ? CreateUnixArchiveCommand(objectPath, outputPath)
+            : CreateUnixLinkCommand(objectPath, outputPath, kind, options);
     }
 
-    private static LinkerCommand CreateWindowsLinkerCommand(
+    private static LinkerCommand CreateWindowsCommand(
         string objectPath,
         string outputPath,
-        string targetTriple)
+        string targetTriple,
+        NativeArtifactKind kind,
+        NativeLinkOptions options,
+        string? importLibraryPath)
     {
         string architecture = GetMsvcArchitecture(targetTriple);
         WindowsToolchain toolchain = DiscoverWindowsToolchain(architecture);
@@ -113,49 +137,133 @@ public sealed class NativeLinker
             _ => throw new LinkerException($"unsupported MSVC target architecture '{architecture}'"),
         };
 
-        string[] arguments =
-        [
+        if (kind is NativeArtifactKind.StaticLibrary)
+        {
+            return new LinkerCommand(
+                toolchain.LibrarianPath,
+                ["/NOLOGO", $"/MACHINE:{machine}", $"/OUT:{outputPath}", objectPath]);
+        }
+
+        var arguments = new List<string>
+        {
             "/NOLOGO",
             "/INCREMENTAL:NO",
-            "/SUBSYSTEM:CONSOLE",
             $"/MACHINE:{machine}",
             $"/OUT:{outputPath}",
             $"/LIBPATH:{toolchain.VisualCppLibraryDirectory}",
             $"/LIBPATH:{toolchain.UniversalCrtLibraryDirectory}",
             $"/LIBPATH:{toolchain.WindowsSdkLibraryDirectory}",
-            objectPath,
-            "libcmt.lib",
-            "libvcruntime.lib",
-            "libucrt.lib",
-            "oldnames.lib",
-            "kernel32.lib",
-        ];
+        };
+        if (kind is NativeArtifactKind.Executable)
+        {
+            arguments.Add("/SUBSYSTEM:CONSOLE");
+        }
+        else
+        {
+            arguments.Add("/DLL");
+            if (importLibraryPath is not null)
+            {
+                arguments.Add($"/IMPLIB:{importLibraryPath}");
+            }
+
+            foreach (string symbol in options.ExportedSymbols ?? [])
+            {
+                arguments.Add($"/EXPORT:{symbol}");
+            }
+        }
+
+        foreach (string path in options.LibraryPaths ?? [])
+        {
+            arguments.Add($"/LIBPATH:{Path.GetFullPath(path)}");
+        }
+
+        arguments.Add(objectPath);
+        arguments.AddRange(["libcmt.lib", "libvcruntime.lib", "libucrt.lib", "oldnames.lib", "kernel32.lib"]);
+        foreach (string library in options.Libraries ?? [])
+        {
+            arguments.Add(GetWindowsLibraryArgument(library));
+        }
+
         return new LinkerCommand(toolchain.LinkerPath, arguments);
     }
 
-    private static LinkerCommand CreateUnixLinkerCommand(
+    private static LinkerCommand CreateUnixArchiveCommand(string objectPath, string outputPath)
+    {
+        string? archiver = FindExecutableOnPath(Environment.GetEnvironmentVariable("AR"), "llvm-ar", "ar");
+        if (archiver is null)
+        {
+            throw new LinkerException("no host archiver was found; install llvm-ar or ar, or set AR");
+        }
+
+        return new LinkerCommand(archiver, ["rcs", outputPath, objectPath]);
+    }
+
+    private static LinkerCommand CreateUnixLinkCommand(
         string objectPath,
         string outputPath,
-        bool addNoPie)
+        NativeArtifactKind kind,
+        NativeLinkOptions options)
     {
         string? linker = FindExecutableOnPath(
-            Environment.GetEnvironmentVariable("CC"),
-            "clang",
-            "cc",
-            "gcc");
+            Environment.GetEnvironmentVariable("CC"), "clang", "cc", "gcc");
         if (linker is null)
         {
-            throw new LinkerException(
-                "no host C linker driver was found; install clang or gcc, or set CC");
+            throw new LinkerException("no host C linker driver was found; install clang or gcc, or set CC");
         }
 
-        var arguments = new List<string> { objectPath, "-o", outputPath };
-        if (addNoPie)
+        var arguments = new List<string>();
+        if (kind is NativeArtifactKind.SharedLibrary)
         {
-            arguments.Add("-no-pie");
+            arguments.Add(OperatingSystem.IsMacOS() ? "-dynamiclib" : "-shared");
         }
 
+        arguments.Add(objectPath);
+        foreach (string path in options.LibraryPaths ?? [])
+        {
+            arguments.Add($"-L{Path.GetFullPath(path)}");
+        }
+
+        foreach (string library in options.Libraries ?? [])
+        {
+            arguments.Add(GetUnixLibraryArgument(library));
+        }
+
+        arguments.Add("-o");
+        arguments.Add(outputPath);
         return new LinkerCommand(linker, arguments);
+    }
+
+    private static string GetWindowsLibraryArgument(string library)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(library);
+        return IsLibraryPath(library) || Path.HasExtension(library) ? library : $"{library}.lib";
+    }
+
+    private static string GetUnixLibraryArgument(string library)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(library);
+        return IsLibraryPath(library) || Path.HasExtension(library) ? library : $"-l{library}";
+    }
+
+    private static bool IsLibraryPath(string value) =>
+        Path.IsPathFullyQualified(value) ||
+        value.Contains(Path.DirectorySeparatorChar) ||
+        value.Contains(Path.AltDirectorySeparatorChar);
+
+    private static void EnsureHostTarget(string targetTriple)
+    {
+        bool compatible = OperatingSystem.IsWindows()
+            ? IsWindowsTriple(targetTriple)
+            : OperatingSystem.IsLinux()
+                ? targetTriple.Contains("linux", StringComparison.OrdinalIgnoreCase)
+                : OperatingSystem.IsMacOS() &&
+                  (targetTriple.Contains("darwin", StringComparison.OrdinalIgnoreCase) ||
+                   targetTriple.Contains("macos", StringComparison.OrdinalIgnoreCase));
+        if (!compatible)
+        {
+            throw new LinkerException(
+                $"cross-target linking for '{targetTriple}' requires a configured target SDK and linker");
+        }
     }
 
     private static WindowsToolchain DiscoverWindowsToolchain(string architecture)
@@ -173,19 +281,15 @@ public sealed class NativeLinker
             visualCppRoots.Add(configuredTools);
         }
 
-        string[] programFilesRoots =
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-        };
-        foreach (string programFilesRoot in programFilesRoots.Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (string programFilesRoot in new[]
+                 {
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                 }.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             foreach (string version in new[] { "2022", "2019", "2017" })
             {
-                string visualStudioRoot = Path.Combine(
-                    programFilesRoot,
-                    "Microsoft Visual Studio",
-                    version);
+                string visualStudioRoot = Path.Combine(programFilesRoot, "Microsoft Visual Studio", version);
                 if (!Directory.Exists(visualStudioRoot))
                 {
                     continue;
@@ -206,40 +310,30 @@ public sealed class NativeLinker
                      .Distinct(StringComparer.OrdinalIgnoreCase)
                      .OrderByDescending(path => ParseVersion(Path.GetFileName(Path.TrimEndingDirectorySeparator(path)))))
         {
-            string[] hostCandidates = hostArchitecture == "Hostarm64"
-                ? ["Hostarm64", "Hostx64"]
-                : [hostArchitecture];
+            string[] hostCandidates = hostArchitecture == "Hostarm64" ? ["Hostarm64", "Hostx64"] : [hostArchitecture];
             foreach (string hostCandidate in hostCandidates)
             {
-                string linkerPath = Path.Combine(
-                    toolsRoot,
-                    "bin",
-                    hostCandidate,
-                    architecture,
-                    "link.exe");
+                string toolDirectory = Path.Combine(toolsRoot, "bin", hostCandidate, architecture);
+                string linkerPath = Path.Combine(toolDirectory, "link.exe");
+                string librarianPath = Path.Combine(toolDirectory, "lib.exe");
                 string libraryDirectory = Path.Combine(toolsRoot, "lib", architecture);
-                if (!File.Exists(linkerPath) || !Directory.Exists(libraryDirectory))
+                if (!File.Exists(linkerPath) || !File.Exists(librarianPath) || !Directory.Exists(libraryDirectory))
                 {
                     continue;
                 }
 
                 (string ucrt, string sdk) = DiscoverWindowsSdkLibraries(architecture);
-                return new WindowsToolchain(linkerPath, libraryDirectory, ucrt, sdk);
+                return new WindowsToolchain(linkerPath, librarianPath, libraryDirectory, ucrt, sdk);
             }
         }
 
-        throw new LinkerException(
-            "MSVC linker was not found; install the Visual Studio C++ build tools workload");
+        throw new LinkerException("MSVC linker was not found; install the Visual Studio C++ build tools workload");
     }
 
-    private static (string UniversalCrt, string WindowsSdk) DiscoverWindowsSdkLibraries(
-        string architecture)
+    private static (string UniversalCrt, string WindowsSdk) DiscoverWindowsSdkLibraries(string architecture)
     {
         string windowsKitsRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            "Windows Kits",
-            "10",
-            "Lib");
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Windows Kits", "10", "Lib");
         if (!Directory.Exists(windowsKitsRoot))
         {
             throw new LinkerException("Windows SDK libraries were not found");
@@ -257,11 +351,10 @@ public sealed class NativeLinker
             }
         }
 
-        throw new LinkerException(
-            $"Windows SDK libraries for architecture '{architecture}' were not found");
+        throw new LinkerException($"Windows SDK libraries for architecture '{architecture}' were not found");
     }
 
-    private static void RunLinker(LinkerCommand command)
+    private static void RunTool(LinkerCommand command)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -279,24 +372,24 @@ public sealed class NativeLinker
         try
         {
             using Process process = Process.Start(startInfo)
-                ?? throw new LinkerException($"failed to start linker '{command.ExecutablePath}'");
+                ?? throw new LinkerException($"failed to start native tool '{command.ExecutablePath}'");
             Task<string> standardOutputTask = process.StandardOutput.ReadToEndAsync();
             Task<string> standardErrorTask = process.StandardError.ReadToEndAsync();
             process.WaitForExit();
             Task.WaitAll(standardOutputTask, standardErrorTask);
-            string standardOutput = standardOutputTask.Result;
-            string standardError = standardErrorTask.Result;
-            if (process.ExitCode != 0)
+            if (process.ExitCode == 0)
             {
-                string details = string.Join(
-                    Environment.NewLine,
-                    new[] { standardOutput, standardError }
-                        .Where(text => !string.IsNullOrWhiteSpace(text))
-                        .Select(text => text.Trim()));
-                throw new LinkerException(
-                    $"linker '{command.ExecutablePath}' failed with exit code {process.ExitCode}" +
-                    (details.Length == 0 ? string.Empty : $":{Environment.NewLine}{details}"));
+                return;
             }
+
+            string details = string.Join(
+                Environment.NewLine,
+                new[] { standardOutputTask.Result, standardErrorTask.Result }
+                    .Where(text => !string.IsNullOrWhiteSpace(text))
+                    .Select(text => text.Trim()));
+            throw new LinkerException(
+                $"native tool '{command.ExecutablePath}' failed with exit code {process.ExitCode}" +
+                (details.Length == 0 ? string.Empty : $":{Environment.NewLine}{details}"));
         }
         catch (LinkerException)
         {
@@ -305,8 +398,32 @@ public sealed class NativeLinker
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             throw new LinkerException(
-                $"cannot execute linker '{command.ExecutablePath}': {exception.Message}",
-                exception);
+                $"cannot execute native tool '{command.ExecutablePath}': {exception.Message}", exception);
+        }
+    }
+
+    private static string CreateTemporaryPath(string finalPath)
+    {
+        string directory = Path.GetDirectoryName(finalPath)!;
+        Directory.CreateDirectory(directory);
+        return Path.Combine(
+            directory,
+            $".{Path.GetFileNameWithoutExtension(finalPath)}.{Guid.NewGuid():N}.tmp{Path.GetExtension(finalPath)}");
+    }
+
+    private static void EnsureProduced(string path, string artifactName)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length == 0)
+        {
+            throw new LinkerException($"native tool did not produce the expected {artifactName} '{path}'");
+        }
+    }
+
+    private static void DeleteIfExists(string? path)
+    {
+        if (path is not null && File.Exists(path))
+        {
+            File.Delete(path);
         }
     }
 
@@ -359,12 +476,18 @@ public sealed class NativeLinker
     private static Version ParseVersion(string text) =>
         Version.TryParse(text, out Version? version) ? version : new Version();
 
-    private sealed record LinkerCommand(
-        string ExecutablePath,
-        IReadOnlyList<string> Arguments);
+    private enum NativeArtifactKind
+    {
+        Executable,
+        StaticLibrary,
+        SharedLibrary,
+    }
+
+    private sealed record LinkerCommand(string ExecutablePath, IReadOnlyList<string> Arguments);
 
     private sealed record WindowsToolchain(
         string LinkerPath,
+        string LibrarianPath,
         string VisualCppLibraryDirectory,
         string UniversalCrtLibraryDirectory,
         string WindowsSdkLibraryDirectory);

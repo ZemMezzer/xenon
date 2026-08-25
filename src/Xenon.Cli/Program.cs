@@ -5,6 +5,7 @@ using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
+using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Driver;
 using Xenon.ProjectSystem;
 
@@ -219,7 +220,7 @@ internal static class Program
         }
 
         LinkedExecutable? executable = null;
-        if (projectCommand && input.GenerateExecutableEntryPoint)
+        if (projectCommand)
         {
             if (selectedTarget is null || objectFile is null)
             {
@@ -244,16 +245,52 @@ internal static class Program
             {
                 try
                 {
-                    string executablePath = XenonBuildPaths.GetExecutablePath(
-                        input.RootDirectory,
-                        input.Name,
-                        profileName,
-                        selectedTarget.Triple);
-                    executable = new NativeLinker().LinkExecutable(
-                        objectFile.Path,
-                        executablePath,
-                        selectedTarget.Triple);
-                    Console.WriteLine($"Wrote executable to '{executable.Path}'.");
+                    var nativeLinker = new NativeLinker();
+                    var nativeOptions = new NativeLinkOptions(
+                        input.NativeLibraries,
+                        input.NativeLibraryPaths,
+                        compilation.SemanticModel.Functions
+                            .Select(function => function.Symbol)
+                            .Where(symbol => symbol.IsExport)
+                            .Select(NativeSymbolNames.Get)
+                            .ToImmutableArray());
+                    switch (input.ProjectType)
+                    {
+                        case XenonProjectType.Executable:
+                            string executablePath = XenonBuildPaths.GetExecutablePath(
+                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
+                            executable = nativeLinker.LinkExecutable(
+                                objectFile.Path, executablePath, selectedTarget.Triple, nativeOptions);
+                            Console.WriteLine($"Wrote executable to '{executable.Path}'.");
+                            break;
+                        case XenonProjectType.StaticLibrary:
+                            string staticLibraryPath = XenonBuildPaths.GetStaticLibraryPath(
+                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
+                            LinkedNativeArtifact staticLibrary = nativeLinker.CreateStaticLibrary(
+                                objectFile.Path, staticLibraryPath, selectedTarget.Triple);
+                            Console.WriteLine($"Wrote static library to '{staticLibrary.Path}'.");
+                            break;
+                        case XenonProjectType.SharedLibrary:
+                            string sharedLibraryPath = XenonBuildPaths.GetSharedLibraryPath(
+                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
+                            string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
+                            LinkedNativeArtifact sharedLibrary = nativeLinker.LinkSharedLibrary(
+                                objectFile.Path,
+                                sharedLibraryPath,
+                                selectedTarget.Triple,
+                                nativeOptions,
+                                importLibraryPath);
+                            Console.WriteLine($"Wrote shared library to '{sharedLibrary.Path}'.");
+                            if (sharedLibrary.ImportLibraryPath is not null)
+                            {
+                                Console.WriteLine($"Wrote import library to '{sharedLibrary.ImportLibraryPath}'.");
+                            }
+
+                            break;
+                        default:
+                            throw new InvalidOperationException($"unsupported project type '{input.ProjectType}'");
+                    }
                 }
                 catch (LinkerException exception)
                 {
@@ -334,6 +371,9 @@ internal static class Program
                 project.SourceFiles,
                 llvmOutputPath,
                 projectProfile,
+                project.Type,
+                project.NativeLibraries,
+                project.NativeLibraryPaths,
                 project.Type is XenonProjectType.SharedLibrary,
                 project.Type is XenonProjectType.Executable);
         }
@@ -368,6 +408,9 @@ internal static class Program
             sourceFiles.ToImmutable(),
             Path.ChangeExtension(firstSource, ".ll"),
             defaultProfile,
+            XenonProjectType.Executable,
+            NativeLibraries: [],
+            NativeLibraryPaths: [],
             PositionIndependentCode: false,
             GenerateExecutableEntryPoint: true);
     }
@@ -444,6 +487,9 @@ internal static class Program
         ImmutableArray<string> SourceFiles,
         string LlvmOutputPath,
         XenonBuildProfile Profile,
+        XenonProjectType ProjectType,
+        ImmutableArray<string> NativeLibraries,
+        ImmutableArray<string> NativeLibraryPaths,
         bool PositionIndependentCode,
         bool GenerateExecutableEntryPoint);
 }

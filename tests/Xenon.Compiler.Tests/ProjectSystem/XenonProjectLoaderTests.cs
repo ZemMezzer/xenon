@@ -18,6 +18,13 @@ public sealed class XenonProjectLoaderTests
             [source]
             root = "code"
 
+            [native]
+            libraries = ["sqlite3", "zlib"]
+            library-paths = [
+                "native/lib",
+                "vendor/lib",
+            ]
+
             [profile.debug]
             optimization = 1
             debug-info = true
@@ -41,6 +48,10 @@ public sealed class XenonProjectLoaderTests
         Assert.False(project.DebugProfile.EnableChecks);
         Assert.Equal(2, project.ReleaseProfile.OptimizationLevel);
         Assert.False(project.ReleaseProfile.EmitDebugInformation);
+        Assert.Equal(["sqlite3", "zlib"], project.NativeLibraries.ToArray());
+        Assert.Equal(
+            [Path.GetFullPath(directory.PathOf("native/lib")), Path.GetFullPath(directory.PathOf("vendor/lib"))],
+            project.NativeLibraryPaths.ToArray());
     }
 
     [Fact]
@@ -163,6 +174,19 @@ public sealed class XenonProjectLoaderTests
                 "x86_64-pc-windows-msvc",
                 "ImplicitApp.exe"),
             executablePath);
+
+        Assert.Equal(
+            Path.Combine(projectDirectory, "build", "release", "x86_64-pc-windows-msvc", "ImplicitApp.lib"),
+            XenonBuildPaths.GetStaticLibraryPath(
+                projectDirectory, project.Name, "release", "x86_64-pc-windows-msvc"));
+        Assert.Equal(
+            Path.Combine(projectDirectory, "build", "release", "x86_64-unknown-linux-gnu", "libImplicitApp.so"),
+            XenonBuildPaths.GetSharedLibraryPath(
+                projectDirectory, project.Name, "release", "x86_64-unknown-linux-gnu"));
+        Assert.Equal(
+            Path.Combine(projectDirectory, "build", "release", "aarch64-apple-darwin", "libImplicitApp.dylib"),
+            XenonBuildPaths.GetSharedLibraryPath(
+                projectDirectory, project.Name, "release", "aarch64-apple-darwin"));
     }
 
     private sealed class TemporaryDirectory : IDisposable

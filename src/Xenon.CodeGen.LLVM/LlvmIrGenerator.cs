@@ -102,7 +102,16 @@ public sealed class LlvmIrGenerator
                 .Select(parameter => MapType(parameter.Type))
                 .ToArray();
             LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, parameterTypes, false);
-            LLVMValueRef value = _module.AddFunction(GetNativeName(function), functionType);
+            LLVMValueRef value = _module.AddFunction(NativeSymbolNames.Get(function), functionType);
+            if (!function.IsExtern && !function.IsExport)
+            {
+                value.Linkage = LLVMLinkage.LLVMInternalLinkage;
+            }
+            else if (function.IsExport && IsWindowsTarget())
+            {
+                value.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+            }
+
             _functions.Add(function, new LlvmFunction(value, functionType));
         }
 
@@ -254,21 +263,6 @@ public sealed class LlvmIrGenerator
         "windows",
         StringComparison.OrdinalIgnoreCase) is true ||
         _targetMachine?.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase) is true;
-
-    private static string GetNativeName(FunctionSymbol function)
-    {
-        if (function.IsExtern)
-        {
-            return function.Name;
-        }
-
-        if (function.IsExport)
-        {
-            return function.FullName.Replace('.', '_');
-        }
-
-        return function.FullName;
-    }
 
     private readonly record struct LlvmFunction(LLVMValueRef Value, LLVMTypeRef Type);
 

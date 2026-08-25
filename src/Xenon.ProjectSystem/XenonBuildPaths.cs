@@ -53,17 +53,73 @@ public static class XenonBuildPaths
         ArgumentException.ThrowIfNullOrWhiteSpace(profileName);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetTriple);
 
-        string extension = targetTriple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
-            targetTriple.Contains("win32", StringComparison.OrdinalIgnoreCase)
-                ? ".exe"
-                : string.Empty;
+        string extension = IsWindowsTarget(targetTriple) ? ".exe" : string.Empty;
+        return GetBuildArtifactPath(rootDirectory, projectName, profileName, targetTriple, projectName, extension);
+    }
+
+    public static string GetStaticLibraryPath(
+        string rootDirectory,
+        string projectName,
+        string profileName,
+        string targetTriple)
+    {
+        string fileName = IsWindowsTarget(targetTriple) ? projectName : $"lib{projectName}";
+        string extension = IsWindowsTarget(targetTriple) ? ".lib" : ".a";
+        return GetBuildArtifactPath(rootDirectory, projectName, profileName, targetTriple, fileName, extension);
+    }
+
+    public static string GetSharedLibraryPath(
+        string rootDirectory,
+        string projectName,
+        string profileName,
+        string targetTriple)
+    {
+        bool windows = IsWindowsTarget(targetTriple);
+        string fileName = windows ? projectName : $"lib{projectName}";
+        string extension = windows
+            ? ".dll"
+            : IsAppleTarget(targetTriple) ? ".dylib" : ".so";
+        return GetBuildArtifactPath(rootDirectory, projectName, profileName, targetTriple, fileName, extension);
+    }
+
+    public static string? GetImportLibraryPath(
+        string rootDirectory,
+        string projectName,
+        string profileName,
+        string targetTriple) =>
+        IsWindowsTarget(targetTriple)
+            ? GetBuildArtifactPath(rootDirectory, projectName, profileName, targetTriple, projectName, ".lib")
+            : null;
+
+    private static string GetBuildArtifactPath(
+        string rootDirectory,
+        string projectName,
+        string profileName,
+        string targetTriple,
+        string fileName,
+        string extension)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetTriple);
+
         return Path.Combine(
             rootDirectory,
             "build",
             SanitizePathSegment(profileName),
             SanitizePathSegment(targetTriple),
-            $"{SanitizePathSegment(projectName)}{extension}");
+            $"{SanitizePathSegment(fileName)}{extension}");
     }
+
+    private static bool IsWindowsTarget(string triple) =>
+        triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
+        triple.Contains("win32", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsAppleTarget(string triple) =>
+        triple.Contains("darwin", StringComparison.OrdinalIgnoreCase) ||
+        triple.Contains("macos", StringComparison.OrdinalIgnoreCase) ||
+        triple.Contains("ios", StringComparison.OrdinalIgnoreCase);
 
     private static string SanitizePathSegment(string value)
     {

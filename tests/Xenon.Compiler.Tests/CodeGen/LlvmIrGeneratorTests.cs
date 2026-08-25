@@ -20,7 +20,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "minimal");
 
-        Assert.Contains("define i32 @Example.Main()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @Example.Main()", llvmIr, StringComparison.Ordinal);
         Assert.Contains("ret i32 42", llvmIr, StringComparison.Ordinal);
     }
 
@@ -53,7 +53,7 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "core");
 
         Assert.Contains("declare i32 @puts(ptr)", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("define i32 @Example.Add(i32", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @Example.Add(i32", llvmIr, StringComparison.Ordinal);
         Assert.Contains("define i32 @Example_Multiply(i32", llvmIr, StringComparison.Ordinal);
         Assert.Contains("add i32", llvmIr, StringComparison.Ordinal);
         Assert.Contains("mul i32", llvmIr, StringComparison.Ordinal);
