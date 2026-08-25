@@ -172,19 +172,88 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_AllowsNullForPointerVariables()
+    public void Analyzer_ContextuallyTypesNullAsPointer()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
+            struct Holder
+            {
+                public int* Value;
+            }
+
+            struct Box
+            {
+                public int* Value;
+
+                public Box(int* value)
+                {
+                    Value = value;
+                }
+            }
+
+            int* ReturnNull()
+            {
+                return null;
+            }
+
+            void Consume(int* value)
+            {
+            }
+
             int Main()
             {
-                byte* pointer = null;
-                return 0;
+                int* pointer = null;
+                pointer = null;
+                bool equals = pointer == null;
+                bool notEquals = null != pointer;
+                Consume(null);
+                Holder holder = Holder { null };
+                Box box = Box(null);
+                Box* heap = new Box(null);
+                free(heap);
+                if (equals && !notEquals)
+                    return 0;
+
+                return 1;
             }
             """);
 
         Assert.Empty(compilation.Diagnostics);
+
+        BoundFunction returnNull = Assert.Single(
+            compilation.SemanticModel.Functions.Where(function => function.Symbol.Name == "ReturnNull"));
+        var returnStatement = Assert.IsType<BoundReturnStatement>(Assert.Single(returnNull.Body.Statements));
+        Assert.IsType<PointerTypeSymbol>(returnStatement.Expression!.Type);
+
+        BoundFunction main = Assert.Single(
+            compilation.SemanticModel.Functions.Where(function => function.Symbol.Name == "Main"));
+        var declaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[0]);
+        Assert.IsType<PointerTypeSymbol>(declaration.Initializer!.Type);
+
+        var equalsDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[2]);
+        var equals = Assert.IsType<BoundBinaryExpression>(equalsDeclaration.Initializer);
+        Assert.IsType<PointerTypeSymbol>(equals.Right.Type);
+
+        var notEqualsDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[3]);
+        var notEquals = Assert.IsType<BoundBinaryExpression>(notEqualsDeclaration.Initializer);
+        Assert.IsType<PointerTypeSymbol>(notEquals.Left.Type);
+
+        var callStatement = Assert.IsType<BoundExpressionStatement>(main.Body.Statements[4]);
+        var call = Assert.IsType<BoundCallExpression>(callStatement.Expression);
+        Assert.IsType<PointerTypeSymbol>(Assert.Single(call.Arguments).Type);
+
+        var holderDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[5]);
+        var holder = Assert.IsType<BoundStructConstructionExpression>(holderDeclaration.Initializer);
+        Assert.IsType<PointerTypeSymbol>(Assert.Single(holder.Arguments).Type);
+
+        var boxDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[6]);
+        var box = Assert.IsType<BoundConstructorCallExpression>(boxDeclaration.Initializer);
+        Assert.IsType<PointerTypeSymbol>(Assert.Single(box.Arguments).Type);
+
+        var heapDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[7]);
+        var heap = Assert.IsType<BoundNewExpression>(heapDeclaration.Initializer);
+        Assert.IsType<PointerTypeSymbol>(Assert.Single(heap.Arguments).Type);
     }
 
     [Fact]

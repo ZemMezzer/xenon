@@ -733,6 +733,12 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitLiteral(BoundLiteralExpression expression)
         {
+            if (expression.Value is null && expression.Type is not PointerTypeSymbol)
+            {
+                throw new LlvmCodeGenerationException(
+                    "Uncontextualized null literal reached LLVM code generation; null must be bound to a concrete pointer type first.");
+            }
+
             LLVMTypeRef type = _mapType(expression.Type);
 
             if (ReferenceEquals(expression.Type, BuiltinTypes.Bool))

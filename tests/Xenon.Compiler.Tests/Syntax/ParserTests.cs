@@ -64,6 +64,35 @@ public sealed class ParserTests
     }
 
     [Fact]
+    public void Parser_ParsesTopLevelVisibilityModifiers()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            private int Hidden()
+            {
+                return 1;
+            }
+
+            public int Visible()
+            {
+                return 2;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        Assert.Equal(2, tree.Root.Members.Length);
+
+        var hidden = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.True(hidden.IsPrivate);
+        Assert.False(hidden.IsPublic);
+
+        var visible = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.True(visible.IsPublic);
+        Assert.False(visible.IsPrivate);
+    }
+
+    [Fact]
     public void Parser_RespectsBinaryOperatorPrecedence()
     {
         SyntaxTree tree = Parse("""

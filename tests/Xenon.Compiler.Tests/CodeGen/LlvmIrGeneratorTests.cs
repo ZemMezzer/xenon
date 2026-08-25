@@ -271,6 +271,63 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_EmitsContextuallyTypedNullPointers()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Box
+            {
+                public int* Value;
+
+                public Box(int* value)
+                {
+                    Value = value;
+                }
+            }
+
+            int* ReturnNull()
+            {
+                return null;
+            }
+
+            void Consume(int* value)
+            {
+            }
+
+            int Main()
+            {
+                int* pointer = null;
+                pointer = null;
+                if (pointer != null)
+                    return 1;
+
+                if (null != pointer)
+                    return 2;
+
+                Consume(null);
+                Box value = Box(null);
+                Box* heap = new Box(null);
+                free(heap);
+                if (ReturnNull() == null)
+                    return 0;
+
+                return 3;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, target, "null-pointers");
+
+        Assert.Contains("ret ptr null", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("store ptr null", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @Example.Consume(ptr null)", llvmIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("<null>", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_EmitsDelayedLocalInitialization()
     {
         Compilation compilation = CreateCompilation("""

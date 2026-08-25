@@ -209,6 +209,11 @@ internal sealed class FunctionBodyBinder
         }
 
         BoundExpression? initializer = syntax.Initializer is null ? null : BindExpression(syntax.Initializer);
+        if (initializer is not null)
+        {
+            initializer = ContextualizeNull(initializer, type);
+        }
+
         if (initializer is not null && !TypeFacts.CanAssign(type, initializer.Type))
         {
             ReportCannotConvert(GetLocation(syntax.Initializer!), initializer.Type, type);
@@ -230,6 +235,10 @@ internal sealed class FunctionBodyBinder
     private BoundReturnStatement BindReturnStatement(ReturnStatementSyntax syntax)
     {
         BoundExpression? expression = syntax.Expression is null ? null : BindExpression(syntax.Expression);
+        if (expression is not null)
+        {
+            expression = ContextualizeNull(expression, _function.ReturnType);
+        }
 
         if (ReferenceEquals(_function.ReturnType, BuiltinTypes.Void))
         {
@@ -378,6 +387,19 @@ internal sealed class FunctionBodyBinder
     {
         BoundExpression left = BindExpression(syntax.Left);
         BoundExpression right = BindExpression(syntax.Right);
+
+        if (syntax.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken)
+        {
+            if (left.Type is PointerTypeSymbol)
+            {
+                right = ContextualizeNull(right, left.Type);
+            }
+            else if (right.Type is PointerTypeSymbol)
+            {
+                left = ContextualizeNull(left, right.Type);
+            }
+        }
+
         TypeSymbol? resultType = GetBinaryResultType(left.Type, syntax.OperatorToken.Kind, right.Type);
 
         if (resultType is null)
@@ -402,6 +424,11 @@ internal sealed class FunctionBodyBinder
             ? BindNameExpression(name, requireDefinitelyAssigned: false)
             : BindExpression(syntax.Target);
         BoundExpression expression = BindExpression(syntax.Expression);
+        if (isSimpleAssignment)
+        {
+            expression = ContextualizeNull(expression, target.Type);
+        }
+
         if (!IsWritable(target))
         {
             if (!ReferenceEquals(target.Type, BuiltinTypes.Error))
@@ -547,7 +574,7 @@ internal sealed class FunctionBodyBinder
         }
 
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
-        ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.TypeNameToken.Location);
+        arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.TypeNameToken.Location);
         return new BoundStructConstructionExpression(structType, arguments);
     }
 
@@ -595,7 +622,7 @@ internal sealed class FunctionBodyBinder
                 _diagnostics.Report(name.IdentifierToken.Location, $"constructor '{structType.Name}' is private");
             }
 
-            ValidateFunctionArguments(constructor, arguments, syntax.Arguments, name.IdentifierToken.Location);
+            arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, name.IdentifierToken.Location);
             return new BoundConstructorCallExpression(structType, constructor, arguments);
         }
 
@@ -606,7 +633,7 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location);
+        arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location);
         return new BoundCallExpression(function, arguments);
     }
 
@@ -648,7 +675,7 @@ internal sealed class FunctionBodyBinder
         FunctionSymbol? constructor = null;
         if (syntax.IsPositionalInitialization)
         {
-            ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
+            arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
         }
         else
         {
@@ -666,7 +693,7 @@ internal sealed class FunctionBodyBinder
                 _diagnostics.Report(syntax.Type.NameToken.Location, $"constructor '{structType.Name}' is private");
             }
 
-            ValidateFunctionArguments(constructor, arguments, syntax.Arguments, syntax.NewKeyword.Location);
+            arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, syntax.NewKeyword.Location);
         }
 
         PointerTypeSymbol pointerType = BuiltinTypes.PointerTo(structType);
@@ -710,7 +737,7 @@ internal sealed class FunctionBodyBinder
         return new BoundFreeExpression(pointer, destructor);
     }
 
-    private void ValidatePositionalArguments(
+    private ImmutableArray<BoundExpression> ValidatePositionalArguments(
         StructTypeSymbol structType,
         ImmutableArray<BoundExpression> arguments,
         ImmutableArray<ExpressionSyntax> argumentSyntax,
@@ -723,24 +750,31 @@ internal sealed class FunctionBodyBinder
                 $"struct '{structType.Name}' expects {structType.Fields.Length} positional value(s), but {arguments.Length} were provided");
         }
 
+        var convertedArguments = arguments.ToBuilder();
         int count = Math.Min(arguments.Length, structType.Fields.Length);
         for (int index = 0; index < count; index++)
         {
-            if (GetArrayStorage(arguments[index]) == ArrayStorageKind.Stack)
+            TypeSymbol fieldType = structType.Fields[index].Type;
+            BoundExpression argument = ContextualizeNull(arguments[index], fieldType);
+            convertedArguments[index] = argument;
+
+            if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
                     "stack array cannot be stored inside a positional struct value");
             }
 
-            if (!TypeFacts.CanAssign(structType.Fields[index].Type, arguments[index].Type))
+            if (!TypeFacts.CanAssign(fieldType, argument.Type))
             {
-                ReportCannotConvert(GetLocation(argumentSyntax[index]), arguments[index].Type, structType.Fields[index].Type);
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, fieldType);
             }
         }
+
+        return convertedArguments.ToImmutable();
     }
 
-    private void ValidateFunctionArguments(
+    private ImmutableArray<BoundExpression> ValidateFunctionArguments(
         FunctionSymbol function,
         ImmutableArray<BoundExpression> arguments,
         ImmutableArray<ExpressionSyntax> argumentSyntax,
@@ -753,19 +787,38 @@ internal sealed class FunctionBodyBinder
                 $"function '{function.Name}' expects {function.Parameters.Length} argument(s), but {arguments.Length} were provided");
         }
 
+        var convertedArguments = arguments.ToBuilder();
         int count = Math.Min(arguments.Length, function.Parameters.Length);
         for (int index = 0; index < count; index++)
         {
-            if (GetArrayStorage(arguments[index]) == ArrayStorageKind.Stack)
+            TypeSymbol parameterType = function.Parameters[index].Type;
+            BoundExpression argument = ContextualizeNull(arguments[index], parameterType);
+            convertedArguments[index] = argument;
+
+            if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
                 _diagnostics.Report(GetLocation(argumentSyntax[index]), "stack array cannot be passed to another function");
             }
 
-            if (!TypeFacts.CanAssign(function.Parameters[index].Type, arguments[index].Type))
+            if (!TypeFacts.CanAssign(parameterType, argument.Type))
             {
-                ReportCannotConvert(GetLocation(argumentSyntax[index]), arguments[index].Type, function.Parameters[index].Type);
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
             }
         }
+
+        return convertedArguments.ToImmutable();
+    }
+
+    private static BoundExpression ContextualizeNull(BoundExpression expression, TypeSymbol targetType)
+    {
+        if (expression is BoundLiteralExpression { Value: null } &&
+            ReferenceEquals(expression.Type, BuiltinTypes.Null) &&
+            targetType is PointerTypeSymbol pointerType)
+        {
+            return new BoundLiteralExpression(null, pointerType);
+        }
+
+        return expression;
     }
 
     private void ValidateArrayElementType(TypeSymbol elementType, TextLocation location)

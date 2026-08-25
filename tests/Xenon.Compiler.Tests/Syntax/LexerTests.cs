@@ -31,6 +31,17 @@ public sealed class LexerTests
     }
 
     [Fact]
+    public void Lexer_RecognizesVisibilityKeywords()
+    {
+        LexedSource source = LexedSource.Lex(SourceText.From("public private"));
+
+        Assert.Empty(source.Diagnostics);
+        Assert.Equal(SyntaxKind.PublicKeyword, source.Tokens[0].Kind);
+        Assert.Equal(SyntaxKind.PrivateKeyword, source.Tokens[1].Kind);
+        Assert.Equal(SyntaxKind.EndOfFileToken, source.Tokens[2].Kind);
+    }
+
+    [Fact]
     public void Lexer_UsesLongestOperatorMatch()
     {
         const string source = "<<= >>= -> ++ -- == != <= >= && || += -= *= /= %= &= |= ^=";
