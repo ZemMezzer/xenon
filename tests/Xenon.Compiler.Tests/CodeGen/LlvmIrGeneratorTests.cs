@@ -155,8 +155,8 @@ public sealed class LlvmIrGeneratorTests
 
             struct Vector2
             {
-                float X;
-                float Y;
+                public float X;
+                public float Y;
             }
 
             export float Sum(Vector2* value)
@@ -181,14 +181,14 @@ public sealed class LlvmIrGeneratorTests
 
             struct Pair
             {
-                int X;
-                int Y;
+                public int X;
+                public int Y;
             }
 
             int Main()
             {
-                Pair stack = Pair(20, 22);
-                Pair* heap = new Pair(stack.X, stack.Y);
+                Pair stack = Pair { 20, 22 };
+                Pair* heap = new Pair { stack.X, stack.Y };
                 int result = heap->X + heap->Y;
                 free(heap);
                 return result;
@@ -201,6 +201,100 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("insertvalue %Example.Pair", llvmIr, StringComparison.Ordinal);
         Assert.Contains($"call ptr @malloc(i{IntPtr.Size * 8} 8)", llvmIr, StringComparison.Ordinal);
         Assert.Contains("call void @free", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_UsesExternalXenonLinkageForPublicFunctions()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            int Hidden() { return 1; }
+            public int Visible() { return 2; }
+            """);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "visibility");
+
+        Assert.Contains("define internal i32 @Example.Hidden()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @Example.Visible()", llvmIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("define internal i32 @Example.Visible()", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsConstructorDestructorAndArrayStorage()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Box
+            {
+                int Value;
+
+                public Box(int value)
+                {
+                    Value = value;
+                }
+
+                ~Box()
+                {
+                    Value = 0;
+                }
+            }
+
+            int Main()
+            {
+                Box value = Box(42);
+                Box* heap = new Box(10);
+                free(heap);
+
+                int[] dynamic = new int[10];
+                dynamic[0] = 7;
+                free(dynamic);
+
+                int[] temporary = int[4];
+                temporary[1] = 3;
+                return temporary[1];
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, target, "lifecycle-arrays");
+
+        Assert.Contains("@Example.Box.__ctor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Box.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @Example.Box.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("stack.array = alloca i32", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("getelementptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call ptr @malloc", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsDelayedLocalInitialization()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Pair
+            {
+                public int X;
+                public int Y;
+            }
+
+            int Main()
+            {
+                Pair value;
+                value = Pair { 20, 22 };
+                return value.X + value.Y;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "delayed-init");
+
+        Assert.Contains("%value = alloca %Example.Pair", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("store %Example.Pair", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]

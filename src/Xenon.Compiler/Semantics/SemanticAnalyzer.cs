@@ -14,6 +14,7 @@ internal sealed class SemanticAnalyzer
     private readonly Dictionary<SyntaxTree, NamespaceSymbol> _treeNamespaces = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<FunctionDeclarationSyntax, FunctionSymbol> _functionSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StructDeclarationSyntax, StructTypeSymbol> _structSymbols = new(ReferenceEqualityComparer.Instance);
+    private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body)> _functionBodies = [];
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees)
     {
@@ -32,21 +33,31 @@ internal sealed class SemanticAnalyzer
         DeclareStructs();
         BindStructFields();
         ValidateStructLayouts();
+        DeclareStructLifecycleFunctions();
         DeclareFunctions();
 
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
-        foreach ((FunctionDeclarationSyntax declaration, FunctionSymbol symbol) in _functionSymbols)
+        foreach ((FunctionSymbol symbol, BlockStatementSyntax body) in _functionBodies)
         {
-            if (declaration.Body is null)
-            {
-                continue;
-            }
-
             var binder = new FunctionBodyBinder(symbol, _diagnostics);
-            functions.Add(new BoundFunction(symbol, binder.BindBody(declaration.Body)));
+            functions.Add(new BoundFunction(symbol, binder.BindBody(body)));
         }
 
         return new SemanticModel(_globalNamespace, functions.ToImmutable(), [.. _diagnostics]);
+    }
+
+    private void DeclareNamespaces()
+    {
+        foreach (SyntaxTree tree in _syntaxTrees)
+        {
+            NamespaceSymbol current = _globalNamespace;
+            foreach (SyntaxToken part in tree.Root.Namespace.NameParts)
+            {
+                current = current.GetOrAddNamespace(part.Text);
+            }
+
+            _treeNamespaces.Add(tree, current);
+        }
     }
 
     private void DeclareStructs()
@@ -76,9 +87,8 @@ internal sealed class SemanticAnalyzer
         {
             var fields = ImmutableArray.CreateBuilder<FieldSymbol>();
             var names = new HashSet<string>(StringComparer.Ordinal);
-            for (int index = 0; index < declaration.Fields.Length; index++)
+            foreach (FieldDeclarationSyntax fieldSyntax in declaration.Fields)
             {
-                FieldDeclarationSyntax fieldSyntax = declaration.Fields[index];
                 TypeSymbol fieldType = TypeResolver.Resolve(
                     fieldSyntax.Type,
                     type.ContainingNamespace,
@@ -99,7 +109,8 @@ internal sealed class SemanticAnalyzer
                     fieldSyntax.IdentifierToken.Text,
                     type,
                     fieldType,
-                    index,
+                    fields.Count,
+                    fieldSyntax.IsPublic ? Accessibility.Public : Accessibility.Private,
                     fieldSyntax));
             }
 
@@ -113,46 +124,101 @@ internal sealed class SemanticAnalyzer
         {
             foreach (FieldSymbol field in type.Fields)
             {
-                if (field.Type is StructTypeSymbol fieldStruct && ContainsByValue(fieldStruct, type, []))
+                if (ContainsStructByValue(field.Type, type, []))
                 {
                     _diagnostics.Report(
                         field.Declaration.Type.NameToken.Location,
-                        $"struct '{type.Name}' has a recursive by-value field '{field.Name}'; use a pointer instead");
+                        $"struct '{type.Name}' has a recursive by-value field '{field.Name}'; use a pointer or array handle instead");
                 }
             }
         }
     }
 
-    private static bool ContainsByValue(
-        StructTypeSymbol candidate,
+    private static bool ContainsStructByValue(
+        TypeSymbol candidate,
         StructTypeSymbol target,
         HashSet<StructTypeSymbol> visited)
     {
-        if (ReferenceEquals(candidate, target))
-        {
-            return true;
-        }
-
-        if (!visited.Add(candidate))
+        if (candidate is not StructTypeSymbol structType)
         {
             return false;
         }
 
-        return candidate.Fields.Any(field =>
-            field.Type is StructTypeSymbol nested && ContainsByValue(nested, target, visited));
+        if (ReferenceEquals(structType, target))
+        {
+            return true;
+        }
+
+        if (!visited.Add(structType))
+        {
+            return false;
+        }
+
+        return structType.Fields.Any(field => ContainsStructByValue(field.Type, target, visited));
     }
 
-    private void DeclareNamespaces()
+    private void DeclareStructLifecycleFunctions()
     {
-        foreach (SyntaxTree tree in _syntaxTrees)
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
-            NamespaceSymbol current = _globalNamespace;
-            foreach (SyntaxToken part in tree.Root.Namespace.NameParts)
+            if (declaration.Constructors.Length > 1)
             {
-                current = current.GetOrAddNamespace(part.Text);
+                foreach (ConstructorDeclarationSyntax duplicate in declaration.Constructors.Skip(1))
+                {
+                    _diagnostics.Report(
+                        duplicate.IdentifierToken.Location,
+                        $"constructor overloading is not supported yet; struct '{type.Name}' may declare only one constructor");
+                }
             }
 
-            _treeNamespaces.Add(tree, current);
+            ConstructorDeclarationSyntax? constructorSyntax = declaration.Constructors.FirstOrDefault();
+            if (constructorSyntax is not null)
+            {
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(
+                    constructorSyntax.Parameters,
+                    type.ContainingNamespace);
+                var constructor = new FunctionSymbol(
+                    FunctionKind.Constructor,
+                    type,
+                    parameters,
+                    constructorSyntax,
+                    constructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
+                type.SetConstructor(constructor);
+                _functionBodies.Add((constructor, constructorSyntax.Body));
+            }
+
+            DestructorDeclarationSyntax[] destructors = declaration.Members
+                .OfType<DestructorDeclarationSyntax>()
+                .ToArray();
+            if (destructors.Length > 1)
+            {
+                foreach (DestructorDeclarationSyntax duplicate in destructors.Skip(1))
+                {
+                    _diagnostics.Report(
+                        duplicate.TildeToken.Location,
+                        $"struct '{type.Name}' may declare only one destructor");
+                }
+            }
+
+            DestructorDeclarationSyntax? destructorSyntax = destructors.FirstOrDefault();
+            if (destructorSyntax is not null)
+            {
+                if (!string.Equals(destructorSyntax.IdentifierToken.Text, type.Name, StringComparison.Ordinal))
+                {
+                    _diagnostics.Report(
+                        destructorSyntax.IdentifierToken.Location,
+                        $"destructor name must match containing struct '{type.Name}'");
+                }
+
+                var destructor = new FunctionSymbol(
+                    FunctionKind.Destructor,
+                    type,
+                    [],
+                    destructorSyntax,
+                    destructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
+                type.SetDestructor(destructor);
+                _functionBodies.Add((destructor, destructorSyntax.Body));
+            }
         }
     }
 
@@ -163,15 +229,15 @@ internal sealed class SemanticAnalyzer
             NamespaceSymbol @namespace = _treeNamespaces[tree];
             foreach (FunctionDeclarationSyntax declaration in tree.Root.Members.OfType<FunctionDeclarationSyntax>())
             {
-                if (declaration.IsExtern && declaration.IdentifierToken.Text == "malloc")
+                if (declaration.IsExtern && declaration.IdentifierToken.Text is "malloc" or "free")
                 {
                     _diagnostics.Report(
                         declaration.IdentifierToken.Location,
-                        "native symbol 'malloc' is reserved for the built-in 'new' operation");
+                        $"native symbol '{declaration.IdentifierToken.Text}' is reserved for Xenon memory operations");
                 }
 
                 TypeSymbol returnType = TypeResolver.Resolve(declaration.ReturnType, @namespace, _diagnostics);
-                ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration, @namespace);
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration.Parameters, @namespace);
                 var function = new FunctionSymbol(
                     declaration.IdentifierToken.Text,
                     @namespace,
@@ -190,6 +256,10 @@ internal sealed class SemanticAnalyzer
                 }
 
                 _functionSymbols.Add(declaration, function);
+                if (declaration.Body is not null)
+                {
+                    _functionBodies.Add((function, declaration.Body));
+                }
             }
         }
     }
@@ -210,27 +280,41 @@ internal sealed class SemanticAnalyzer
                 $"external ABI does not yet support struct '{returnStruct.Name}' by value; use a pointer instead");
         }
 
+        if (function.ReturnType is ArrayTypeSymbol)
+        {
+            _diagnostics.Report(
+                declaration.ReturnType.NameToken.Location,
+                "external ABI does not yet support Xenon array types directly; use a pointer and explicit length");
+        }
+
         for (int index = 0; index < function.Parameters.Length; index++)
         {
-            if (function.Parameters[index].Type is StructTypeSymbol parameterStruct)
+            TypeSymbol parameterType = function.Parameters[index].Type;
+            if (parameterType is StructTypeSymbol parameterStruct)
             {
                 _diagnostics.Report(
                     declaration.Parameters[index].Type.NameToken.Location,
                     $"external ABI does not yet support struct '{parameterStruct.Name}' by value; use a pointer instead");
             }
+            else if (parameterType is ArrayTypeSymbol)
+            {
+                _diagnostics.Report(
+                    declaration.Parameters[index].Type.NameToken.Location,
+                    "external ABI does not yet support Xenon array types directly; use a pointer and explicit length");
+            }
         }
     }
 
     private ImmutableArray<ParameterSymbol> BindParameters(
-        FunctionDeclarationSyntax declaration,
+        ImmutableArray<ParameterSyntax> parameterSyntax,
         NamespaceSymbol containingNamespace)
     {
         var parameters = ImmutableArray.CreateBuilder<ParameterSymbol>();
         var names = new HashSet<string>(StringComparer.Ordinal);
 
-        for (int index = 0; index < declaration.Parameters.Length; index++)
+        for (int index = 0; index < parameterSyntax.Length; index++)
         {
-            ParameterSyntax syntax = declaration.Parameters[index];
+            ParameterSyntax syntax = parameterSyntax[index];
             TypeSymbol type = TypeResolver.Resolve(syntax.Type, containingNamespace, _diagnostics);
 
             if (ReferenceEquals(type, BuiltinTypes.Void))

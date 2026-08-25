@@ -29,6 +29,17 @@ internal static class TypeResolver
             type = BuiltinTypes.PointerTo(type, syntax.IsConst && depth == 0);
         }
 
-        return type;
+        if (!syntax.IsArray)
+        {
+            return type;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.Void))
+        {
+            diagnostics.Report(syntax.NameToken.Location, "array element type cannot be 'void'");
+            return BuiltinTypes.Error;
+        }
+
+        return BuiltinTypes.ArrayOf(type);
     }
 }

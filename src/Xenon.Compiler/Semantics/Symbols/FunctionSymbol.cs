@@ -17,21 +17,60 @@ public sealed class FunctionSymbol : Symbol
         ReturnType = returnType;
         Parameters = parameters;
         Declaration = declaration;
+        Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
+        FunctionKind = FunctionKind.Ordinary;
+    }
+
+    internal FunctionSymbol(
+        FunctionKind functionKind,
+        StructTypeSymbol containingType,
+        ImmutableArray<ParameterSymbol> parameters,
+        SyntaxNode declaration,
+        Accessibility accessibility)
+        : base(functionKind == FunctionKind.Constructor ? containingType.Name : $"~{containingType.Name}", SymbolKind.Function)
+    {
+        if (functionKind == FunctionKind.Ordinary)
+        {
+            throw new ArgumentOutOfRangeException(nameof(functionKind));
+        }
+
+        FunctionKind = functionKind;
+        ContainingType = containingType;
+        ContainingNamespace = containingType.ContainingNamespace;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = parameters;
+        Declaration = declaration;
+        Accessibility = accessibility;
     }
 
     public NamespaceSymbol ContainingNamespace { get; }
 
-    public string FullName => $"{ContainingNamespace.FullName}.{Name}";
+    public StructTypeSymbol? ContainingType { get; }
+
+    public string FullName => FunctionKind switch
+    {
+        FunctionKind.Constructor => $"{ContainingType!.FullName}.__ctor",
+        FunctionKind.Destructor => $"{ContainingType!.FullName}.__dtor",
+        _ => $"{ContainingNamespace.FullName}.{Name}",
+    };
 
     public TypeSymbol ReturnType { get; }
 
     public ImmutableArray<ParameterSymbol> Parameters { get; }
 
-    public bool IsExtern => Declaration.IsExtern;
+    public FunctionKind FunctionKind { get; }
 
-    public bool IsExport => Declaration.IsExport;
+    public Accessibility Accessibility { get; }
 
-    internal FunctionDeclarationSyntax Declaration { get; }
+    public bool IsExtern => Declaration is FunctionDeclarationSyntax { IsExtern: true };
+
+    public bool IsExport => Declaration is FunctionDeclarationSyntax { IsExport: true };
+
+    public bool IsPublic => Accessibility == Accessibility.Public;
+
+    public bool HasImplicitThis => ContainingType is not null;
+
+    internal SyntaxNode Declaration { get; }
 }
 
 public abstract class VariableSymbol : Symbol
@@ -62,4 +101,6 @@ public sealed class LocalVariableSymbol : VariableSymbol
         : base(name, SymbolKind.LocalVariable, type)
     {
     }
+
+    public ArrayStorageKind ArrayStorage { get; internal set; }
 }

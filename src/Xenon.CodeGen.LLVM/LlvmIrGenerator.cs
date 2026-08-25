@@ -131,28 +131,50 @@ public sealed class LlvmIrGenerator
     {
         foreach (FunctionSymbol function in @namespace.Functions)
         {
-            LLVMTypeRef returnType = MapType(function.ReturnType);
-            LLVMTypeRef[] parameterTypes = function.Parameters
-                .Select(parameter => MapType(parameter.Type))
-                .ToArray();
-            LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, parameterTypes, false);
-            LLVMValueRef value = _module.AddFunction(NativeSymbolNames.Get(function), functionType);
-            if (!function.IsExtern && !function.IsExport)
+            DeclareFunction(function);
+        }
+
+        foreach (StructTypeSymbol type in @namespace.Types)
+        {
+            if (type.Constructor is not null)
             {
-                value.Linkage = LLVMLinkage.LLVMInternalLinkage;
-            }
-            else if (function.IsExport && IsWindowsTarget())
-            {
-                value.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+                DeclareFunction(type.Constructor);
             }
 
-            _functions.Add(function, new LlvmFunction(value, functionType));
+            if (type.Destructor is not null)
+            {
+                DeclareFunction(type.Destructor);
+            }
         }
 
         foreach (NamespaceSymbol child in @namespace.Namespaces)
         {
             DeclareFunctions(child);
         }
+    }
+
+    private void DeclareFunction(FunctionSymbol function)
+    {
+        LLVMTypeRef returnType = MapType(function.ReturnType);
+        var parameterTypes = new List<LLVMTypeRef>();
+        if (function.HasImplicitThis)
+        {
+            parameterTypes.Add(LLVMTypeRef.CreatePointer(MapType(function.ContainingType!), 0));
+        }
+
+        parameterTypes.AddRange(function.Parameters.Select(parameter => MapType(parameter.Type)));
+        LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, [.. parameterTypes], false);
+        LLVMValueRef value = _module.AddFunction(NativeSymbolNames.Get(function), functionType);
+        if (!function.IsExtern && !function.IsExport && !function.IsPublic)
+        {
+            value.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        }
+        else if (function.IsExport && IsWindowsTarget())
+        {
+            value.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+        }
+
+        _functions.Add(function, new LlvmFunction(value, functionType));
     }
 
     private void EmitFunctionBodies(ImmutableArray<BoundFunction> functions)
@@ -172,7 +194,8 @@ public sealed class LlvmIrGenerator
                 _functions,
                 MapType,
                 GetOrDeclareMemoryRuntime,
-                GetAbiSize);
+                GetAbiSize,
+                GetIntegerBitWidth);
             emitter.Emit(function.Body);
         }
     }
@@ -274,6 +297,11 @@ public sealed class LlvmIrGenerator
             return _context.DoubleType;
         }
 
+        if (type is ArrayTypeSymbol array)
+        {
+            return LLVMTypeRef.CreatePointer(MapType(array.ElementType), 0);
+        }
+
         if (type is PointerTypeSymbol pointer)
         {
             return LLVMTypeRef.CreatePointer(MapType(pointer.ElementType), 0);
@@ -295,6 +323,26 @@ public sealed class LlvmIrGenerator
         _ => throw new LlvmCodeGenerationException(
             $"Target integer type '{type.Name}' has unsupported width {bitWidth}."),
     };
+
+    private int GetIntegerBitWidth(TypeSymbol type)
+    {
+        if (type is PrimitiveTypeSymbol { IsInteger: true, BitWidth: int bitWidth })
+        {
+            return bitWidth;
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.NInt) || ReferenceEquals(type, BuiltinTypes.NUInt))
+        {
+            return GetPointerBitWidth();
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.CLong) || ReferenceEquals(type, BuiltinTypes.CULong))
+        {
+            return IsWindowsTarget() ? 32 : GetPointerBitWidth();
+        }
+
+        throw new LlvmCodeGenerationException($"Type '{type.Name}' is not an integer type.");
+    }
 
     private ulong GetAbiSize(TypeSymbol type)
     {
@@ -368,6 +416,8 @@ public sealed class LlvmIrGenerator
         private readonly Func<TypeSymbol, LLVMTypeRef> _mapType;
         private readonly Func<LlvmMemoryRuntime> _getMemoryRuntime;
         private readonly Func<TypeSymbol, ulong> _getAbiSize;
+        private readonly Func<TypeSymbol, int> _getIntegerBitWidth;
+        private readonly LLVMValueRef _thisValue;
         private readonly Dictionary<VariableSymbol, LLVMValueRef> _addresses = [];
         private readonly Stack<LoopTargets> _loopTargets = [];
         private bool _terminated;
@@ -380,7 +430,8 @@ public sealed class LlvmIrGenerator
             Dictionary<FunctionSymbol, LlvmFunction> functions,
             Func<TypeSymbol, LLVMTypeRef> mapType,
             Func<LlvmMemoryRuntime> getMemoryRuntime,
-            Func<TypeSymbol, ulong> getAbiSize)
+            Func<TypeSymbol, ulong> getAbiSize,
+            Func<TypeSymbol, int> getIntegerBitWidth)
         {
             _context = context;
             _builder = builder;
@@ -390,12 +441,15 @@ public sealed class LlvmIrGenerator
             _mapType = mapType;
             _getMemoryRuntime = getMemoryRuntime;
             _getAbiSize = getAbiSize;
+            _getIntegerBitWidth = getIntegerBitWidth;
+            _thisValue = function.HasImplicitThis ? llvmFunction.GetParam(0) : default;
 
+            uint parameterOffset = function.HasImplicitThis ? 1u : 0u;
             for (int index = 0; index < function.Parameters.Length; index++)
             {
                 ParameterSymbol parameter = function.Parameters[index];
                 LLVMValueRef address = _builder.BuildAlloca(_mapType(parameter.Type), parameter.Name);
-                _builder.BuildStore(llvmFunction.GetParam((uint)index), address);
+                _builder.BuildStore(llvmFunction.GetParam(parameterOffset + (uint)index), address);
                 _addresses.Add(parameter, address);
             }
         }
@@ -660,14 +714,18 @@ public sealed class LlvmIrGenerator
         {
             BoundLiteralExpression literal => EmitLiteral(literal),
             BoundVariableExpression variable => EmitVariable(variable),
+            BoundThisExpression => _thisValue,
             BoundUnaryExpression unary => EmitUnary(unary),
             BoundBinaryExpression binary => EmitBinary(binary),
             BoundAssignmentExpression assignment => EmitAssignment(assignment),
             BoundCallExpression call => EmitCall(call),
             BoundMemberAccessExpression member => EmitMemberAccess(member),
+            BoundIndexExpression index => EmitIndex(index),
             BoundStructConstructionExpression construction => EmitStructConstruction(
                 construction.StructType,
                 construction.Arguments),
+            BoundConstructorCallExpression constructor => EmitConstructorCall(constructor),
+            BoundArrayCreationExpression array => EmitArrayCreation(array),
             BoundNewExpression @new => EmitNew(@new),
             BoundFreeExpression free => EmitFree(free),
             _ => throw new LlvmCodeGenerationException($"Bound expression '{expression.Kind}' is not supported by LLVM code generation."),
@@ -940,6 +998,55 @@ public sealed class LlvmIrGenerator
             return value;
         }
 
+        private LLVMValueRef EmitConstructorCall(BoundConstructorCallExpression expression)
+        {
+            LLVMValueRef address = _builder.BuildAlloca(_mapType(expression.StructType), $"{expression.StructType.Name}.ctor.tmp");
+            EmitLifecycleCall(expression.Constructor, address, expression.Arguments);
+            return _builder.BuildLoad2(_mapType(expression.StructType), address, $"{expression.StructType.Name}.value");
+        }
+
+        private LLVMValueRef EmitArrayCreation(BoundArrayCreationExpression expression)
+        {
+            LLVMValueRef length = ConvertIntegerToSize(EmitExpression(expression.Length), expression.Length.Type);
+            if (expression.Storage == ArrayStorageKind.Stack)
+            {
+                return _builder.BuildArrayAlloca(_mapType(expression.ElementType), length, $"{expression.ElementType.Name}.stack.array");
+            }
+
+            LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            LLVMValueRef elementSize = LLVMValueRef.CreateConstInt(
+                runtime.SizeType,
+                _getAbiSize(expression.ElementType),
+                false);
+            LLVMValueRef byteCount = _builder.BuildMul(length, elementSize, "array.bytes");
+            return _builder.BuildCall2(
+                runtime.MallocType,
+                runtime.Malloc,
+                new LLVMValueRef[] { byteCount },
+                $"{expression.ElementType.Name}.heap.array");
+        }
+
+        private LLVMValueRef ConvertIntegerToSize(LLVMValueRef value, TypeSymbol sourceType)
+        {
+            LLVMTypeRef sizeType = _mapType(BuiltinTypes.NUInt);
+            int sourceWidth = _getIntegerBitWidth(sourceType);
+            int targetWidth = _getIntegerBitWidth(BuiltinTypes.NUInt);
+            if (sourceWidth == targetWidth)
+            {
+                return value;
+            }
+
+            if (sourceWidth > targetWidth)
+            {
+                return _builder.BuildTrunc(value, sizeType, "array.length.trunc");
+            }
+
+            bool signed = sourceType is PrimitiveTypeSymbol { IsSigned: true } || ReferenceEquals(sourceType, BuiltinTypes.NInt) || ReferenceEquals(sourceType, BuiltinTypes.CLong);
+            return signed
+                ? _builder.BuildSExt(value, sizeType, "array.length.sext")
+                : _builder.BuildZExt(value, sizeType, "array.length.zext");
+        }
+
         private LLVMValueRef EmitNew(BoundNewExpression expression)
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
@@ -952,19 +1059,56 @@ public sealed class LlvmIrGenerator
                 runtime.Malloc,
                 new LLVMValueRef[] { size },
                 $"{expression.StructType.Name}.heap");
-            LLVMValueRef value = EmitStructConstruction(expression.StructType, expression.Arguments);
-            _builder.BuildStore(value, address);
+
+            if (expression.IsPositionalInitialization)
+            {
+                LLVMValueRef value = EmitStructConstruction(expression.StructType, expression.Arguments);
+                _builder.BuildStore(value, address);
+            }
+            else
+            {
+                EmitLifecycleCall(expression.Constructor!, address, expression.Arguments);
+            }
+
             return address;
         }
 
         private LLVMValueRef EmitFree(BoundFreeExpression expression)
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            LLVMValueRef address = EmitExpression(expression.Pointer);
+            if (expression.Destructor is not null)
+            {
+                EmitLifecycleCall(expression.Destructor, address, []);
+            }
+
             return _builder.BuildCall2(
                 runtime.FreeType,
                 runtime.Free,
-                new LLVMValueRef[] { EmitExpression(expression.Pointer) },
+                new LLVMValueRef[] { address },
                 string.Empty);
+        }
+
+        private LLVMValueRef EmitLifecycleCall(
+            FunctionSymbol function,
+            LLVMValueRef thisAddress,
+            ImmutableArray<BoundExpression> arguments)
+        {
+            LlvmFunction llvmFunction = _functions[function];
+            var values = new LLVMValueRef[arguments.Length + 1];
+            values[0] = thisAddress;
+            for (int index = 0; index < arguments.Length; index++)
+            {
+                values[index + 1] = EmitExpression(arguments[index]);
+            }
+
+            return _builder.BuildCall2(llvmFunction.Type, llvmFunction.Value, values, string.Empty);
+        }
+
+        private LLVMValueRef EmitIndex(BoundIndexExpression expression)
+        {
+            LLVMValueRef address = EmitIndexAddress(expression);
+            return _builder.BuildLoad2(_mapType(expression.ElementType), address, "element");
         }
 
         private LLVMValueRef EmitAddress(BoundExpression expression) => expression switch
@@ -973,9 +1117,27 @@ public sealed class LlvmIrGenerator
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } dereference =>
                 EmitExpression(dereference.Operand),
             BoundMemberAccessExpression member => EmitMemberAddress(member),
+            BoundIndexExpression index => EmitIndexAddress(index),
             _ => throw new LlvmCodeGenerationException(
                 $"Expression '{expression.Kind}' does not have an addressable storage location."),
         };
+
+        private LLVMValueRef EmitIndexAddress(BoundIndexExpression expression)
+        {
+            LLVMValueRef index = EmitExpression(expression.Index);
+            TypeSymbol elementType = expression.Receiver.Type switch
+            {
+                ArrayTypeSymbol array => array.ElementType,
+                PointerTypeSymbol pointerType => pointerType.ElementType,
+                _ => expression.ElementType,
+            };
+            LLVMValueRef pointer = EmitExpression(expression.Receiver);
+            return _builder.BuildGEP2(
+                _mapType(elementType),
+                pointer,
+                new LLVMValueRef[] { index },
+                "element.address");
+        }
 
         private LLVMValueRef EmitMemberAddress(BoundMemberAccessExpression expression)
         {
@@ -1006,6 +1168,7 @@ public sealed class LlvmIrGenerator
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
             BoundMemberAccessExpression { IsPointerAccess: true } => true,
             BoundMemberAccessExpression member => IsAddressable(member.Receiver),
+            BoundIndexExpression => true,
             _ => false,
         };
 

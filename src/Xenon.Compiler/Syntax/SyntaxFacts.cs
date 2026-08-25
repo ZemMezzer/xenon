@@ -34,6 +34,8 @@ public static class SyntaxFacts
             ["return"] = SyntaxKind.ReturnKeyword,
             ["extern"] = SyntaxKind.ExternKeyword,
             ["export"] = SyntaxKind.ExportKeyword,
+            ["public"] = SyntaxKind.PublicKeyword,
+            ["private"] = SyntaxKind.PrivateKeyword,
             ["true"] = SyntaxKind.TrueKeyword,
             ["false"] = SyntaxKind.FalseKeyword,
             ["null"] = SyntaxKind.NullKeyword,

@@ -60,15 +60,49 @@ public sealed record MemberAccessExpressionSyntax(
     public override SyntaxKind Kind => SyntaxKind.MemberAccessExpression;
 }
 
+public sealed record IndexExpressionSyntax(
+    ExpressionSyntax Receiver,
+    SyntaxToken OpenBracketToken,
+    ExpressionSyntax Index,
+    SyntaxToken CloseBracketToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.IndexExpression;
+}
+
+public sealed record StructPositionalConstructionExpressionSyntax(
+    SyntaxToken TypeNameToken,
+    SyntaxToken OpenBraceToken,
+    ImmutableArray<ExpressionSyntax> Arguments,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken CloseBraceToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.StructPositionalConstructionExpression;
+}
+
+public sealed record StackArrayCreationExpressionSyntax(
+    TypeSyntax ElementType,
+    SyntaxToken OpenBracketToken,
+    ExpressionSyntax Length,
+    SyntaxToken CloseBracketToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.StackArrayCreationExpression;
+}
+
 public sealed record NewExpressionSyntax(
     SyntaxToken NewKeyword,
     TypeSyntax Type,
-    SyntaxToken OpenParenthesisToken,
+    SyntaxToken OpenDelimiterToken,
     ImmutableArray<ExpressionSyntax> Arguments,
     ImmutableArray<SyntaxToken> CommaTokens,
-    SyntaxToken CloseParenthesisToken) : ExpressionSyntax
+    SyntaxToken CloseDelimiterToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.NewExpression;
+
+    public bool IsArrayAllocation => OpenDelimiterToken.Kind == SyntaxKind.OpenBracketToken;
+
+    public bool IsPositionalInitialization => OpenDelimiterToken.Kind == SyntaxKind.OpenBraceToken;
+
+    public bool IsConstructorCall => OpenDelimiterToken.Kind == SyntaxKind.OpenParenthesisToken;
 }
 
 public sealed record FreeExpressionSyntax(

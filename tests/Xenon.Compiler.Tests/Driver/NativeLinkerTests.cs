@@ -317,8 +317,8 @@ public sealed class NativeLinkerTests
 
             struct Vector2
             {
-                float X;
-                float Y;
+                public float X;
+                public float Y;
             }
 
             export float Sum(Vector2* value)
@@ -375,8 +375,8 @@ public sealed class NativeLinkerTests
 
             struct Pair
             {
-                int X;
-                int Y;
+                public int X;
+                public int Y;
             }
 
             Pair ChangeCopy(Pair value)
@@ -392,9 +392,7 @@ public sealed class NativeLinkerTests
 
             int Main()
             {
-                Pair original;
-                original.X = 20;
-                original.Y = 2;
+                Pair original = Pair { 20, 2 };
 
                 Pair copy = original;
                 copy.Y = 22;
@@ -445,15 +443,15 @@ public sealed class NativeLinkerTests
 
             struct Vector3
             {
-                int X;
-                int Y;
-                int Z;
+                public int X;
+                public int Y;
+                public int Z;
             }
 
             int Main()
             {
-                Vector3 stack = Vector3(10, 12, 20);
-                Vector3* heap = new Vector3(stack.X, stack.Y, stack.Z);
+                Vector3 stack = Vector3 { 10, 12, 20 };
+                Vector3* heap = new Vector3 { stack.X, stack.Y, stack.Z };
                 int result = heap->X + heap->Y + heap->Z;
                 free(heap);
                 return result;

@@ -47,6 +47,18 @@ public sealed class PointerTypeSymbol : TypeSymbol
     public bool IsConst { get; }
 }
 
+
+public sealed class ArrayTypeSymbol : TypeSymbol
+{
+    internal ArrayTypeSymbol(TypeSymbol elementType)
+        : base($"{elementType.Name}[]")
+    {
+        ElementType = elementType;
+    }
+
+    public TypeSymbol ElementType { get; }
+}
+
 internal sealed class SpecialTypeSymbol : TypeSymbol
 {
     public SpecialTypeSymbol(string name)

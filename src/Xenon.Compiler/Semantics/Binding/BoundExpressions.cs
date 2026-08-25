@@ -4,17 +4,19 @@ using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Binding;
 
-public sealed record BoundLiteralExpression(
-    object? Value,
-    TypeSymbol LiteralType) : BoundExpression(LiteralType)
+public sealed record BoundLiteralExpression(object? Value, TypeSymbol LiteralType) : BoundExpression(LiteralType)
 {
     public override BoundKind Kind => BoundKind.LiteralExpression;
 }
 
-public sealed record BoundVariableExpression(
-    VariableSymbol Variable) : BoundExpression(Variable.Type)
+public sealed record BoundVariableExpression(VariableSymbol Variable) : BoundExpression(Variable.Type)
 {
     public override BoundKind Kind => BoundKind.VariableExpression;
+}
+
+public sealed record BoundThisExpression(StructTypeSymbol StructType, PointerTypeSymbol PointerType) : BoundExpression(PointerType)
+{
+    public override BoundKind Kind => BoundKind.ThisExpression;
 }
 
 public sealed record BoundUnaryExpression(
@@ -51,6 +53,14 @@ public sealed record BoundMemberAccessExpression(
     public override BoundKind Kind => BoundKind.MemberAccessExpression;
 }
 
+public sealed record BoundIndexExpression(
+    BoundExpression Receiver,
+    BoundExpression Index,
+    TypeSymbol ElementType) : BoundExpression(ElementType)
+{
+    public override BoundKind Kind => BoundKind.IndexExpression;
+}
+
 public sealed record BoundStructConstructionExpression(
     StructTypeSymbol StructType,
     ImmutableArray<BoundExpression> Arguments) : BoundExpression(StructType)
@@ -58,16 +68,36 @@ public sealed record BoundStructConstructionExpression(
     public override BoundKind Kind => BoundKind.StructConstructionExpression;
 }
 
+public sealed record BoundConstructorCallExpression(
+    StructTypeSymbol StructType,
+    FunctionSymbol Constructor,
+    ImmutableArray<BoundExpression> Arguments) : BoundExpression(StructType)
+{
+    public override BoundKind Kind => BoundKind.ConstructorCallExpression;
+}
+
+public sealed record BoundArrayCreationExpression(
+    TypeSymbol ElementType,
+    BoundExpression Length,
+    ArrayTypeSymbol ArrayType,
+    ArrayStorageKind Storage) : BoundExpression(ArrayType)
+{
+    public override BoundKind Kind => BoundKind.ArrayCreationExpression;
+}
+
 public sealed record BoundNewExpression(
     StructTypeSymbol StructType,
+    FunctionSymbol? Constructor,
     ImmutableArray<BoundExpression> Arguments,
+    bool IsPositionalInitialization,
     PointerTypeSymbol PointerType) : BoundExpression(PointerType)
 {
     public override BoundKind Kind => BoundKind.NewExpression;
 }
 
 public sealed record BoundFreeExpression(
-    BoundExpression Pointer) : BoundExpression(BuiltinTypes.Void)
+    BoundExpression Pointer,
+    FunctionSymbol? Destructor) : BoundExpression(BuiltinTypes.Void)
 {
     public override BoundKind Kind => BoundKind.FreeExpression;
 }

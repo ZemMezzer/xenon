@@ -6,6 +6,7 @@ namespace Xenon.Compiler.Semantics.Symbols;
 public static class BuiltinTypes
 {
     private static readonly ConcurrentDictionary<(TypeSymbol Element, bool IsConst), PointerTypeSymbol> PointerTypes = new();
+    private static readonly ConcurrentDictionary<TypeSymbol, ArrayTypeSymbol> ArrayTypes = new();
 
     public static PrimitiveTypeSymbol Void { get; } = new("void");
     public static PrimitiveTypeSymbol Bool { get; } = new("bool");
@@ -30,6 +31,9 @@ public static class BuiltinTypes
 
     public static PointerTypeSymbol PointerTo(TypeSymbol elementType, bool isConst = false) =>
         PointerTypes.GetOrAdd((elementType, isConst), key => new PointerTypeSymbol(key.Element, key.IsConst));
+
+    public static ArrayTypeSymbol ArrayOf(TypeSymbol elementType) =>
+        ArrayTypes.GetOrAdd(elementType, static element => new ArrayTypeSymbol(element));
 
     internal static TypeSymbol? FromSyntaxKind(SyntaxKind kind) => kind switch
     {

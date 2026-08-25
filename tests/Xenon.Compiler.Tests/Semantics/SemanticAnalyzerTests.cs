@@ -295,8 +295,8 @@ public sealed class SemanticAnalyzerTests
 
             struct Vector2
             {
-                float X;
-                float Y;
+                public float X;
+                public float Y;
             }
 
             export float Sum(Vector2* value)
@@ -344,7 +344,7 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message ==
-                "struct 'Node' has a recursive by-value field 'Next'; use a pointer instead");
+                "struct 'Node' has a recursive by-value field 'Next'; use a pointer or array handle instead");
     }
 
     [Fact]
@@ -395,39 +395,305 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_BindsStackConstructionNewAndFree()
+    public void Analyzer_BindsConstructorsPositionalConstructionDestructorAndFree()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
             struct Vector3
             {
-                float X;
-                float Y;
-                float Z;
+                int X;
+                int Y;
+                int Z;
+
+                public Vector3(int x, int y, int z)
+                {
+                    X = x;
+                    Y = y;
+                    Z = z;
+                }
+
+                ~Vector3()
+                {
+                    X = 0;
+                }
             }
 
-            void Build(float x, float y, float z)
+            void Build(int x, int y, int z)
             {
-                Vector3 stack = Vector3(x, y, z);
+                Vector3 positional = Vector3 { x, y, z };
+                Vector3 value = Vector3(x, y, z);
                 Vector3* heap = new Vector3(x, y, z);
                 free(heap);
             }
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        BoundFunction function = Assert.Single(compilation.SemanticModel.Functions);
+        NamespaceSymbol example = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        StructTypeSymbol vector = Assert.Single(example.Types);
+        Assert.NotNull(vector.Constructor);
+        Assert.NotNull(vector.Destructor);
+
+        BoundFunction function = Assert.Single(compilation.SemanticModel.Functions.Where(f => f.Symbol.Name == "Build"));
         Assert.IsType<BoundStructConstructionExpression>(
             Assert.IsType<BoundVariableDeclarationStatement>(function.Body.Statements[0]).Initializer);
-        var allocation = Assert.IsType<BoundNewExpression>(
+        Assert.IsType<BoundConstructorCallExpression>(
             Assert.IsType<BoundVariableDeclarationStatement>(function.Body.Statements[1]).Initializer);
-        Assert.IsType<PointerTypeSymbol>(allocation.Type);
-        Assert.IsType<BoundFreeExpression>(
-            Assert.IsType<BoundExpressionStatement>(function.Body.Statements[2]).Expression);
+        var allocation = Assert.IsType<BoundNewExpression>(
+            Assert.IsType<BoundVariableDeclarationStatement>(function.Body.Statements[2]).Initializer);
+        Assert.NotNull(allocation.Constructor);
+        var free = Assert.IsType<BoundFreeExpression>(
+            Assert.IsType<BoundExpressionStatement>(function.Body.Statements[3]).Expression);
+        Assert.Same(vector.Destructor, free.Destructor);
     }
 
     [Fact]
-    public void Analyzer_ValidatesStructConstructorAndFreeArguments()
+    public void Analyzer_FieldsAndFunctionsDefaultToPrivate()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Pair
+            {
+                int X;
+                public int Y;
+            }
+
+            int Hidden() { return 1; }
+            public int Visible() { return 2; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NamespaceSymbol example = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        StructTypeSymbol pair = Assert.Single(example.Types);
+        Assert.False(pair.Fields[0].IsPublic);
+        Assert.True(pair.Fields[1].IsPublic);
+        FunctionSymbol hidden = Assert.Single(example.Functions.Where(function => function.Name == "Hidden"));
+        FunctionSymbol visible = Assert.Single(example.Functions.Where(function => function.Name == "Visible"));
+        Assert.False(hidden.IsPublic);
+        Assert.True(visible.IsPublic);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPrivateFieldAccessOutsideStruct()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Pair
+            {
+                int X;
+                public int Y;
+            }
+
+            int Read(Pair* pair)
+            {
+                return pair->X;
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "field 'X' is private in struct 'Pair'");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsUseOfUninitializedLocals()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector3
+            {
+                public int X;
+                public int Y;
+                public int Z;
+            }
+
+            int ReadScalar()
+            {
+                int value;
+                return value;
+            }
+
+            void WriteField()
+            {
+                Vector3 vec;
+                vec.X = 10;
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "local variable 'value' is used before it is initialized");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "local variable 'vec' is used before it is initialized");
+    }
+
+    [Fact]
+    public void Analyzer_AllowsExplicitAssignmentAfterDeclaration()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector3
+            {
+                public int X;
+                public int Y;
+                public int Z;
+
+                public Vector3(int x, int y, int z)
+                {
+                    X = x;
+                    Y = y;
+                    Z = z;
+                }
+            }
+
+            int Build(int x, int y, int z)
+            {
+                Vector3 vec;
+                vec = Vector3(x, y, z);
+                return vec.X;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_TracksDefiniteAssignmentAcrossIfBranches()
+    {
+        Compilation constantTrue = CreateCompilation("""
+            namespace Example;
+
+            struct Vector3
+            {
+                public int X;
+                public int Y;
+                public int Z;
+
+                public Vector3(int x, int y, int z)
+                {
+                    X = x;
+                    Y = y;
+                    Z = z;
+                }
+            }
+
+            int Build(int x, int y, int z)
+            {
+                Vector3 vec;
+                if (true)
+                {
+                    vec = Vector3(x, y, z);
+                }
+
+                return vec.X;
+            }
+            """);
+
+        Compilation bothBranches = CreateCompilation("""
+            namespace Example;
+
+            struct Vector3
+            {
+                public int X;
+                public int Y;
+                public int Z;
+            }
+
+            int Build(bool condition)
+            {
+                Vector3 vec;
+                if (condition)
+                    vec = Vector3 { 1, 2, 3 };
+                else
+                    vec = Vector3 { 4, 5, 6 };
+
+                return vec.X;
+            }
+            """);
+
+        Compilation conditionalOnly = CreateCompilation("""
+            namespace Example;
+
+            struct Vector3
+            {
+                public int X;
+                public int Y;
+                public int Z;
+            }
+
+            int Build(bool condition)
+            {
+                Vector3 vec;
+                if (condition)
+                {
+                    vec = Vector3 { 1, 2, 3 };
+                }
+
+                return vec.X;
+            }
+            """);
+
+        Assert.Empty(constantTrue.Diagnostics);
+        Assert.Empty(bothBranches.Diagnostics);
+        Assert.Contains(
+            conditionalOnly.Diagnostics,
+            diagnostic => diagnostic.Message == "local variable 'vec' is used before it is initialized");
+    }
+
+    [Fact]
+    public void Analyzer_BindsHeapAndStackArraysAndRejectsStackEscape()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            void Consume(int[] values)
+            {
+            }
+
+            struct Holder
+            {
+                int[] Values;
+            }
+
+            int[] Invalid()
+            {
+                int[] stack = int[10];
+                stack[0] = 42;
+                Consume(stack);
+                Holder holder = Holder { stack };
+                return stack;
+            }
+
+            void Heap()
+            {
+                int[] values = new int[10];
+                values[0] = 1;
+                Consume(values);
+                free(values);
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "stack array cannot be passed to another function");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "stack array cannot be returned from a function");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "stack array cannot be stored inside a positional struct value");
+        Assert.DoesNotContain(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message.Contains("heap array", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Analyzer_RequiresConstructorParenthesesButKeepsBracePositionalConstruction()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -440,22 +706,18 @@ public sealed class SemanticAnalyzerTests
 
             void Invalid()
             {
-                Pair pair = Pair(1);
-                Pair* heap = new Pair(1, 2.0);
-                free(pair);
+                Pair okay = Pair { 1, 2 };
+                Pair bad = Pair(1, 2);
+                free(okay);
             }
             """);
 
         Assert.Contains(
             compilation.Diagnostics,
-            diagnostic => diagnostic.Message ==
-                "struct 'Pair' expects 2 constructor argument(s), but 1 were provided");
+            diagnostic => diagnostic.Message.Contains("does not declare a constructor", StringComparison.Ordinal));
         Assert.Contains(
             compilation.Diagnostics,
-            diagnostic => diagnostic.Message == "cannot implicitly convert 'double' to 'int'");
-        Assert.Contains(
-            compilation.Diagnostics,
-            diagnostic => diagnostic.Message == "'free' requires a pointer, but has type 'Pair'");
+            diagnostic => diagnostic.Message == "'free' requires a heap pointer or heap array, but has type 'Pair'");
     }
 
     [Fact]
@@ -470,7 +732,7 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message ==
-                "native symbol 'malloc' is reserved for the built-in 'new' operation");
+                "native symbol 'malloc' is reserved for Xenon memory operations");
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(

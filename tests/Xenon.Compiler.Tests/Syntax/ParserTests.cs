@@ -211,34 +211,99 @@ public sealed class ParserTests
     }
 
     [Fact]
-    public void Parser_ParsesStackConstructionNewAndFree()
+    public void Parser_ParsesConstructorsDestructorsVisibilityAndPositionalConstruction()
     {
         SyntaxTree tree = Parse("""
             namespace Example;
 
             struct Vector3
             {
-                float X;
-                float Y;
-                float Z;
+                private int X;
+                public int Y;
+                int Z;
+
+                public Vector3(int x, int y, int z)
+                {
+                    X = x;
+                    Y = y;
+                    Z = z;
+                }
+
+                ~Vector3()
+                {
+                    X = 0;
+                }
             }
 
-            void Build(float x, float y, float z)
+            void Build(int x, int y, int z)
             {
-                Vector3 stack = Vector3(x, y, z);
+                Vector3 positional = Vector3 { x, y, z };
+                Vector3 value = Vector3(x, y, z);
                 Vector3* heap = new Vector3(x, y, z);
                 free(heap);
             }
             """);
 
         Assert.Empty(tree.Diagnostics);
+        var type = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.Equal(3, type.Fields.Length);
+        Assert.False(type.Fields[0].IsPublic);
+        Assert.True(type.Fields[1].IsPublic);
+        Assert.False(type.Fields[2].IsPublic);
+        Assert.Single(type.Constructors);
+        Assert.NotNull(type.Destructor);
+
         var function = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
-        var stack = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
-        Assert.IsType<CallExpressionSyntax>(stack.Initializer);
-        var heap = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[1]);
+        var positional = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
+        Assert.IsType<StructPositionalConstructionExpressionSyntax>(positional.Initializer);
+        var constructor = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[1]);
+        Assert.IsType<CallExpressionSyntax>(constructor.Initializer);
+        var heap = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[2]);
         Assert.Equal(3, Assert.IsType<NewExpressionSyntax>(heap.Initializer).Arguments.Length);
-        Assert.IsType<FreeExpressionSyntax>(
+    }
+
+    [Fact]
+    public void Parser_ParsesHeapAndStackArrayCreation()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            void Build()
+            {
+                int[] heap = new int[10];
+                int[] stack = int[10];
+                heap[0] = stack[1];
+                free(heap);
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var heap = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
+        Assert.True(heap.Type.IsUnsizedArray);
+        Assert.True(Assert.IsType<NewExpressionSyntax>(heap.Initializer).IsArrayAllocation);
+        var stack = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[1]);
+        Assert.IsType<StackArrayCreationExpressionSyntax>(stack.Initializer);
+        Assert.IsType<AssignmentExpressionSyntax>(
             Assert.IsType<ExpressionStatementSyntax>(function.Body.Statements[2]).Expression);
+    }
+
+    [Fact]
+    public void Parser_RejectsFixedSizeArrayTypeDeclarations()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            void Build()
+            {
+                int[16] values;
+            }
+            """);
+
+        Assert.Contains(
+            tree.Diagnostics,
+            diagnostic => diagnostic.Message ==
+                "fixed-size array type syntax is not supported; use 'T[]' and initialize it with 'T[n]' or 'new T[n]'");
     }
 
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));

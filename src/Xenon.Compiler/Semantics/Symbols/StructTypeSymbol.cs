@@ -23,6 +23,10 @@ public sealed class StructTypeSymbol : TypeSymbol
 
     public ImmutableArray<FieldSymbol> Fields => _fields;
 
+    public FunctionSymbol? Constructor { get; private set; }
+
+    public FunctionSymbol? Destructor { get; private set; }
+
     internal StructDeclarationSyntax Declaration { get; }
 
     internal void SetFields(ImmutableArray<FieldSymbol> fields)
@@ -33,6 +37,26 @@ public sealed class StructTypeSymbol : TypeSymbol
         }
 
         _fields = fields;
+    }
+
+    internal void SetConstructor(FunctionSymbol constructor)
+    {
+        if (Constructor is not null)
+        {
+            throw new InvalidOperationException($"constructor for struct '{FullName}' is already defined");
+        }
+
+        Constructor = constructor;
+    }
+
+    internal void SetDestructor(FunctionSymbol destructor)
+    {
+        if (Destructor is not null)
+        {
+            throw new InvalidOperationException($"destructor for struct '{FullName}' is already defined");
+        }
+
+        Destructor = destructor;
     }
 
     public FieldSymbol? FindField(string name) =>
@@ -46,12 +70,14 @@ public sealed class FieldSymbol : Symbol
         StructTypeSymbol containingType,
         TypeSymbol type,
         int ordinal,
+        Accessibility accessibility,
         FieldDeclarationSyntax declaration)
         : base(name, SymbolKind.Field)
     {
         ContainingType = containingType;
         Type = type;
         Ordinal = ordinal;
+        Accessibility = accessibility;
         Declaration = declaration;
     }
 
@@ -60,6 +86,10 @@ public sealed class FieldSymbol : Symbol
     public TypeSymbol Type { get; }
 
     public int Ordinal { get; }
+
+    public Accessibility Accessibility { get; }
+
+    public bool IsPublic => Accessibility == Accessibility.Public;
 
     internal FieldDeclarationSyntax Declaration { get; }
 }
