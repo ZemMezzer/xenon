@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Xenon.CodeGen.LLVM;
@@ -128,8 +129,7 @@ public sealed class NativeLinkerTests
                 executablePath,
                 target.Triple);
 
-            byte[] header = File.ReadAllBytes(executable.Path)[..4];
-            Assert.Equal([0xcf, 0xfa, 0xed, 0xfe], header);
+            AssertMacOsMachO(executable.Path, expectedFileType: 2);
 
             var startInfo = new ProcessStartInfo
             {
@@ -211,6 +211,10 @@ public sealed class NativeLinkerTests
             if (OperatingSystem.IsWindows())
             {
                 Assert.True(File.Exists(library.ImportLibraryPath));
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                AssertMacOsMachO(library.Path, expectedFileType: 6);
             }
 
             nint handle = NativeLibrary.Load(library.Path);
@@ -310,5 +314,31 @@ public sealed class NativeLinkerTests
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         return directory;
+    }
+
+    private static void AssertMacOsMachO(string path, uint expectedFileType)
+    {
+        const uint MachO64Magic = 0xfeedfacf;
+        const uint X86_64CpuType = 0x01000007;
+        const uint Arm64CpuType = 0x0100000c;
+
+        byte[] header = new byte[16];
+        using (FileStream stream = File.OpenRead(path))
+        {
+            stream.ReadExactly(header);
+        }
+
+        Assert.Equal(MachO64Magic, BinaryPrimitives.ReadUInt32LittleEndian(header));
+
+        uint expectedCpuType = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => X86_64CpuType,
+            Architecture.Arm64 => Arm64CpuType,
+            Architecture architecture => throw new Xunit.Sdk.XunitException(
+                $"Unsupported macOS test architecture '{architecture}'."),
+        };
+
+        Assert.Equal(expectedCpuType, BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4)));
+        Assert.Equal(expectedFileType, BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(12)));
     }
 }
