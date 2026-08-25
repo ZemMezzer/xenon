@@ -98,6 +98,7 @@ public enum SyntaxKind
     NamespaceDeclaration,
     StructDeclaration,
     FieldDeclaration,
+    MethodDeclaration,
     ConstructorDeclaration,
     DestructorDeclaration,
     FunctionDeclaration,

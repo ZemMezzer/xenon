@@ -292,6 +292,64 @@ public sealed class ParserTests
     }
 
     [Fact]
+    public void Parser_ParsesStructMethodsAndMethodCalls()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            struct Counter
+            {
+                int Value;
+
+                public void Add(int amount)
+                {
+                    Value += amount;
+                }
+
+                int Read()
+                {
+                    return Value;
+                }
+            }
+
+            int Main()
+            {
+                Counter value = Counter { 10 };
+                value.Add(5);
+                Counter* pointer = &value;
+                pointer->Add(7);
+                return value.Read();
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var type = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.Equal(2, type.Methods.Length);
+
+        MethodDeclarationSyntax add = type.Methods[0];
+        Assert.True(add.IsPublic);
+        Assert.Equal("Add", add.IdentifierToken.Text);
+        Assert.Equal(SyntaxKind.VoidKeyword, add.ReturnType.NameToken.Kind);
+        Assert.Single(add.Parameters);
+
+        MethodDeclarationSyntax read = type.Methods[1];
+        Assert.True(read.IsPrivate);
+        Assert.Equal("Read", read.IdentifierToken.Text);
+
+        var main = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        var valueCall = Assert.IsType<CallExpressionSyntax>(
+            Assert.IsType<ExpressionStatementSyntax>(main.Body!.Statements[1]).Expression);
+        var valueTarget = Assert.IsType<MemberAccessExpressionSyntax>(valueCall.Target);
+        Assert.Equal(SyntaxKind.DotToken, valueTarget.OperatorToken.Kind);
+        Assert.Equal("Add", valueTarget.MemberToken.Text);
+
+        var pointerCall = Assert.IsType<CallExpressionSyntax>(
+            Assert.IsType<ExpressionStatementSyntax>(main.Body.Statements[3]).Expression);
+        var pointerTarget = Assert.IsType<MemberAccessExpressionSyntax>(pointerCall.Target);
+        Assert.Equal(SyntaxKind.ArrowToken, pointerTarget.OperatorToken.Kind);
+    }
+
+    [Fact]
     public void Parser_ParsesHeapAndStackArrayCreation()
     {
         SyntaxTree tree = Parse("""

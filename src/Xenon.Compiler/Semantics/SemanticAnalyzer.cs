@@ -33,6 +33,7 @@ internal sealed class SemanticAnalyzer
         DeclareStructs();
         BindStructFields();
         ValidateStructLayouts();
+        DeclareStructMethods();
         DeclareStructLifecycleFunctions();
         DeclareFunctions();
 
@@ -155,6 +156,53 @@ internal sealed class SemanticAnalyzer
         }
 
         return structType.Fields.Any(field => ContainsStructByValue(field.Type, target, visited));
+    }
+
+    private void DeclareStructMethods()
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        {
+            var methods = ImmutableArray.CreateBuilder<FunctionSymbol>();
+            var names = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (MethodDeclarationSyntax methodSyntax in declaration.Methods)
+            {
+                if (!names.Add(methodSyntax.IdentifierToken.Text))
+                {
+                    _diagnostics.Report(
+                        methodSyntax.IdentifierToken.Location,
+                        $"method overloading is not supported yet; struct '{type.Name}' may declare only one method named '{methodSyntax.IdentifierToken.Text}'");
+                    continue;
+                }
+
+                if (type.FindField(methodSyntax.IdentifierToken.Text) is not null)
+                {
+                    _diagnostics.Report(
+                        methodSyntax.IdentifierToken.Location,
+                        $"struct '{type.Name}' already contains field '{methodSyntax.IdentifierToken.Text}'");
+                }
+
+                TypeSymbol returnType = TypeResolver.Resolve(
+                    methodSyntax.ReturnType,
+                    type.ContainingNamespace,
+                    _diagnostics);
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(
+                    methodSyntax.Parameters,
+                    type.ContainingNamespace);
+
+                var method = new FunctionSymbol(
+                    methodSyntax.IdentifierToken.Text,
+                    type,
+                    returnType,
+                    parameters,
+                    methodSyntax);
+
+                methods.Add(method);
+                _functionBodies.Add((method, methodSyntax.Body));
+            }
+
+            type.SetMethods(methods.ToImmutable());
+        }
     }
 
     private void DeclareStructLifecycleFunctions()

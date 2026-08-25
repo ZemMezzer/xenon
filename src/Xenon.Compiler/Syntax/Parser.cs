@@ -65,9 +65,16 @@ internal sealed class Parser
             else
             {
                 TypeSyntax type = ParseType();
-                SyntaxToken fieldIdentifier = MatchToken(SyntaxKind.IdentifierToken);
-                SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
-                members.Add(new FieldDeclarationSyntax(accessModifier, type, fieldIdentifier, semicolon));
+                SyntaxToken memberIdentifier = MatchToken(SyntaxKind.IdentifierToken);
+                if (Current.Kind == SyntaxKind.OpenParenthesisToken)
+                {
+                    members.Add(ParseMethodDeclaration(accessModifier, type, memberIdentifier));
+                }
+                else
+                {
+                    SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
+                    members.Add(new FieldDeclarationSyntax(accessModifier, type, memberIdentifier, semicolon));
+                }
             }
 
             if (_position == start)
@@ -83,6 +90,26 @@ internal sealed class Parser
             openBrace,
             members.ToImmutable(),
             closeBrace);
+    }
+
+    private MethodDeclarationSyntax ParseMethodDeclaration(
+        SyntaxToken? accessModifier,
+        TypeSyntax returnType,
+        SyntaxToken identifier)
+    {
+        SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        (ImmutableArray<ParameterSyntax> parameters, ImmutableArray<SyntaxToken> commas) = ParseParameterList();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        BlockStatementSyntax body = ParseBlockStatement();
+        return new MethodDeclarationSyntax(
+            accessModifier,
+            returnType,
+            identifier,
+            openParenthesis,
+            parameters,
+            commas,
+            closeParenthesis,
+            body);
     }
 
     private ConstructorDeclarationSyntax ParseConstructorDeclaration(SyntaxToken? accessModifier)

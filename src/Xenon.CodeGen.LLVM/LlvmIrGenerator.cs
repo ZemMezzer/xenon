@@ -136,6 +136,11 @@ public sealed class LlvmIrGenerator
 
         foreach (StructTypeSymbol type in @namespace.Types)
         {
+            foreach (FunctionSymbol method in type.Methods)
+            {
+                DeclareFunction(method);
+            }
+
             if (type.Constructor is not null)
             {
                 DeclareFunction(type.Constructor);
@@ -203,7 +208,10 @@ public sealed class LlvmIrGenerator
     private void EmitExecutableEntryPoint(ImmutableArray<BoundFunction> functions)
     {
         BoundFunction[] candidates = functions
-            .Where(function => function.Symbol.Name == "Main")
+            .Where(function =>
+                function.Symbol.FunctionKind == FunctionKind.Ordinary &&
+                function.Symbol.ContainingType is null &&
+                function.Symbol.Name == "Main")
             .ToArray();
         if (candidates.Length == 0)
         {
@@ -719,6 +727,7 @@ public sealed class LlvmIrGenerator
             BoundBinaryExpression binary => EmitBinary(binary),
             BoundAssignmentExpression assignment => EmitAssignment(assignment),
             BoundCallExpression call => EmitCall(call),
+            BoundMethodCallExpression methodCall => EmitMethodCall(methodCall),
             BoundMemberAccessExpression member => EmitMemberAccess(member),
             BoundIndexExpression index => EmitIndex(index),
             BoundStructConstructionExpression construction => EmitStructConstruction(
@@ -1177,6 +1186,40 @@ public sealed class LlvmIrGenerator
             BoundIndexExpression => true,
             _ => false,
         };
+
+        private LLVMValueRef EmitMethodCall(BoundMethodCallExpression expression)
+        {
+            LlvmFunction function = _functions[expression.Method];
+            var arguments = new LLVMValueRef[expression.Arguments.Length + 1];
+            arguments[0] = EmitMethodReceiverAddress(expression);
+
+            for (int index = 0; index < expression.Arguments.Length; index++)
+            {
+                arguments[index + 1] = EmitExpression(expression.Arguments[index]);
+            }
+
+            string name = ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "method.call";
+            return _builder.BuildCall2(function.Type, function.Value, arguments, name);
+        }
+
+        private LLVMValueRef EmitMethodReceiverAddress(BoundMethodCallExpression expression)
+        {
+            if (expression.IsPointerAccess)
+            {
+                return EmitExpression(expression.Receiver);
+            }
+
+            if (IsAddressable(expression.Receiver))
+            {
+                return EmitAddress(expression.Receiver);
+            }
+
+            LLVMValueRef temporary = _builder.BuildAlloca(
+                _mapType(expression.Receiver.Type),
+                $"{expression.Method.ContainingType!.Name}.method.tmp");
+            _builder.BuildStore(EmitExpression(expression.Receiver), temporary);
+            return temporary;
+        }
 
         private LLVMValueRef EmitCall(BoundCallExpression expression)
         {

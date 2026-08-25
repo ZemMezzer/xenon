@@ -9,6 +9,7 @@ public enum Accessibility
 public enum FunctionKind
 {
     Ordinary,
+    Method,
     Constructor,
     Destructor,
 }

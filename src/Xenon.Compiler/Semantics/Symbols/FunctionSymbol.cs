@@ -22,6 +22,23 @@ public sealed class FunctionSymbol : Symbol
     }
 
     internal FunctionSymbol(
+        string name,
+        StructTypeSymbol containingType,
+        TypeSymbol returnType,
+        ImmutableArray<ParameterSymbol> parameters,
+        MethodDeclarationSyntax declaration)
+        : base(name, SymbolKind.Function)
+    {
+        FunctionKind = FunctionKind.Method;
+        ContainingType = containingType;
+        ContainingNamespace = containingType.ContainingNamespace;
+        ReturnType = returnType;
+        Parameters = parameters;
+        Declaration = declaration;
+        Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
+    }
+
+    internal FunctionSymbol(
         FunctionKind functionKind,
         StructTypeSymbol containingType,
         ImmutableArray<ParameterSymbol> parameters,
@@ -29,7 +46,7 @@ public sealed class FunctionSymbol : Symbol
         Accessibility accessibility)
         : base(functionKind == FunctionKind.Constructor ? containingType.Name : $"~{containingType.Name}", SymbolKind.Function)
     {
-        if (functionKind == FunctionKind.Ordinary)
+        if (functionKind is FunctionKind.Ordinary or FunctionKind.Method)
         {
             throw new ArgumentOutOfRangeException(nameof(functionKind));
         }
@@ -49,6 +66,7 @@ public sealed class FunctionSymbol : Symbol
 
     public string FullName => FunctionKind switch
     {
+        FunctionKind.Method => $"{ContainingType!.FullName}.{Name}",
         FunctionKind.Constructor => $"{ContainingType!.FullName}.__ctor",
         FunctionKind.Destructor => $"{ContainingType!.FullName}.__dtor",
         _ => $"{ContainingNamespace.FullName}.{Name}",

@@ -599,9 +599,15 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindCallExpression(CallExpressionSyntax syntax)
     {
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+
+        if (syntax.Target is MemberAccessExpressionSyntax memberTarget)
+        {
+            return BindMethodCallExpression(memberTarget, arguments, syntax.Arguments);
+        }
+
         if (syntax.Target is not NameExpressionSyntax name)
         {
-            _diagnostics.Report(GetLocation(syntax.Target), "call target must be a function or struct name");
+            _diagnostics.Report(GetLocation(syntax.Target), "call target must be a function, method, or struct name");
             return new BoundErrorExpression();
         }
 
@@ -626,6 +632,21 @@ internal sealed class FunctionBodyBinder
             return new BoundConstructorCallExpression(structType, constructor, arguments);
         }
 
+        if (_function.ContainingType is StructTypeSymbol containingType)
+        {
+            FunctionSymbol? method = containingType.FindMethod(name.IdentifierToken.Text);
+            if (method is not null)
+            {
+                arguments = ValidateFunctionArguments(method, arguments, syntax.Arguments, name.IdentifierToken.Location);
+                PointerTypeSymbol thisType = BuiltinTypes.PointerTo(containingType);
+                return new BoundMethodCallExpression(
+                    new BoundThisExpression(containingType, thisType),
+                    method,
+                    arguments,
+                    IsPointerAccess: true);
+            }
+        }
+
         FunctionSymbol? function = _function.ContainingNamespace.FindFunction(name.IdentifierToken.Text);
         if (function is null)
         {
@@ -635,6 +656,63 @@ internal sealed class FunctionBodyBinder
 
         arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location);
         return new BoundCallExpression(function, arguments);
+    }
+
+    private BoundExpression BindMethodCallExpression(
+        MemberAccessExpressionSyntax target,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax)
+    {
+        BoundExpression receiver = BindExpression(target.Receiver);
+        bool pointerAccess = target.OperatorToken.Kind == SyntaxKind.ArrowToken;
+        StructTypeSymbol? structType = pointerAccess
+            ? (receiver.Type as PointerTypeSymbol)?.ElementType as StructTypeSymbol
+            : receiver.Type as StructTypeSymbol;
+
+        if (structType is null)
+        {
+            if (!ReferenceEquals(receiver.Type, BuiltinTypes.Error))
+            {
+                string expected = pointerAccess ? "pointer to struct" : "struct";
+                _diagnostics.Report(
+                    target.OperatorToken.Location,
+                    $"operator '{target.OperatorToken.Text}' requires a {expected}, but has type '{receiver.Type.Name}'");
+            }
+
+            return new BoundErrorExpression();
+        }
+
+        FunctionSymbol? method = structType.FindMethod(target.MemberToken.Text);
+        if (method is null)
+        {
+            _diagnostics.Report(
+                target.MemberToken.Location,
+                $"struct '{structType.Name}' does not contain method '{target.MemberToken.Text}'");
+            return new BoundErrorExpression();
+        }
+
+        if (!method.IsPublic && !ReferenceEquals(_function.ContainingType, structType))
+        {
+            _diagnostics.Report(
+                target.MemberToken.Location,
+                $"method '{method.Name}' is private in struct '{structType.Name}'");
+        }
+
+        if (pointerAccess && receiver.Type is PointerTypeSymbol { IsConst: true })
+        {
+            _diagnostics.Report(
+                target.MemberToken.Location,
+                $"method '{method.Name}' cannot be called through 'const {structType.Name}*' because readonly methods are not supported yet");
+        }
+        else if (!pointerAccess && IsAddressable(receiver) && !IsWritable(receiver))
+        {
+            _diagnostics.Report(
+                target.MemberToken.Location,
+                $"method '{method.Name}' cannot be called on a readonly '{structType.Name}' value because readonly methods are not supported yet");
+        }
+
+        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, target.MemberToken.Location);
+        return new BoundMethodCallExpression(receiver, method, arguments, pointerAccess);
     }
 
     private BoundExpression BindNewExpression(NewExpressionSyntax syntax)

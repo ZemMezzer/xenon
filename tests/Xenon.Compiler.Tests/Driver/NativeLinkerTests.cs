@@ -99,6 +99,94 @@ public sealed class NativeLinkerTests
         }
     }
 
+    [Fact]
+    public void Linker_CreatesAndRunsHostExecutableUsingStructMethods()
+    {
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Integration;
+
+            struct Counter
+            {
+                int Value;
+
+                public Counter(int value)
+                {
+                    Value = value;
+                }
+
+                private void AddCore(int amount)
+                {
+                    Value += amount;
+                }
+
+                public void Add(int amount)
+                {
+                    AddCore(amount);
+                }
+
+                public int Read()
+                {
+                    return Value;
+                }
+            }
+
+            int Main()
+            {
+                Counter value = Counter(20);
+                value.Add(20);
+
+                Counter* pointer = &value;
+                pointer->Add(2);
+
+                return value.Read();
+            }
+            """, "methods-integration.xe"));
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "xenon-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        string objectPath = Path.Combine(
+            directory,
+            $"methods-integration{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory,
+            "methods-integration",
+            "debug",
+            target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "methods-integration",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path,
+                executablePath,
+                target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [MacOsFact]
     public void Linker_CreatesAndRunsMacOsMachOExecutable()
     {

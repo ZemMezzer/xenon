@@ -45,6 +45,15 @@ public sealed record BoundAssignmentExpression(
     public override BoundKind Kind => BoundKind.AssignmentExpression;
 }
 
+public sealed record BoundMethodCallExpression(
+    BoundExpression Receiver,
+    FunctionSymbol Method,
+    ImmutableArray<BoundExpression> Arguments,
+    bool IsPointerAccess) : BoundExpression(Method.ReturnType)
+{
+    public override BoundKind Kind => BoundKind.MethodCallExpression;
+}
+
 public sealed record BoundMemberAccessExpression(
     BoundExpression Receiver,
     FieldSymbol Field,

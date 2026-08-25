@@ -59,6 +59,23 @@ public sealed record FieldDeclarationSyntax(
     public bool IsPrivate => !IsPublic;
 }
 
+public sealed record MethodDeclarationSyntax(
+    SyntaxToken? AccessModifierToken,
+    TypeSyntax ReturnType,
+    SyntaxToken IdentifierToken,
+    SyntaxToken OpenParenthesisToken,
+    ImmutableArray<ParameterSyntax> Parameters,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken CloseParenthesisToken,
+    BlockStatementSyntax Body) : StructMemberDeclarationSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.MethodDeclaration;
+
+    public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;
+
+    public bool IsPrivate => !IsPublic;
+}
+
 public sealed record ConstructorDeclarationSyntax(
     SyntaxToken? AccessModifierToken,
     SyntaxToken IdentifierToken,
@@ -101,6 +118,9 @@ public sealed record StructDeclarationSyntax(
 
     public ImmutableArray<FieldDeclarationSyntax> Fields =>
         Members.OfType<FieldDeclarationSyntax>().ToImmutableArray();
+
+    public ImmutableArray<MethodDeclarationSyntax> Methods =>
+        Members.OfType<MethodDeclarationSyntax>().ToImmutableArray();
 
     public ImmutableArray<ConstructorDeclarationSyntax> Constructors =>
         Members.OfType<ConstructorDeclarationSyntax>().ToImmutableArray();

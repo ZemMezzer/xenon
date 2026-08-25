@@ -715,6 +715,148 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
+    public void Analyzer_BindsStructMethodsWithImplicitThisAndValueOrPointerReceivers()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Counter
+            {
+                int Value;
+
+                public Counter(int value)
+                {
+                    Value = value;
+                }
+
+                private void AddCore(int amount)
+                {
+                    Value += amount;
+                }
+
+                public void Add(int amount)
+                {
+                    AddCore(amount);
+                }
+
+                public int Read()
+                {
+                    return Value;
+                }
+            }
+
+            int Main()
+            {
+                Counter value = Counter(10);
+                value.Add(5);
+
+                Counter* pointer = &value;
+                pointer->Add(7);
+
+                return value.Read();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+
+        StructTypeSymbol counter = Assert.Single(
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+        Assert.Equal(3, counter.Methods.Length);
+        Assert.True(counter.FindMethod("Add")!.IsPublic);
+        Assert.False(counter.FindMethod("AddCore")!.IsPublic);
+
+        BoundFunction add = Assert.Single(
+            compilation.SemanticModel.Functions.Where(function =>
+                function.Symbol.FunctionKind == FunctionKind.Method &&
+                function.Symbol.Name == "Add"));
+        var addCoreStatement = Assert.IsType<BoundExpressionStatement>(Assert.Single(add.Body.Statements));
+        var implicitCall = Assert.IsType<BoundMethodCallExpression>(addCoreStatement.Expression);
+        Assert.IsType<BoundThisExpression>(implicitCall.Receiver);
+        Assert.True(implicitCall.IsPointerAccess);
+
+        BoundFunction main = Assert.Single(
+            compilation.SemanticModel.Functions.Where(function => function.Symbol.Name == "Main"));
+        var valueCallStatement = Assert.IsType<BoundExpressionStatement>(main.Body.Statements[1]);
+        var valueCall = Assert.IsType<BoundMethodCallExpression>(valueCallStatement.Expression);
+        Assert.False(valueCall.IsPointerAccess);
+        Assert.Equal("Add", valueCall.Method.Name);
+
+        var pointerCallStatement = Assert.IsType<BoundExpressionStatement>(main.Body.Statements[3]);
+        var pointerCall = Assert.IsType<BoundMethodCallExpression>(pointerCallStatement.Expression);
+        Assert.True(pointerCall.IsPointerAccess);
+
+        var returnStatement = Assert.IsType<BoundReturnStatement>(main.Body.Statements[4]);
+        Assert.IsType<BoundMethodCallExpression>(returnStatement.Expression);
+    }
+
+    [Fact]
+    public void Analyzer_EnforcesStructMethodVisibilityAndRejectsConstReceiverCalls()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Counter
+            {
+                int Value;
+
+                void Hidden()
+                {
+                    Value++;
+                }
+
+                public void Add(int amount)
+                {
+                    Value += amount;
+                }
+            }
+
+            void CallConst(const Counter* pointer)
+            {
+                pointer->Add(1);
+            }
+
+            int Main()
+            {
+                Counter value = Counter { 0 };
+                value.Hidden();
+                return 0;
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "method 'Hidden' is private in struct 'Counter'");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message ==
+                "method 'Add' cannot be called through 'const Counter*' because readonly methods are not supported yet");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsStructMethodOverloading()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Counter
+            {
+                public void Add(int value)
+                {
+                }
+
+                public void Add(float value)
+                {
+                }
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message ==
+                "method overloading is not supported yet; struct 'Counter' may declare only one method named 'Add'");
+    }
+
+    [Fact]
     public void Analyzer_BindsHeapAndStackArraysAndRejectsStackEscape()
     {
         Compilation compilation = CreateCompilation("""

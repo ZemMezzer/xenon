@@ -271,6 +271,54 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_EmitsStructMethodsWithImplicitThis()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Counter
+            {
+                int Value;
+
+                public Counter(int value)
+                {
+                    Value = value;
+                }
+
+                public void Add(int amount)
+                {
+                    Value += amount;
+                }
+
+                public int Read()
+                {
+                    return Value;
+                }
+            }
+
+            int Main()
+            {
+                Counter value = Counter(20);
+                value.Add(22);
+
+                Counter* pointer = &value;
+                pointer->Add(1);
+
+                return value.Read();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "struct-methods");
+
+        Assert.Contains("define void @Example.Counter.Add(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @Example.Counter.Read(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @Example.Counter.Add(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call i32 @Example.Counter.Read(ptr", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_EmitsContextuallyTypedNullPointers()
     {
         Compilation compilation = CreateCompilation("""
@@ -375,6 +423,41 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Contains($"target triple = \"{target.Triple}\"", llvmIr, StringComparison.Ordinal);
         Assert.Contains("target datalayout =", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @main()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call i32 @Example.Main()", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_DoesNotTreatStructMainMethodAsExecutableEntryPoint()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Worker
+            {
+                public int Main()
+                {
+                    return 7;
+                }
+            }
+
+            int Main()
+            {
+                Worker worker = Worker { };
+                return worker.Main();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            target,
+            "method-main",
+            generateExecutableEntryPoint: true);
+
+        Assert.Contains("define i32 @Example.Worker.Main(ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("define i32 @main()", llvmIr, StringComparison.Ordinal);
         Assert.Contains("call i32 @Example.Main()", llvmIr, StringComparison.Ordinal);
     }

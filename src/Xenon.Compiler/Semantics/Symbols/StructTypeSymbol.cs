@@ -6,6 +6,7 @@ namespace Xenon.Compiler.Semantics.Symbols;
 public sealed class StructTypeSymbol : TypeSymbol
 {
     private ImmutableArray<FieldSymbol> _fields = [];
+    private ImmutableArray<FunctionSymbol> _methods = [];
 
     internal StructTypeSymbol(
         string name,
@@ -23,6 +24,8 @@ public sealed class StructTypeSymbol : TypeSymbol
 
     public ImmutableArray<FieldSymbol> Fields => _fields;
 
+    public ImmutableArray<FunctionSymbol> Methods => _methods;
+
     public FunctionSymbol? Constructor { get; private set; }
 
     public FunctionSymbol? Destructor { get; private set; }
@@ -37,6 +40,16 @@ public sealed class StructTypeSymbol : TypeSymbol
         }
 
         _fields = fields;
+    }
+
+    internal void SetMethods(ImmutableArray<FunctionSymbol> methods)
+    {
+        if (!_methods.IsDefaultOrEmpty)
+        {
+            throw new InvalidOperationException($"methods for struct '{FullName}' are already defined");
+        }
+
+        _methods = methods;
     }
 
     internal void SetConstructor(FunctionSymbol constructor)
@@ -61,6 +74,9 @@ public sealed class StructTypeSymbol : TypeSymbol
 
     public FieldSymbol? FindField(string name) =>
         _fields.FirstOrDefault(field => string.Equals(field.Name, name, StringComparison.Ordinal));
+
+    public FunctionSymbol? FindMethod(string name) =>
+        _methods.FirstOrDefault(method => string.Equals(method.Name, name, StringComparison.Ordinal));
 }
 
 public sealed class FieldSymbol : Symbol
