@@ -126,6 +126,45 @@ public sealed class XenonProjectLoaderTests
         Assert.Contains("no .xe source files", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void BuildPaths_SeparatesObjectsByProfileAndTarget()
+    {
+        using var directory = new TemporaryDirectory();
+        string projectDirectory = directory.CreateDirectory("ImplicitApp");
+        directory.Write("ImplicitApp/Main.xe", "namespace Example; int Main() { return 0; }");
+        XenonProject project = XenonProjectLoader.LoadDirectory(projectDirectory);
+
+        string objectPath = XenonBuildPaths.GetObjectFilePath(
+            project,
+            "release",
+            "x86_64-pc-windows-msvc",
+            ".obj");
+
+        Assert.Equal(
+            Path.Combine(
+                projectDirectory,
+                ".xenon",
+                "obj",
+                "release",
+                "x86_64-pc-windows-msvc",
+                "ImplicitApp.obj"),
+            objectPath);
+
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            projectDirectory,
+            project.Name,
+            "release",
+            "x86_64-pc-windows-msvc");
+        Assert.Equal(
+            Path.Combine(
+                projectDirectory,
+                "build",
+                "release",
+                "x86_64-pc-windows-msvc",
+                "ImplicitApp.exe"),
+            executablePath);
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()

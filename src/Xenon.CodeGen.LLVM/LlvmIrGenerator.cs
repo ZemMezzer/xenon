@@ -12,10 +12,42 @@ public sealed class LlvmIrGenerator
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private LLVMContextRef _context;
     private LLVMModuleRef _module;
+    private NativeTargetMachine? _targetMachine;
 
-    public string Generate(Compilation compilation, string moduleName = "xenon")
+    public string Generate(Compilation compilation, string moduleName = "xenon") =>
+        GenerateModule(
+            compilation,
+            moduleName,
+            targetMachine: null,
+            module => module.PrintToString(),
+            generateExecutableEntryPoint: false);
+
+    public string GenerateForTarget(
+        Compilation compilation,
+        LlvmTargetOptions targetOptions,
+        string moduleName = "xenon",
+        bool generateExecutableEntryPoint = false)
+    {
+        ArgumentNullException.ThrowIfNull(targetOptions);
+        using NativeTargetMachine targetMachine = NativeTargetMachine.Create(targetOptions);
+        return GenerateModule(
+            compilation,
+            moduleName,
+            targetMachine,
+            module => module.PrintToString(),
+            generateExecutableEntryPoint);
+    }
+
+    internal TResult GenerateModule<TResult>(
+        Compilation compilation,
+        string moduleName,
+        NativeTargetMachine? targetMachine,
+        Func<LLVMModuleRef, TResult> resultFactory,
+        bool generateExecutableEntryPoint)
     {
         ArgumentNullException.ThrowIfNull(compilation);
+        ArgumentException.ThrowIfNullOrWhiteSpace(moduleName);
+        ArgumentNullException.ThrowIfNull(resultFactory);
 
         if (compilation.HasErrors)
         {
@@ -24,13 +56,25 @@ public sealed class LlvmIrGenerator
 
         _context = LLVMContextRef.Create();
         _module = _context.CreateModuleWithName(moduleName);
+        _targetMachine = targetMachine;
 
         try
         {
+            if (targetMachine is not null)
+            {
+                _module.Target = targetMachine.Triple;
+                _module.DataLayout = targetMachine.DataLayout;
+            }
+
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
             EmitFunctionBodies(compilation.SemanticModel.Functions);
+            if (generateExecutableEntryPoint)
+            {
+                EmitExecutableEntryPoint(compilation.SemanticModel.Functions);
+            }
+
             _module.Verify(LLVMVerifierFailureAction.LLVMReturnStatusAction);
-            return _module.PrintToString();
+            return resultFactory(_module);
         }
         catch (LlvmCodeGenerationException)
         {
@@ -45,6 +89,7 @@ public sealed class LlvmIrGenerator
             _module.Dispose();
             _context.Dispose();
             _functions.Clear();
+            _targetMachine = null;
         }
     }
 
@@ -87,6 +132,50 @@ public sealed class LlvmIrGenerator
         }
     }
 
+    private void EmitExecutableEntryPoint(ImmutableArray<BoundFunction> functions)
+    {
+        BoundFunction[] candidates = functions
+            .Where(function => function.Symbol.Name == "Main")
+            .ToArray();
+        if (candidates.Length == 0)
+        {
+            throw new LlvmCodeGenerationException(
+                "Executable project must declare exactly one entry point 'int Main()'.");
+        }
+
+        if (candidates.Length > 1)
+        {
+            throw new LlvmCodeGenerationException(
+                "Executable project declares multiple functions named 'Main'.");
+        }
+
+        FunctionSymbol entryPoint = candidates[0].Symbol;
+        if (!ReferenceEquals(entryPoint.ReturnType, BuiltinTypes.Int) || !entryPoint.Parameters.IsEmpty)
+        {
+            throw new LlvmCodeGenerationException(
+                $"Entry point '{entryPoint.FullName}' must have signature 'int Main()'.");
+        }
+
+        LlvmFunction xenonEntryPoint = _functions[entryPoint];
+        LLVMTypeRef nativeEntryPointType = LLVMTypeRef.CreateFunction(_context.Int32Type, [], false);
+        if (_module.GetNamedFunction("main").Handle != IntPtr.Zero)
+        {
+            throw new LlvmCodeGenerationException(
+                "Native symbol 'main' conflicts with the generated executable entry point.");
+        }
+
+        LLVMValueRef nativeEntryPoint = _module.AddFunction("main", nativeEntryPointType);
+        LLVMBasicBlockRef block = nativeEntryPoint.AppendBasicBlock("entry");
+        using LLVMBuilderRef builder = _context.CreateBuilder();
+        builder.PositionAtEnd(block);
+        LLVMValueRef result = builder.BuildCall2(
+            xenonEntryPoint.Type,
+            xenonEntryPoint.Value,
+            Array.Empty<LLVMValueRef>(),
+            "result");
+        builder.BuildRet(result);
+    }
+
     private LLVMTypeRef MapType(TypeSymbol type)
     {
         if (ReferenceEquals(type, BuiltinTypes.Void))
@@ -119,6 +208,17 @@ public sealed class LlvmIrGenerator
             return _context.Int64Type;
         }
 
+        if (ReferenceEquals(type, BuiltinTypes.NInt) || ReferenceEquals(type, BuiltinTypes.NUInt))
+        {
+            return MapTargetInteger(type, GetPointerBitWidth());
+        }
+
+        if (ReferenceEquals(type, BuiltinTypes.CLong) || ReferenceEquals(type, BuiltinTypes.CULong))
+        {
+            int bitWidth = IsWindowsTarget() ? 32 : GetPointerBitWidth();
+            return MapTargetInteger(type, bitWidth);
+        }
+
         if (ReferenceEquals(type, BuiltinTypes.Float))
         {
             return _context.FloatType;
@@ -137,6 +237,23 @@ public sealed class LlvmIrGenerator
         throw new LlvmCodeGenerationException(
             $"Type '{type.Name}' requires target information and cannot be lowered by the target-independent LLVM milestone.");
     }
+
+    private LLVMTypeRef MapTargetInteger(TypeSymbol type, int bitWidth) => bitWidth switch
+    {
+        32 => _context.Int32Type,
+        64 => _context.Int64Type,
+        _ => throw new LlvmCodeGenerationException(
+            $"Target integer type '{type.Name}' has unsupported width {bitWidth}."),
+    };
+
+    private int GetPointerBitWidth() => _targetMachine?.PointerBitWidth
+        ?? throw new LlvmCodeGenerationException(
+            "Target-dependent integer types require a configured LLVM target machine.");
+
+    private bool IsWindowsTarget() => _targetMachine?.Triple.Contains(
+        "windows",
+        StringComparison.OrdinalIgnoreCase) is true ||
+        _targetMachine?.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase) is true;
 
     private static string GetNativeName(FunctionSymbol function)
     {

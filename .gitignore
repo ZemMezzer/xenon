@@ -53,6 +53,9 @@ dkms.conf
 
 # debug information files
 *.dwo
+.xenon/
+**/.xenon/
+**/build/
 .idea
 tests/Xenon.Compiler.Tests/bin
 tests/Xenon.Compiler.Tests/obj
@@ -64,3 +67,5 @@ src/Xenon.Compiler/bin
 src/Xenon.Compiler/obj
 src/Xenon.ProjectSystem/bin
 src/Xenon.ProjectSystem/obj
+src/Xenon.Driver/bin
+src/Xenon.Driver/obj

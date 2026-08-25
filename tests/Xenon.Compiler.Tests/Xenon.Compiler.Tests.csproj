@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
     <ProjectReference Include="../../src/Xenon.Compiler/Xenon.Compiler.csproj" />
+    <ProjectReference Include="../../src/Xenon.Driver/Xenon.Driver.csproj" />
     <ProjectReference Include="../../src/Xenon.ProjectSystem/Xenon.ProjectSystem.csproj" />
   </ItemGroup>
 </Project>

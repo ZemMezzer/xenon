@@ -1,9 +1,11 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Text;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
+using Xenon.Driver;
 using Xenon.ProjectSystem;
 
 namespace Xenon.Cli;
@@ -29,10 +31,14 @@ internal static class Program
         }
 
         bool buildCommand = args.Length > 0 && string.Equals(args[0], "build", StringComparison.Ordinal);
-        int argumentIndex = buildCommand ? 1 : 0;
+        bool runCommand = args.Length > 0 && string.Equals(args[0], "run", StringComparison.Ordinal);
+        bool projectCommand = buildCommand || runCommand;
+        int argumentIndex = projectCommand ? 1 : 0;
         bool dumpTokens = false;
         bool emitLlvm = false;
+        bool emitObject = projectCommand;
         string profileName = "debug";
+        string? targetTriple = null;
         var inputs = new List<string>();
 
         while (argumentIndex < args.Length)
@@ -46,6 +52,9 @@ internal static class Program
                 case "--emit-llvm":
                     emitLlvm = true;
                     break;
+                case "--emit-object":
+                    emitObject = true;
+                    break;
                 case "--release":
                     profileName = "release";
                     break;
@@ -57,10 +66,22 @@ internal static class Program
 
                     profileName = args[argumentIndex++];
                     break;
+                case "--target":
+                    if (argumentIndex == args.Length)
+                    {
+                        return WriteUsageError("option '--target' requires a value");
+                    }
+
+                    targetTriple = args[argumentIndex++];
+                    break;
                 default:
                     if (argument.StartsWith("--profile=", StringComparison.Ordinal))
                     {
                         profileName = argument["--profile=".Length..];
+                    }
+                    else if (argument.StartsWith("--target=", StringComparison.Ordinal))
+                    {
+                        targetTriple = argument["--target=".Length..];
                     }
                     else if (argument.StartsWith("-", StringComparison.Ordinal))
                     {
@@ -80,11 +101,22 @@ internal static class Program
             return WriteUsageError($"unknown build profile '{profileName}'");
         }
 
-        if (buildCommand)
+        if (targetTriple is not null && string.IsNullOrWhiteSpace(targetTriple))
+        {
+            return WriteUsageError("target triple cannot be empty");
+        }
+
+        if (targetTriple is not null && !emitObject)
+        {
+            return WriteUsageError("option '--target' requires 'build' or '--emit-object'");
+        }
+
+        if (projectCommand)
         {
             if (inputs.Count > 1)
             {
-                return WriteUsageError("'xenon build' accepts at most one file, project, or directory");
+                return WriteUsageError(
+                    $"'xenon {(runCommand ? "run" : "build")}' accepts at most one file, project, or directory");
             }
 
             if (inputs.Count == 0)
@@ -107,6 +139,11 @@ internal static class Program
         {
             Console.Error.WriteLine($"error: {exception.Message}");
             return UsageError;
+        }
+
+        if (runCommand && !input.GenerateExecutableEntryPoint)
+        {
+            return WriteUsageError("'xenon run' requires an executable project");
         }
 
         var sources = new List<SourceText>(input.SourceFiles.Length);
@@ -140,11 +177,108 @@ internal static class Program
             return CompilationError;
         }
 
+        LlvmObjectFile? objectFile = null;
+        LlvmTargetOptions? selectedTarget = null;
+        if (emitObject)
+        {
+            try
+            {
+                string effectiveTriple = targetTriple ?? LlvmTargetPlatform.HostTriple;
+                bool positionIndependentCode = input.PositionIndependentCode ||
+                    (input.GenerateExecutableEntryPoint && !IsWindowsTarget(effectiveTriple));
+                selectedTarget = new LlvmTargetOptions(
+                    effectiveTriple,
+                    input.Profile.OptimizationLevel,
+                    PositionIndependentCode: positionIndependentCode);
+                string objectExtension = LlvmTargetPlatform.GetObjectFileExtension(selectedTarget.Triple);
+                string objectPath = XenonBuildPaths.GetObjectFilePath(
+                    input.RootDirectory,
+                    input.Name,
+                    profileName,
+                    selectedTarget.Triple,
+                    objectExtension);
+                objectFile = new LlvmObjectEmitter().Emit(
+                    compilation,
+                    objectPath,
+                    selectedTarget,
+                    input.Name,
+                    input.GenerateExecutableEntryPoint);
+                Console.WriteLine(
+                    $"Wrote {objectFile.TargetTriple} object file to '{objectFile.Path}'.");
+            }
+            catch (LlvmCodeGenerationException exception)
+            {
+                Console.Error.WriteLine($"error: {exception.Message}");
+                return CompilationError;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine($"error: cannot write object file: {exception.Message}");
+                return CompilationError;
+            }
+        }
+
+        LinkedExecutable? executable = null;
+        if (projectCommand && input.GenerateExecutableEntryPoint)
+        {
+            if (selectedTarget is null || objectFile is null)
+            {
+                Console.Error.WriteLine("error: executable linking requires an emitted object file");
+                return CompilationError;
+            }
+
+            string hostTriple = LlvmTargetPlatform.HostTriple;
+            if (!string.Equals(selectedTarget.Triple, hostTriple, StringComparison.OrdinalIgnoreCase))
+            {
+                if (runCommand)
+                {
+                    Console.Error.WriteLine(
+                        $"error: cannot run target '{selectedTarget.Triple}' on host '{hostTriple}'");
+                    return UsageError;
+                }
+
+                Console.WriteLine(
+                    $"Skipped linking for cross target '{selectedTarget.Triple}'; the object file is ready for a configured target SDK/linker.");
+            }
+            else
+            {
+                try
+                {
+                    string executablePath = XenonBuildPaths.GetExecutablePath(
+                        input.RootDirectory,
+                        input.Name,
+                        profileName,
+                        selectedTarget.Triple);
+                    executable = new NativeLinker().LinkExecutable(
+                        objectFile.Path,
+                        executablePath,
+                        selectedTarget.Triple);
+                    Console.WriteLine($"Wrote executable to '{executable.Path}'.");
+                }
+                catch (LinkerException exception)
+                {
+                    Console.Error.WriteLine($"error: {exception.Message}");
+                    return CompilationError;
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    Console.Error.WriteLine($"error: cannot write executable: {exception.Message}");
+                    return CompilationError;
+                }
+            }
+        }
+
         if (emitLlvm)
         {
             try
             {
-                string llvmIr = new LlvmIrGenerator().Generate(compilation, input.Name);
+                string llvmIr = selectedTarget is null
+                    ? new LlvmIrGenerator().Generate(compilation, input.Name)
+                    : new LlvmIrGenerator().GenerateForTarget(
+                        compilation,
+                        selectedTarget,
+                        input.Name,
+                        input.GenerateExecutableEntryPoint);
                 File.WriteAllText(
                     input.LlvmOutputPath,
                     llvmIr,
@@ -169,6 +303,18 @@ internal static class Program
         Console.WriteLine(
             $"Analyzed {projectKind} project '{input.Name}' ({profileName}): " +
             $"{compilation.SyntaxTrees.Length} file(s), {memberCount} declaration(s), {tokenCount} token(s).");
+
+        if (runCommand)
+        {
+            if (executable is null)
+            {
+                Console.Error.WriteLine("error: no executable was produced");
+                return CompilationError;
+            }
+
+            return RunExecutable(executable.Path, input.RootDirectory);
+        }
+
         return Success;
     }
 
@@ -177,15 +323,19 @@ internal static class Program
         if (inputs.Count == 1)
         {
             XenonProject project = XenonProjectLoader.Resolve(inputs[0]);
-            _ = project.GetProfile(profileName);
+            XenonBuildProfile projectProfile = project.GetProfile(profileName);
             string llvmOutputPath = project.IsImplicit && project.SourceFiles.Length == 1
                 ? Path.ChangeExtension(project.SourceFiles[0], ".ll")
                 : Path.Combine(project.RootDirectory, $"{project.Name}.ll");
             return new CompilationInput(
                 project.Name,
                 project.IsImplicit,
+                project.RootDirectory,
                 project.SourceFiles,
-                llvmOutputPath);
+                llvmOutputPath,
+                projectProfile,
+                project.Type is XenonProjectType.SharedLibrary,
+                project.Type is XenonProjectType.Executable);
         }
 
         var sourceFiles = ImmutableArray.CreateBuilder<string>(inputs.Count);
@@ -207,11 +357,19 @@ internal static class Program
         }
 
         string firstSource = sourceFiles[0];
+        string rootDirectory = Path.GetDirectoryName(firstSource)!;
+        XenonBuildProfile defaultProfile = profileName == "release"
+            ? XenonBuildProfile.Release
+            : XenonBuildProfile.Debug;
         return new CompilationInput(
             Path.GetFileNameWithoutExtension(firstSource),
             IsImplicit: true,
+            rootDirectory,
             sourceFiles.ToImmutable(),
-            Path.ChangeExtension(firstSource, ".ll"));
+            Path.ChangeExtension(firstSource, ".ll"),
+            defaultProfile,
+            PositionIndependentCode: false,
+            GenerateExecutableEntryPoint: true);
     }
 
     private static int WriteUsageError(string message)
@@ -219,6 +377,32 @@ internal static class Program
         Console.Error.WriteLine($"error: {message}");
         return UsageError;
     }
+
+    private static int RunExecutable(string executablePath, string workingDirectory)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executablePath,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+            };
+            using Process process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException($"failed to start executable '{executablePath}'");
+            process.WaitForExit();
+            return process.ExitCode;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"error: cannot run executable '{executablePath}': {exception.Message}");
+            return CompilationError;
+        }
+    }
+
+    private static bool IsWindowsTarget(string triple) =>
+        triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
+        triple.Contains("win32", StringComparison.OrdinalIgnoreCase);
 
     private static void DumpTokens(Compilation compilation)
     {
@@ -244,8 +428,9 @@ internal static class Program
         Console.WriteLine("Xenon compiler");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  xenon build [path] [--profile debug|release] [--dump-tokens] [--emit-llvm]");
-        Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] <source.xe> [additional.xe ...]");
+        Console.WriteLine("  xenon build [path] [--profile debug|release] [--target triple] [--dump-tokens] [--emit-llvm]");
+        Console.WriteLine("  xenon run [path] [--profile debug|release]");
+        Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] [--emit-object] <source.xe> [additional.xe ...]");
         Console.WriteLine("  xenon --version");
         Console.WriteLine("  xenon --help");
         Console.WriteLine();
@@ -255,6 +440,10 @@ internal static class Program
     private sealed record CompilationInput(
         string Name,
         bool IsImplicit,
+        string RootDirectory,
         ImmutableArray<string> SourceFiles,
-        string LlvmOutputPath);
+        string LlvmOutputPath,
+        XenonBuildProfile Profile,
+        bool PositionIndependentCode,
+        bool GenerateExecutableEntryPoint);
 }
