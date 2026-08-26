@@ -12,7 +12,7 @@ public sealed class LexerTests
         const string source = """
             namespace Example;
 
-            extern int puts(const byte* text);
+            extern int puts(readonly byte* text);
 
             int Main()
             {

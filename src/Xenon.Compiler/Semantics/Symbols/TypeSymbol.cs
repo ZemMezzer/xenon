@@ -35,30 +35,30 @@ public sealed class PrimitiveTypeSymbol : TypeSymbol
 
 public sealed class PointerTypeSymbol : TypeSymbol
 {
-    internal PointerTypeSymbol(TypeSymbol elementType, bool isConst)
-        : base($"{(isConst ? "const " : string.Empty)}{elementType.Name}*")
+    internal PointerTypeSymbol(TypeSymbol elementType, bool isReadonly)
+        : base($"{(isReadonly ? "readonly " : string.Empty)}{elementType.Name}*")
     {
         ElementType = elementType;
-        IsConst = isConst;
+        IsReadonly = isReadonly;
     }
 
     public TypeSymbol ElementType { get; }
 
-    public bool IsConst { get; }
+    public bool IsReadonly { get; }
 }
 
 public sealed class ReferenceTypeSymbol : TypeSymbol
 {
-    internal ReferenceTypeSymbol(TypeSymbol elementType, bool isConst)
-        : base($"{(isConst ? "const " : string.Empty)}{elementType.Name}&")
+    internal ReferenceTypeSymbol(TypeSymbol elementType, bool isReadonly)
+        : base($"{(isReadonly ? "readonly " : string.Empty)}{elementType.Name}&")
     {
         ElementType = elementType;
-        IsConst = isConst;
+        IsReadonly = isReadonly;
     }
 
     public TypeSymbol ElementType { get; }
 
-    public bool IsConst { get; }
+    public bool IsReadonly { get; }
 }
 
 

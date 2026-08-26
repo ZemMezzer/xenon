@@ -41,7 +41,7 @@ public sealed class NativeLinkerTests
         Compilation compilation = Compilation.Create(SourceText.From("""
             namespace Integration;
 
-            extern int puts(const byte* text);
+            extern int puts(readonly byte* text);
 
             int Main()
             {
@@ -261,7 +261,7 @@ public sealed class NativeLinkerTests
         Compilation compilation = Compilation.Create(SourceText.From("""
             namespace MacOsIntegration;
 
-            extern int puts(const byte* text);
+            extern int puts(readonly byte* text);
 
             int Main()
             {
@@ -755,6 +755,796 @@ public sealed class NativeLinkerTests
             })!;
             process.WaitForExit();
             Assert.Equal(20, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExecutesReadonlyFieldReferenceAndMethodFlow()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Counter
+            {
+                readonly int Value;
+
+                public Counter(int value)
+                {
+                    Value = value;
+                }
+
+                public readonly int Read()
+                {
+                    return Value;
+                }
+            }
+
+            int Main()
+            {
+                readonly Counter counter = Counter(42);
+                readonly Counter& reference = counter;
+                return reference.Read();
+            }
+            """, "readonly-flow.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"readonly-flow{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "readonly-flow", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "readonly-flow",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_SelectsReadonlyAwareMethodOverloads()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Container
+            {
+                int Value;
+
+                public int& Get()
+                {
+                    return Value;
+                }
+
+                public readonly readonly int& Get()
+                {
+                    return Value;
+                }
+            }
+
+            int Main()
+            {
+                Container value = Container { 7 };
+                Container& mutable = value;
+                readonly Container& readOnly = mutable;
+                int& writable = mutable.Get();
+                writable = 42;
+                readonly int& readable = readOnly.Get();
+                return readable;
+            }
+            """, "readonly-overloads.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"readonly-overloads{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "readonly-overloads", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "readonly-overloads",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExecutesInstanceFieldInitializersAfterBaseConstruction()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            int Offset()
+            {
+                return 2;
+            }
+
+            struct Base
+            {
+                public int Stage;
+
+                public Base()
+                {
+                    Stage = 40;
+                }
+            }
+
+            struct Derived : Base
+            {
+                readonly int Result = Stage + Offset();
+                int Marker = 7;
+
+                public Derived()
+                {
+                    Marker = Marker + 1;
+                }
+
+                public readonly int ReadResult()
+                {
+                    return Result;
+                }
+
+                public readonly int ReadMarker()
+                {
+                    return Marker;
+                }
+            }
+
+            int Main()
+            {
+                Derived value = Derived();
+                if (value.ReadMarker() != 8)
+                    return 1;
+                return value.ReadResult();
+            }
+            """, "field-initializers.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"field-initializers{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "field-initializers", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "field-initializers",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExecutesFieldInitializersForPositionalAndDefaultBaseConstruction()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Value
+            {
+                int Seed = 20;
+                public readonly int Number = Seed + 2;
+            }
+
+            struct Base
+            {
+                public readonly int Number = 20;
+            }
+
+            struct Derived : Base
+            {
+                public Derived()
+                    : base()
+                {
+                }
+            }
+
+            int Main()
+            {
+                Value first = Value { };
+                Derived second = Derived();
+                return first.Number + second.Number;
+            }
+            """, "default-field-initializers.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"default-field-initializers{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "default-field-initializers", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "default-field-initializers",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExecutesPropertyGetterAndSetter()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Player
+            {
+                int health;
+
+                public int Health
+                {
+                    get { return health; }
+                    set { health = value; }
+                }
+            }
+
+            int Main()
+            {
+                Player player = Player { 0 };
+                player.Health = 42;
+                return player.Health;
+            }
+            """, "properties.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"properties{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "properties", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "properties",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_DispatchesVirtualPropertyAccessors()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Base
+            {
+                int stored;
+
+                public virtual int Value
+                {
+                    get { return stored; }
+                    set { stored = value; }
+                }
+            }
+
+            struct Derived : Base
+            {
+                int adjusted;
+
+                public override int Value
+                {
+                    get { return adjusted + 1; }
+                    set { adjusted = value + 1; }
+                }
+            }
+
+            int Main()
+            {
+                Derived derived = Derived { 0, 0 };
+                Base* value = &derived;
+                value->Value = 40;
+                return value->Value;
+            }
+            """, "virtual-properties.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"virtual-properties{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "virtual-properties", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "virtual-properties",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExecutesCompoundVirtualPropertyAssignmentsAndEvaluatesReceiverOnce()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Base
+            {
+                int stored;
+
+                public virtual int Value
+                {
+                    get { return stored; }
+                    set { stored = value; }
+                }
+            }
+
+            struct Derived : Base
+            {
+                int adjusted;
+
+                public override int Value
+                {
+                    get { return adjusted; }
+                    set { adjusted = value; }
+                }
+            }
+
+            struct Probe
+            {
+                public static int Calls;
+
+                public static Base* Get(Base* value)
+                {
+                    Probe.Calls += 1;
+                    return value;
+                }
+            }
+
+            int Main()
+            {
+                Derived derived = Derived { 0, 1 };
+                Base* view = &derived;
+                Probe.Get(view)->Value += 50;
+                view->Value -= 10;
+                return view->Value + Probe.Calls;
+            }
+            """, "compound-virtual-properties.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"compound-virtual-properties{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "compound-virtual-properties", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "compound-virtual-properties",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_DispatchesInterfacePropertyAccessors()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            interface IValue
+            {
+                int Value { get; set; }
+            }
+
+            struct Box : IValue
+            {
+                int stored;
+
+                public int Value
+                {
+                    get { return stored; }
+                    set { stored = value; }
+                }
+            }
+
+            int Main()
+            {
+                Box box = Box { 0 };
+                IValue value = box;
+                value.Value = 42;
+                return value.Value;
+            }
+            """, "interface-properties.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"interface-properties{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "interface-properties", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "interface-properties",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_DispatchesMultiParameterInterfaceIndexer()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            interface IGrid
+            {
+                int this[int x, int y] { get; set; }
+            }
+
+            struct Grid : IGrid
+            {
+                int stored;
+
+                public int this[int x, int y]
+                {
+                    get { return stored + x + y; }
+                    set { stored = value - x - y; }
+                }
+            }
+
+            int Main()
+            {
+                Grid concrete = Grid { 0 };
+                IGrid grid = concrete;
+                grid[4, 7] = 42;
+                return grid[4, 7];
+            }
+            """, "interface-indexers.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"interface-indexers{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "interface-indexers", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "interface-indexers",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExecutesCompoundInterfaceIndexerAssignmentAndEvaluatesArgumentsOnce()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            interface IGrid
+            {
+                int Value { get; set; }
+                int this[int x, int y] { get; set; }
+            }
+
+            struct Grid : IGrid
+            {
+                int stored;
+
+                public int Value
+                {
+                    get { return stored; }
+                    set { stored = value; }
+                }
+
+                public int this[int x, int y]
+                {
+                    get { return stored + x + y; }
+                    set { stored = value - x - y; }
+                }
+            }
+
+            struct Probe
+            {
+                public static int Calls;
+
+                public static int Next()
+                {
+                    Probe.Calls += 1;
+                    return Probe.Calls;
+                }
+            }
+
+            int Main()
+            {
+                Grid concrete = Grid { 0 };
+                IGrid grid = concrete;
+                grid.Value += 10;
+                grid.Value -= 5;
+                grid[Probe.Next(), Probe.Next()] += 35;
+                return grid.Value + Probe.Calls;
+            }
+            """, "compound-interface-indexers.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"compound-interface-indexers{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "compound-interface-indexers", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "compound-interface-indexers",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_InlinesModuleAndStructConstants()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            const int A = 4;
+            const int B = A * 2;
+            const int C = B + A;
+
+            struct Values
+            {
+                const int Factor = 3;
+            }
+
+            int Main() { return C * Values.Factor; }
+            """, "constants.xe"));
+        string objectPath = Path.Combine(directory, $"constants{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(directory, "constants", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "constants", generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(objectFile.Path, executablePath, target.Triple);
+            using Process process = Process.Start(new ProcessStartInfo { FileName = executable.Path, UseShellExecute = false })!;
+            process.WaitForExit();
+            Assert.Equal(36, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_EvaluatesLayoutAndCastConstantExpressions()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Pair
+            {
+                int First;
+                long Second;
+            }
+
+            const int PairSize = sizeof(Pair);
+            const int PairAlignment = alignof(Pair);
+            const int SecondOffset = offsetof(Pair, Second);
+            const int Narrowed = cast<int>(cast<long>(6));
+
+            int Main()
+            {
+                return PairSize + PairAlignment + SecondOffset + Narrowed;
+            }
+            """, "layout-constants.xe"));
+        string objectPath = Path.Combine(directory, $"layout-constants{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(directory, "layout-constants", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "layout-constants", generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(objectFile.Path, executablePath, target.Triple);
+            using Process process = Process.Start(new ProcessStartInfo { FileName = executable.Path, UseShellExecute = false })!;
+            process.WaitForExit();
+            Assert.Equal(38, process.ExitCode);
         }
         finally
         {

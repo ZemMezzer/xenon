@@ -28,14 +28,22 @@ internal static class TypeResolver
             type = BuiltinTypes.Error;
         }
 
-        if (syntax.IsConst && syntax.PointerDepth == 0 && !syntax.IsReference)
+        if (syntax.IsConst && syntax.PointerDepth > 0)
         {
-            diagnostics.Report(syntax.ConstKeyword!.Location, "'const' is currently supported only for pointer element and reference types");
+            diagnostics.Report(syntax.ConstKeyword!.Location, "'const T*' is no longer supported; use 'readonly T*'");
+        }
+        else if (syntax.IsConst && syntax.IsReference)
+        {
+            diagnostics.Report(syntax.ConstKeyword!.Location, "'const T&' is no longer supported; use 'readonly T&'");
+        }
+        else if (syntax.IsConst)
+        {
+            diagnostics.Report(syntax.ConstKeyword!.Location, "'const' cannot qualify a runtime type; use a const declaration for compile-time values");
         }
 
         for (int depth = 0; depth < syntax.PointerDepth; depth++)
         {
-            type = BuiltinTypes.PointerTo(type, syntax.IsConst && depth == 0);
+            type = BuiltinTypes.PointerTo(type, syntax.IsReadonly && depth == 0);
         }
 
         if (syntax.IsReference)
@@ -47,7 +55,7 @@ internal static class TypeResolver
             }
             else
             {
-                type = BuiltinTypes.ReferenceTo(type, syntax.IsConst && syntax.PointerDepth == 0);
+                type = BuiltinTypes.ReferenceTo(type, syntax.IsReadonly);
             }
         }
 

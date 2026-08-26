@@ -190,6 +190,24 @@ internal sealed class FileSymbolScope
         return null;
     }
 
+    public ConstantSymbol? ResolveConstant(string name, TextLocation location, DiagnosticBag diagnostics)
+    {
+        ConstantSymbol? local = ContainingNamespace.FindConstant(name);
+        if (local is not null)
+            return local;
+
+        ConstantSymbol[] matches = _importedNamespaces
+            .Select(@namespace => @namespace.FindConstant(name))
+            .Where(constant => constant is not null)
+            .Cast<ConstantSymbol>()
+            .ToArray();
+        if (matches.Length == 1)
+            return matches[0];
+        if (matches.Length > 1)
+            diagnostics.Report(location, $"constant name '{name}' is ambiguous between imported namespaces");
+        return null;
+    }
+
     public TypeSymbol? ResolveQualifiedType(IReadOnlyList<string> parts)
     {
         if (parts.Count == 0)

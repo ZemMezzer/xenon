@@ -25,13 +25,19 @@ internal static class TypeFacts
         if (destination is PointerTypeSymbol && ReferenceEquals(source, BuiltinTypes.Null))
             return 1000;
 
-        if (destination is PointerTypeSymbol { IsConst: var destinationConst, ElementType: StructTypeSymbol destinationStruct } &&
-            source is PointerTypeSymbol { IsConst: var sourceConst, ElementType: StructTypeSymbol sourceStruct } &&
-            (!sourceConst || destinationConst) &&
-            GetInheritanceDistance(sourceStruct, destinationStruct) is int inheritanceDistance)
+        if (destination is PointerTypeSymbol { IsReadonly: var destinationReadonly } destinationPointer &&
+            source is PointerTypeSymbol { IsReadonly: var sourceReadonly } sourcePointer &&
+            (!sourceReadonly || destinationReadonly))
         {
-            int constQualificationCost = sourceConst == destinationConst ? 0 : 1;
-            return inheritanceDistance + constQualificationCost;
+            int readonlyQualificationCost = sourceReadonly == destinationReadonly ? 0 : 1;
+            if (ReferenceEquals(destinationPointer.ElementType, sourcePointer.ElementType))
+                return readonlyQualificationCost;
+            if (destinationPointer.ElementType is StructTypeSymbol destinationStruct &&
+                sourcePointer.ElementType is StructTypeSymbol sourceStruct &&
+                GetInheritanceDistance(sourceStruct, destinationStruct) is int inheritanceDistance)
+            {
+                return inheritanceDistance + readonlyQualificationCost;
+            }
         }
 
         if (destination is InterfaceTypeSymbol destinationInterface && source is StructTypeSymbol interfaceSourceStruct && interfaceSourceStruct.Implements(destinationInterface))
@@ -45,9 +51,9 @@ internal static class TypeFacts
         int constQualificationCost = 0;
         if (source is ReferenceTypeSymbol sourceReference)
         {
-            if (sourceReference.IsConst && !destination.IsConst)
+            if (sourceReference.IsReadonly && !destination.IsReadonly)
                 return null;
-            constQualificationCost = sourceReference.IsConst == destination.IsConst ? 0 : 1;
+            constQualificationCost = sourceReference.IsReadonly == destination.IsReadonly ? 0 : 1;
             source = sourceReference.ElementType;
         }
 

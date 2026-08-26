@@ -37,7 +37,7 @@ public sealed class ParserTests
         SyntaxTree tree = Parse("""
             namespace Example.Math;
 
-            extern int puts(const byte* text);
+            extern int puts(readonly byte* text);
 
             export int Add(int a, int b)
             {
@@ -54,7 +54,7 @@ public sealed class ParserTests
         Assert.Null(external.Body);
         Assert.NotNull(external.SemicolonToken);
         ParameterSyntax parameter = Assert.Single(external.Parameters);
-        Assert.True(parameter.Type.IsConst);
+        Assert.True(parameter.Type.IsReadonly);
         Assert.Equal(1, parameter.Type.PointerDepth);
 
         var exported = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
@@ -64,12 +64,12 @@ public sealed class ParserTests
     }
 
     [Fact]
-    public void Parser_ParsesMutableAndConstReferenceTypes()
+    public void Parser_ParsesMutableAndReadonlyReferenceTypes()
     {
         SyntaxTree tree = Parse("""
             namespace Example;
 
-            void Read(Entity& value, const Entity& readOnly)
+            void Read(Entity& value, readonly Entity& readOnly)
             {
             }
             """);
@@ -79,7 +79,111 @@ public sealed class ParserTests
         Assert.True(function.Parameters[0].Type.IsReference);
         Assert.False(function.Parameters[0].Type.IsConst);
         Assert.True(function.Parameters[1].Type.IsReference);
-        Assert.True(function.Parameters[1].Type.IsConst);
+        Assert.True(function.Parameters[1].Type.IsReadonly);
+    }
+
+    [Fact]
+    public void Parser_ParsesPropertyAccessors()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            struct Player
+            {
+                int Health
+                {
+                    get { return 1; }
+                    set { }
+                }
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var type = Assert.IsType<StructDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        PropertyDeclarationSyntax property = Assert.Single(type.Properties);
+        Assert.Equal("Health", property.IdentifierToken.Text);
+        Assert.NotNull(property.Getter?.Body);
+        Assert.NotNull(property.Setter?.Body);
+    }
+
+    [Fact]
+    public void Parser_ParsesInterfaceProperty()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            interface IValue
+            {
+                int Value { get; set; }
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var type = Assert.IsType<InterfaceDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        InterfacePropertyDeclarationSyntax property = Assert.Single(type.Properties);
+        Assert.Equal("Value", property.IdentifierToken.Text);
+        Assert.NotNull(property.Getter);
+        Assert.NotNull(property.Setter);
+    }
+
+    [Fact]
+    public void Parser_ParsesMultiParameterStructAndInterfaceIndexers()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            interface IGrid
+            {
+                int this[int x, int y] { get; set; }
+            }
+
+            struct Grid
+            {
+                int this[int x, int y]
+                {
+                    get { return x + y; }
+                    set { }
+                }
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var contract = Assert.IsType<InterfaceDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.Equal(2, Assert.Single(contract.Indexers).Parameters.Length);
+        var implementation = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.Equal(2, Assert.Single(implementation.Indexers).Parameters.Length);
+    }
+
+    [Fact]
+    public void Parser_ParsesModuleAndStructConstants()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            const int Global = 4;
+            struct Values
+            {
+                const int Local = 8;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        Assert.IsType<ModuleConstantDeclarationSyntax>(tree.Root.Members[0]);
+        var type = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.Single(type.Constants);
+    }
+
+    [Fact]
+    public void Parser_ParsesPrimitiveCastExpression()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+            const int Value = cast<int>(cast<long>(42));
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var declaration = Assert.IsType<ModuleConstantDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.IsType<CastExpressionSyntax>(declaration.Initializer);
     }
 
     [Fact]

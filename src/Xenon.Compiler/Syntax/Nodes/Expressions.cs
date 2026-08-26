@@ -68,10 +68,13 @@ public sealed record MemberAccessExpressionSyntax(
 public sealed record IndexExpressionSyntax(
     ExpressionSyntax Receiver,
     SyntaxToken OpenBracketToken,
-    ExpressionSyntax Index,
+    ImmutableArray<ExpressionSyntax> Arguments,
+    ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseBracketToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.IndexExpression;
+
+    public ExpressionSyntax Index => Arguments[0];
 }
 
 public sealed record StructPositionalConstructionExpressionSyntax(
@@ -136,4 +139,16 @@ public sealed record TypeLayoutExpressionSyntax(
     SyntaxToken CloseParenthesisToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.TypeLayoutExpression;
+}
+
+public sealed record CastExpressionSyntax(
+    SyntaxToken CastKeyword,
+    SyntaxToken LessToken,
+    TypeSyntax Type,
+    SyntaxToken GreaterToken,
+    SyntaxToken OpenParenthesisToken,
+    ExpressionSyntax Expression,
+    SyntaxToken CloseParenthesisToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.CastExpression;
 }

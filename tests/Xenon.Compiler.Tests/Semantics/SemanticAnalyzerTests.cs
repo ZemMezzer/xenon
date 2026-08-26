@@ -1,5 +1,6 @@
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xunit;
 
@@ -42,7 +43,7 @@ public sealed class SemanticAnalyzerTests
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
-            extern int puts(const byte* text);
+            extern int puts(readonly byte* text);
 
             int Main()
             {
@@ -417,7 +418,7 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_RejectsWritesThroughConstStructPointer()
+    public void Analyzer_RejectsWritesThroughReadonlyStructPointer()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -428,7 +429,7 @@ public sealed class SemanticAnalyzerTests
                 float Y;
             }
 
-            void Mutate(const Vector2* value)
+            void Mutate(readonly Vector2* value)
             {
                 value->X = 1.0f;
             }
@@ -437,6 +438,42 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message == "left side of assignment must be writable");
+    }
+
+    [Fact]
+    public void Analyzer_UsesReadonlyInsteadOfConstForPointerConstCorrectness()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Value
+            {
+                int Data;
+            }
+
+            void Use(Value* mutable, readonly Value* readOnly)
+            {
+                readonly Value* upgraded = mutable;
+                Value* invalid = readOnly;
+                readOnly->Data = 1;
+            }
+
+            void Legacy(const Value* value)
+            {
+            }
+            """);
+
+        NamespaceSymbol @namespace = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        FunctionSymbol use = @namespace.Functions.Single(function => function.Name == "Use");
+        FunctionSymbol legacy = @namespace.Functions.Single(function => function.Name == "Legacy");
+        Assert.True(Assert.IsType<PointerTypeSymbol>(use.Parameters[1].Type).IsReadonly);
+        Assert.False(Assert.IsType<PointerTypeSymbol>(legacy.Parameters[0].Type).IsReadonly);
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Message == "cannot implicitly convert 'readonly Value*' to 'Value*'");
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Message == "left side of assignment must be writable");
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Message == "'const T*' is no longer supported; use 'readonly T*'");
     }
 
     [Fact]
@@ -1043,7 +1080,7 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_EnforcesStructMethodVisibilityAndRejectsConstReceiverCalls()
+    public void Analyzer_EnforcesStructMethodVisibilityAndReadonlyReceiverCalls()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -1063,7 +1100,7 @@ public sealed class SemanticAnalyzerTests
                 }
             }
 
-            void CallConst(const Counter* pointer)
+            void CallReadonly(readonly Counter* pointer)
             {
                 pointer->Add(1);
             }
@@ -1082,7 +1119,7 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message ==
-                "method 'Add' cannot be called through 'const Counter*' because readonly methods are not supported yet");
+                "mutable method 'Add' cannot be called on a readonly 'Counter' receiver");
     }
 
     [Fact]
@@ -1475,13 +1512,13 @@ public sealed class SemanticAnalyzerTests
 
             struct Messages
             {
-                public static const byte* Text = "Hello";
+                public static readonly readonly byte* Text = "Hello";
             }
             """);
 
         Assert.Contains(
             compilation.Diagnostics,
-            diagnostic => diagnostic.Message == "static field type 'const byte*' does not support this constant initializer");
+            diagnostic => diagnostic.Message == "static field type 'readonly byte*' does not support this constant initializer");
     }
 
     [Fact]
@@ -1517,14 +1554,14 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_RejectsMutationThroughConstReference()
+    public void Analyzer_RejectsMutationThroughReadonlyReference()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
             struct Entity { public int Value; }
 
-            void Mutate(const Entity& entity)
+            void Mutate(readonly Entity& entity)
             {
                 entity.Value = 42;
             }
@@ -1645,6 +1682,531 @@ public sealed class SemanticAnalyzerTests
         var baseCall = Assert.IsType<BoundBaseLifecycleCallExpression>(statement.Expression);
         Assert.Equal("Base", baseCall.Function.ContainingType!.Name);
         Assert.Empty(baseCall.Arguments);
+    }
+
+    [Fact]
+    public void Analyzer_EnforcesReadonlyLocalsAndFields()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            int ReadValue() { return 10; }
+
+            struct Entity
+            {
+                public readonly int Id;
+
+                public Entity(int id)
+                {
+                    Id = id;
+                }
+            }
+
+            void Invalid()
+            {
+                readonly int result = ReadValue();
+                result = 20;
+
+                Entity entity = Entity(1);
+                entity.Id = 2;
+            }
+            """);
+
+        Assert.Equal(
+            2,
+            compilation.Diagnostics.Count(diagnostic => diagnostic.Message == "left side of assignment must be writable"));
+    }
+
+    [Fact]
+    public void Analyzer_BindsInstanceFieldInitializersBetweenBaseCallAndConstructorBody()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base
+            {
+                public int Stage;
+
+                public Base()
+                {
+                    Stage = 40;
+                }
+            }
+
+            struct Derived : Base
+            {
+                readonly int Result = Stage + 2;
+                int Marker = 7;
+
+                public Derived()
+                {
+                    Marker = Marker + 1;
+                }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction constructor = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.FunctionKind == FunctionKind.Constructor &&
+            function.Symbol.ContainingType?.Name == "Derived");
+
+        Assert.IsType<BoundBaseLifecycleCallExpression>(
+            Assert.IsType<BoundExpressionStatement>(constructor.Body.Statements[0]).Expression);
+        var initializerCall = Assert.IsType<BoundBaseLifecycleCallExpression>(
+            Assert.IsType<BoundExpressionStatement>(constructor.Body.Statements[1]).Expression);
+        Assert.Equal(FunctionKind.InstanceInitializer, initializerCall.Function.FunctionKind);
+        Assert.IsType<BoundAssignmentExpression>(
+            Assert.IsType<BoundExpressionStatement>(constructor.Body.Statements[2]).Expression);
+
+        BoundFunction initializer = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.FunctionKind == FunctionKind.InstanceInitializer &&
+            function.Symbol.ContainingType?.Name == "Derived");
+        Assert.Equal(
+            "Result",
+            Assert.IsType<BoundMemberAccessExpression>(
+                Assert.IsType<BoundAssignmentExpression>(
+                    Assert.IsType<BoundExpressionStatement>(initializer.Body.Statements[0]).Expression).Target).Field.Name);
+        Assert.Equal(
+            "Marker",
+            Assert.IsType<BoundMemberAccessExpression>(
+                Assert.IsType<BoundAssignmentExpression>(
+                    Assert.IsType<BoundExpressionStatement>(initializer.Body.Statements[1]).Expression).Target).Field.Name);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsInstanceFieldInitializerTypeMismatch()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Invalid
+            {
+                readonly int Value = true;
+
+                public Invalid()
+                {
+                }
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Message == "cannot implicitly convert 'bool' to 'int'");
+    }
+
+    [Fact]
+    public void Analyzer_BindsThisAsReadonlyReferenceInsideReadonlyMethod()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            void Read(readonly Value& value)
+            {
+            }
+
+            struct Value
+            {
+                public readonly void Test()
+                {
+                    Read(this);
+                }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_EnforcesReadonlyInterfaceMemberCalls()
+    {
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+
+            interface IValue
+            {
+                readonly int Read();
+                readonly int Current { get; }
+                readonly int this[int index] { get; }
+            }
+
+            struct Value : IValue
+            {
+                int value;
+                public readonly int Read() { return value; }
+                public readonly int Current { get { return value; } }
+                public readonly int this[int index] { get { return value + index; } }
+            }
+
+            int Use(readonly IValue& value)
+            {
+                return value.Read() + value.Current + value[1];
+            }
+            """);
+
+        Assert.Empty(valid.Diagnostics);
+
+        Compilation invalid = CreateCompilation("""
+            namespace Example;
+
+            interface IMutable
+            {
+                void Mutate();
+                int Current { get; }
+                int this[int index] { get; }
+            }
+
+            void Use(readonly IMutable& value)
+            {
+                value.Mutate();
+                int current = value.Current;
+                int indexed = value[0];
+            }
+            """);
+
+        Assert.Contains(invalid.Diagnostics, diagnostic =>
+            diagnostic.Message == "mutable interface method 'Mutate' cannot be called on a readonly 'IMutable' receiver");
+        Assert.Contains(invalid.Diagnostics, diagnostic =>
+            diagnostic.Message == "property 'Current' cannot be read through a readonly interface receiver because its getter is mutable");
+        Assert.Contains(invalid.Diagnostics, diagnostic =>
+            diagnostic.Message == "no indexer of type 'IMutable' matches the provided arguments");
+    }
+
+    [Fact]
+    public void Analyzer_FoldsTargetIndependentConstantsAndRejectsDivisionByZero()
+    {
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+
+            const int A = 4 * 8;
+            const int B = A + 10;
+            const byte Wrapped = cast<byte>(255) + cast<byte>(1);
+
+            int Main() { return B; }
+            """);
+
+        Assert.Empty(valid.Diagnostics);
+        NamespaceSymbol @namespace = Assert.Single(valid.SemanticModel.GlobalNamespace.Namespaces);
+        ConstantSymbol a = @namespace.Constants.Single(constant => constant.Name == "A");
+        ConstantSymbol b = @namespace.Constants.Single(constant => constant.Name == "B");
+        ConstantSymbol wrapped = @namespace.Constants.Single(constant => constant.Name == "Wrapped");
+        Assert.Equal(32, a.Value);
+        Assert.Equal(42, b.Value);
+        Assert.Equal(32, Assert.IsType<BoundLiteralExpression>(a.BoundValue).Value);
+        Assert.Equal(42, Assert.IsType<BoundLiteralExpression>(b.BoundValue).Value);
+        Assert.Equal(0, wrapped.Value);
+
+        Compilation invalid = CreateCompilation("""
+            namespace Example;
+
+            const int Bad = 1 / 0;
+            int Main() { return 0; }
+            """);
+
+        Assert.Contains(invalid.Diagnostics, diagnostic =>
+            diagnostic.Message == "initializer of constant 'Bad' contains an invalid compile-time operation");
+    }
+
+    [Fact]
+    public void Analyzer_EnforcesReadonlyInstanceMethods()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Counter
+            {
+                int Value;
+
+                public readonly int Read()
+                {
+                    return Value;
+                }
+
+                public void Reset()
+                {
+                    Value = 0;
+                }
+
+                public readonly int Invalid()
+                {
+                    Reset();
+                    Value = 1;
+                    return Read();
+                }
+            }
+
+            int Use(readonly Counter& counter)
+            {
+                int value = counter.Read();
+                counter.Reset();
+                return value;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "readonly method 'Invalid' cannot call mutable method 'Reset' through 'this'");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "left side of assignment must be writable");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "mutable method 'Reset' cannot be called on a readonly 'Counter' receiver");
+    }
+
+    [Fact]
+    public void Analyzer_SelectsMethodOverloadForReceiverMutability()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Container
+            {
+                int Value;
+
+                public int& Get()
+                {
+                    return Value;
+                }
+
+                public readonly readonly int& Get()
+                {
+                    return Value;
+                }
+            }
+
+            int Main()
+            {
+                Container value = Container { 7 };
+                Container& mutable = value;
+                readonly Container& readOnly = mutable;
+                int& writable = mutable.Get();
+                readonly int& readable = readOnly.Get();
+                return readable;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol container = Assert.Single(
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+        Assert.Equal(2, container.Methods.Length);
+        Assert.Contains(container.Methods, method => !method.IsReadonly && method.FullName == "Example.Container.Get");
+        Assert.Contains(container.Methods, method => method.IsReadonly && method.FullName == "Example.Container.Get.__readonly");
+
+        BoundFunction main = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Main");
+        var mutableDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[3]);
+        var mutableConversion = Assert.IsType<BoundReferenceConversionExpression>(mutableDeclaration.Initializer);
+        var mutableDereference = Assert.IsType<BoundReferenceDereferenceExpression>(mutableConversion.Source);
+        var mutableCall = Assert.IsType<BoundMethodCallExpression>(mutableDereference.Reference);
+        Assert.False(mutableCall.Method.IsReadonly);
+        var readonlyDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[4]);
+        var readonlyConversion = Assert.IsType<BoundReferenceConversionExpression>(readonlyDeclaration.Initializer);
+        var readonlyDereference = Assert.IsType<BoundReferenceDereferenceExpression>(readonlyConversion.Source);
+        var readonlyCall = Assert.IsType<BoundMethodCallExpression>(readonlyDereference.Reference);
+        Assert.True(readonlyCall.Method.IsReadonly);
+    }
+
+    [Fact]
+    public void Analyzer_BindsPropertyGetAndSetAsAccessorsWithoutStorage()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Player
+            {
+                int health;
+
+                public int Health
+                {
+                    get { return health; }
+                    set { health = value; }
+                }
+            }
+
+            int Main()
+            {
+                Player player = Player { 0 };
+                player.Health = 100;
+                return player.Health;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol player = Assert.Single(
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+        PropertySymbol property = Assert.Single(player.Properties);
+        Assert.Single(player.AllInstanceFields);
+        Assert.NotNull(property.Getter);
+        Assert.NotNull(property.Setter);
+
+        BoundFunction main = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Main");
+        var setStatement = Assert.IsType<BoundExpressionStatement>(main.Body.Statements[1]);
+        Assert.IsType<BoundPropertySetExpression>(setStatement.Expression);
+        var returnStatement = Assert.IsType<BoundReturnStatement>(main.Body.Statements[2]);
+        var getCall = Assert.IsType<BoundMethodCallExpression>(returnStatement.Expression);
+        Assert.Same(property.Getter, getCall.Method);
+    }
+
+    [Fact]
+    public void Analyzer_BindsCompoundPropertyAndIndexerAssignmentsAsSingleAccessorOperations()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Values
+            {
+                int stored;
+
+                public int Value
+                {
+                    get { return stored; }
+                    set { stored = value; }
+                }
+
+                public int this[int index]
+                {
+                    get { return stored + index; }
+                    set { stored = value - index; }
+                }
+            }
+
+            int Main()
+            {
+                Values values = Values { 10 };
+                values.Value += 5;
+                values[2] -= 3;
+                return values.Value;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction main = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Main");
+        var propertyStatement = Assert.IsType<BoundExpressionStatement>(main.Body.Statements[1]);
+        var propertyAssignment = Assert.IsType<BoundCompoundAccessorAssignmentExpression>(propertyStatement.Expression);
+        Assert.Equal(SyntaxKind.PlusToken, propertyAssignment.OperatorKind);
+        Assert.Empty(propertyAssignment.Arguments);
+        Assert.Null(propertyAssignment.InterfaceType);
+
+        var indexerStatement = Assert.IsType<BoundExpressionStatement>(main.Body.Statements[2]);
+        var indexerAssignment = Assert.IsType<BoundCompoundAccessorAssignmentExpression>(indexerStatement.Expression);
+        Assert.Equal(SyntaxKind.MinusToken, indexerAssignment.OperatorKind);
+        Assert.Single(indexerAssignment.Arguments);
+        Assert.Null(indexerAssignment.InterfaceType);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsMissingPropertyAccessorAndReadonlyMutation()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Player
+            {
+                int health;
+
+                public readonly int Health
+                {
+                    get { return health; }
+                }
+            }
+
+            int Main()
+            {
+                Player player = Player { 0 };
+                readonly Player& readOnly = player;
+                int value = readOnly.Health;
+                player.Health = 10;
+                return value;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "property 'Health' does not declare a setter");
+        Assert.DoesNotContain(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("cannot be read through a readonly receiver", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_ResolvesIndexerOverloadsByParameterTypes()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Values
+            {
+                public int this[int index]
+                {
+                    get { return index; }
+                }
+
+                public int this[bool enabled]
+                {
+                    get { if (enabled) return 42; return 0; }
+                }
+            }
+
+            int Main()
+            {
+                Values values = Values { };
+                return values[1] + values[true];
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol values = Assert.Single(
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+        Assert.Equal(2, values.Indexers.Length);
+    }
+
+    [Fact]
+    public void Analyzer_ResolvesConstantDependenciesAndReportsCycles()
+    {
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+
+            const int C = B + A;
+            const int A = 4;
+            const int B = A * 2;
+
+            struct Values
+            {
+                const int Factor = C;
+            }
+
+            int Main() { return Values.Factor; }
+            """);
+        Assert.Empty(valid.Diagnostics);
+
+        Compilation cyclic = CreateCompilation("""
+            namespace Example;
+            const int A = B + 1;
+            const int B = A + 1;
+            """);
+        Assert.Contains(cyclic.Diagnostics, diagnostic => diagnostic.Message.Contains("circular constant dependency", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_ConvertsMutableReferenceToReadonlyButNotBack()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Value { int Data; }
+
+            void Test()
+            {
+                Value value = Value { 1 };
+                Value& mutableValue = value;
+                readonly Value& readOnlyValue = mutableValue;
+                Value& invalid = readOnlyValue;
+            }
+            """);
+
+        Assert.Single(compilation.Diagnostics);
+        Assert.Contains("cannot implicitly convert", compilation.Diagnostics[0].Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsConstReferenceSyntaxInIterationThree()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Value { }
+            void Read(const Value& value) { }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "'const T&' is no longer supported; use 'readonly T&'");
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(

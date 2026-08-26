@@ -45,6 +45,19 @@ public sealed record BoundAssignmentExpression(
     public override BoundKind Kind => BoundKind.AssignmentExpression;
 }
 
+public sealed record BoundCompoundAccessorAssignmentExpression(
+    BoundExpression Receiver,
+    FunctionSymbol Getter,
+    FunctionSymbol Setter,
+    ImmutableArray<BoundExpression> Arguments,
+    SyntaxKind OperatorKind,
+    BoundExpression Value,
+    bool IsPointerAccess,
+    InterfaceTypeSymbol? InterfaceType) : BoundExpression(Getter.ReturnType)
+{
+    public override BoundKind Kind => BoundKind.CompoundAccessorAssignmentExpression;
+}
+
 public sealed record BoundMethodCallExpression(
     BoundExpression Receiver,
     FunctionSymbol Method,
@@ -52,6 +65,44 @@ public sealed record BoundMethodCallExpression(
     bool IsPointerAccess) : BoundExpression(Method.ReturnType)
 {
     public override BoundKind Kind => BoundKind.MethodCallExpression;
+}
+
+public sealed record BoundPropertySetExpression(
+    BoundExpression Receiver,
+    PropertySymbol Property,
+    BoundExpression Value,
+    bool IsPointerAccess) : BoundExpression(Property.Type)
+{
+    public override BoundKind Kind => BoundKind.PropertySetExpression;
+}
+
+public sealed record BoundInterfacePropertySetExpression(
+    BoundExpression Receiver,
+    InterfaceTypeSymbol InterfaceType,
+    InterfacePropertySymbol Property,
+    BoundExpression Value,
+    bool IsPointerAccess) : BoundExpression(Property.Type)
+{
+    public override BoundKind Kind => BoundKind.InterfacePropertySetExpression;
+}
+
+public sealed record BoundIndexerSetExpression(
+    BoundExpression Receiver,
+    IndexerSymbol Indexer,
+    ImmutableArray<BoundExpression> Arguments,
+    BoundExpression Value) : BoundExpression(Indexer.Type)
+{
+    public override BoundKind Kind => BoundKind.IndexerSetExpression;
+}
+
+public sealed record BoundInterfaceIndexerSetExpression(
+    BoundExpression Receiver,
+    InterfaceTypeSymbol InterfaceType,
+    InterfaceIndexerSymbol Indexer,
+    ImmutableArray<BoundExpression> Arguments,
+    BoundExpression Value) : BoundExpression(Indexer.Type)
+{
+    public override BoundKind Kind => BoundKind.InterfaceIndexerSetExpression;
 }
 
 public sealed record BoundMemberAccessExpression(
@@ -73,6 +124,13 @@ public sealed record BoundTypeLayoutExpression(
     FieldSymbol? Field) : BoundExpression(BuiltinTypes.NUInt)
 {
     public override BoundKind Kind => BoundKind.TypeLayoutExpression;
+}
+
+public sealed record BoundCastExpression(
+    BoundExpression Expression,
+    TypeSymbol TargetType) : BoundExpression(TargetType)
+{
+    public override BoundKind Kind => BoundKind.CastExpression;
 }
 
 public sealed record BoundInterfaceConversionExpression(

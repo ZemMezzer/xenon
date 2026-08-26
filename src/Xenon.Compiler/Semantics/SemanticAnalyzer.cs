@@ -17,7 +17,10 @@ internal sealed class SemanticAnalyzer
     private readonly Dictionary<StructDeclarationSyntax, StructTypeSymbol> _structSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<InterfaceDeclarationSyntax, InterfaceTypeSymbol> _interfaceSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StructDeclarationSyntax, FileSymbolScope> _structScopes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ConstantSymbol, FileSymbolScope> _constantScopes = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<ConstantSymbol> _evaluatingConstants = new(ReferenceEqualityComparer.Instance);
     private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body, FileSymbolScope Scope)> _functionBodies = [];
+    private readonly List<BoundFunction> _synthesizedFunctions = [];
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees)
     {
@@ -43,11 +46,16 @@ internal sealed class SemanticAnalyzer
         AssignInterfaceMethodSlots();
         BindStructFields();
         ValidateStructLayouts();
+        DeclareConstants();
+        EvaluateConstants();
+        DeclareStructProperties();
+        DeclareStructIndexers();
         DeclareStructMethods();
         DeclareStructLifecycleFunctions();
         BuildVirtualMethodTables();
         ValidateMethodOverridesAndInterfaces();
         DeclareFunctions();
+        BindInstanceFieldInitializers();
 
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
@@ -55,8 +63,40 @@ internal sealed class SemanticAnalyzer
             var binder = new FunctionBodyBinder(symbol, scope, _diagnostics);
             functions.Add(new BoundFunction(symbol, binder.BindBody(body)));
         }
+        functions.AddRange(_synthesizedFunctions);
 
         return new SemanticModel(_globalNamespace, functions.ToImmutable(), [.. _diagnostics]);
+    }
+
+    private void BindInstanceFieldInitializers()
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        {
+            if (!type.Fields.Any(field => field.Declaration.Initializer is not null))
+                continue;
+
+            var initializer = new FunctionSymbol(
+                FunctionKind.InstanceInitializer,
+                type,
+                [],
+                declaration,
+                Accessibility.Private);
+            type.SetInstanceInitializer(initializer);
+            var binder = new FunctionBodyBinder(
+                initializer,
+                _structScopes[declaration],
+                _diagnostics);
+
+            foreach (FieldSymbol field in type.Fields)
+            {
+                if (binder.BindFieldInitializer(field) is BoundExpression boundInitializer)
+                    field.SetInitializer(boundInitializer);
+            }
+
+            _synthesizedFunctions.Add(new BoundFunction(
+                initializer,
+                new BoundBlockStatement(binder.CreateInstanceFieldInitializerStatements(type))));
+        }
     }
 
     private void DeclareNamespaces()
@@ -181,6 +221,7 @@ internal sealed class SemanticAnalyzer
                     fieldSyntax.IsStatic ? staticFields.Count : (type.BaseType?.AllInstanceFields.Length ?? 0) + (type.HasVirtualDispatch ? 1 : 0) + fields.Count,
                     fieldSyntax.IsPublic ? Accessibility.Public : Accessibility.Private,
                     fieldSyntax.IsStatic,
+                    fieldSyntax.IsReadonly,
                     constantValue,
                     fieldSyntax);
                 if (fieldSyntax.IsStatic)
@@ -192,6 +233,353 @@ internal sealed class SemanticAnalyzer
             type.SetFields(fields.ToImmutable());
             type.SetStaticFields(staticFields.ToImmutable());
         }
+    }
+
+    private void DeclareConstants()
+    {
+        foreach (SyntaxTree tree in _syntaxTrees)
+        {
+            NamespaceSymbol @namespace = _treeNamespaces[tree];
+            FileSymbolScope scope = _treeScopes[tree];
+            foreach (ModuleConstantDeclarationSyntax syntax in tree.Root.Members.OfType<ModuleConstantDeclarationSyntax>())
+            {
+                TypeSymbol type = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                var constant = new ConstantSymbol(syntax.IdentifierToken.Text, type, @namespace, null, syntax.Initializer, syntax.IdentifierToken);
+                if (!@namespace.TryDeclareConstant(constant))
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"constant '{@namespace.FullName}.{constant.Name}' is already declared");
+                else
+                    _constantScopes.Add(constant, scope);
+            }
+        }
+
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        {
+            FileSymbolScope scope = _structScopes[declaration];
+            var constants = ImmutableArray.CreateBuilder<ConstantSymbol>();
+            foreach (StructConstantDeclarationSyntax syntax in declaration.Constants)
+            {
+                TypeSymbol constantType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                var constant = new ConstantSymbol(syntax.IdentifierToken.Text, constantType, type.ContainingNamespace, type, syntax.Initializer, syntax.IdentifierToken);
+                if (constants.Any(existing => existing.Name == constant.Name))
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"constant '{constant.Name}' is already declared in struct '{type.Name}'");
+                else
+                {
+                    constants.Add(constant);
+                    _constantScopes.Add(constant, scope);
+                }
+            }
+            type.SetConstants(constants.ToImmutable());
+        }
+    }
+
+    private void EvaluateConstants()
+    {
+        IEnumerable<ConstantSymbol> constants = _constantScopes.Keys;
+        foreach (ConstantSymbol constant in constants)
+            EvaluateConstant(constant);
+    }
+
+    private bool EvaluateConstant(ConstantSymbol constant)
+    {
+        if (constant.HasValue)
+            return true;
+        if (!_evaluatingConstants.Add(constant))
+        {
+            _diagnostics.Report(constant.IdentifierToken.Location, $"circular constant dependency involving '{constant.Name}'");
+            return false;
+        }
+        try
+        {
+            BoundExpression? value = BindConstantExpression(constant.Initializer, constant);
+            if (value is null)
+            {
+                _diagnostics.Report(constant.IdentifierToken.Location, $"initializer of constant '{constant.Name}' is not a compile-time constant");
+                return false;
+            }
+            if (!TypeFacts.CanAssign(constant.Type, value.Type))
+            {
+                if (TypeFacts.IsNumeric(constant.Type) && TypeFacts.IsNumeric(value.Type))
+                    value = new BoundCastExpression(value, constant.Type);
+                else
+                {
+                    _diagnostics.Report(constant.IdentifierToken.Location, $"cannot implicitly convert '{value.Type.Name}' to '{constant.Type.Name}'");
+                    return false;
+                }
+            }
+
+            ConstantFoldStatus foldStatus = FoldConstantExpression(value, out object? foldedValue);
+            if (foldStatus == ConstantFoldStatus.Invalid)
+            {
+                _diagnostics.Report(
+                    constant.IdentifierToken.Location,
+                    $"initializer of constant '{constant.Name}' contains an invalid compile-time operation");
+                return false;
+            }
+
+            if (foldStatus == ConstantFoldStatus.Folded)
+            {
+                constant.SetValue(foldedValue);
+                constant.SetBoundValue(new BoundLiteralExpression(foldedValue, value.Type));
+            }
+            else
+            {
+                constant.SetBoundValue(value);
+            }
+            return true;
+        }
+        finally
+        {
+            _evaluatingConstants.Remove(constant);
+        }
+    }
+
+    private BoundExpression? BindConstantExpression(ExpressionSyntax syntax, ConstantSymbol context)
+    {
+        switch (syntax)
+        {
+            case LiteralExpressionSyntax literal:
+                return new BoundLiteralExpression(GetConstantLiteralValue(literal), GetConstantExpressionType(literal));
+            case ParenthesizedExpressionSyntax parenthesized:
+                return BindConstantExpression(parenthesized.Expression, context);
+            case NameExpressionSyntax name:
+            {
+                ConstantSymbol? referenced = context.ContainingType?.FindConstant(name.IdentifierToken.Text) ??
+                    _constantScopes[context].ResolveConstant(name.IdentifierToken.Text, name.IdentifierToken.Location, _diagnostics);
+                return referenced is not null && EvaluateConstant(referenced) ? referenced.BoundValue : null;
+            }
+            case MemberAccessExpressionSyntax member when member.Receiver is NameExpressionSyntax typeName &&
+                _constantScopes[context].ResolveType(typeName.IdentifierToken.Text, typeName.IdentifierToken.Location, _diagnostics) is StructTypeSymbol structType &&
+                structType.FindConstant(member.MemberToken.Text) is ConstantSymbol associated:
+                return EvaluateConstant(associated) ? associated.BoundValue : null;
+            case UnaryExpressionSyntax unary:
+            {
+                BoundExpression? operand = BindConstantExpression(unary.Operand, context);
+                if (operand is null)
+                    return null;
+                TypeSymbol? result = unary.OperatorToken.Kind switch
+                {
+                    SyntaxKind.PlusToken or SyntaxKind.MinusToken when TypeFacts.IsNumeric(operand.Type) => operand.Type,
+                    SyntaxKind.BangToken when ReferenceEquals(operand.Type, BuiltinTypes.Bool) => BuiltinTypes.Bool,
+                    SyntaxKind.TildeToken when TypeFacts.IsInteger(operand.Type) => operand.Type,
+                    _ => null,
+                };
+                return result is null ? null : new BoundUnaryExpression(unary.OperatorToken.Kind, operand, result);
+            }
+            case BinaryExpressionSyntax binary:
+            {
+                BoundExpression? left = BindConstantExpression(binary.Left, context);
+                BoundExpression? right = BindConstantExpression(binary.Right, context);
+                if (left is null || right is null || !ReferenceEquals(left.Type, right.Type))
+                    return null;
+                bool comparison = binary.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken or
+                    SyntaxKind.LessToken or SyntaxKind.LessOrEqualsToken or SyntaxKind.GreaterToken or SyntaxKind.GreaterOrEqualsToken;
+                bool logical = binary.OperatorToken.Kind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken;
+                bool arithmetic = binary.OperatorToken.Kind is SyntaxKind.PlusToken or SyntaxKind.MinusToken or SyntaxKind.StarToken or SyntaxKind.SlashToken or SyntaxKind.PercentToken;
+                bool bitwise = binary.OperatorToken.Kind is SyntaxKind.AmpersandToken or SyntaxKind.PipeToken or SyntaxKind.CaretToken or SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken;
+                if ((logical && !ReferenceEquals(left.Type, BuiltinTypes.Bool)) ||
+                    (arithmetic && !TypeFacts.IsNumeric(left.Type)) ||
+                    (bitwise && !TypeFacts.IsInteger(left.Type)) ||
+                    (!comparison && !logical && !arithmetic && !bitwise))
+                    return null;
+                return new BoundBinaryExpression(left, binary.OperatorToken.Kind, right, comparison || logical ? BuiltinTypes.Bool : left.Type);
+            }
+            case TypeLayoutExpressionSyntax layout:
+            {
+                TypeSymbol target = TypeResolver.Resolve(layout.Type, _constantScopes[context], _diagnostics);
+                FieldSymbol? field = null;
+                if (layout.Keyword.Kind == SyntaxKind.OffsetOfKeyword)
+                {
+                    if (target is not StructTypeSymbol targetStruct ||
+                        (field = targetStruct.FindField(layout.FieldToken!.Text)) is null)
+                        return null;
+                }
+                return new BoundTypeLayoutExpression(layout.Keyword.Kind, target, field);
+            }
+            case CastExpressionSyntax cast:
+            {
+                BoundExpression? expression = BindConstantExpression(cast.Expression, context);
+                TypeSymbol target = TypeResolver.Resolve(cast.Type, _constantScopes[context], _diagnostics);
+                if (expression is null || !TypeFacts.IsNumeric(expression.Type) || !TypeFacts.IsNumeric(target))
+                    return null;
+                return new BoundCastExpression(expression, target);
+            }
+            default:
+                return null;
+        }
+    }
+
+    private static ConstantFoldStatus FoldConstantExpression(BoundExpression expression, out object? value)
+    {
+        switch (expression)
+        {
+            case BoundLiteralExpression literal:
+                value = literal.Value;
+                return ConstantFoldStatus.Folded;
+            case BoundTypeLayoutExpression:
+                value = null;
+                return ConstantFoldStatus.TargetDependent;
+            case BoundUnaryExpression unary:
+            {
+                ConstantFoldStatus operandStatus = FoldConstantExpression(unary.Operand, out object? operand);
+                if (operandStatus != ConstantFoldStatus.Folded)
+                {
+                    value = null;
+                    return operandStatus;
+                }
+                if (TryEvaluateUnaryConstant(unary.OperatorKind, operand, out object? unaryValue) &&
+                    TryNormalizeFoldedValue(unaryValue, unary.Type, out value))
+                {
+                    return ConstantFoldStatus.Folded;
+                }
+                value = null;
+                return ConstantFoldStatus.Invalid;
+            }
+            case BoundBinaryExpression binary:
+            {
+                ConstantFoldStatus leftStatus = FoldConstantExpression(binary.Left, out object? left);
+                if (leftStatus == ConstantFoldStatus.Invalid)
+                {
+                    value = null;
+                    return ConstantFoldStatus.Invalid;
+                }
+                if (leftStatus == ConstantFoldStatus.Folded && left is bool leftBoolean)
+                {
+                    if (binary.OperatorKind == SyntaxKind.AmpersandAmpersandToken && !leftBoolean)
+                    {
+                        value = false;
+                        return ConstantFoldStatus.Folded;
+                    }
+                    if (binary.OperatorKind == SyntaxKind.PipePipeToken && leftBoolean)
+                    {
+                        value = true;
+                        return ConstantFoldStatus.Folded;
+                    }
+                }
+
+                ConstantFoldStatus rightStatus = FoldConstantExpression(binary.Right, out object? right);
+                if (rightStatus == ConstantFoldStatus.Invalid ||
+                    (binary.OperatorKind is SyntaxKind.SlashToken or SyntaxKind.PercentToken && IsIntegerZero(right)))
+                {
+                    value = null;
+                    return ConstantFoldStatus.Invalid;
+                }
+                if (leftStatus == ConstantFoldStatus.TargetDependent || rightStatus == ConstantFoldStatus.TargetDependent)
+                {
+                    value = null;
+                    return ConstantFoldStatus.TargetDependent;
+                }
+
+                try
+                {
+                    if (TryEvaluateBinaryConstant(left, binary.OperatorKind, right, out object? binaryValue) &&
+                        TryNormalizeFoldedValue(binaryValue, binary.Type, out value))
+                    {
+                        return ConstantFoldStatus.Folded;
+                    }
+                }
+                catch (Exception exception) when (exception is OverflowException or DivideByZeroException)
+                {
+                }
+
+                value = null;
+                return ConstantFoldStatus.Invalid;
+            }
+            case BoundCastExpression cast:
+            {
+                ConstantFoldStatus operandStatus = FoldConstantExpression(cast.Expression, out object? operand);
+                if (operandStatus != ConstantFoldStatus.Folded)
+                {
+                    value = null;
+                    return operandStatus;
+                }
+                if (cast.TargetType is PrimitiveTypeSymbol { IsInteger: true, BitWidth: null })
+                {
+                    value = null;
+                    return ConstantFoldStatus.TargetDependent;
+                }
+                return TryFoldPrimitiveCast(operand, cast.TargetType, out value)
+                    ? ConstantFoldStatus.Folded
+                    : ConstantFoldStatus.Invalid;
+            }
+            default:
+                value = null;
+                return ConstantFoldStatus.Invalid;
+        }
+    }
+
+    private static bool IsIntegerZero(object? value) => value switch
+    {
+        int integer => integer == 0,
+        long integer => integer == 0,
+        ulong integer => integer == 0,
+        _ => false,
+    };
+
+    private static bool TryFoldPrimitiveCast(object? value, TypeSymbol targetType, out object? converted)
+    {
+        try
+        {
+            if (ReferenceEquals(targetType, BuiltinTypes.Float))
+            {
+                converted = Convert.ToSingle(value);
+                return true;
+            }
+            if (ReferenceEquals(targetType, BuiltinTypes.Double))
+            {
+                converted = Convert.ToDouble(value);
+                return true;
+            }
+            if (targetType is not PrimitiveTypeSymbol { IsInteger: true })
+            {
+                converted = null;
+                return false;
+            }
+
+            ulong bits = value switch
+            {
+                int integer => unchecked((ulong)(long)integer),
+                long integer => unchecked((ulong)integer),
+                ulong integer => integer,
+                float number => unchecked((ulong)(long)Math.Truncate(number)),
+                double number => unchecked((ulong)(long)Math.Truncate(number)),
+                _ => throw new InvalidCastException(),
+            };
+            converted = targetType.Name switch
+            {
+                "byte" => (int)unchecked((byte)bits),
+                "sbyte" => (int)unchecked((sbyte)bits),
+                "short" => (int)unchecked((short)bits),
+                "ushort" => (int)unchecked((ushort)bits),
+                "int" => unchecked((int)bits),
+                "uint" => (ulong)unchecked((uint)bits),
+                "long" => unchecked((long)bits),
+                "ulong" => bits,
+                _ => null,
+            };
+            return converted is not null;
+        }
+        catch (Exception exception) when (exception is OverflowException or InvalidCastException or FormatException)
+        {
+            converted = null;
+            return false;
+        }
+    }
+
+    private static bool TryNormalizeFoldedValue(object? value, TypeSymbol type, out object? normalized)
+    {
+        if (ReferenceEquals(type, BuiltinTypes.Bool) && value is bool)
+        {
+            normalized = value;
+            return true;
+        }
+        return TryFoldPrimitiveCast(value, type, out normalized);
+    }
+
+    private enum ConstantFoldStatus
+    {
+        Folded,
+        TargetDependent,
+        Invalid,
     }
 
     private static bool IsSupportedStaticInitializer(TypeSymbol type, object? value) =>
@@ -264,7 +652,7 @@ internal sealed class SemanticAnalyzer
         LiteralExpressionSyntax { LiteralToken.Value: float } => BuiltinTypes.Float,
         LiteralExpressionSyntax { LiteralToken.Value: double } => BuiltinTypes.Double,
         LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.TrueKeyword or SyntaxKind.FalseKeyword } => BuiltinTypes.Bool,
-        LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.StringLiteralToken } => BuiltinTypes.PointerTo(BuiltinTypes.Byte, isConst: true),
+        LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.StringLiteralToken } => BuiltinTypes.PointerTo(BuiltinTypes.Byte, isReadonly: true),
         LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.NullKeyword } => BuiltinTypes.Null,
         ParenthesizedExpressionSyntax parenthesized => GetConstantExpressionType(parenthesized.Expression),
         UnaryExpressionSyntax { OperatorToken.Kind: SyntaxKind.BangToken } => BuiltinTypes.Bool,
@@ -475,6 +863,72 @@ internal sealed class SemanticAnalyzer
                 methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, TypeResolver.Resolve(syntax.ReturnType, scope, _diagnostics), BindParameters(syntax.Parameters, scope), syntax));
             }
             type.SetMethods(methods.ToImmutable());
+
+            var properties = ImmutableArray.CreateBuilder<InterfacePropertySymbol>();
+            foreach (InterfacePropertyDeclarationSyntax syntax in declaration.Properties)
+            {
+                if (properties.Any(property => string.Equals(property.Name, syntax.IdentifierToken.Text, StringComparison.Ordinal)) ||
+                    declaration.Methods.Any(method => string.Equals(method.IdentifierToken.Text, syntax.IdentifierToken.Text, StringComparison.Ordinal)))
+                {
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface '{type.Name}' already declares member '{syntax.IdentifierToken.Text}'");
+                    continue;
+                }
+
+                TypeSymbol propertyType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                var property = new InterfacePropertySymbol(syntax.IdentifierToken.Text, type, propertyType, syntax);
+                if (syntax.Accessors.Count(accessor => accessor.IsGetter) > 1)
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' declares more than one getter");
+                if (syntax.Accessors.Count(accessor => accessor.IsSetter) > 1)
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' declares more than one setter");
+                if (syntax.Getter is null && syntax.Setter is null)
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' must declare a getter or setter");
+
+                FunctionSymbol? getter = syntax.Getter is null
+                    ? null
+                    : new FunctionSymbol($"get_{property.Name}", property, propertyType, [], syntax.Getter);
+                FunctionSymbol? setter = syntax.Setter is null
+                    ? null
+                    : new FunctionSymbol(
+                        $"set_{property.Name}",
+                        property,
+                        BuiltinTypes.Void,
+                        [new ParameterSymbol("value", propertyType, 0)],
+                        syntax.Setter);
+                property.SetAccessors(getter, setter);
+                properties.Add(property);
+            }
+            type.SetProperties(properties.ToImmutable());
+
+            var indexers = ImmutableArray.CreateBuilder<InterfaceIndexerSymbol>();
+            foreach (InterfaceIndexerDeclarationSyntax syntax in declaration.Indexers)
+            {
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(syntax.Parameters, scope);
+                if (parameters.IsEmpty)
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter");
+                if (indexers.Any(candidate => HaveSameParameterTypes(candidate.Parameters, parameters)))
+                {
+                    _diagnostics.Report(syntax.ThisKeyword.Location, $"interface '{type.Name}' already declares an indexer with the same parameter types");
+                    continue;
+                }
+                TypeSymbol indexerType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                var indexer = new InterfaceIndexerSymbol(type, indexerType, parameters, syntax);
+                FunctionSymbol? getter = syntax.Getter is null
+                    ? null
+                    : new FunctionSymbol(indexer.GetAccessorName(getter: true), indexer, indexerType, parameters, syntax.Getter);
+                FunctionSymbol? setter = syntax.Setter is null
+                    ? null
+                    : new FunctionSymbol(
+                        indexer.GetAccessorName(getter: false),
+                        indexer,
+                        BuiltinTypes.Void,
+                        [.. parameters, new ParameterSymbol("value", indexerType, parameters.Length)],
+                        syntax.Setter);
+                if (getter is null && setter is null)
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an interface indexer must declare a getter or setter");
+                indexer.SetAccessors(getter, setter);
+                indexers.Add(indexer);
+            }
+            type.SetIndexers(indexers.ToImmutable());
         }
     }
 
@@ -531,6 +985,8 @@ internal sealed class SemanticAnalyzer
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
             if (declaration.Methods.Any(method => method.IsVirtual || method.IsOverride || method.IsAbstract) ||
+                declaration.Properties.Any(property => property.IsVirtual || property.IsOverride || property.IsAbstract) ||
+                declaration.Indexers.Any(indexer => indexer.IsVirtual || indexer.IsOverride || indexer.IsAbstract) ||
                 declaration.Destructor?.IsVirtual == true)
             {
                 MarkBaseChainForVirtualDispatch(type);
@@ -572,7 +1028,7 @@ internal sealed class SemanticAnalyzer
         var slots = type.BaseType?.VirtualMethods.ToBuilder() ?? ImmutableArray.CreateBuilder<FunctionSymbol>();
         foreach (FunctionSymbol method in type.Methods)
         {
-            FunctionSymbol? inherited = type.BaseType?.FindMethod(method.Name);
+            FunctionSymbol? inherited = type.BaseType?.FindMethod(method.Name, method.IsReadonly);
             if (method.IsOverride && inherited?.VTableSlot is int slot)
             {
                 method.SetVTableSlot(slot);
@@ -647,23 +1103,35 @@ internal sealed class SemanticAnalyzer
         {
             FileSymbolScope scope = _structScopes[declaration];
             var methods = ImmutableArray.CreateBuilder<FunctionSymbol>();
-            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (PropertySymbol property in type.Properties)
+            {
+                if (property.Getter is not null)
+                    methods.Add(property.Getter);
+                if (property.Setter is not null)
+                    methods.Add(property.Setter);
+            }
+            foreach (IndexerSymbol indexer in type.Indexers)
+            {
+                if (indexer.Getter is not null)
+                    methods.Add(indexer.Getter);
+                if (indexer.Setter is not null)
+                    methods.Add(indexer.Setter);
+            }
 
             foreach (MethodDeclarationSyntax methodSyntax in declaration.Methods)
             {
-                if (!names.Add(methodSyntax.IdentifierToken.Text))
-                {
-                    _diagnostics.Report(
-                        methodSyntax.IdentifierToken.Location,
-                        $"method overloading is not supported yet; struct '{type.Name}' may declare only one method named '{methodSyntax.IdentifierToken.Text}'");
-                    continue;
-                }
-
                 if (type.FindField(methodSyntax.IdentifierToken.Text) is not null)
                 {
                     _diagnostics.Report(
                         methodSyntax.IdentifierToken.Location,
                         $"struct '{type.Name}' already contains field '{methodSyntax.IdentifierToken.Text}'");
+                }
+
+                if (type.FindProperty(methodSyntax.IdentifierToken.Text) is not null)
+                {
+                    _diagnostics.Report(
+                        methodSyntax.IdentifierToken.Location,
+                        $"struct '{type.Name}' already contains property '{methodSyntax.IdentifierToken.Text}'");
                 }
 
                 TypeSymbol returnType = TypeResolver.Resolve(
@@ -681,6 +1149,16 @@ internal sealed class SemanticAnalyzer
                     parameters,
                     methodSyntax);
 
+                FunctionSymbol? sameName = methods.FirstOrDefault(candidate =>
+                    string.Equals(candidate.Name, method.Name, StringComparison.Ordinal));
+                if (sameName is not null && !CanFormReadonlyOverloadPair(sameName, method))
+                {
+                    _diagnostics.Report(
+                        methodSyntax.IdentifierToken.Location,
+                        $"method overloading is not supported yet; struct '{type.Name}' may declare only one method named '{method.Name}'");
+                    continue;
+                }
+
                 methods.Add(method);
                 if (methodSyntax.Body is not null)
                 {
@@ -692,13 +1170,176 @@ internal sealed class SemanticAnalyzer
         }
     }
 
+    private void DeclareStructProperties()
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        {
+            FileSymbolScope scope = _structScopes[declaration];
+            var properties = ImmutableArray.CreateBuilder<PropertySymbol>();
+            foreach (PropertyDeclarationSyntax syntax in declaration.Properties)
+            {
+                if (properties.Any(property => string.Equals(property.Name, syntax.IdentifierToken.Text, StringComparison.Ordinal)))
+                {
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{syntax.IdentifierToken.Text}' is already declared in struct '{type.Name}'");
+                    continue;
+                }
+                if (type.FindField(syntax.IdentifierToken.Text) is not null)
+                {
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"struct '{type.Name}' already contains field '{syntax.IdentifierToken.Text}'");
+                }
+                if (syntax.IsStatic)
+                {
+                    _diagnostics.Report(syntax.IdentifierToken.Location, "static properties are not supported in this iteration");
+                }
+
+                TypeSymbol propertyType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                var property = new PropertySymbol(
+                    syntax.IdentifierToken.Text,
+                    type,
+                    propertyType,
+                    syntax.IsPublic ? Accessibility.Public : Accessibility.Private,
+                    syntax);
+
+                PropertyAccessorDeclarationSyntax? getterSyntax = syntax.Getter;
+                PropertyAccessorDeclarationSyntax? setterSyntax = syntax.Setter;
+                if (syntax.Accessors.Count(accessor => accessor.IsGetter) > 1)
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' declares more than one getter");
+                if (syntax.Accessors.Count(accessor => accessor.IsSetter) > 1)
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' declares more than one setter");
+                if (getterSyntax is null && setterSyntax is null)
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' must declare a getter or setter");
+
+                FunctionSymbol? getter = getterSyntax is null
+                    ? null
+                    : new FunctionSymbol($"get_{property.Name}", property, propertyType, [], getterSyntax);
+                FunctionSymbol? setter = setterSyntax is null
+                    ? null
+                    : new FunctionSymbol(
+                        $"set_{property.Name}",
+                        property,
+                        BuiltinTypes.Void,
+                        [new ParameterSymbol("value", propertyType, 0)],
+                        setterSyntax);
+                property.SetAccessors(getter, setter);
+                properties.Add(property);
+
+                AddPropertyAccessorBody(getter, getterSyntax, syntax, scope);
+                AddPropertyAccessorBody(setter, setterSyntax, syntax, scope);
+            }
+
+            type.SetProperties(properties.ToImmutable());
+        }
+    }
+
+    private void AddPropertyAccessorBody(
+        FunctionSymbol? accessor,
+        PropertyAccessorDeclarationSyntax? accessorSyntax,
+        PropertyDeclarationSyntax propertySyntax,
+        FileSymbolScope scope)
+    {
+        if (accessor is null || accessorSyntax is null)
+            return;
+
+        if (accessorSyntax.Body is not null)
+        {
+            if (propertySyntax.IsAbstract)
+                _diagnostics.Report(accessorSyntax.KeywordToken.Location, "abstract property accessors cannot have a body");
+            _functionBodies.Add((accessor, accessorSyntax.Body, scope));
+        }
+        else if (!propertySyntax.IsAbstract)
+        {
+            _diagnostics.Report(accessorSyntax.KeywordToken.Location, "property accessor without a body must be abstract");
+        }
+    }
+
+    private void DeclareStructIndexers()
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        {
+            FileSymbolScope scope = _structScopes[declaration];
+            var indexers = ImmutableArray.CreateBuilder<IndexerSymbol>();
+            foreach (IndexerDeclarationSyntax syntax in declaration.Indexers)
+            {
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(syntax.Parameters, scope);
+                if (parameters.IsEmpty)
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter");
+                if (indexers.Any(candidate => HaveSameParameterTypes(candidate.Parameters, parameters)))
+                {
+                    _diagnostics.Report(syntax.ThisKeyword.Location, $"struct '{type.Name}' already declares an indexer with the same parameter types");
+                    continue;
+                }
+                if (syntax.IsStatic)
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "static indexers are not supported");
+
+                TypeSymbol indexerType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                var indexer = new IndexerSymbol(
+                    type,
+                    indexerType,
+                    parameters,
+                    syntax.IsPublic ? Accessibility.Public : Accessibility.Private,
+                    syntax);
+                FunctionSymbol? getter = syntax.Getter is null
+                    ? null
+                    : new FunctionSymbol(indexer.GetAccessorName(getter: true), indexer, indexerType, parameters, syntax.Getter);
+                FunctionSymbol? setter = syntax.Setter is null
+                    ? null
+                    : new FunctionSymbol(
+                        indexer.GetAccessorName(getter: false),
+                        indexer,
+                        BuiltinTypes.Void,
+                        [.. parameters, new ParameterSymbol("value", indexerType, parameters.Length)],
+                        syntax.Setter);
+                if (getter is null && setter is null)
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare a getter or setter");
+                indexer.SetAccessors(getter, setter);
+                indexers.Add(indexer);
+                AddIndexerAccessorBody(getter, syntax.Getter, syntax, scope);
+                AddIndexerAccessorBody(setter, syntax.Setter, syntax, scope);
+            }
+            type.SetIndexers(indexers.ToImmutable());
+        }
+    }
+
+    private void AddIndexerAccessorBody(
+        FunctionSymbol? accessor,
+        PropertyAccessorDeclarationSyntax? accessorSyntax,
+        IndexerDeclarationSyntax indexerSyntax,
+        FileSymbolScope scope)
+    {
+        if (accessor is null || accessorSyntax is null)
+            return;
+        if (accessorSyntax.Body is not null)
+        {
+            if (indexerSyntax.IsAbstract)
+                _diagnostics.Report(accessorSyntax.KeywordToken.Location, "abstract indexer accessors cannot have a body");
+            _functionBodies.Add((accessor, accessorSyntax.Body, scope));
+        }
+        else if (!indexerSyntax.IsAbstract)
+        {
+            _diagnostics.Report(accessorSyntax.KeywordToken.Location, "indexer accessor without a body must be abstract");
+        }
+    }
+
+    private static bool HaveSameParameterTypes(
+        ImmutableArray<ParameterSymbol> first,
+        ImmutableArray<ParameterSymbol> second) =>
+        first.Length == second.Length &&
+        first.Zip(second).All(pair => ReferenceEquals(pair.First.Type, pair.Second.Type));
+
+    private static bool CanFormReadonlyOverloadPair(FunctionSymbol first, FunctionSymbol second) =>
+        !first.IsStatic &&
+        !second.IsStatic &&
+        first.IsReadonly != second.IsReadonly &&
+        first.Parameters.Length == second.Parameters.Length &&
+        first.Parameters.Zip(second.Parameters).All(pair => ReferenceEquals(pair.First.Type, pair.Second.Type));
+
     private void ValidateMethodOverridesAndInterfaces()
     {
         foreach (StructTypeSymbol type in _structSymbols.Values)
         {
             foreach (FunctionSymbol method in type.Methods)
             {
-                FunctionSymbol? inherited = type.BaseType?.FindMethod(method.Name);
+                FunctionSymbol? inherited = type.BaseType?.FindMethod(method.Name, method.IsReadonly);
                 if (method.IsOverride)
                 {
                     if (inherited is null || (!inherited.IsVirtual && !inherited.IsAbstract) || !method.Overrides(inherited))
@@ -709,6 +1350,8 @@ internal sealed class SemanticAnalyzer
 
                 if (method.IsStatic && (method.IsVirtual || method.IsOverride || method.IsAbstract))
                     _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, "static methods cannot be virtual, override, or abstract");
+                if (method.IsStatic && method.IsReadonly)
+                    _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, "static methods cannot be readonly");
                 if (method.IsAbstract && method.Declaration is MethodDeclarationSyntax { Body: not null } abstractSyntax)
                     _diagnostics.Report(abstractSyntax.IdentifierToken.Location, "abstract methods cannot have a body");
             }

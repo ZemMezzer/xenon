@@ -30,7 +30,7 @@ public sealed class LlvmIrGeneratorTests
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
-            extern int puts(const byte* text);
+            extern int puts(readonly byte* text);
 
             int Add(int a, int b)
             {
@@ -659,7 +659,7 @@ public sealed class LlvmIrGeneratorTests
 
             int Main()
             {
-                const Base& value = Derived();
+                readonly Base& value = Derived();
                 return 0;
             }
             """);

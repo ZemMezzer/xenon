@@ -6,6 +6,8 @@ public enum SymbolKind
     Type,
     Function,
     Field,
+    Property,
+    Constant,
     Parameter,
     LocalVariable,
 }
