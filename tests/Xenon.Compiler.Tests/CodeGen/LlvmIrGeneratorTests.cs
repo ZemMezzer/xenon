@@ -436,6 +436,33 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_EmitsStoresToMutableStaticFields()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct State
+            {
+                public static int Value;
+            }
+
+            int Main()
+            {
+                State.Value = 41;
+                State.Value += 1;
+                return State.Value;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "static-write");
+
+        Assert.Contains("store i32 41, ptr @Example.State.Value", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("load i32, ptr @Example.State.Value", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("store i32", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_InitializesBaseConstructorBeforeDerivedBody()
     {
         Compilation compilation = CreateCompilation("""

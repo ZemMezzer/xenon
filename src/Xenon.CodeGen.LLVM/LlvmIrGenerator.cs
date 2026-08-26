@@ -1471,6 +1471,7 @@ public sealed class LlvmIrGenerator
         private static bool IsAddressable(BoundExpression expression) => expression switch
         {
             BoundVariableExpression => true,
+            BoundStaticFieldExpression => true,
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
             BoundReferenceDereferenceExpression => true,
             BoundMemberAccessExpression { IsPointerAccess: true } => true,

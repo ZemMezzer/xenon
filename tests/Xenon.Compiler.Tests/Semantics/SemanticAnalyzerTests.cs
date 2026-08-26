@@ -1322,6 +1322,28 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
+    public void Analyzer_AllowsAssignmentToMutableStaticField()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct State
+            {
+                public static int Value;
+            }
+
+            int Main()
+            {
+                State.Value = 41;
+                State.Value += 1;
+                return State.Value;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
     public void Analyzer_EvaluatesStaticConstantExpressions()
     {
         Compilation compilation = CreateCompilation("""
