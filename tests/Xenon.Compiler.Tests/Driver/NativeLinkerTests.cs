@@ -644,6 +644,124 @@ public sealed class NativeLinkerTests
         }
     }
 
+    [Fact]
+    public void Linker_ResolvesAbstractVTableSlotsThroughConcreteOverride()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            struct Entity
+            {
+                public abstract int Score();
+            }
+
+            struct Enemy : Entity
+            {
+                public override int Score() { return 42; }
+            }
+
+            int Main()
+            {
+                Enemy enemy = Enemy { };
+                Entity& entity = enemy;
+                return entity.Score();
+            }
+            """, "abstract-link.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"abstract-link{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "abstract-link", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "abstract-link",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ProjectsDerivedInterfaceReferenceToCorrectBaseTable()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            positionIndependentCode: !OperatingSystem.IsWindows());
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Example;
+
+            interface IA { int A(); }
+            interface IB { int B(); }
+            interface IC : IA, IB { int C(); }
+
+            struct Value : IC
+            {
+                public int A() { return 10; }
+                public int B() { return 20; }
+                public int C() { return 30; }
+            }
+
+            int Main()
+            {
+                Value value = Value { };
+                IC& ic = value;
+                IB& ib = ic;
+                return ib.B();
+            }
+            """, "interface-reference-upcast.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"interface-reference-upcast{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "interface-reference-upcast", "debug", target.Triple);
+
+        try
+        {
+            Assert.Empty(compilation.Diagnostics);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation,
+                objectPath,
+                target,
+                "interface-reference-upcast",
+                generateExecutableEntryPoint: true);
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                objectFile.Path, executablePath, target.Triple);
+
+            using Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executable.Path,
+                UseShellExecute = false,
+            })!;
+            process.WaitForExit();
+            Assert.Equal(20, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static Compilation CreateLibraryCompilation() => Compilation.Create(SourceText.From("""
         namespace Integration;
 

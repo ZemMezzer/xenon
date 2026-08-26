@@ -47,6 +47,20 @@ public sealed class PointerTypeSymbol : TypeSymbol
     public bool IsConst { get; }
 }
 
+public sealed class ReferenceTypeSymbol : TypeSymbol
+{
+    internal ReferenceTypeSymbol(TypeSymbol elementType, bool isConst)
+        : base($"{(isConst ? "const " : string.Empty)}{elementType.Name}&")
+    {
+        ElementType = elementType;
+        IsConst = isConst;
+    }
+
+    public TypeSymbol ElementType { get; }
+
+    public bool IsConst { get; }
+}
+
 
 public sealed class ArrayTypeSymbol : TypeSymbol
 {

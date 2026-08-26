@@ -403,6 +403,451 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_EmitsStaticFieldsAndTargetLayoutIntrinsics()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                public int Id;
+                public static int Count = 512 * 2;
+            }
+
+            int ReadCount()
+            {
+                return Entity.Count;
+            }
+
+            nuint Size() { return sizeof(Entity); }
+            nuint Alignment() { return alignof(Entity); }
+            nuint Offset() { return offsetof(Entity, Id); }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            LlvmTargetOptions.CreateHost(),
+            "static-layout");
+
+        Assert.Contains("@Example.Entity.Count = global i32 1024", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("load i32, ptr @Example.Entity.Count", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("ret i64 4", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_InitializesBaseConstructorBeforeDerivedBody()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                public int Id;
+                public Entity(int id) { Id = id; }
+            }
+
+            struct Enemy : Entity
+            {
+                public int Health;
+                public Enemy(int id, int health) : base(id) { Health = health; }
+            }
+
+            int Main()
+            {
+                Enemy value = Enemy(1, 100);
+                return value.Id + value.Health;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "base-ctor");
+
+        Assert.Contains("%Example.Enemy = type { i32, i32 }", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @Example.Entity.__ctor", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsVTablesAndVirtualBaseDispatch()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                public virtual int Score() { return 1; }
+            }
+
+            struct Enemy : Entity
+            {
+                public override int Score() { return 42; }
+            }
+
+            int Main()
+            {
+                Enemy enemy = Enemy { };
+                Entity* entity = &enemy;
+                return entity->Score();
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "virtual-dispatch");
+
+        Assert.Contains("@Example.Enemy.__vtable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Enemy.Score", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("virtual.slot", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_DefinesAbstractVTableSlotsWithUnreachableStubs()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                public abstract int Score();
+            }
+
+            struct Enemy : Entity
+            {
+                public override int Score() { return 42; }
+            }
+
+            int Main()
+            {
+                Enemy enemy = Enemy { };
+                Entity* entity = &enemy;
+                return entity->Score();
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "abstract-vtable");
+
+        Assert.Contains("define internal i32 @Example.Entity.Score(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("unreachable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Enemy.__vtable", llvmIr, StringComparison.Ordinal);
+
+        Compilation privateAbstract = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                abstract void Update();
+            }
+            """);
+        Assert.Empty(privateAbstract.Diagnostics);
+        string privateIr = new LlvmIrGenerator().Generate(privateAbstract, "private-abstract-vtable");
+        Assert.Contains("define internal void @Example.Entity.Update(ptr", privateIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_LowersDerivedToBaseReferencesAndVirtualDispatch()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                public virtual int Score() { return 1; }
+            }
+
+            struct Enemy : Entity
+            {
+                public override int Score() { return 42; }
+            }
+
+            int Read(Entity& entity)
+            {
+                return entity.Score();
+            }
+
+            int Main()
+            {
+                Enemy enemy = Enemy { };
+                Entity& entity = enemy;
+                return Read(entity);
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "reference-dispatch");
+
+        Assert.Contains("define internal i32 @Example.Read(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("virtual.slot", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_LowersDynamicInterfaceReferences()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            interface IScore { int Score(); }
+
+            struct Enemy : IScore
+            {
+                public int Score() { return 42; }
+            }
+
+            int Read(IScore& score)
+            {
+                return score.Score();
+            }
+
+            int Main()
+            {
+                Enemy enemy = Enemy { };
+                IScore& score = enemy;
+                return Read(score);
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "interface-reference-dispatch");
+
+        Assert.Contains("define internal i32 @Example.Read(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Enemy.IScore.__itable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("interface.slot", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_MaterializesDerivedTemporaryUsingItsSourceType()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base
+            {
+                public Base() { }
+            }
+
+            struct Derived : Base
+            {
+                int Value;
+                public Derived() { Value = 42; }
+            }
+
+            int Main()
+            {
+                const Base& value = Derived();
+                return 0;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "derived-reference-temporary");
+
+        Assert.Contains("alloca %Example.Derived", llvmIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("alloca %Example.Base,", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsSignedStaticConstantsWithoutOverflow()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Test
+            {
+                public static bool Less = -1 < 1;
+                public static int Divide = -3 / 2;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "signed-static-constants");
+
+        Assert.Contains("@Example.Test.Less = global i1 true", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Test.Divide = global i32 -1", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsInterfaceTableAndDynamicInterfaceCall()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            interface IScore
+            {
+                int Score();
+            }
+
+            struct Enemy : IScore
+            {
+                public int Score() { return 42; }
+            }
+
+            int Main()
+            {
+                Enemy enemy = Enemy { };
+                IScore score = enemy;
+                IScore* pointer = &score;
+                return pointer->Score();
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "interface-dispatch");
+
+        Assert.Contains("%Example.IScore = type { ptr, ptr }", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Enemy.IScore.__itable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("interface.slot", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_UsesSlotsFromTheStaticInterfaceType()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            interface IA { int A(); }
+            interface IB { int B(); }
+            interface IC : IA, IB { int C(); }
+
+            struct Value : IC
+            {
+                public int A() { return 10; }
+                public int B() { return 20; }
+                public int C() { return 30; }
+            }
+
+            int Main()
+            {
+                Value value = Value { };
+                IB ib = value;
+                return ib.B();
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "multiple-interface-inheritance");
+
+        Assert.Contains("@Example.Value.IB.__itable = internal global [1 x ptr]", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("i32 0, i32 0", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_PreservesCompatibleInheritedInterfaceImplementation()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            interface IValue { int Get(int value); }
+
+            struct Base : IValue
+            {
+                public int Get(int value) { return value + 1; }
+            }
+
+            struct Derived : Base
+            {
+                public int Get() { return 100; }
+            }
+
+            int Main()
+            {
+                Derived derived = Derived { };
+                IValue value = derived;
+                return value.Get(10);
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().Generate(compilation, "inherited-interface-implementation");
+
+        Assert.Contains("@Example.Derived.IValue.__itable = internal global [1 x ptr] [ptr @Example.Base.Get]", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_UsesVirtualDestructorWhenFreeingThroughBasePointer()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                public virtual ~Entity() { }
+            }
+
+            struct Enemy : Entity
+            {
+                public ~Enemy() { }
+            }
+
+            int Main()
+            {
+                Enemy* enemy = new Enemy { };
+                Entity* entity = enemy;
+                free(entity);
+                return 0;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            LlvmTargetOptions.CreateHost(),
+            "virtual-destructor");
+
+        Assert.Contains("@Example.Enemy.__vtable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Enemy.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("destructor.slot", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_CallsInheritedDestructorWhenDerivedDeclaresNone()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity { ~Entity() { } }
+            struct Enemy : Entity { }
+
+            int Main()
+            {
+                Enemy* enemy = new Enemy { };
+                free(enemy);
+                return 0;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(), "inherited-destructor");
+
+        Assert.Contains("call void @Example.Entity.__dtor", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_ChainsVirtualDestructorAcrossIntermediateTypeWithoutDestructor()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base { public virtual ~Base() { } }
+            struct Middle : Base { }
+            struct Derived : Middle { public ~Derived() { } }
+
+            int Main()
+            {
+                Derived* derived = new Derived { };
+                Base* value = derived;
+                free(value);
+                return 0;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(), "destructor-gap");
+
+        Assert.Contains("@Example.Derived.__vtable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @Example.Base.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("destructor.slot", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_EmitsTargetedIrWithNativeEntryPoint()
     {
         Compilation compilation = CreateCompilation("""

@@ -36,7 +36,7 @@ internal sealed class FileSymbolScope
 
             string[] parts = directive.NameParts.Select(part => part.Text).ToArray();
             NamespaceSymbol? namespaceTarget = ResolveNamespacePath(parts);
-            StructTypeSymbol? typeTarget = ResolveTypePath(parts);
+            TypeSymbol? typeTarget = ResolveTypePath(parts);
 
             if (!directive.HasAlias)
             {
@@ -94,16 +94,16 @@ internal sealed class FileSymbolScope
             return alias.Type;
         }
 
-        StructTypeSymbol? local = ContainingNamespace.FindType(name);
+        TypeSymbol? local = ContainingNamespace.FindAnyType(name);
         if (local is not null)
         {
             return local;
         }
 
-        List<StructTypeSymbol> matches = _importedNamespaces
-            .Select(@namespace => @namespace.FindType(name))
+        List<TypeSymbol> matches = _importedNamespaces
+            .Select(@namespace => @namespace.FindAnyType(name))
             .Where(type => type is not null)
-            .Cast<StructTypeSymbol>()
+            .Cast<TypeSymbol>()
             .ToList();
 
         if (matches.Count == 1)
@@ -190,7 +190,7 @@ internal sealed class FileSymbolScope
         return null;
     }
 
-    public StructTypeSymbol? ResolveQualifiedType(IReadOnlyList<string> parts)
+    public TypeSymbol? ResolveQualifiedType(IReadOnlyList<string> parts)
     {
         if (parts.Count == 0)
         {
@@ -204,11 +204,11 @@ internal sealed class FileSymbolScope
                 return alias.Type;
             }
 
-            return ContainingNamespace.FindType(parts[0]);
+            return ContainingNamespace.FindAnyType(parts[0]);
         }
 
         NamespaceSymbol? containingNamespace = ResolveNamespacePrefix(parts, parts.Count - 1);
-        return containingNamespace?.FindType(parts[^1]);
+        return containingNamespace?.FindAnyType(parts[^1]);
     }
 
     public FunctionSymbol? ResolveQualifiedFunction(
@@ -281,7 +281,7 @@ internal sealed class FileSymbolScope
     private NamespaceSymbol? ResolveNamespacePath(IReadOnlyList<string> parts) =>
         ResolveNamespacePrefix(parts, parts.Count);
 
-    private StructTypeSymbol? ResolveTypePath(IReadOnlyList<string> parts)
+    private TypeSymbol? ResolveTypePath(IReadOnlyList<string> parts)
     {
         if (parts.Count == 0)
         {
@@ -290,22 +290,29 @@ internal sealed class FileSymbolScope
 
         if (parts.Count == 1)
         {
-            return GlobalNamespace.FindType(parts[0]) ?? ContainingNamespace.FindType(parts[0]);
+            return GlobalNamespace.FindAnyType(parts[0]) ?? ContainingNamespace.FindAnyType(parts[0]);
         }
 
         NamespaceSymbol? @namespace = ResolveNamespacePrefix(parts, parts.Count - 1);
-        return @namespace?.FindType(parts[^1]);
+        return @namespace?.FindAnyType(parts[^1]);
     }
 
-    private static string FormatTypeCandidates(IEnumerable<StructTypeSymbol> types) =>
+    private static string FormatTypeCandidates(IEnumerable<TypeSymbol> types) =>
         string.Join(
             " and ",
-            types.Select(type => $"'{type.FullName}'"));
+            types.Select(type => $"'{GetFullTypeName(type)}'"));
+
+    private static string GetFullTypeName(TypeSymbol type) => type switch
+    {
+        StructTypeSymbol @struct => @struct.FullName,
+        InterfaceTypeSymbol @interface => @interface.FullName,
+        _ => type.Name,
+    };
 
     private static string FormatFunctionCandidates(IEnumerable<FunctionSymbol> functions) =>
         string.Join(
             " and ",
             functions.Select(function => $"'{function.FullName}'"));
 
-    private sealed record UsingAliasTarget(NamespaceSymbol? Namespace, StructTypeSymbol? Type);
+    private sealed record UsingAliasTarget(NamespaceSymbol? Namespace, TypeSymbol? Type);
 }

@@ -23,6 +23,24 @@ public sealed class FunctionSymbol : Symbol
 
     internal FunctionSymbol(
         string name,
+        InterfaceTypeSymbol containingInterface,
+        TypeSymbol returnType,
+        ImmutableArray<ParameterSymbol> parameters,
+        InterfaceMethodDeclarationSyntax declaration)
+        : base(name, SymbolKind.Function)
+    {
+        FunctionKind = FunctionKind.Method;
+        ContainingInterface = containingInterface;
+        ContainingNamespace = containingInterface.ContainingNamespace;
+        ReturnType = returnType;
+        Parameters = parameters;
+        Declaration = declaration;
+        Accessibility = Accessibility.Public;
+        IsAbstract = true;
+    }
+
+    internal FunctionSymbol(
+        string name,
         StructTypeSymbol containingType,
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
@@ -36,6 +54,10 @@ public sealed class FunctionSymbol : Symbol
         Parameters = parameters;
         Declaration = declaration;
         Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
+        IsStatic = declaration.IsStatic;
+        IsVirtual = declaration.IsVirtual;
+        IsOverride = declaration.IsOverride;
+        IsAbstract = declaration.IsAbstract;
     }
 
     internal FunctionSymbol(
@@ -58,16 +80,19 @@ public sealed class FunctionSymbol : Symbol
         Parameters = parameters;
         Declaration = declaration;
         Accessibility = accessibility;
+        IsVirtual = declaration is DestructorDeclarationSyntax { IsVirtual: true };
     }
 
     public NamespaceSymbol ContainingNamespace { get; }
 
     public StructTypeSymbol? ContainingType { get; }
+    public InterfaceTypeSymbol? ContainingInterface { get; }
 
     public string FullName => FunctionKind switch
     {
-        FunctionKind.Method => $"{ContainingType!.FullName}.{Name}",
-        FunctionKind.Constructor => $"{ContainingType!.FullName}.__ctor",
+        FunctionKind.Method when ContainingType is not null => $"{ContainingType.FullName}.{Name}",
+        FunctionKind.Method => $"{ContainingInterface!.FullName}.{Name}",
+        FunctionKind.Constructor => ConstructorOverloadCount == 1 ? $"{ContainingType!.FullName}.__ctor" : $"{ContainingType!.FullName}.__ctor.{ConstructorOverload}",
         FunctionKind.Destructor => $"{ContainingType!.FullName}.__dtor",
         _ => $"{ContainingNamespace.FullName}.{Name}",
     };
@@ -86,7 +111,29 @@ public sealed class FunctionSymbol : Symbol
 
     public bool IsPublic => Accessibility == Accessibility.Public;
 
-    public bool HasImplicitThis => ContainingType is not null;
+    public bool HasImplicitThis => ContainingType is not null && !IsStatic;
+
+    public bool IsStatic { get; }
+    public bool IsVirtual { get; }
+    public bool IsOverride { get; }
+    public bool IsAbstract { get; }
+
+    public int? VTableSlot { get; private set; }
+    public int ConstructorOverload { get; private set; }
+    public int ConstructorOverloadCount { get; private set; } = 1;
+
+    internal void SetVTableSlot(int slot) => VTableSlot = slot;
+    internal void SetConstructorOverload(int index, int count)
+    {
+        ConstructorOverload = index;
+        ConstructorOverloadCount = count;
+    }
+
+    public bool Overrides(FunctionSymbol candidate) =>
+        string.Equals(Name, candidate.Name, StringComparison.Ordinal) &&
+        ReferenceEquals(ReturnType, candidate.ReturnType) &&
+        Parameters.Length == candidate.Parameters.Length &&
+        Parameters.Zip(candidate.Parameters).All(pair => ReferenceEquals(pair.First.Type, pair.Second.Type));
 
     internal SyntaxNode Declaration { get; }
 }

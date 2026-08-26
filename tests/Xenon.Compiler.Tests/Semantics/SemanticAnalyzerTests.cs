@@ -1199,6 +1199,432 @@ public sealed class SemanticAnalyzerTests
                 "native symbol 'malloc' is reserved for Xenon memory operations");
     }
 
+    [Fact]
+    public void Analyzer_BindsInheritanceInterfacesAndStaticMembers()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            interface IRenderable
+            {
+                void Render();
+            }
+
+            struct Entity
+            {
+                public int Id;
+                public static int Count = 3;
+                public virtual void Update() { }
+            }
+
+            struct Enemy : Entity, IRenderable
+            {
+                public int Health;
+                public override void Update() { }
+                public void Render() { }
+                public static int GetCount() { return Entity.Count; }
+            }
+
+            int Main()
+            {
+                Enemy value = Enemy { 1, 100 };
+                Entity* entity = &value;
+                return Enemy.GetCount() + entity->Id;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol enemy = compilation.SemanticModel.GlobalNamespace
+            .Namespaces.Single().Types.Single(type => type.Name == "Enemy");
+        Assert.Equal("Entity", enemy.BaseType!.Name);
+        Assert.Equal(2, enemy.AllInstanceFields.Length);
+        Assert.Single(enemy.Interfaces);
+        Assert.Single(enemy.BaseType.StaticFields);
+    }
+
+    [Fact]
+    public void Analyzer_SelectsOverloadedConstructorsIncludingBaseConstructors()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity
+            {
+                public Entity() { }
+                public Entity(int id) { }
+            }
+
+            struct Enemy : Entity
+            {
+                public Enemy() : base() { }
+                public Enemy(int id) : base(id) { }
+            }
+
+            void Build()
+            {
+                Enemy first = Enemy();
+                Enemy second = Enemy(42);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol enemy = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Types.Single(type => type.Name == "Enemy");
+        Assert.Equal(2, enemy.Constructors.Length);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPrivateBaseMemberAccessFromDerivedStruct()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity { private int Secret; }
+            struct Enemy : Entity
+            {
+                int Reveal() { return Secret; }
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "field 'Secret' is private in struct 'Entity'");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsDerivedObjectUseInBaseConstructorArguments()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base { public Base(int value) { } }
+            struct Derived : Base
+            {
+                int Value;
+                public Derived() : base(Value) { Value = 100; }
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "the derived object cannot be used in base constructor arguments");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsImplicitPrivateBaseMethodCall()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base { private int Secret() { return 42; } }
+            struct Derived : Base
+            {
+                public int Leak() { return Secret(); }
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "method 'Secret' is private in struct 'Base'");
+    }
+
+    [Fact]
+    public void Analyzer_EvaluatesStaticConstantExpressions()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Limits { public static int Maximum = 512 * 2; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol limits = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Types.Single();
+        Assert.Equal(1024, Assert.Single(limits.StaticFields).ConstantValue);
+    }
+
+    [Fact]
+    public void Analyzer_ReportsStructAndInterfaceInheritanceCycles()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct A : B { }
+            struct B : A { }
+            interface IA : IB { }
+            interface IB : IA { }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("struct inheritance cycle", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("interface inheritance cycle", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPrivateBaseConstructor()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base { private Base(int value) { } }
+            struct Derived : Base { public Derived() : base(123) { } }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "constructor 'Base' is private");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPrivateStaticMemberAccess()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Secret
+            {
+                private static int Value = 42;
+                private static int Get() { return 42; }
+            }
+
+            int Main() { return Secret.Value + Secret.Get(); }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "static field 'Value' is private in struct 'Secret'");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "static method 'Get' is private in struct 'Secret'");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsStaticInitializerTypeMismatch()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Test
+            {
+                public static int A = true;
+                public static bool B = 123;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "cannot implicitly convert 'bool' to 'int'");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "cannot implicitly convert 'int' to 'bool'");
+    }
+
+    [Fact]
+    public void Analyzer_SupportsThisAndRejectsItInBaseArguments()
+    {
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+
+            struct Base { public Base(int id) { } }
+            struct Derived : Base
+            {
+                int Health;
+                public Derived(int id, int health) : base(id) { this.Health = health; }
+            }
+            """);
+        Assert.Empty(valid.Diagnostics);
+
+        Compilation invalid = CreateCompilation("""
+            namespace Example;
+
+            struct Base { public Base(Derived* value) { } }
+            struct Derived : Base { public Derived() : base(this) { } }
+            """);
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Message == "the derived object cannot be used in base constructor arguments");
+    }
+
+    [Fact]
+    public void Analyzer_AssignsInterfaceMethodSlotsPerInterface()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            interface IA { int A(); }
+            interface IB { int B(); }
+            interface IC : IA, IB { int C(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NamespaceSymbol example = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        InterfaceTypeSymbol ib = example.Interfaces.Single(type => type.Name == "IB");
+        InterfaceTypeSymbol ic = example.Interfaces.Single(type => type.Name == "IC");
+        FunctionSymbol b = ib.FindMethod("B")!;
+
+        Assert.Equal(0, ib.GetMethodSlot(b));
+        Assert.Equal(1, ic.GetMethodSlot(b));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsStaticStringInitializerBeforeCodeGeneration()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Messages
+            {
+                public static const byte* Text = "Hello";
+            }
+            """);
+
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message == "static field type 'const byte*' does not support this constant initializer");
+    }
+
+    [Fact]
+    public void Analyzer_PrefersExactBaseConstructorOverload()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity { }
+            struct Enemy : Entity { }
+
+            struct Base
+            {
+                public Base(Entity* value) { }
+                public Base(Enemy* value) { }
+            }
+
+            struct Derived : Base
+            {
+                public Derived(Enemy* value) : base(value) { }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction constructor = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.FunctionKind == FunctionKind.Constructor &&
+            function.Symbol.ContainingType?.Name == "Derived");
+        var statement = Assert.IsType<BoundExpressionStatement>(constructor.Body.Statements[0]);
+        var baseCall = Assert.IsType<BoundBaseLifecycleCallExpression>(statement.Expression);
+        var parameterType = Assert.IsType<PointerTypeSymbol>(Assert.Single(baseCall.Function.Parameters).Type);
+
+        Assert.Equal("Enemy", parameterType.ElementType.Name);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsMutationThroughConstReference()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity { public int Value; }
+
+            void Mutate(const Entity& entity)
+            {
+                entity.Value = 42;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "left side of assignment must be writable");
+    }
+
+    [Fact]
+    public void Analyzer_RequiresReferenceLocalInitializer()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Entity { }
+
+            void Invalid()
+            {
+                Entity& entity;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "reference variables must be initialized");
+    }
+
+    [Fact]
+    public void Analyzer_EvaluatesSignedIntegerConstantsWithSignedSemantics()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Test
+            {
+                public static bool Less = -1 < 1;
+                public static int Divide = -3 / 2;
+                public static int Remainder = -3 % 2;
+                public static int Shift = -1 >> 1;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol type = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Types.Single();
+        Assert.Equal(true, type.StaticFields.Single(field => field.Name == "Less").ConstantValue);
+        Assert.Equal(-1, type.StaticFields.Single(field => field.Name == "Divide").ConstantValue);
+        Assert.Equal(-1, type.StaticFields.Single(field => field.Name == "Remainder").ConstantValue);
+        Assert.Equal(-1, type.StaticFields.Single(field => field.Name == "Shift").ConstantValue);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsImplicitDefaultBaseConstructionWhenBaseDeclaresNoConstructor()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base
+            {
+                int Value;
+            }
+
+            struct Derived : Base
+            {
+                public Derived()
+                {
+                }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsExplicitBaseCallForImplicitDefaultConstruction()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base
+            {
+            }
+
+            struct Derived : Base
+            {
+                public Derived() : base()
+                {
+                }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_BindsImplicitBaseCallWhenParameterlessConstructorExists()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Base
+            {
+                public Base()
+                {
+                }
+            }
+
+            struct Derived : Base
+            {
+                public Derived()
+                {
+                }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction constructor = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.FunctionKind == FunctionKind.Constructor &&
+            function.Symbol.ContainingType?.Name == "Derived");
+        var statement = Assert.IsType<BoundExpressionStatement>(constructor.Body.Statements[0]);
+        var baseCall = Assert.IsType<BoundBaseLifecycleCallExpression>(statement.Expression);
+        Assert.Equal("Base", baseCall.Function.ContainingType!.Name);
+        Assert.Empty(baseCall.Arguments);
+    }
+
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(
         sources.Select((source, index) => SourceText.From(source, $"test{index}.xe")).ToArray());
 }

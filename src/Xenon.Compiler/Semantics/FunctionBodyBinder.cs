@@ -15,6 +15,7 @@ internal sealed class FunctionBodyBinder
     private readonly HashSet<LocalVariableSymbol> _definitelyAssigned = [];
     private BoundScope _scope = new(null);
     private int _loopDepth;
+    private bool _bindingBaseConstructorArguments;
 
     public FunctionBodyBinder(FunctionSymbol function, FileSymbolScope fileScope, DiagnosticBag diagnostics)
     {
@@ -30,7 +31,51 @@ internal sealed class FunctionBodyBinder
 
     public BoundBlockStatement BindBody(BlockStatementSyntax body)
     {
+        BoundStatement? baseConstructorCall = null;
+
+        if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingType?.BaseType is StructTypeSymbol baseType && !baseType.Constructors.IsEmpty)
+        {
+            ConstructorDeclarationSyntax syntax = (ConstructorDeclarationSyntax)_function.Declaration;
+            _bindingBaseConstructorArguments = true;
+            ImmutableArray<BoundExpression> arguments;
+            try
+            {
+                arguments = syntax.BaseArguments.Select(BindExpression).ToImmutableArray();
+            }
+            finally
+            {
+                _bindingBaseConstructorArguments = false;
+            }
+            FunctionSymbol? baseConstructor = ResolveConstructor(baseType, arguments, syntax.BaseArguments, syntax.IdentifierToken.Location);
+            if (baseConstructor is not null)
+            {
+                if (!baseConstructor.IsPublic)
+                {
+                    _diagnostics.Report(syntax.BaseKeyword?.Location ?? syntax.IdentifierToken.Location, $"constructor '{baseType.Name}' is private");
+                }
+                arguments = ValidateFunctionArguments(baseConstructor, arguments, syntax.BaseArguments, syntax.IdentifierToken.Location);
+                baseConstructorCall = new BoundExpressionStatement(new BoundBaseLifecycleCallExpression(baseConstructor, arguments));
+            }
+        }
+        else if (_function.FunctionKind == FunctionKind.Constructor &&
+                 _function.ContainingType?.BaseType is StructTypeSymbol baseWithoutConstructor)
+        {
+            ConstructorDeclarationSyntax syntax = (ConstructorDeclarationSyntax)_function.Declaration;
+            if (!syntax.BaseArguments.IsEmpty)
+            {
+                _diagnostics.Report(syntax.BaseKeyword?.Location ?? syntax.IdentifierToken.Location, $"base struct '{baseWithoutConstructor.Name}' does not declare a constructor");
+            }
+        }
+
         BoundBlockStatement boundBody = BindBlockStatement(body, createScope: false);
+        if (baseConstructorCall is not null)
+        {
+            boundBody = new BoundBlockStatement([baseConstructorCall, .. boundBody.Statements]);
+        }
+        else if (_function.FunctionKind == FunctionKind.Destructor && _function.ContainingType?.BaseType?.FindDestructor() is FunctionSymbol baseDestructor)
+        {
+            boundBody = new BoundBlockStatement([.. boundBody.Statements, new BoundExpressionStatement(new BoundBaseLifecycleCallExpression(baseDestructor, []))]);
+        }
 
         if (!ReferenceEquals(_function.ReturnType, BuiltinTypes.Void) && !AlwaysReturns(boundBody))
         {
@@ -211,9 +256,13 @@ internal sealed class FunctionBodyBinder
         }
 
         BoundExpression? initializer = syntax.Initializer is null ? null : BindExpression(syntax.Initializer);
+        if (type is ReferenceTypeSymbol && initializer is null)
+        {
+            _diagnostics.Report(syntax.IdentifierToken.Location, "reference variables must be initialized");
+        }
         if (initializer is not null)
         {
-            initializer = ContextualizeNull(initializer, type);
+            initializer = ContextualizeConversion(initializer, type);
         }
 
         if (initializer is not null && !TypeFacts.CanAssign(type, initializer.Type))
@@ -239,7 +288,7 @@ internal sealed class FunctionBodyBinder
         BoundExpression? expression = syntax.Expression is null ? null : BindExpression(syntax.Expression);
         if (expression is not null)
         {
-            expression = ContextualizeNull(expression, _function.ReturnType);
+            expression = ContextualizeConversion(expression, _function.ReturnType);
         }
 
         if (ReferenceEquals(_function.ReturnType, BuiltinTypes.Void))
@@ -266,24 +315,50 @@ internal sealed class FunctionBodyBinder
         return new BoundReturnStatement(expression);
     }
 
-    private BoundExpression BindExpression(ExpressionSyntax syntax) => syntax switch
+    private BoundExpression BindExpression(ExpressionSyntax syntax)
     {
-        LiteralExpressionSyntax literal => BindLiteralExpression(literal),
-        NameExpressionSyntax name => BindNameExpression(name),
-        ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
-        UnaryExpressionSyntax unary => BindUnaryExpression(unary),
-        PostfixUnaryExpressionSyntax postfix => BindPostfixUnaryExpression(postfix),
-        BinaryExpressionSyntax binary => BindBinaryExpression(binary),
-        AssignmentExpressionSyntax assignment => BindAssignmentExpression(assignment),
-        CallExpressionSyntax call => BindCallExpression(call),
-        MemberAccessExpressionSyntax member => BindMemberAccessExpression(member),
-        IndexExpressionSyntax index => BindIndexExpression(index),
-        StructPositionalConstructionExpressionSyntax construction => BindStructPositionalConstructionExpression(construction),
-        StackArrayCreationExpressionSyntax stackArray => BindStackArrayCreationExpression(stackArray),
-        NewExpressionSyntax @new => BindNewExpression(@new),
-        FreeExpressionSyntax free => BindFreeExpression(free),
-        _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
-    };
+        BoundExpression expression = syntax switch
+        {
+            LiteralExpressionSyntax literal => BindLiteralExpression(literal),
+            NameExpressionSyntax name => BindNameExpression(name),
+            ThisExpressionSyntax @this => BindThisExpression(@this),
+            ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
+            UnaryExpressionSyntax unary => BindUnaryExpression(unary),
+            PostfixUnaryExpressionSyntax postfix => BindPostfixUnaryExpression(postfix),
+            BinaryExpressionSyntax binary => BindBinaryExpression(binary),
+            AssignmentExpressionSyntax assignment => BindAssignmentExpression(assignment),
+            CallExpressionSyntax call => BindCallExpression(call),
+            MemberAccessExpressionSyntax member => BindMemberAccessExpression(member),
+            IndexExpressionSyntax index => BindIndexExpression(index),
+            StructPositionalConstructionExpressionSyntax construction => BindStructPositionalConstructionExpression(construction),
+            StackArrayCreationExpressionSyntax stackArray => BindStackArrayCreationExpression(stackArray),
+            NewExpressionSyntax @new => BindNewExpression(@new),
+            FreeExpressionSyntax free => BindFreeExpression(free),
+            TypeLayoutExpressionSyntax layout => BindTypeLayoutExpression(layout),
+            _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
+        };
+        return DereferenceReference(expression);
+    }
+
+    private static BoundExpression DereferenceReference(BoundExpression expression) =>
+        expression.Type is ReferenceTypeSymbol referenceType
+            ? new BoundReferenceDereferenceExpression(expression, referenceType)
+            : expression;
+
+    private BoundExpression BindThisExpression(ThisExpressionSyntax syntax)
+    {
+        if (_function.ContainingType is not StructTypeSymbol containingType || _function.IsStatic)
+        {
+            _diagnostics.Report(syntax.ThisKeyword.Location, "'this' is available only in instance members");
+            return new BoundErrorExpression();
+        }
+        if (_bindingBaseConstructorArguments)
+        {
+            _diagnostics.Report(syntax.ThisKeyword.Location, "the derived object cannot be used in base constructor arguments");
+            return new BoundErrorExpression();
+        }
+        return new BoundThisExpression(containingType, BuiltinTypes.PointerTo(containingType));
+    }
 
     private static BoundExpression BindLiteralExpression(LiteralExpressionSyntax syntax)
     {
@@ -329,6 +404,21 @@ internal sealed class FunctionBodyBinder
             FieldSymbol? field = containingType.FindField(syntax.IdentifierToken.Text);
             if (field is not null)
             {
+                if (_bindingBaseConstructorArguments)
+                {
+                    _diagnostics.Report(syntax.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments");
+                    return new BoundErrorExpression();
+                }
+                if (!field.IsPublic && !ReferenceEquals(containingType, field.ContainingType))
+                {
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'");
+                    return new BoundErrorExpression();
+                }
+                if (_function.IsStatic)
+                {
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"static method '{_function.Name}' cannot access instance field '{field.Name}' without an explicit instance");
+                    return new BoundErrorExpression();
+                }
                 PointerTypeSymbol thisType = BuiltinTypes.PointerTo(containingType);
                 return new BoundMemberAccessExpression(
                     new BoundThisExpression(containingType, thisType),
@@ -425,10 +515,11 @@ internal sealed class FunctionBodyBinder
         BoundExpression target = isSimpleAssignment && syntax.Target is NameExpressionSyntax name
             ? BindNameExpression(name, requireDefinitelyAssigned: false)
             : BindExpression(syntax.Target);
+        target = DereferenceReference(target);
         BoundExpression expression = BindExpression(syntax.Expression);
         if (isSimpleAssignment)
         {
-            expression = ContextualizeNull(expression, target.Type);
+            expression = ContextualizeConversion(expression, target.Type);
         }
 
         if (!IsWritable(target))
@@ -491,8 +582,29 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindMemberAccessExpression(MemberAccessExpressionSyntax syntax)
     {
+        if (syntax.OperatorToken.Kind == SyntaxKind.DotToken && TryGetDottedName(syntax, out ImmutableArray<SyntaxToken> qualifiedName) && qualifiedName.Length >= 2)
+        {
+            string[] typeParts = qualifiedName.Take(qualifiedName.Length - 1).Select(token => token.Text).ToArray();
+            TypeSymbol? resolved = typeParts.Length == 1
+                ? _fileScope.ResolveType(typeParts[0], syntax.Receiver is NameExpressionSyntax name ? name.IdentifierToken.Location : syntax.OperatorToken.Location, _diagnostics)
+                : _fileScope.ResolveQualifiedType(typeParts);
+            if (resolved is StructTypeSymbol staticType)
+            {
+                FieldSymbol? staticField = staticType.FindStaticField(qualifiedName[^1].Text);
+                if (staticField is not null)
+                {
+                    if (!staticField.IsPublic && !ReferenceEquals(_function.ContainingType, staticField.ContainingType))
+                    {
+                        _diagnostics.Report(qualifiedName[^1].Location, $"static field '{staticField.Name}' is private in struct '{staticField.ContainingType.Name}'");
+                        return new BoundErrorExpression();
+                    }
+                    return new BoundStaticFieldExpression(staticField);
+                }
+            }
+        }
+
         BoundExpression receiver = BindExpression(syntax.Receiver);
-        bool pointerAccess = syntax.OperatorToken.Kind == SyntaxKind.ArrowToken;
+        bool pointerAccess = syntax.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
         StructTypeSymbol? structType = pointerAccess
             ? (receiver.Type as PointerTypeSymbol)?.ElementType as StructTypeSymbol
             : receiver.Type as StructTypeSymbol;
@@ -519,14 +631,34 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (!field.IsPublic && !ReferenceEquals(_function.ContainingType, structType))
+        if (!field.IsPublic && !ReferenceEquals(_function.ContainingType, field.ContainingType))
         {
             _diagnostics.Report(
                 syntax.MemberToken.Location,
-                $"field '{field.Name}' is private in struct '{structType.Name}'");
+                $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'");
         }
 
         return new BoundMemberAccessExpression(receiver, field, pointerAccess);
+    }
+
+    private BoundExpression BindTypeLayoutExpression(TypeLayoutExpressionSyntax syntax)
+    {
+        TypeSymbol type = TypeResolver.Resolve(syntax.Type, _fileScope, _diagnostics);
+        if (syntax.Keyword.Kind != SyntaxKind.OffsetOfKeyword)
+            return new BoundTypeLayoutExpression(syntax.Keyword.Kind, type, null);
+
+        if (type is not StructTypeSymbol structType)
+        {
+            _diagnostics.Report(syntax.Type.NameToken.Location, "offsetof requires a struct type");
+            return new BoundErrorExpression();
+        }
+        FieldSymbol? field = structType.FindField(syntax.FieldToken!.Text);
+        if (field is null)
+        {
+            _diagnostics.Report(syntax.FieldToken.Location, $"struct '{structType.Name}' does not contain field '{syntax.FieldToken.Text}'");
+            return new BoundErrorExpression();
+        }
+        return new BoundTypeLayoutExpression(syntax.Keyword.Kind, type, field);
     }
 
     private BoundExpression BindIndexExpression(IndexExpressionSyntax syntax)
@@ -619,6 +751,11 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        if (structType.IsAbstract)
+        {
+            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+        }
+
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
         arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.Type.NameToken.Location);
         return new BoundStructConstructionExpression(structType, arguments);
@@ -648,6 +785,8 @@ internal sealed class FunctionBodyBinder
 
         if (syntax.Target is MemberAccessExpressionSyntax memberTarget)
         {
+            if (TryBindStaticMethodCall(memberTarget, arguments, syntax.Arguments) is BoundExpression staticCall)
+                return staticCall;
             BoundExpression? qualifiedCall = TryBindQualifiedCallExpression(
                 memberTarget,
                 arguments,
@@ -667,7 +806,12 @@ internal sealed class FunctionBodyBinder
             _diagnostics) as StructTypeSymbol;
         if (structType is not null)
         {
-            FunctionSymbol? constructor = structType.Constructor;
+            if (structType.IsAbstract)
+            {
+                _diagnostics.Report(name.IdentifierToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+                return new BoundErrorExpression();
+            }
+            FunctionSymbol? constructor = ResolveConstructor(structType, arguments, syntax.Arguments, name.IdentifierToken.Location);
             if (constructor is null)
             {
                 _diagnostics.Report(
@@ -690,6 +834,26 @@ internal sealed class FunctionBodyBinder
             FunctionSymbol? method = containingType.FindMethod(name.IdentifierToken.Text);
             if (method is not null)
             {
+                if (_bindingBaseConstructorArguments)
+                {
+                    _diagnostics.Report(name.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments");
+                    return new BoundErrorExpression();
+                }
+                if (!method.IsPublic && !ReferenceEquals(containingType, method.ContainingType))
+                {
+                    _diagnostics.Report(name.IdentifierToken.Location, $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'");
+                    return new BoundErrorExpression();
+                }
+                if (_function.IsStatic)
+                {
+                    _diagnostics.Report(name.IdentifierToken.Location, $"static method '{_function.Name}' cannot call instance method '{method.Name}' without an explicit instance");
+                    return new BoundErrorExpression();
+                }
+                if (method.IsStatic)
+                {
+                    _diagnostics.Report(name.IdentifierToken.Location, $"static method '{method.Name}' must be accessed through type '{containingType.Name}'");
+                    return new BoundErrorExpression();
+                }
                 arguments = ValidateFunctionArguments(method, arguments, syntax.Arguments, name.IdentifierToken.Location);
                 PointerTypeSymbol thisType = BuiltinTypes.PointerTo(containingType);
                 return new BoundMethodCallExpression(
@@ -719,6 +883,28 @@ internal sealed class FunctionBodyBinder
         return new BoundCallExpression(function, arguments);
     }
 
+    private BoundExpression? TryBindStaticMethodCall(MemberAccessExpressionSyntax target, ImmutableArray<BoundExpression> arguments, ImmutableArray<ExpressionSyntax> argumentSyntax)
+    {
+        if (!TryGetDottedName(target, out ImmutableArray<SyntaxToken> parts) || parts.Length < 2)
+            return null;
+        string[] typeParts = parts.Take(parts.Length - 1).Select(token => token.Text).ToArray();
+        TypeSymbol? resolved = typeParts.Length == 1
+            ? _fileScope.ResolveType(typeParts[0], parts[0].Location, _diagnostics)
+            : _fileScope.ResolveQualifiedType(typeParts);
+        if (resolved is not StructTypeSymbol structType)
+            return null;
+        FunctionSymbol? method = structType.FindMethod(parts[^1].Text);
+        if (method is null || !method.IsStatic)
+            return null;
+        if (!method.IsPublic && !ReferenceEquals(_function.ContainingType, method.ContainingType))
+        {
+            _diagnostics.Report(parts[^1].Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'");
+            return new BoundErrorExpression();
+        }
+        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, parts[^1].Location);
+        return new BoundCallExpression(method, arguments);
+    }
+
     private BoundExpression? TryBindQualifiedCallExpression(
         MemberAccessExpressionSyntax target,
         ImmutableArray<BoundExpression> arguments,
@@ -746,10 +932,15 @@ internal sealed class FunctionBodyBinder
         }
 
         string[] parts = nameParts.Select(part => part.Text).ToArray();
-        StructTypeSymbol? structType = _fileScope.ResolveQualifiedType(parts);
+        StructTypeSymbol? structType = _fileScope.ResolveQualifiedType(parts) as StructTypeSymbol;
         if (structType is not null)
         {
-            FunctionSymbol? constructor = structType.Constructor;
+            if (structType.IsAbstract)
+            {
+                _diagnostics.Report(target.MemberToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+                return new BoundErrorExpression();
+            }
+            FunctionSymbol? constructor = ResolveConstructor(structType, arguments, argumentSyntax, target.MemberToken.Location);
             if (constructor is null)
             {
                 _diagnostics.Report(
@@ -831,7 +1022,21 @@ internal sealed class FunctionBodyBinder
         ImmutableArray<ExpressionSyntax> argumentSyntax)
     {
         BoundExpression receiver = BindExpression(target.Receiver);
-        bool pointerAccess = target.OperatorToken.Kind == SyntaxKind.ArrowToken;
+        bool pointerAccess = target.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
+        InterfaceTypeSymbol? interfaceType = pointerAccess
+            ? (receiver.Type as PointerTypeSymbol)?.ElementType as InterfaceTypeSymbol
+            : receiver.Type as InterfaceTypeSymbol;
+        if (interfaceType is not null)
+        {
+            FunctionSymbol? interfaceMethod = interfaceType.FindMethod(target.MemberToken.Text);
+            if (interfaceMethod is null)
+            {
+                _diagnostics.Report(target.MemberToken.Location, $"interface '{interfaceType.Name}' does not contain method '{target.MemberToken.Text}'");
+                return new BoundErrorExpression();
+            }
+            arguments = ValidateFunctionArguments(interfaceMethod, arguments, argumentSyntax, target.MemberToken.Location);
+            return new BoundInterfaceMethodCallExpression(receiver, interfaceType, interfaceMethod, arguments, pointerAccess);
+        }
         StructTypeSymbol? structType = pointerAccess
             ? (receiver.Type as PointerTypeSymbol)?.ElementType as StructTypeSymbol
             : receiver.Type as StructTypeSymbol;
@@ -858,11 +1063,17 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (!method.IsPublic && !ReferenceEquals(_function.ContainingType, structType))
+        if (method.IsStatic)
+        {
+            _diagnostics.Report(target.MemberToken.Location, $"static method '{method.Name}' must be accessed through type '{structType.Name}'");
+            return new BoundErrorExpression();
+        }
+
+        if (!method.IsPublic && !ReferenceEquals(_function.ContainingType, method.ContainingType))
         {
             _diagnostics.Report(
                 target.MemberToken.Location,
-                $"method '{method.Name}' is private in struct '{structType.Name}'");
+                $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'");
         }
 
         if (pointerAccess && receiver.Type is PointerTypeSymbol { IsConst: true })
@@ -916,6 +1127,11 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        if (structType.IsAbstract)
+        {
+            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+        }
+
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
         FunctionSymbol? constructor = null;
         if (syntax.IsPositionalInitialization)
@@ -924,7 +1140,7 @@ internal sealed class FunctionBodyBinder
         }
         else
         {
-            constructor = structType.Constructor;
+            constructor = ResolveConstructor(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
             if (constructor is null)
             {
                 _diagnostics.Report(
@@ -959,7 +1175,7 @@ internal sealed class FunctionBodyBinder
         {
             if (pointerType.ElementType is StructTypeSymbol structType)
             {
-                destructor = structType.Destructor;
+                destructor = structType.FindDestructor();
             }
         }
         else if (pointer.Type is ArrayTypeSymbol arrayType)
@@ -988,19 +1204,19 @@ internal sealed class FunctionBodyBinder
         ImmutableArray<ExpressionSyntax> argumentSyntax,
         TextLocation location)
     {
-        if (arguments.Length != structType.Fields.Length)
+        if (arguments.Length != structType.AllInstanceFields.Length)
         {
             _diagnostics.Report(
                 location,
-                $"struct '{structType.Name}' expects {structType.Fields.Length} positional value(s), but {arguments.Length} were provided");
+                $"struct '{structType.Name}' expects {structType.AllInstanceFields.Length} positional value(s), but {arguments.Length} were provided");
         }
 
         var convertedArguments = arguments.ToBuilder();
-        int count = Math.Min(arguments.Length, structType.Fields.Length);
+        int count = Math.Min(arguments.Length, structType.AllInstanceFields.Length);
         for (int index = 0; index < count; index++)
         {
-            TypeSymbol fieldType = structType.Fields[index].Type;
-            BoundExpression argument = ContextualizeNull(arguments[index], fieldType);
+            TypeSymbol fieldType = structType.AllInstanceFields[index].Type;
+            BoundExpression argument = ContextualizeConversion(arguments[index], fieldType);
             convertedArguments[index] = argument;
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
@@ -1037,7 +1253,7 @@ internal sealed class FunctionBodyBinder
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
-            BoundExpression argument = ContextualizeNull(arguments[index], parameterType);
+            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType);
             convertedArguments[index] = argument;
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
@@ -1054,6 +1270,77 @@ internal sealed class FunctionBodyBinder
         return convertedArguments.ToImmutable();
     }
 
+    private FunctionSymbol? ResolveConstructor(
+        StructTypeSymbol type,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        TextLocation location)
+    {
+        if (type.Constructors.IsEmpty)
+            return null;
+
+        var matches = type.Constructors
+            .Where(candidate => candidate.Parameters.Length == arguments.Length)
+            .Select(candidate => new
+            {
+                Constructor = candidate,
+                Costs = candidate.Parameters.Zip(arguments)
+                    .Select(pair => GetArgumentConversionCost(pair.First.Type, pair.Second))
+                    .ToArray(),
+            })
+            .Where(candidate => candidate.Costs.All(cost => cost.HasValue))
+            .Select(candidate => new
+            {
+                candidate.Constructor,
+                Costs = candidate.Costs.Select(cost => cost!.Value).ToArray(),
+            })
+            .ToArray();
+        if (matches.Length == 1)
+            return matches[0].Constructor;
+        if (matches.Length == 0)
+        {
+            _diagnostics.Report(location, $"no constructor of struct '{type.Name}' matches the provided arguments");
+            return null;
+        }
+
+        FunctionSymbol[] bestMatches = matches
+            .Where(candidate => !matches.Any(other =>
+                !ReferenceEquals(other, candidate) &&
+                IsBetterConversionSequence(other.Costs, candidate.Costs)))
+            .Select(candidate => candidate.Constructor)
+            .ToArray();
+        if (bestMatches.Length == 1)
+            return bestMatches[0];
+
+        _diagnostics.Report(location, $"constructor call for struct '{type.Name}' is ambiguous");
+        return null;
+    }
+
+    private static bool IsBetterConversionSequence(int[] candidate, int[] other)
+    {
+        bool strictlyBetter = false;
+        for (int index = 0; index < candidate.Length; index++)
+        {
+            if (candidate[index] > other[index])
+                return false;
+            strictlyBetter |= candidate[index] < other[index];
+        }
+        return strictlyBetter;
+    }
+
+    private static int? GetArgumentConversionCost(TypeSymbol parameterType, BoundExpression argument)
+    {
+        int? standardCost = TypeFacts.GetImplicitConversionCost(parameterType, argument.Type);
+        if (standardCost is not null)
+            return standardCost;
+
+        if (parameterType is not ReferenceTypeSymbol referenceType)
+            return null;
+        if (!referenceType.IsConst && argument is BoundReferenceDereferenceExpression { ReferenceType.IsConst: true })
+            return null;
+        return TypeFacts.GetReferenceBindingCost(referenceType, argument.Type);
+    }
+
     private static BoundExpression ContextualizeNull(BoundExpression expression, TypeSymbol targetType)
     {
         if (expression is BoundLiteralExpression { Value: null } &&
@@ -1064,6 +1351,33 @@ internal sealed class FunctionBodyBinder
         }
 
         return expression;
+    }
+
+    private static BoundExpression ContextualizeConversion(BoundExpression expression, TypeSymbol targetType)
+    {
+        if (targetType is ReferenceTypeSymbol referenceType)
+        {
+            if (!referenceType.IsConst && expression is BoundReferenceDereferenceExpression { ReferenceType.IsConst: true })
+                return expression;
+            if (TypeFacts.GetReferenceBindingCost(referenceType, expression.Type) is null)
+                return expression;
+
+            if (referenceType.ElementType is InterfaceTypeSymbol referenceInterface &&
+                expression.Type is StructTypeSymbol referenceSource &&
+                referenceSource.Implements(referenceInterface))
+            {
+                expression = new BoundInterfaceConversionExpression(expression, referenceSource, referenceInterface);
+            }
+
+            if (IsAddressable(expression) || referenceType.IsConst || expression is BoundInterfaceConversionExpression)
+                return new BoundReferenceConversionExpression(expression, referenceType);
+            return expression;
+        }
+
+        expression = ContextualizeNull(expression, targetType);
+        return targetType is InterfaceTypeSymbol @interface && expression.Type is StructTypeSymbol source && source.Implements(@interface)
+            ? new BoundInterfaceConversionExpression(expression, source, @interface)
+            : expression;
     }
 
     private void ValidateArrayElementType(TypeSymbol elementType, TextLocation location)
@@ -1196,6 +1510,7 @@ internal sealed class FunctionBodyBinder
     {
         LiteralExpressionSyntax literal => literal.LiteralToken.Location,
         NameExpressionSyntax name => name.IdentifierToken.Location,
+        ThisExpressionSyntax @this => @this.ThisKeyword.Location,
         ParenthesizedExpressionSyntax parenthesized => parenthesized.OpenParenthesisToken.Location,
         UnaryExpressionSyntax unary => unary.OperatorToken.Location,
         PostfixUnaryExpressionSyntax postfix => postfix.OperatorToken.Location,
@@ -1215,6 +1530,7 @@ internal sealed class FunctionBodyBinder
     {
         BoundVariableExpression => true,
         BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
+        BoundReferenceDereferenceExpression => true,
         BoundMemberAccessExpression { IsPointerAccess: true } => true,
         BoundMemberAccessExpression member => IsAddressable(member.Receiver),
         BoundIndexExpression => true,
@@ -1231,6 +1547,7 @@ internal sealed class FunctionBodyBinder
         return expression switch
         {
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken, Operand.Type: PointerTypeSymbol { IsConst: true } } => false,
+            BoundReferenceDereferenceExpression { ReferenceType.IsConst: true } => false,
             BoundMemberAccessExpression
             {
                 IsPointerAccess: true,

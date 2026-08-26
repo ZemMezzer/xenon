@@ -28,14 +28,27 @@ internal static class TypeResolver
             type = BuiltinTypes.Error;
         }
 
-        if (syntax.IsConst && syntax.PointerDepth == 0)
+        if (syntax.IsConst && syntax.PointerDepth == 0 && !syntax.IsReference)
         {
-            diagnostics.Report(syntax.ConstKeyword!.Location, "'const' is currently supported only for pointer element types");
+            diagnostics.Report(syntax.ConstKeyword!.Location, "'const' is currently supported only for pointer element and reference types");
         }
 
         for (int depth = 0; depth < syntax.PointerDepth; depth++)
         {
             type = BuiltinTypes.PointerTo(type, syntax.IsConst && depth == 0);
+        }
+
+        if (syntax.IsReference)
+        {
+            if (ReferenceEquals(type, BuiltinTypes.Void))
+            {
+                diagnostics.Report(syntax.NameToken.Location, "reference element type cannot be 'void'");
+                type = BuiltinTypes.Error;
+            }
+            else
+            {
+                type = BuiltinTypes.ReferenceTo(type, syntax.IsConst && syntax.PointerDepth == 0);
+            }
         }
 
         if (!syntax.IsArray)

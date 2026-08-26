@@ -11,6 +11,10 @@ public sealed class LlvmIrGenerator
 {
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
+    private readonly Dictionary<InterfaceTypeSymbol, LLVMTypeRef> _interfaceTypes = [];
+    private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields = [];
+    private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables = [];
+    private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps = [];
     private LLVMContextRef _context;
     private LLVMModuleRef _module;
     private NativeTargetMachine? _targetMachine;
@@ -68,8 +72,12 @@ public sealed class LlvmIrGenerator
                 _module.DataLayout = targetMachine.DataLayout;
             }
 
+            DeclareInterfaceTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareStructTypes(compilation.SemanticModel.GlobalNamespace);
+            DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
+            DeclareVirtualTables(compilation.SemanticModel.GlobalNamespace);
+            DeclareInterfaceTables(compilation.SemanticModel.GlobalNamespace);
             EmitFunctionBodies(compilation.SemanticModel.Functions);
             if (generateExecutableEntryPoint)
             {
@@ -93,6 +101,10 @@ public sealed class LlvmIrGenerator
             _context.Dispose();
             _functions.Clear();
             _structTypes.Clear();
+            _interfaceTypes.Clear();
+            _staticFields.Clear();
+            _virtualTables.Clear();
+            _interfaceMaps.Clear();
             _targetMachine = null;
             _memoryRuntime = null;
         }
@@ -109,10 +121,117 @@ public sealed class LlvmIrGenerator
 
         foreach (StructTypeSymbol type in types)
         {
-            LLVMTypeRef[] fields = type.Fields.Select(field => MapType(field.Type)).ToArray();
+            LLVMTypeRef[] fields = type.HasVirtualDispatch
+                ? [LLVMTypeRef.CreatePointer(_context.Int8Type, 0), .. type.AllInstanceFields.Select(field => MapType(field.Type))]
+                : type.AllInstanceFields.Select(field => MapType(field.Type)).ToArray();
             _structTypes[type].StructSetBody(fields, false);
         }
     }
+
+    private void DeclareInterfaceTypes(NamespaceSymbol @namespace)
+    {
+        foreach (InterfaceTypeSymbol type in @namespace.Interfaces)
+        {
+            LLVMTypeRef llvmType = _context.CreateNamedStruct(type.FullName);
+            llvmType.StructSetBody([LLVMTypeRef.CreatePointer(_context.Int8Type, 0), LLVMTypeRef.CreatePointer(_context.Int8Type, 0)], false);
+            _interfaceTypes.Add(type, llvmType);
+        }
+        foreach (NamespaceSymbol child in @namespace.Namespaces)
+            DeclareInterfaceTypes(child);
+    }
+
+    private void DeclareVirtualTables(NamespaceSymbol @namespace)
+    {
+        foreach (StructTypeSymbol type in @namespace.Types.Where(type => !type.VirtualMethods.IsEmpty))
+        {
+            LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)type.VirtualMethods.Length);
+            LLVMValueRef table = _module.AddGlobal(tableType, $"{type.FullName}.__vtable");
+            table.Linkage = LLVMLinkage.LLVMInternalLinkage;
+            LLVMValueRef[] entries = type.VirtualMethods
+                .Select(method => _functions[method].Value)
+                .ToArray();
+            table.Initializer = LLVMValueRef.CreateConstArray(elementType, entries);
+            _virtualTables.Add(type, new LlvmVTable(table, tableType));
+        }
+        foreach (NamespaceSymbol child in @namespace.Namespaces)
+            DeclareVirtualTables(child);
+    }
+
+    private void DeclareInterfaceTables(NamespaceSymbol @namespace)
+    {
+        foreach (StructTypeSymbol type in @namespace.Types)
+        {
+            var tables = new Dictionary<InterfaceTypeSymbol, LlvmVTable>();
+            foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces)
+            {
+                FunctionSymbol[] implementations = @interface.AllMethods.Select(required => type.FindInterfaceImplementation(required)!).ToArray();
+                LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+                LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)implementations.Length);
+                LLVMValueRef table = _module.AddGlobal(tableType, $"{type.FullName}.{@interface.Name}.__itable");
+                table.Linkage = LLVMLinkage.LLVMInternalLinkage;
+                table.Initializer = LLVMValueRef.CreateConstArray(elementType, implementations.Select(method => _functions[method].Value).ToArray());
+                tables.Add(@interface, new LlvmVTable(table, tableType));
+            }
+
+            if (tables.Count > 0)
+            {
+                LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+                LLVMTypeRef mapType = LLVMTypeRef.CreateArray(entryType, (uint)_interfaceTypes.Count);
+                LLVMValueRef[] entries = Enumerable.Repeat(
+                    LLVMValueRef.CreateConstPointerNull(entryType),
+                    _interfaceTypes.Count).ToArray();
+                foreach ((InterfaceTypeSymbol @interface, LlvmVTable table) in tables)
+                    entries[@interface.DispatchId] = table.Value;
+
+                LLVMValueRef map = _module.AddGlobal(mapType, $"{type.FullName}.__imap");
+                map.Linkage = LLVMLinkage.LLVMInternalLinkage;
+                map.Initializer = LLVMValueRef.CreateConstArray(entryType, entries);
+                _interfaceMaps.Add(type, new LlvmVTable(map, mapType));
+            }
+        }
+        foreach (NamespaceSymbol child in @namespace.Namespaces)
+            DeclareInterfaceTables(child);
+    }
+
+    private void DeclareStaticFields(NamespaceSymbol @namespace)
+    {
+        foreach (StructTypeSymbol type in @namespace.Types)
+        {
+            foreach (FieldSymbol field in type.StaticFields)
+            {
+                LLVMTypeRef fieldType = MapType(field.Type);
+                LLVMValueRef global = _module.AddGlobal(fieldType, $"{type.FullName}.{field.Name}");
+                global.Linkage = field.IsPublic ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
+                global.Initializer = CreateStaticInitializer(field.Type, field.ConstantValue);
+                _staticFields.Add(field, global);
+            }
+        }
+        foreach (NamespaceSymbol child in @namespace.Namespaces)
+            DeclareStaticFields(child);
+    }
+
+    private LLVMValueRef CreateStaticInitializer(TypeSymbol type, object? value)
+    {
+        LLVMTypeRef llvmType = MapType(type);
+        if (value is null)
+            return type is PointerTypeSymbol ? LLVMValueRef.CreateConstPointerNull(llvmType) : LLVMValueRef.CreateConstNull(llvmType);
+        if (ReferenceEquals(type, BuiltinTypes.Bool))
+            return LLVMValueRef.CreateConstInt(llvmType, value is true ? 1UL : 0UL, false);
+        if (type is PrimitiveTypeSymbol { IsInteger: true })
+            return LLVMValueRef.CreateConstInt(llvmType, GetIntegerConstantBits(value), false);
+        if (type is PrimitiveTypeSymbol { IsFloatingPoint: true })
+            return LLVMValueRef.CreateConstReal(llvmType, Convert.ToDouble(value));
+        throw new LlvmCodeGenerationException($"static field type '{type.Name}' does not support a constant initializer");
+    }
+
+    private static ulong GetIntegerConstantBits(object value) => value switch
+    {
+        int integer => unchecked((ulong)(long)integer),
+        long integer => unchecked((ulong)integer),
+        ulong integer => integer,
+        _ => Convert.ToUInt64(value),
+    };
 
     private static void CollectStructTypes(NamespaceSymbol @namespace, ICollection<StructTypeSymbol> types)
     {
@@ -141,10 +260,8 @@ public sealed class LlvmIrGenerator
                 DeclareFunction(method);
             }
 
-            if (type.Constructor is not null)
-            {
-                DeclareFunction(type.Constructor);
-            }
+            foreach (FunctionSymbol constructor in type.Constructors)
+                DeclareFunction(constructor);
 
             if (type.Destructor is not null)
             {
@@ -170,7 +287,15 @@ public sealed class LlvmIrGenerator
         parameterTypes.AddRange(function.Parameters.Select(parameter => MapType(parameter.Type)));
         LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, [.. parameterTypes], false);
         LLVMValueRef value = _module.AddFunction(NativeSymbolNames.Get(function), functionType);
-        if (!function.IsExtern && !function.IsExport && !function.IsPublic)
+        if (function.IsAbstract)
+        {
+            value.Linkage = LLVMLinkage.LLVMInternalLinkage;
+            using LLVMBuilderRef builder = _context.CreateBuilder();
+            LLVMBasicBlockRef entry = value.AppendBasicBlock("entry");
+            builder.PositionAtEnd(entry);
+            builder.BuildUnreachable();
+        }
+        else if (!function.IsExtern && !function.IsExport && !function.IsPublic)
         {
             value.Linkage = LLVMLinkage.LLVMInternalLinkage;
         }
@@ -197,9 +322,15 @@ public sealed class LlvmIrGenerator
                 function.Symbol,
                 declaration.Value,
                 _functions,
+                _staticFields,
+                _virtualTables,
+                _interfaceMaps,
+                _interfaceTypes.Count,
                 MapType,
                 GetOrDeclareMemoryRuntime,
                 GetAbiSize,
+                GetAbiAlignment,
+                GetFieldOffset,
                 GetIntegerBitWidth);
             emitter.Emit(function.Body);
         }
@@ -315,9 +446,19 @@ public sealed class LlvmIrGenerator
             return LLVMTypeRef.CreatePointer(MapType(pointer.ElementType), 0);
         }
 
+        if (type is ReferenceTypeSymbol reference)
+        {
+            return LLVMTypeRef.CreatePointer(MapType(reference.ElementType), 0);
+        }
+
         if (type is StructTypeSymbol structType && _structTypes.TryGetValue(structType, out LLVMTypeRef llvmStruct))
         {
             return llvmStruct;
+        }
+
+        if (type is InterfaceTypeSymbol interfaceType && _interfaceTypes.TryGetValue(interfaceType, out LLVMTypeRef llvmInterface))
+        {
+            return llvmInterface;
         }
 
         throw new LlvmCodeGenerationException(
@@ -363,6 +504,20 @@ public sealed class LlvmIrGenerator
         return _targetMachine.TargetData.ABISizeOfType(MapType(type));
     }
 
+    private uint GetAbiAlignment(TypeSymbol type)
+    {
+        if (_targetMachine is null)
+            throw new LlvmCodeGenerationException("alignof requires a configured LLVM target and data layout.");
+        return _targetMachine.TargetData.ABIAlignmentOfType(MapType(type));
+    }
+
+    private ulong GetFieldOffset(StructTypeSymbol type, FieldSymbol field)
+    {
+        if (_targetMachine is null)
+            throw new LlvmCodeGenerationException("offsetof requires a configured LLVM target and data layout.");
+        return _targetMachine.TargetData.OffsetOfElement(MapType(type), (uint)field.Ordinal);
+    }
+
     private LlvmMemoryRuntime GetOrDeclareMemoryRuntime()
     {
         if (_memoryRuntime is not null)
@@ -406,6 +561,7 @@ public sealed class LlvmIrGenerator
         _targetMachine?.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase) is true;
 
     private readonly record struct LlvmFunction(LLVMValueRef Value, LLVMTypeRef Type);
+    private readonly record struct LlvmVTable(LLVMValueRef Value, LLVMTypeRef Type);
 
     private sealed record LlvmMemoryRuntime(
         LLVMValueRef Malloc,
@@ -421,9 +577,15 @@ public sealed class LlvmIrGenerator
         private readonly FunctionSymbol _function;
         private readonly LLVMValueRef _llvmFunction;
         private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions;
+        private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields;
+        private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables;
+        private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps;
+        private readonly int _interfaceCount;
         private readonly Func<TypeSymbol, LLVMTypeRef> _mapType;
         private readonly Func<LlvmMemoryRuntime> _getMemoryRuntime;
         private readonly Func<TypeSymbol, ulong> _getAbiSize;
+        private readonly Func<TypeSymbol, uint> _getAbiAlignment;
+        private readonly Func<StructTypeSymbol, FieldSymbol, ulong> _getFieldOffset;
         private readonly Func<TypeSymbol, int> _getIntegerBitWidth;
         private readonly LLVMValueRef _thisValue;
         private readonly Dictionary<VariableSymbol, LLVMValueRef> _addresses = [];
@@ -436,9 +598,15 @@ public sealed class LlvmIrGenerator
             FunctionSymbol function,
             LLVMValueRef llvmFunction,
             Dictionary<FunctionSymbol, LlvmFunction> functions,
+            Dictionary<FieldSymbol, LLVMValueRef> staticFields,
+            Dictionary<StructTypeSymbol, LlvmVTable> virtualTables,
+            Dictionary<StructTypeSymbol, LlvmVTable> interfaceMaps,
+            int interfaceCount,
             Func<TypeSymbol, LLVMTypeRef> mapType,
             Func<LlvmMemoryRuntime> getMemoryRuntime,
             Func<TypeSymbol, ulong> getAbiSize,
+            Func<TypeSymbol, uint> getAbiAlignment,
+            Func<StructTypeSymbol, FieldSymbol, ulong> getFieldOffset,
             Func<TypeSymbol, int> getIntegerBitWidth)
         {
             _context = context;
@@ -446,9 +614,15 @@ public sealed class LlvmIrGenerator
             _function = function;
             _llvmFunction = llvmFunction;
             _functions = functions;
+            _staticFields = staticFields;
+            _virtualTables = virtualTables;
+            _interfaceMaps = interfaceMaps;
+            _interfaceCount = interfaceCount;
             _mapType = mapType;
             _getMemoryRuntime = getMemoryRuntime;
             _getAbiSize = getAbiSize;
+            _getAbiAlignment = getAbiAlignment;
+            _getFieldOffset = getFieldOffset;
             _getIntegerBitWidth = getIntegerBitWidth;
             _thisValue = function.HasImplicitThis ? llvmFunction.GetParam(0) : default;
 
@@ -727,13 +901,21 @@ public sealed class LlvmIrGenerator
             BoundBinaryExpression binary => EmitBinary(binary),
             BoundAssignmentExpression assignment => EmitAssignment(assignment),
             BoundCallExpression call => EmitCall(call),
+            BoundMethodCallExpression methodCall when methodCall.Method.VTableSlot is not null => EmitVirtualMethodCall(methodCall),
             BoundMethodCallExpression methodCall => EmitMethodCall(methodCall),
             BoundMemberAccessExpression member => EmitMemberAccess(member),
+            BoundStaticFieldExpression field => _builder.BuildLoad2(_mapType(field.Type), _staticFields[field.Field], field.Field.Name),
+            BoundTypeLayoutExpression layout => EmitTypeLayout(layout),
+            BoundInterfaceConversionExpression conversion => EmitInterfaceConversion(conversion),
+            BoundReferenceConversionExpression conversion => EmitReferenceConversion(conversion),
+            BoundReferenceDereferenceExpression dereference => EmitReferenceDereference(dereference),
+            BoundInterfaceMethodCallExpression interfaceCall => EmitInterfaceMethodCall(interfaceCall),
             BoundIndexExpression index => EmitIndex(index),
             BoundStructConstructionExpression construction => EmitStructConstruction(
                 construction.StructType,
                 construction.Arguments),
             BoundConstructorCallExpression constructor => EmitConstructorCall(constructor),
+            BoundBaseLifecycleCallExpression lifecycle => EmitLifecycleCall(lifecycle.Function, _thisValue, lifecycle.Arguments, initializeVTable: false),
             BoundArrayCreationExpression array => EmitArrayCreation(array),
             BoundNewExpression @new => EmitNew(@new),
             BoundFreeExpression free => EmitFree(free),
@@ -796,6 +978,19 @@ public sealed class LlvmIrGenerator
             LLVMValueRef address = GetAddress(expression.Variable);
             return _builder.BuildLoad2(_mapType(expression.Type), address, expression.Variable.Name);
         }
+
+        private LLVMValueRef EmitReferenceConversion(BoundReferenceConversionExpression expression)
+        {
+            if (IsAddressable(expression.Source))
+                return EmitAddress(expression.Source);
+            return StoreTemporary(expression.Source, expression.Source.Type);
+        }
+
+        private LLVMValueRef EmitReferenceDereference(BoundReferenceDereferenceExpression expression) =>
+            _builder.BuildLoad2(
+                _mapType(expression.ReferenceType.ElementType),
+                EmitExpression(expression.Reference),
+                "reference.value");
 
         private LLVMValueRef EmitUnary(BoundUnaryExpression expression)
         {
@@ -1001,13 +1196,17 @@ public sealed class LlvmIrGenerator
             ImmutableArray<BoundExpression> arguments)
         {
             LLVMValueRef value = _mapType(structType).Poison;
+            if (structType.HasVirtualDispatch && _virtualTables.TryGetValue(structType, out LlvmVTable vtable))
+            {
+                value = _builder.BuildInsertValue(value, vtable.Value, 0, "vtable.init");
+            }
             for (int index = 0; index < arguments.Length; index++)
             {
                 value = _builder.BuildInsertValue(
                     value,
                     EmitExpression(arguments[index]),
-                    checked((uint)index),
-                    $"{structType.Fields[index].Name}.init");
+                    checked((uint)structType.AllInstanceFields[index].Ordinal),
+                    $"{structType.AllInstanceFields[index].Name}.init");
             }
 
             return value;
@@ -1094,7 +1293,16 @@ public sealed class LlvmIrGenerator
             LLVMValueRef address = EmitExpression(expression.Pointer);
             if (expression.Destructor is not null)
             {
-                EmitLifecycleCall(expression.Destructor, address, []);
+                if (expression.Destructor.VTableSlot is int slot &&
+                    expression.Pointer.Type is PointerTypeSymbol { ElementType: StructTypeSymbol staticType } &&
+                    _virtualTables.TryGetValue(staticType, out LlvmVTable vtable))
+                {
+                    EmitVirtualDestructor(expression.Destructor, address, vtable, slot);
+                }
+                else
+                {
+                    EmitLifecycleCall(expression.Destructor, address, []);
+                }
             }
 
             return _builder.BuildCall2(
@@ -1104,11 +1312,33 @@ public sealed class LlvmIrGenerator
                 string.Empty);
         }
 
+        private void EmitVirtualDestructor(FunctionSymbol destructor, LLVMValueRef address, LlvmVTable vtable, int slot)
+        {
+            StructTypeSymbol staticType = destructor.ContainingType!;
+            LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(staticType), address, 0, "vtable.address");
+            LLVMValueRef vtablePointer = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), vtableAddress, "vtable");
+            LLVMValueRef functionAddress = _builder.BuildGEP2(vtable.Type, vtablePointer,
+                new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)slot, false) },
+                "destructor.slot");
+            LLVMValueRef target = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), functionAddress, "destructor");
+            LlvmFunction signature = _functions[destructor];
+            _builder.BuildCall2(signature.Type, target, new LLVMValueRef[] { address }, string.Empty);
+        }
+
         private LLVMValueRef EmitLifecycleCall(
             FunctionSymbol function,
             LLVMValueRef thisAddress,
-            ImmutableArray<BoundExpression> arguments)
+            ImmutableArray<BoundExpression> arguments,
+            bool initializeVTable = true)
         {
+            if (initializeVTable && function.FunctionKind == FunctionKind.Constructor &&
+                function.ContainingType is StructTypeSymbol type &&
+                type.HasVirtualDispatch && _virtualTables.TryGetValue(type, out LlvmVTable vtable))
+            {
+                LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(type), thisAddress, 0, "vtable.address");
+                _builder.BuildStore(vtable.Value, vtableAddress);
+            }
+
             LlvmFunction llvmFunction = _functions[function];
             var values = new LLVMValueRef[arguments.Length + 1];
             values[0] = thisAddress;
@@ -1129,13 +1359,74 @@ public sealed class LlvmIrGenerator
         private LLVMValueRef EmitAddress(BoundExpression expression) => expression switch
         {
             BoundVariableExpression variable => GetAddress(variable.Variable),
+            BoundStaticFieldExpression field => _staticFields[field.Field],
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } dereference =>
                 EmitExpression(dereference.Operand),
+            BoundReferenceDereferenceExpression dereference => EmitExpression(dereference.Reference),
             BoundMemberAccessExpression member => EmitMemberAddress(member),
             BoundIndexExpression index => EmitIndexAddress(index),
             _ => throw new LlvmCodeGenerationException(
                 $"Expression '{expression.Kind}' does not have an addressable storage location."),
         };
+
+        private LLVMValueRef EmitTypeLayout(BoundTypeLayoutExpression expression)
+        {
+            ulong value = expression.OperatorKind switch
+            {
+                SyntaxKind.SizeOfKeyword => _getAbiSize(expression.TargetType),
+                SyntaxKind.AlignOfKeyword => _getAbiAlignment(expression.TargetType),
+                SyntaxKind.OffsetOfKeyword => _getFieldOffset((StructTypeSymbol)expression.TargetType, expression.Field!),
+                _ => throw new LlvmCodeGenerationException($"Unknown type layout intrinsic '{expression.OperatorKind}'."),
+            };
+            return LLVMValueRef.CreateConstInt(_mapType(BuiltinTypes.NUInt), value, false);
+        }
+
+        private LLVMValueRef EmitInterfaceConversion(BoundInterfaceConversionExpression expression)
+        {
+            if (!_interfaceMaps.TryGetValue(expression.SourceType, out LlvmVTable map))
+                throw new LlvmCodeGenerationException($"struct '{expression.SourceType.Name}' has no table for interface '{expression.InterfaceType.Name}'.");
+
+            LLVMValueRef data = IsAddressable(expression.Source)
+                ? EmitAddress(expression.Source)
+                : StoreTemporary(expression.Source, expression.SourceType);
+            LLVMValueRef value = _mapType(expression.InterfaceType).Poison;
+            value = _builder.BuildInsertValue(value, data, 0, "interface.data");
+            return _builder.BuildInsertValue(value, map.Value, 1, "interface.map");
+        }
+
+        private LLVMValueRef StoreTemporary(BoundExpression expression, TypeSymbol type)
+        {
+            LLVMValueRef temporary = _builder.BuildAlloca(_mapType(type), "interface.tmp");
+            _builder.BuildStore(EmitExpression(expression), temporary);
+            return temporary;
+        }
+
+        private LLVMValueRef EmitInterfaceMethodCall(BoundInterfaceMethodCallExpression expression)
+        {
+            LLVMValueRef interfaceValue = expression.IsPointerAccess
+                ? _builder.BuildLoad2(_mapType(expression.InterfaceType), EmitExpression(expression.Receiver), "interface")
+                : EmitExpression(expression.Receiver);
+            LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
+            LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
+            LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMTypeRef mapType = LLVMTypeRef.CreateArray(entryType, (uint)_interfaceCount);
+            LLVMValueRef tableAddress = _builder.BuildGEP2(mapType, map,
+                new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.DispatchId, false) },
+                "interface.table.address");
+            LLVMValueRef table = _builder.BuildLoad2(entryType, tableAddress, "interface.table");
+            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length);
+            LLVMValueRef address = _builder.BuildGEP2(tableType, table,
+                new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(expression.Method), false) },
+                "interface.slot");
+            LLVMValueRef function = _builder.BuildLoad2(entryType, address, "interface.method");
+            var parameterTypes = new List<LLVMTypeRef> { LLVMTypeRef.CreatePointer(_context.Int8Type, 0) };
+            parameterTypes.AddRange(expression.Method.Parameters.Select(parameter => _mapType(parameter.Type)));
+            LLVMTypeRef signature = LLVMTypeRef.CreateFunction(_mapType(expression.Method.ReturnType), [.. parameterTypes], false);
+            var arguments = new LLVMValueRef[expression.Arguments.Length + 1];
+            arguments[0] = data;
+            for (int index = 0; index < expression.Arguments.Length; index++) arguments[index + 1] = EmitExpression(expression.Arguments[index]);
+            return _builder.BuildCall2(signature, function, arguments, ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "interface.call");
+        }
 
         private LLVMValueRef EmitIndexAddress(BoundIndexExpression expression)
         {
@@ -1181,6 +1472,7 @@ public sealed class LlvmIrGenerator
         {
             BoundVariableExpression => true,
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
+            BoundReferenceDereferenceExpression => true,
             BoundMemberAccessExpression { IsPointerAccess: true } => true,
             BoundMemberAccessExpression member => IsAddressable(member.Receiver),
             BoundIndexExpression => true,
@@ -1200,6 +1492,31 @@ public sealed class LlvmIrGenerator
 
             string name = ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "method.call";
             return _builder.BuildCall2(function.Type, function.Value, arguments, name);
+        }
+
+        private LLVMValueRef EmitVirtualMethodCall(BoundMethodCallExpression expression)
+        {
+            StructTypeSymbol receiverType = expression.IsPointerAccess
+                ? (StructTypeSymbol)((PointerTypeSymbol)expression.Receiver.Type).ElementType
+                : (StructTypeSymbol)expression.Receiver.Type;
+            if (!_virtualTables.TryGetValue(receiverType, out LlvmVTable vtable))
+                throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
+
+            LLVMValueRef receiver = EmitMethodReceiverAddress(expression);
+            LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(receiverType), receiver, 0, "vtable.address");
+            LLVMValueRef vtablePointer = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), vtableAddress, "vtable");
+            LLVMValueRef functionAddress = _builder.BuildGEP2(
+                vtable.Type,
+                vtablePointer,
+                new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.Method.VTableSlot!.Value, false) },
+                "virtual.slot");
+            LlvmFunction signature = _functions[expression.Method];
+            LLVMValueRef target = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), functionAddress, "virtual.method");
+            var arguments = new LLVMValueRef[expression.Arguments.Length + 1];
+            arguments[0] = receiver;
+            for (int index = 0; index < expression.Arguments.Length; index++)
+                arguments[index + 1] = EmitExpression(expression.Arguments[index]);
+            return _builder.BuildCall2(signature.Type, target, arguments, ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "virtual.call");
         }
 
         private LLVMValueRef EmitMethodReceiverAddress(BoundMethodCallExpression expression)

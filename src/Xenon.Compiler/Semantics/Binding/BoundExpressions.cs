@@ -62,6 +62,51 @@ public sealed record BoundMemberAccessExpression(
     public override BoundKind Kind => BoundKind.MemberAccessExpression;
 }
 
+public sealed record BoundStaticFieldExpression(FieldSymbol Field) : BoundExpression(Field.Type)
+{
+    public override BoundKind Kind => BoundKind.StaticFieldExpression;
+}
+
+public sealed record BoundTypeLayoutExpression(
+    SyntaxKind OperatorKind,
+    TypeSymbol TargetType,
+    FieldSymbol? Field) : BoundExpression(BuiltinTypes.NUInt)
+{
+    public override BoundKind Kind => BoundKind.TypeLayoutExpression;
+}
+
+public sealed record BoundInterfaceConversionExpression(
+    BoundExpression Source,
+    StructTypeSymbol SourceType,
+    InterfaceTypeSymbol InterfaceType) : BoundExpression(InterfaceType)
+{
+    public override BoundKind Kind => BoundKind.InterfaceConversionExpression;
+}
+
+public sealed record BoundReferenceConversionExpression(
+    BoundExpression Source,
+    ReferenceTypeSymbol ReferenceType) : BoundExpression(ReferenceType)
+{
+    public override BoundKind Kind => BoundKind.ReferenceConversionExpression;
+}
+
+public sealed record BoundReferenceDereferenceExpression(
+    BoundExpression Reference,
+    ReferenceTypeSymbol ReferenceType) : BoundExpression(ReferenceType.ElementType)
+{
+    public override BoundKind Kind => BoundKind.ReferenceDereferenceExpression;
+}
+
+public sealed record BoundInterfaceMethodCallExpression(
+    BoundExpression Receiver,
+    InterfaceTypeSymbol InterfaceType,
+    FunctionSymbol Method,
+    ImmutableArray<BoundExpression> Arguments,
+    bool IsPointerAccess) : BoundExpression(Method.ReturnType)
+{
+    public override BoundKind Kind => BoundKind.InterfaceMethodCallExpression;
+}
+
 public sealed record BoundIndexExpression(
     BoundExpression Receiver,
     BoundExpression Index,
@@ -83,6 +128,13 @@ public sealed record BoundConstructorCallExpression(
     ImmutableArray<BoundExpression> Arguments) : BoundExpression(StructType)
 {
     public override BoundKind Kind => BoundKind.ConstructorCallExpression;
+}
+
+public sealed record BoundBaseLifecycleCallExpression(
+    FunctionSymbol Function,
+    ImmutableArray<BoundExpression> Arguments) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.BaseLifecycleCallExpression;
 }
 
 public sealed record BoundArrayCreationExpression(

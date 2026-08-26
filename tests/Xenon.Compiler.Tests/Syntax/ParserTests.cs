@@ -64,6 +64,41 @@ public sealed class ParserTests
     }
 
     [Fact]
+    public void Parser_ParsesMutableAndConstReferenceTypes()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            void Read(Entity& value, const Entity& readOnly)
+            {
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.True(function.Parameters[0].Type.IsReference);
+        Assert.False(function.Parameters[0].Type.IsConst);
+        Assert.True(function.Parameters[1].Type.IsReference);
+        Assert.True(function.Parameters[1].Type.IsConst);
+    }
+
+    [Fact]
+    public void Parser_RejectsBaseConstructorCallWithoutParentheses()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            struct Base { }
+            struct Derived : Base
+            {
+                public Derived() : base { }
+            }
+            """);
+
+        Assert.NotEmpty(tree.Diagnostics);
+    }
+
+    [Fact]
     public void Parser_ParsesUsingDirectivesBeforeNamespace()
     {
         SyntaxTree tree = Parse("""

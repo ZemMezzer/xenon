@@ -42,6 +42,7 @@ public sealed record TypeSyntax(
     ImmutableArray<SyntaxToken> NameParts,
     ImmutableArray<SyntaxToken> DotTokens,
     ImmutableArray<SyntaxToken> PointerTokens,
+    SyntaxToken? ReferenceToken,
     SyntaxToken? OpenBracketToken,
     SyntaxToken? CloseBracketToken) : SyntaxNode
 {
@@ -57,6 +58,8 @@ public sealed record TypeSyntax(
 
     public int PointerDepth => PointerTokens.Length;
 
+    public bool IsReference => ReferenceToken is not null;
+
     public bool IsArray => OpenBracketToken is not null;
 
     public bool IsUnsizedArray => IsArray;
@@ -71,8 +74,11 @@ public sealed record ParameterSyntax(
 
 public sealed record FieldDeclarationSyntax(
     SyntaxToken? AccessModifierToken,
+    SyntaxToken? StaticKeyword,
     TypeSyntax Type,
     SyntaxToken IdentifierToken,
+    SyntaxToken? EqualsToken,
+    ExpressionSyntax? Initializer,
     SyntaxToken SemicolonToken) : StructMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.FieldDeclaration;
@@ -80,23 +86,33 @@ public sealed record FieldDeclarationSyntax(
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;
 
     public bool IsPrivate => !IsPublic;
+    public bool IsStatic => StaticKeyword is not null;
 }
 
 public sealed record MethodDeclarationSyntax(
     SyntaxToken? AccessModifierToken,
+    SyntaxToken? StaticKeyword,
+    SyntaxToken? VirtualKeyword,
+    SyntaxToken? OverrideKeyword,
+    SyntaxToken? AbstractKeyword,
     TypeSyntax ReturnType,
     SyntaxToken IdentifierToken,
     SyntaxToken OpenParenthesisToken,
     ImmutableArray<ParameterSyntax> Parameters,
     ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseParenthesisToken,
-    BlockStatementSyntax Body) : StructMemberDeclarationSyntax
+    BlockStatementSyntax? Body,
+    SyntaxToken? SemicolonToken) : StructMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.MethodDeclaration;
 
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;
 
     public bool IsPrivate => !IsPublic;
+    public bool IsStatic => StaticKeyword is not null;
+    public bool IsVirtual => VirtualKeyword is not null;
+    public bool IsOverride => OverrideKeyword is not null;
+    public bool IsAbstract => AbstractKeyword is not null;
 }
 
 public sealed record ConstructorDeclarationSyntax(
@@ -106,6 +122,12 @@ public sealed record ConstructorDeclarationSyntax(
     ImmutableArray<ParameterSyntax> Parameters,
     ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseParenthesisToken,
+    SyntaxToken? ColonToken,
+    SyntaxToken? BaseKeyword,
+    SyntaxToken? BaseOpenParenthesisToken,
+    ImmutableArray<ExpressionSyntax> BaseArguments,
+    ImmutableArray<SyntaxToken> BaseCommaTokens,
+    SyntaxToken? BaseCloseParenthesisToken,
     BlockStatementSyntax Body) : StructMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.ConstructorDeclaration;
@@ -117,6 +139,7 @@ public sealed record ConstructorDeclarationSyntax(
 
 public sealed record DestructorDeclarationSyntax(
     SyntaxToken? AccessModifierToken,
+    SyntaxToken? VirtualKeyword,
     SyntaxToken TildeToken,
     SyntaxToken IdentifierToken,
     SyntaxToken OpenParenthesisToken,
@@ -128,11 +151,16 @@ public sealed record DestructorDeclarationSyntax(
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;
 
     public bool IsPrivate => !IsPublic;
+
+    public bool IsVirtual => VirtualKeyword is not null;
 }
 
 public sealed record StructDeclarationSyntax(
     SyntaxToken StructKeyword,
     SyntaxToken IdentifierToken,
+    SyntaxToken? ColonToken,
+    ImmutableArray<TypeSyntax> BaseTypes,
+    ImmutableArray<SyntaxToken> BaseCommaTokens,
     SyntaxToken OpenBraceToken,
     ImmutableArray<StructMemberDeclarationSyntax> Members,
     SyntaxToken CloseBraceToken) : MemberDeclarationSyntax
@@ -150,6 +178,31 @@ public sealed record StructDeclarationSyntax(
 
     public DestructorDeclarationSyntax? Destructor =>
         Members.OfType<DestructorDeclarationSyntax>().FirstOrDefault();
+}
+
+public sealed record InterfaceMethodDeclarationSyntax(
+    TypeSyntax ReturnType,
+    SyntaxToken IdentifierToken,
+    SyntaxToken OpenParenthesisToken,
+    ImmutableArray<ParameterSyntax> Parameters,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken CloseParenthesisToken,
+    SyntaxToken SemicolonToken) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.InterfaceMethodDeclaration;
+}
+
+public sealed record InterfaceDeclarationSyntax(
+    SyntaxToken InterfaceKeyword,
+    SyntaxToken IdentifierToken,
+    SyntaxToken? ColonToken,
+    ImmutableArray<TypeSyntax> BaseInterfaces,
+    ImmutableArray<SyntaxToken> BaseCommaTokens,
+    SyntaxToken OpenBraceToken,
+    ImmutableArray<InterfaceMethodDeclarationSyntax> Methods,
+    SyntaxToken CloseBraceToken) : MemberDeclarationSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.InterfaceDeclaration;
 }
 
 public sealed record FunctionDeclarationSyntax(

@@ -12,6 +12,11 @@ public sealed record NameExpressionSyntax(SyntaxToken IdentifierToken) : Express
     public override SyntaxKind Kind => SyntaxKind.NameExpression;
 }
 
+public sealed record ThisExpressionSyntax(SyntaxToken ThisKeyword) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.ThisExpression;
+}
+
 public sealed record UnaryExpressionSyntax(
     SyntaxToken OperatorToken,
     ExpressionSyntax Operand) : ExpressionSyntax
@@ -120,4 +125,15 @@ public sealed record ParenthesizedExpressionSyntax(
     SyntaxToken CloseParenthesisToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.ParenthesizedExpression;
+}
+
+public sealed record TypeLayoutExpressionSyntax(
+    SyntaxToken Keyword,
+    SyntaxToken OpenParenthesisToken,
+    TypeSyntax Type,
+    SyntaxToken? CommaToken,
+    SyntaxToken? FieldToken,
+    SyntaxToken CloseParenthesisToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.TypeLayoutExpression;
 }
