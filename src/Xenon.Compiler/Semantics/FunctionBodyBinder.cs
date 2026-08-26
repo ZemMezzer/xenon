@@ -1762,9 +1762,17 @@ internal sealed class FunctionBodyBinder
         int count = Math.Min(arguments.Length, fields.Length);
         for (int index = 0; index < count; index++)
         {
-            TypeSymbol fieldType = fields[index].Type;
+            FieldSymbol field = fields[index];
+            TypeSymbol fieldType = field.Type;
             BoundExpression argument = ContextualizeConversion(arguments[index], fieldType);
             convertedArguments[index] = argument;
+
+            if (!field.IsPublic && !ReferenceEquals(_function.ContainingType, field.ContainingType))
+            {
+                _diagnostics.Report(
+                    GetLocation(argumentSyntax[index]),
+                    $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'");
+            }
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {

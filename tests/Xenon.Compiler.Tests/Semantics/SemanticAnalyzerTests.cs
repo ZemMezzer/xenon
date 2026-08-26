@@ -508,9 +508,9 @@ public sealed class SemanticAnalyzerTests
 
             struct Vector3
             {
-                int X;
-                int Y;
-                int Z;
+                public int X;
+                public int Y;
+                public int Z;
 
                 public Vector3(int x, int y, int z)
                 {
@@ -601,6 +601,51 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message == "field 'X' is private in struct 'Pair'");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPrivateFieldInitializationThroughExternalPositionalConstruction()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Counter
+            {
+                private int Value;
+            }
+
+            int Main()
+            {
+                Counter local = Counter { 10 };
+                Counter* heap = new Counter { 20 };
+                return 0;
+            }
+            """);
+
+        Assert.Equal(
+            2,
+            compilation.Diagnostics.Count(
+                diagnostic => diagnostic.Message == "field 'Value' is private in struct 'Counter'"));
+    }
+
+    [Fact]
+    public void Analyzer_AllowsPrivateFieldInitializationInsideDeclaringStruct()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Counter
+            {
+                private int Value;
+
+                public static Counter Create(int value)
+                {
+                    return Counter { value };
+                }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
     }
 
     [Fact]
@@ -1954,7 +1999,7 @@ public sealed class SemanticAnalyzerTests
 
             struct Container
             {
-                int Value;
+                public int Value;
 
                 public int& Get()
                 {
@@ -2006,7 +2051,7 @@ public sealed class SemanticAnalyzerTests
 
             struct Player
             {
-                int health;
+                public int health;
 
                 public int Health
                 {
@@ -2047,7 +2092,7 @@ public sealed class SemanticAnalyzerTests
 
             struct Values
             {
-                int stored;
+                public int stored;
 
                 public int Value
                 {
@@ -2181,7 +2226,7 @@ public sealed class SemanticAnalyzerTests
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
-            struct Value { int Data; }
+            struct Value { public int Data; }
 
             void Test()
             {
