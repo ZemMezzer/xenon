@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Access modifiers and visibility rules in Xenon.">
+    <title>Access modifiers — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="access-modifiers" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Access modifiers</span></div>
+                <div class="title-row"><h1>Access modifiers</h1></div>
+                <p class="article-lead"><code>public</code> and <code>private</code> define which functions and struct members may be accessed from other scopes.</p>
+            </header>
+
+            <section>
+                <h2>Default visibility</h2>
+                <p>Namespace-level functions and struct members are private by default. Writing <code>private</code> makes that default explicit; writing <code>public</code> exposes the declaration outside its owning namespace or struct.</p>
+                <pre><code><span class="token-keyword">namespace</span> Library;
+
+<span class="token-keyword">int</span> CalculateCore() { <span class="token-keyword">return</span> <span class="token-number">40</span>; }          <span class="token-comment">// private by default</span>
+<span class="token-keyword">private int</span> InternalValue() { <span class="token-keyword">return</span> <span class="token-number">2</span>; }       <span class="token-comment">// explicitly private</span>
+<span class="token-keyword">public int</span> Calculate() { <span class="token-keyword">return</span> CalculateCore() + InternalValue(); }</code></pre>
+                <p>Code in another namespace may call <code>Library.Calculate()</code>. Private functions remain available to other declarations inside <code>Library</code>.</p>
+            </section>
+
+            <section>
+                <h2>Struct members</h2>
+                <p>The same modifiers apply to fields, methods, constructors, destructors, properties, indexers and static members. Private members are accessible from code belonging to the declaring struct; public members form its external API.</p>
+                <pre><code><span class="token-keyword">struct</span> Counter
+{
+    <span class="token-keyword">private int</span> value;
+
+    <span class="token-keyword">public</span> Counter(<span class="token-keyword">int</span> initialValue)
+    {
+        value = initialValue;
+    }
+
+    <span class="token-keyword">public int</span> Value
+    {
+        get { <span class="token-keyword">return</span> value; }
+    }
+
+    <span class="token-keyword">private void</span> ResetCore()
+    {
+        value = <span class="token-number">0</span>;
+    }
+}</code></pre>
+                <p>Positional brace construction follows the same visibility rules. Code outside <code>Counter</code> cannot write <code>value</code> through <code>Counter { ... }</code>; it must call the public constructor or another public factory supplied by the type.</p>
+            </section>
+
+            <section>
+                <h2>Visibility and native linkage</h2>
+                <p><code>public</code> controls visibility inside Xenon source code. <code>export</code> additionally makes a function public and exposes it as a native symbol, while <code>extern</code> declares a native function implemented elsewhere.</p>
+                <pre><code><span class="token-keyword">public int</span> Add(<span class="token-keyword">int</span> a, <span class="token-keyword">int</span> b) { <span class="token-keyword">return</span> a + b; }
+<span class="token-keyword">export int</span> NativeAdd(<span class="token-keyword">int</span> a, <span class="token-keyword">int</span> b) { <span class="token-keyword">return</span> a + b; }</code></pre>
+            </section>
+
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="operators.html"><span>Next</span><strong>Operators →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

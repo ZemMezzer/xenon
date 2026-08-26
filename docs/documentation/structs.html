@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Learn how structs work in the Xenon programming language.">
+    <title>Structs — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="apple-touch-icon" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page">
+    <div class="site-shell">
+        <header class="site-header">
+            <a class="brand" href="../" aria-label="Xenon home">
+                <img src="../assets/logo.png" alt="" width="36" height="22">
+                <span>Xenon</span>
+            </a>
+
+            <nav aria-label="Main navigation">
+                <a class="active" href="index.html">Documentation</a>
+                <a href="https://github.com/ZemMezzer/xenon">GitHub</a>
+            </nav>
+        </header>
+
+        <main class="article-layout">
+            <aside class="docs-sidebar" data-doc-sidebar data-current="structs" aria-label="Core documentation"></aside>
+
+            <article class="doc-article">
+                <header class="article-header">
+                    <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Structs</span></div>
+                    <div class="title-row">
+                        <h1>Structs</h1>
+                    </div>
+                    <p class="article-lead">Structs define concrete structured types. Their values may live directly in stack storage, inline inside another value, or in explicitly allocated heap memory.</p>
+                </header>
+
+                <section id="declaration">
+                    <h2>Declaration</h2>
+                    <p>A struct is declared at namespace level. Its fields have fixed types and are laid out in declaration order according to the selected target.</p>
+                    <pre><code><span class="token-keyword">namespace</span> Example;
+
+<span class="token-keyword">struct</span> Vector3
+{
+    <span class="token-keyword">public float</span> X;
+    <span class="token-keyword">public float</span> Y;
+    <span class="token-keyword">public float</span> Z;
+}</code></pre>
+                    <p>Member visibility is described separately in <a href="access-modifiers.html">Access modifiers</a>.</p>
+                    <p>Fields may themselves contain other struct values. Recursive data structures use pointer fields so every value retains a finite, target-defined size.</p>
+                </section>
+
+                <section id="construction">
+                    <h2>Construction</h2>
+                    <p>Brace construction creates a value directly from accessible fields. Arguments follow field declaration order and no heap allocation occurs. A private field cannot be initialized this way from outside its declaring struct; use a public constructor or factory instead.</p>
+                    <pre><code>Vector3 position = Vector3 { <span class="token-number">1.0f</span>, <span class="token-number">2.0f</span>, <span class="token-number">3.0f</span> };</code></pre>
+                    <p>A struct may also declare constructors. Parenthesized construction invokes a matching constructor body.</p>
+                    <pre><code><span class="token-keyword">struct</span> Vector3
+{
+    <span class="token-keyword">public float</span> X;
+    <span class="token-keyword">public float</span> Y;
+    <span class="token-keyword">public float</span> Z;
+
+    <span class="token-keyword">public</span> Vector3(<span class="token-keyword">float</span> x, <span class="token-keyword">float</span> y, <span class="token-keyword">float</span> z)
+    {
+        X = x;
+        Y = y;
+        Z = z;
+    }
+}
+
+Vector3 position = Vector3(<span class="token-number">1.0f</span>, <span class="token-number">2.0f</span>, <span class="token-number">3.0f</span>);</code></pre>
+                </section>
+
+                <section id="value-semantics">
+                    <h2>Value semantics</h2>
+                    <p>Struct assignment, parameters and return values use value semantics. Assigning a struct produces an independent copy of its fields. Pointer fields are copied as pointer values and do not deep-copy the referenced memory.</p>
+                    <pre><code>Vector3 original = Vector3 { <span class="token-number">1.0f</span>, <span class="token-number">2.0f</span>, <span class="token-number">3.0f</span> };
+Vector3 copy = original;
+
+copy.X = <span class="token-number">10.0f</span>; <span class="token-comment">// original.X is still 1.0f</span></code></pre>
+                    <p>Use <code>.</code> to access a field on a value:</p>
+                    <pre><code><span class="token-keyword">float</span> x = position.X;
+position.Y = <span class="token-number">8.0f</span>;</code></pre>
+                    <div class="note">
+                        <strong>Semantics are not storage</strong>
+                        <p>Value semantics describe how a struct is copied and passed. They do not restrict it to the stack: <code>new T(...)</code> places a struct in heap memory and returns <code>T*</code>.</p>
+                    </div>
+                </section>
+
+                <section id="methods">
+                    <h2>Methods</h2>
+                    <p>Methods operate on an implicit instance. Fields may be referenced directly inside the method body.</p>
+                    <pre><code><span class="token-keyword">struct</span> Counter
+{
+    <span class="token-keyword">private int</span> Value;
+
+    <span class="token-keyword">public</span> Counter(<span class="token-keyword">int</span> initialValue)
+    {
+        Value = initialValue;
+    }
+
+    <span class="token-keyword">public void</span> Add(<span class="token-keyword">int</span> amount)
+    {
+        Value += amount;
+    }
+
+    <span class="token-keyword">public int</span> Read()
+    {
+        <span class="token-keyword">return</span> Value;
+    }
+}
+
+Counter counter = Counter(<span class="token-number">10</span>);
+counter.Add(<span class="token-number">5</span>);
+<span class="token-keyword">int</span> current = counter.Read();</code></pre>
+                </section>
+
+                <section id="memory">
+                    <h2>Pointers and memory</h2>
+                    <p>Take the address of an existing value with <code>&amp;</code>. Pointer member access uses <code>-&gt;</code> to make the raw access explicit.</p>
+                    <pre><code>Vector3 value = Vector3 { <span class="token-number">1.0f</span>, <span class="token-number">2.0f</span>, <span class="token-number">3.0f</span> };
+Vector3* pointer = &amp;value;
+
+pointer-&gt;X = <span class="token-number">12.0f</span>;
+<span class="token-keyword">float</span> y = pointer-&gt;Y;</code></pre>
+                    <p><code>new</code> allocates a struct through Xenon's target-sized native allocator. Release it explicitly with <code>free</code>.</p>
+                    <pre><code>Vector3* heap = <span class="token-keyword">new</span> Vector3(<span class="token-number">1.0f</span>, <span class="token-number">2.0f</span>, <span class="token-number">3.0f</span>);
+
+heap-&gt;Z = <span class="token-number">9.0f</span>;
+<span class="token-keyword">free</span>(heap);</code></pre>
+                    <p>If the struct declares a destructor, <code>free</code> invokes it before releasing the allocation.</p>
+                </section>
+
+                <nav class="article-pagination" aria-label="Documentation pagination">
+                    <a href="inheritance.html"><span>Next</span><strong>Inheritance →</strong></a>
+                </nav>
+            </article>
+        </main>
+
+        <footer>
+            <span>Xenon language documentation</span>
+        </footer>
+    </div>
+</body>
+</html>

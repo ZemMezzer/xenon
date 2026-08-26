@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Functions in the Xenon programming language.">
+    <title>Functions — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="functions" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Functions</span></div>
+                <div class="title-row"><h1>Functions</h1></div>
+                <p class="article-lead">Functions may exist directly inside a namespace. These free functions provide behavior without requiring a custom type or an object instance.</p>
+            </header>
+            <section>
+                <h2>Free functions</h2>
+                <p>A free function belongs to its namespace rather than to a struct. It has no implicit <code>this</code> value and may be called directly wherever its name is in scope.</p>
+                <pre><code><span class="token-keyword">namespace</span> Xenon.Math;
+
+<span class="token-keyword">public float</span> Clamp(<span class="token-keyword">float</span> value, <span class="token-keyword">float</span> minimum, <span class="token-keyword">float</span> maximum)
+{
+    <span class="token-keyword">if</span> (value &lt; minimum) <span class="token-keyword">return</span> minimum;
+    <span class="token-keyword">if</span> (value &gt; maximum) <span class="token-keyword">return</span> maximum;
+    <span class="token-keyword">return</span> value;
+}</code></pre>
+                <p>From another namespace, import it with <code>using Xenon.Math;</code> or call it by its qualified name: <code>Xenon.Math.Clamp(value, 0.0f, 1.0f)</code>.</p>
+                <p>Free functions are a natural fit for operations that do not belong to a particular object. Behavior tied to one struct instance is expressed as a method instead.</p>
+            </section>
+            <section>
+                <h2>Declaration and calls</h2>
+                <pre><code><span class="token-keyword">int</span> Add(<span class="token-keyword">int</span> a, <span class="token-keyword">int</span> b)
+{
+    <span class="token-keyword">return</span> a + b;
+}
+
+<span class="token-keyword">int</span> result = Add(<span class="token-number">20</span>, <span class="token-number">22</span>);</code></pre>
+                <p>Arguments are checked against parameter types and parameters receive values from the caller. A struct parameter receives an independent copy of the struct's fields. Pointer fields are copied as pointer values; the referenced memory is not deep-copied.</p>
+            </section>
+            <section>
+                <h2>Return values</h2>
+                <p>A value-returning function uses <code>return expression;</code>. A <code>void</code> function completes with <code>return;</code> or by reaching the end of its body.</p>
+                <pre><code><span class="token-keyword">void</span> Reset(<span class="token-keyword">int</span>* value)
+{
+    *value = <span class="token-number">0</span>;
+    <span class="token-keyword">return</span>;
+}</code></pre>
+            </section>
+            <section>
+                <h2>Program entry point</h2>
+                <p>An executable starts at the namespace-level function <code>int Main()</code>. The compiler creates the native platform entry wrapper and returns the Xenon result to the operating system.</p>
+                <pre><code><span class="token-keyword">namespace</span> Example;
+
+<span class="token-keyword">int</span> Main()
+{
+    <span class="token-keyword">return</span> <span class="token-number">0</span>;
+}</code></pre>
+            </section>
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="access-modifiers.html"><span>Next</span><strong>Access modifiers →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

@@ -836,7 +836,7 @@ public sealed class NativeLinkerTests
 
             struct Container
             {
-                int Value;
+                public int Value;
 
                 public int& Get()
                 {
@@ -1054,7 +1054,7 @@ public sealed class NativeLinkerTests
 
             struct Player
             {
-                int health;
+                public int health;
 
                 public int Health
                 {
@@ -1113,7 +1113,7 @@ public sealed class NativeLinkerTests
 
             struct Base
             {
-                int stored;
+                public int stored;
 
                 public virtual int Value
                 {
@@ -1124,7 +1124,7 @@ public sealed class NativeLinkerTests
 
             struct Derived : Base
             {
-                int adjusted;
+                public int adjusted;
 
                 public override int Value
                 {
@@ -1184,7 +1184,7 @@ public sealed class NativeLinkerTests
 
             struct Base
             {
-                int stored;
+                public int stored;
 
                 public virtual int Value
                 {
@@ -1195,7 +1195,7 @@ public sealed class NativeLinkerTests
 
             struct Derived : Base
             {
-                int adjusted;
+                public int adjusted;
 
                 public override int Value
                 {
@@ -1272,7 +1272,7 @@ public sealed class NativeLinkerTests
 
             struct Box : IValue
             {
-                int stored;
+                public int stored;
 
                 public int Value
                 {
@@ -1337,7 +1337,7 @@ public sealed class NativeLinkerTests
 
             struct Grid : IGrid
             {
-                int stored;
+                public int stored;
 
                 public int this[int x, int y]
                 {
@@ -1403,7 +1403,7 @@ public sealed class NativeLinkerTests
 
             struct Grid : IGrid
             {
-                int stored;
+                public int stored;
 
                 public int Value
                 {

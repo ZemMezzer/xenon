@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Xenon source files and comments.">
+    <title>Source files — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="source-files" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Source files</span></div>
+                <div class="title-row"><h1>Source files</h1></div>
+                <p class="article-lead">Xenon programs are written as UTF-8 text in files with the <code>.xe</code> extension.</p>
+            </header>
+            <section>
+                <h2>File structure</h2>
+                <p>Every source file contains exactly one file-scoped namespace declaration. <code>using</code> directives may appear before it. Declarations that follow belong to that namespace for the entire file.</p>
+                <pre><code><span class="token-keyword">using</span> Xenon.Math;
+
+<span class="token-keyword">namespace</span> Example;
+
+<span class="token-keyword">int</span> Main()
+{
+    <span class="token-keyword">return</span> <span class="token-number">0</span>;
+}</code></pre>
+            </section>
+            <section>
+                <h2>Comments</h2>
+                <p>Use <code>//</code> for a single-line comment and <code>/* ... */</code> for a block comment.</p>
+                <pre><code><span class="token-comment">// Explain one line of code.</span>
+<span class="token-keyword">int</span> value = <span class="token-number">42</span>;
+
+<span class="token-comment">/*
+   A comment may span
+   several lines.
+*/</span></code></pre>
+            </section>
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="namespaces.html"><span>Next</span><strong>Namespaces →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

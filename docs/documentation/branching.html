@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Conditional branching in the Xenon programming language.">
+    <title>Branching — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="branching" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Branching</span></div>
+                <div class="title-row"><h1>Branching</h1></div>
+                <p class="article-lead">Branching statements select which path of a program executes based on a condition.</p>
+            </header>
+
+            <section>
+                <h2>if</h2>
+                <p>An <code>if</code> statement executes its body when the condition evaluates to <code>true</code>. Conditions must have type <code>bool</code>.</p>
+                <pre><code><span class="token-keyword">if</span> (temperature &gt; <span class="token-number">30</span>)
+{
+    StartCooling();
+}</code></pre>
+            </section>
+
+            <section>
+                <h2>else</h2>
+                <p>An optional <code>else</code> branch executes when the preceding <code>if</code> condition is false.</p>
+                <pre><code><span class="token-keyword">if</span> (temperature &gt; <span class="token-number">30</span>)
+{
+    StartCooling();
+}
+<span class="token-keyword">else</span>
+{
+    KeepRunning();
+}</code></pre>
+            </section>
+
+            <section>
+                <h2>Chained conditions</h2>
+                <p>Place another <code>if</code> after <code>else</code> to test several conditions in order. The first matching branch runs.</p>
+                <pre><code><span class="token-keyword">if</span> (health == <span class="token-number">0</span>)
+{
+    Stop();
+}
+<span class="token-keyword">else if</span> (health &lt; <span class="token-number">25</span>)
+{
+    Warn();
+}
+<span class="token-keyword">else</span>
+{
+    Continue();
+}</code></pre>
+            </section>
+
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="loops.html"><span>Next</span><strong>Loops →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

@@ -48,31 +48,31 @@ internal static class TypeFacts
 
     public static int? GetReferenceBindingCost(ReferenceTypeSymbol destination, TypeSymbol source)
     {
-        int constQualificationCost = 0;
+        int readonlyQualificationCost = 0;
         if (source is ReferenceTypeSymbol sourceReference)
         {
             if (sourceReference.IsReadonly && !destination.IsReadonly)
                 return null;
-            constQualificationCost = sourceReference.IsReadonly == destination.IsReadonly ? 0 : 1;
+            readonlyQualificationCost = sourceReference.IsReadonly == destination.IsReadonly ? 0 : 1;
             source = sourceReference.ElementType;
         }
 
         if (ReferenceEquals(destination.ElementType, source))
-            return constQualificationCost;
+            return readonlyQualificationCost;
 
         if (destination.ElementType is StructTypeSymbol destinationStruct &&
             source is StructTypeSymbol sourceStruct &&
             GetInheritanceDistance(sourceStruct, destinationStruct) is int inheritanceDistance)
         {
-            return constQualificationCost + inheritanceDistance;
+            return readonlyQualificationCost + inheritanceDistance;
         }
 
         if (destination.ElementType is InterfaceTypeSymbol destinationInterface)
         {
             if (source is StructTypeSymbol sourceStructType && sourceStructType.Implements(destinationInterface))
-                return constQualificationCost + 100;
+                return readonlyQualificationCost + 100;
             if (source is InterfaceTypeSymbol sourceInterface && sourceInterface.IsOrInherits(destinationInterface))
-                return constQualificationCost + 1;
+                return readonlyQualificationCost + 1;
         }
 
         return null;

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="References in the Xenon programming language.">
+    <title>References — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="references" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>References</span></div>
+                <div class="title-row"><h1>References</h1></div>
+                <p class="article-lead">A reference aliases an existing value while preserving typed member access and overload resolution.</p>
+            </header>
+
+            <section>
+                <h2>Binding a reference</h2>
+                <p>Add <code>&amp;</code> to a type to declare a reference. A reference must be initialized from a compatible value and does not create a copy.</p>
+                <pre><code><span class="token-keyword">int</span> value = <span class="token-number">10</span>;
+<span class="token-keyword">int</span>&amp; alias = value;
+
+alias = <span class="token-number">42</span>; <span class="token-comment">// value is now 42</span></code></pre>
+                <p>References use normal value syntax: member access is written with <code>.</code>, and a reference is passed to a <code>T&amp;</code> parameter without an explicit address-of operator.</p>
+            </section>
+
+            <section>
+                <h2>Mutable and readonly references</h2>
+                <p>A mutable <code>T&amp;</code> permits writes to the referenced value. A <code>readonly T&amp;</code> permits reads but not mutation through that reference.</p>
+                <pre><code><span class="token-keyword">void</span> Increment(<span class="token-keyword">int</span>&amp; value)
+{
+    value += <span class="token-number">1</span>;
+}
+
+<span class="token-keyword">int</span> Read(<span class="token-keyword">readonly int</span>&amp; value)
+{
+    <span class="token-keyword">return</span> value;
+}</code></pre>
+                <p>A mutable reference converts to a readonly reference. The reverse conversion is not allowed because it would restore write access.</p>
+            </section>
+
+            <section>
+                <h2>Struct and interface references</h2>
+                <p>References preserve polymorphic conversions. A derived struct reference may bind to a base struct reference, and a struct reference may bind to an interface reference implemented by that struct.</p>
+                <pre><code>Sprite sprite = Sprite(<span class="token-keyword">true</span>);
+IRenderable&amp; renderable = sprite;
+
+renderable.Render();</code></pre>
+                <p>Calls through an interface reference use the concrete struct's implementation. Readonly receivers may call members whose contract is declared <code>readonly</code>.</p>
+            </section>
+
+            <section>
+                <h2>Returning references</h2>
+                <p>Functions and methods may return references, allowing callers to keep aliasing an existing field or value.</p>
+                <pre><code><span class="token-keyword">struct</span> Container
+{
+    <span class="token-keyword">private int</span> value;
+
+    <span class="token-keyword">public int</span>&amp; Get()
+    {
+        <span class="token-keyword">return</span> value;
+    }
+}</code></pre>
+                <p>A reference does not own storage and is not released with <code>free</code>. The referenced value must remain alive for every use of the reference.</p>
+            </section>
+
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="arrays.html"><span>Next</span><strong>Arrays →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

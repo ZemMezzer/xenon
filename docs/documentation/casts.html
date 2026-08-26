@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Explicit numeric casts in Xenon.">
+    <title>Casts — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="casts" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Casts</span></div>
+                <div class="title-row"><h1>Casts</h1></div>
+                <p class="article-lead">The <code>cast&lt;T&gt;(value)</code> expression performs an explicit numeric conversion to a selected destination type.</p>
+            </header>
+            <section>
+                <h2>Integer conversions</h2>
+                <p>Use a cast when changing integer width or signedness. The destination type controls truncation, extension and signed interpretation.</p>
+                <pre><code><span class="token-keyword">long</span> large = <span class="token-number">1000</span>;
+<span class="token-keyword">int</span> compact = <span class="token-keyword">cast</span>&lt;<span class="token-keyword">int</span>&gt;(large);
+
+<span class="token-keyword">uint</span> unsignedValue = <span class="token-number">42</span>;
+<span class="token-keyword">int</span> signedValue = <span class="token-keyword">cast</span>&lt;<span class="token-keyword">int</span>&gt;(unsignedValue);</code></pre>
+            </section>
+            <section>
+                <h2>Integer and floating-point conversions</h2>
+                <p>Casts convert numeric values rather than reinterpreting their underlying bit pattern.</p>
+                <pre><code><span class="token-keyword">float</span> ratio = <span class="token-number">12.75f</span>;
+<span class="token-keyword">int</span> whole = <span class="token-keyword">cast</span>&lt;<span class="token-keyword">int</span>&gt;(ratio);
+
+<span class="token-keyword">int</span> count = <span class="token-number">8</span>;
+<span class="token-keyword">double</span> precise = <span class="token-keyword">cast</span>&lt;<span class="token-keyword">double</span>&gt;(count);</code></pre>
+                <div class="note"><strong>Explicit intent</strong><p>A cast makes width, signedness and numeric-domain changes visible at the point where they occur.</p></div>
+            </section>
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="memory.html"><span>Next</span><strong>Manual memory →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

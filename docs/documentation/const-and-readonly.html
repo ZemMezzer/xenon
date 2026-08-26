@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="The conceptual difference between const and readonly in Xenon.">
+    <title>const and readonly — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="const-and-readonly" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>const and readonly</span></div>
+                <div class="title-row"><h1>const and readonly</h1></div>
+                <p class="article-lead"><code>const</code> answers when a value is known. <code>readonly</code> controls whether a runtime value or access path may be modified.</p>
+            </header>
+
+            <section>
+                <h2>The distinction</h2>
+                <div class="note">
+                    <strong>Two separate concepts</strong>
+                    <p><code>const</code> belongs to compile-time evaluation. <code>readonly</code> belongs to runtime mutability and access control.</p>
+                </div>
+                <p>A value can be known at compile time without representing a runtime variable. Conversely, a runtime value can be read-only even when it is produced by a function, file, network request or another runtime operation.</p>
+            </section>
+
+            <section>
+                <h2>const: compile-time values</h2>
+                <p>A <code>const</code> declaration must have an initializer that the compiler can evaluate. Constants may be declared at module level or associated with a struct.</p>
+                <pre><code><span class="token-keyword">const int</span> MaxPlayers = <span class="token-number">64</span>;
+<span class="token-keyword">const int</span> BufferSize = MaxPlayers * <span class="token-number">1024</span>;
+
+<span class="token-keyword">struct</span> Physics
+{
+    <span class="token-keyword">const float</span> Gravity = <span class="token-number">9.81f</span>;
+}</code></pre>
+                <p>Constant expressions may combine literals, other constants, arithmetic, comparisons, bitwise and boolean operations, primitive casts, <code>sizeof</code>, <code>alignof</code> and <code>offsetof</code>.</p>
+                <pre><code><span class="token-keyword">const int</span> VectorSize = <span class="token-keyword">sizeof</span>(Vector3);
+<span class="token-keyword">const int</span> YOffset = <span class="token-keyword">offsetof</span>(Vector3, Y);</code></pre>
+            </section>
+
+            <section>
+                <h2>readonly: runtime immutability</h2>
+                <p>A <code>readonly</code> value may be calculated at runtime. Once initialized, a readonly local or field cannot be assigned again.</p>
+                <pre><code><span class="token-keyword">readonly int</span> result = ReadValue();
+
+<span class="token-comment">// result exists at runtime, but cannot be reassigned.</span></code></pre>
+                <p><code>readonly</code> is also used for read-only references, read-only pointer access and instance methods that do not mutate their receiver.</p>
+                <pre><code><span class="token-keyword">readonly</span> Vector3&amp; position = GetPosition();
+
+<span class="token-keyword">void</span> Print(<span class="token-keyword">readonly byte</span>* message);
+
+<span class="token-keyword">public readonly float</span> Length()
+{
+    <span class="token-keyword">return</span> Sqrt(X * X + Y * Y + Z * Z);
+}</code></pre>
+            </section>
+
+            <section>
+                <h2>Readonly access paths</h2>
+                <p>For pointers and references, <code>readonly</code> restricts mutation through that particular access path. It does not necessarily make the underlying memory globally immutable.</p>
+                <pre><code>Vector3 value = Vector3(<span class="token-number">1.0f</span>, <span class="token-number">2.0f</span>, <span class="token-number">3.0f</span>);
+Vector3&amp; mutableView = value;
+<span class="token-keyword">readonly</span> Vector3&amp; readonlyView = value;
+
+mutableView.X = <span class="token-number">10.0f</span>; <span class="token-comment">// allowed</span>
+<span class="token-comment">// readonlyView.X = 10.0f;  not writable through this reference</span></code></pre>
+                <p>In the parameter <code>readonly byte* message</code>, the pointed-to bytes cannot be modified through <code>message</code>. The pointer is a runtime value; the declaration is not a compile-time constant.</p>
+            </section>
+
+            <section>
+                <h2>Choosing the keyword</h2>
+                <p>Use <code>const</code> when the compiler must know and evaluate the value. Use <code>readonly</code> when the value or access path exists at runtime but mutation must be restricted.</p>
+                <pre><code><span class="token-keyword">const int</span> HeaderSize = <span class="token-number">16</span>;        <span class="token-comment">// compile time</span>
+<span class="token-keyword">readonly int</span> bytesRead = Read(); <span class="token-comment">// runtime</span></code></pre>
+            </section>
+
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="functions.html"><span>Next</span><strong>Functions →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

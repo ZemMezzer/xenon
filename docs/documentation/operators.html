@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Operators in the Xenon programming language.">
+    <title>Operators — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="operators" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Operators</span></div>
+                <div class="title-row"><h1>Operators</h1></div>
+                <p class="article-lead">Operators combine, compare and update values with predictable type-directed semantics.</p>
+            </header>
+            <section>
+                <h2>Arithmetic and comparison</h2>
+                <div class="operator-grid">
+                    <div><span>Arithmetic</span><code>+ &nbsp; - &nbsp; * &nbsp; / &nbsp; %</code></div>
+                    <div><span>Comparison</span><code>== &nbsp; != &nbsp; &lt; &nbsp; &lt;= &nbsp; &gt; &nbsp; &gt;=</code></div>
+                </div>
+                <pre><code><span class="token-keyword">int</span> total = a + b * <span class="token-number">2</span>;
+<span class="token-keyword">bool</span> ordered = a &lt;= b;</code></pre>
+                <p>Numeric operations use matching operand types. Comparison expressions produce <code>bool</code>.</p>
+            </section>
+            <section>
+                <h2>Boolean and bitwise</h2>
+                <div class="operator-grid">
+                    <div><span>Boolean</span><code>&amp;&amp; &nbsp; || &nbsp; !</code></div>
+                    <div><span>Bitwise</span><code>&amp; &nbsp; | &nbsp; ^ &nbsp; ~ &nbsp; &lt;&lt; &nbsp; &gt;&gt;</code></div>
+                </div>
+                <p><code>&amp;&amp;</code> and <code>||</code> evaluate the right-hand expression only when its value is required.</p>
+                <pre><code><span class="token-keyword">bool</span> canRun = ready &amp;&amp; !failed;
+<span class="token-keyword">uint</span> masked = value &amp; <span class="token-number">0xFF</span>;</code></pre>
+            </section>
+            <section>
+                <h2>Assignment and updates</h2>
+                <p>Simple and compound assignment update an addressable value. Prefix and postfix forms increment or decrement numeric values.</p>
+                <pre><code>value = <span class="token-number">10</span>;
+value += <span class="token-number">5</span>;
+value &lt;&lt;= <span class="token-number">1</span>;
+
+i++;
+--count;</code></pre>
+                <div class="inline-code-list"><code>+=</code><code>-=</code><code>*=</code><code>/=</code><code>%=</code><code>&amp;=</code><code>|=</code><code>^=</code><code>&lt;&lt;=</code><code>&gt;&gt;=</code></div>
+            </section>
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="branching.html"><span>Next</span><strong>Branching →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>

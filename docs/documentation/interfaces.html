@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#070b11">
+    <meta name="description" content="Interfaces in the Xenon programming language.">
+    <title>Interfaces — Xenon Documentation</title>
+    <link rel="icon" type="image/png" href="../assets/logo.png">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="documentation.css">
+    <script src="navigation.js" defer></script>
+</head>
+<body class="docs-page"><div class="site-shell">
+    <header class="site-header">
+        <a class="brand" href="../" aria-label="Xenon home"><img src="../assets/logo.png" alt="" width="36" height="22"><span>Xenon</span></a>
+        <nav aria-label="Main navigation"><a class="active" href="index.html">Documentation</a><a href="https://github.com/ZemMezzer/xenon">GitHub</a></nav>
+    </header>
+    <main class="article-layout">
+        <aside class="docs-sidebar" data-doc-sidebar data-current="interfaces" aria-label="Core documentation"></aside>
+        <article class="doc-article">
+            <header class="article-header">
+                <div class="breadcrumb"><a href="index.html">Core</a><span>/</span><span>Interfaces</span></div>
+                <div class="title-row"><h1>Interfaces</h1></div>
+                <p class="article-lead">An interface defines a behavioral contract without instance fields or a concrete object layout.</p>
+            </header>
+
+            <section>
+                <h2>Declaring an interface</h2>
+                <p>Interface members declare signatures without implementation bodies. Methods, properties and indexers can participate in a contract.</p>
+                <pre><code><span class="token-keyword">interface</span> IRenderable
+{
+    <span class="token-keyword">void</span> Render();
+    <span class="token-keyword">readonly bool</span> Visible { get; }
+    <span class="token-keyword">readonly int</span> <span class="token-keyword">this</span>[<span class="token-keyword">int</span> index] { get; }
+}</code></pre>
+                <p>Interface members are public contract members. A readonly member can be called through a readonly interface reference.</p>
+            </section>
+
+            <section>
+                <h2>Implementing an interface</h2>
+                <p>Add the interface to a struct's base list and provide compatible public instance members for the complete contract.</p>
+                <pre><code><span class="token-keyword">struct</span> Sprite : IRenderable
+{
+    <span class="token-keyword">private bool</span> visible;
+
+    <span class="token-keyword">public</span> Sprite(<span class="token-keyword">bool</span> isVisible)
+    {
+        visible = isVisible;
+    }
+
+    <span class="token-keyword">public void</span> Render()
+    {
+        DrawSprite();
+    }
+
+    <span class="token-keyword">public readonly bool</span> Visible
+    {
+        get { <span class="token-keyword">return</span> visible; }
+    }
+
+    <span class="token-keyword">public readonly int</span> <span class="token-keyword">this</span>[<span class="token-keyword">int</span> index]
+    {
+        get { <span class="token-keyword">return</span> index; }
+    }
+}</code></pre>
+            </section>
+
+            <section>
+                <h2>Interface references</h2>
+                <p>A struct value converts to an interface value, and a struct reference converts to an interface reference. The interface representation preserves the concrete object and its dispatch information. Calls are routed to the implementation belonging to the runtime struct.</p>
+                <pre><code>Sprite sprite = Sprite(<span class="token-keyword">true</span>);
+IRenderable&amp; renderable = sprite;
+
+renderable.Render();
+<span class="token-keyword">bool</span> visible = renderable.Visible;</code></pre>
+                <p>An interface pointer type such as <code>IRenderable*</code> may be used directly, but a raw <code>Sprite*</code> is not implicitly converted to it. Form an interface value or reference before working through the interface contract.</p>
+            </section>
+
+            <section>
+                <h2>Interface inheritance</h2>
+                <p>An interface may extend multiple other interfaces. Its contract includes all inherited members together with its own declarations.</p>
+                <pre><code><span class="token-keyword">interface</span> IUpdatable
+{
+    <span class="token-keyword">void</span> Update();
+}
+
+<span class="token-keyword">interface</span> IEntity : IRenderable, IUpdatable
+{
+    <span class="token-keyword">int</span> GetId();
+}</code></pre>
+                <p>A struct may implement several interfaces while also extending one base struct.</p>
+            </section>
+
+            <nav class="article-pagination" aria-label="Documentation pagination"><a href="abstraction.html"><span>Next</span><strong>Abstraction and virtual dispatch →</strong></a></nav>
+        </article>
+    </main>
+    <footer><span>Xenon language documentation</span></footer>
+</div></body>
+</html>
