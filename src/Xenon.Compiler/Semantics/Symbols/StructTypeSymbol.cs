@@ -347,7 +347,7 @@ public sealed class FieldSymbol : Symbol
         Ordinal = ordinal;
         Accessibility = accessibility;
         IsStatic = isStatic;
-        IsReadonly = isReadonly;
+        IsReadonly = isReadonly || declaration.Type.PointerReadonlyKeyword is not null;
         ConstantValue = constantValue;
         Declaration = declaration;
     }

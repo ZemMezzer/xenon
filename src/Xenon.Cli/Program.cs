@@ -107,9 +107,9 @@ internal static class Program
             return WriteUsageError("target triple cannot be empty");
         }
 
-        if (targetTriple is not null && !emitObject)
+        if (targetTriple is not null && !emitObject && !emitLlvm)
         {
-            return WriteUsageError("option '--target' requires 'build' or '--emit-object'");
+            return WriteUsageError("option '--target' requires 'build', '--emit-object', or '--emit-llvm'");
         }
 
         if (projectCommand)
@@ -168,6 +168,25 @@ internal static class Program
             DumpTokens(compilation);
         }
 
+        LlvmTargetOptions? selectedTarget = null;
+        if (!compilation.HasErrors && (emitObject || emitLlvm || compilation.RequiresTargetLayout))
+        {
+            try
+            {
+                string effectiveTriple = targetTriple ?? LlvmTargetPlatform.HostTriple;
+                bool positionIndependentCode = input.PositionIndependentCode ||
+                    (input.GenerateExecutableEntryPoint && !IsWindowsTarget(effectiveTriple));
+                selectedTarget = new LlvmTargetOptions(effectiveTriple, input.Profile.OptimizationLevel,
+                    PositionIndependentCode: positionIndependentCode);
+                compilation = LlvmIrGenerator.BindForTarget(compilation, selectedTarget);
+            }
+            catch (LlvmCodeGenerationException exception)
+            {
+                Console.Error.WriteLine($"error: {exception.Message}");
+                return CompilationError;
+            }
+        }
+
         foreach (var diagnostic in compilation.Diagnostics)
         {
             DiagnosticWriter.Write(Console.Error, diagnostic);
@@ -179,19 +198,11 @@ internal static class Program
         }
 
         LlvmObjectFile? objectFile = null;
-        LlvmTargetOptions? selectedTarget = null;
         if (emitObject)
         {
             try
             {
-                string effectiveTriple = targetTriple ?? LlvmTargetPlatform.HostTriple;
-                bool positionIndependentCode = input.PositionIndependentCode ||
-                    (input.GenerateExecutableEntryPoint && !IsWindowsTarget(effectiveTriple));
-                selectedTarget = new LlvmTargetOptions(
-                    effectiveTriple,
-                    input.Profile.OptimizationLevel,
-                    PositionIndependentCode: positionIndependentCode);
-                string objectExtension = LlvmTargetPlatform.GetObjectFileExtension(selectedTarget.Triple);
+                string objectExtension = LlvmTargetPlatform.GetObjectFileExtension(selectedTarget!.Triple);
                 string objectPath = XenonBuildPaths.GetObjectFilePath(
                     input.RootDirectory,
                     input.Name,

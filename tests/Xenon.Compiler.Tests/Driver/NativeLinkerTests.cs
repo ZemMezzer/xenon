@@ -780,7 +780,7 @@ public sealed class NativeLinkerTests
                     Value = value;
                 }
 
-                public readonly int Read()
+                public int readonly Read()
                 {
                     return Value;
                 }
@@ -843,7 +843,7 @@ public sealed class NativeLinkerTests
                     return Value;
                 }
 
-                public readonly readonly int& Get()
+                public readonly int& readonly Get()
                 {
                     return Value;
                 }
@@ -926,12 +926,12 @@ public sealed class NativeLinkerTests
                     Marker = Marker + 1;
                 }
 
-                public readonly int ReadResult()
+                public int readonly ReadResult()
                 {
                     return Result;
                 }
 
-                public readonly int ReadMarker()
+                public int readonly ReadMarker()
                 {
                     return Marker;
                 }
@@ -1545,6 +1545,557 @@ public sealed class NativeLinkerTests
             using Process process = Process.Start(new ProcessStartInfo { FileName = executable.Path, UseShellExecute = false })!;
             process.WaitForExit();
             Assert.Equal(38, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyFreeFunctionsWithExplicitMutableCapabilities(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            extern int readonly abs(int value);
+            int readonly Magnitude(int value) { return abs(value); }
+            int readonly Square(int value) { return value * value; }
+            export void readonly Fill(int* output, readonly int* input)
+            {
+                *output = *input + Square(1);
+            }
+            void readonly Increment(int& value) { value++; }
+            void readonly Store(int** destination, int* source) { *destination = source; }
+            int* readonly Identity(int* value) { return value; }
+            struct Reader
+            {
+                public int Offset;
+                public void readonly Copy(int* output, readonly int* input)
+                {
+                    Fill(output, input);
+                    *output += Offset;
+                }
+                public static int readonly Read(readonly int* value) { return *value; }
+            }
+            int Main()
+            {
+                int input = Magnitude(-40);
+                int output = 0;
+                int* pointer = &input;
+                Store(&pointer, &output);
+                Reader reader = Reader { 0 };
+                reader.Copy(Identity(pointer), &input);
+                Increment(output);
+                readonly int* readonly view = pointer;
+                return Reader.Read(view);
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyMethodQualifiersAndPointerReturns(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            interface IValue
+            {
+                readonly int* readonly GetView();
+                int readonly Read();
+                void readonly Update();
+            }
+            struct Value : IValue
+            {
+                public int* Pointer;
+                public int Count;
+                public readonly int* Touch() { Count++; return &Count; }
+                public int* readonly GetPointer(int* pointer) { return pointer; }
+                public readonly int* readonly GetView() { return Pointer; }
+                public int readonly Read() { return Count; }
+                public void readonly Update() { int snapshot = Count; }
+            }
+            struct Base { public abstract int readonly Score(); }
+            struct Derived : Base { public override int readonly Score() { return 42; } }
+            int Main()
+            {
+                int number = 10;
+                Value value = Value { &number, 0 };
+                readonly Value& receiver = value;
+                int* pointer = receiver.GetPointer(&number);
+                *pointer = 40;
+                pointer = &number;
+                readonly int* view = value.Touch();
+                if (*view != 1) return 1;
+                view = receiver.GetView();
+                if (*view != 40) return 2;
+                readonly IValue& contract = value;
+                contract.Update();
+                Derived derived = Derived { };
+                readonly Base& baseView = derived;
+                if (baseView.Score() != 42) return 3;
+                return *contract.GetView() + contract.Read() + 1;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ExecutesSharedSwitchBodyOnceForEveryGroupedLabel(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Probe
+            {
+                public static int Calls = 0;
+                public static int Destroyed = 0;
+                public static void Handle() { Probe.Calls++; }
+                public ~Probe() { Probe.Destroyed++; }
+            }
+            int Group(int value)
+            {
+                int result;
+                switch (value)
+                {
+                    case 1:
+                    case 2:
+                    case 3:
+                        Probe[] temporary = Probe[1];
+                        Probe.Handle();
+                        result = 10;
+                        break;
+                    default: return 0;
+                }
+                return result;
+            }
+            int SharedReturn(int value)
+            {
+                switch (value)
+                {
+                    case 1:
+                    case 2: return 3;
+                    default: return 0;
+                }
+            }
+            int Main()
+            {
+                int total = Group(1) + Group(2) + Group(3) + Group(9);
+                if (Probe.Calls != 3 || Probe.Destroyed != 3) return 1;
+                return total + SharedReturn(1) + SharedReturn(2) + SharedReturn(9) + Probe.Calls + Probe.Destroyed;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsIterationFourEnumsSwitchAndReadonlyPointers(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            const int Start = 10;
+            enum State : byte { Idle, Running = Start, Stopped }
+            enum Signed : sbyte { Negative = -1 }
+            int Select(State value)
+            {
+                switch (value)
+                {
+                    case State.Idle: return 0;
+                    case State.Running: return 20;
+                    default: return 30;
+                }
+            }
+            int Main()
+            {
+                int a = 1;
+                int b = 2;
+                readonly int* p = &a;
+                p = &b;
+                int* readonly fixed = &a;
+                *fixed = 3;
+                readonly int* readonly both = &b;
+                int result = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    switch (i)
+                    {
+                        case 0: continue;
+                        case 1:
+                        case 2: result += i; break;
+                        default:
+                            switch (i) { case 3: result += 4; break; default: break; }
+                            break;
+                    }
+                    result += 1;
+                }
+                return result + Select(cast<State>(10)) + cast<int>(State.Stopped) + cast<int>(Signed.Negative) + a - *p + *both - 1;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsRectangularJaggedAndStackArrayMetadata(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            int[,] Create(int rows, int columns) { return new int[rows, columns]; }
+            int Inspect(int[,] values) { return values.Length + values.GetLength(0) + values.GetLength(1) + values.Rank; }
+            int Main()
+            {
+                int[,] matrix = Create(2, 3);
+                int n = 0;
+                for (int i = 0; i < 2; i++)
+                    for (int j = 0; j < 3; j++) { matrix[i,j] = n; n++; }
+                int* first = &matrix[0,0];
+                if (first[4] != matrix[1,1]) return 1;
+                int[][,] matrices = new int[2][,];
+                matrices[0] = matrix;
+                int[,] alias = matrices[0];
+                free(matrices);
+                if (alias[1,2] != 5) return 2;
+                int[][] rows = new int[2][];
+                rows[0] = new int[3]; rows[1] = new int[5]; rows[1][4] = 7;
+                int[,] stack = int[2,2];
+                if (stack.Rank != 2 || stack.GetLength(1) != 2) return 3;
+                int[] empty = new int[0];
+                int result = Inspect(alias) + rows.Length + rows[0].Length + rows[1].Length + rows[1][4] + stack.Length + empty.Length + alias[1,2];
+                free(empty); free(alias); free(rows[0]); free(rows[1]); free(rows);
+                return result + 3;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_DestroysArrayElementsOnceInReverseOrder(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Counter
+            {
+                public static int Trace = 0;
+                public static int Count = 0;
+                public int Id = 7;
+                public ~Counter() { Counter.Trace = Counter.Trace * 10 + Id; Counter.Count += 1; }
+            }
+            int Main()
+            {
+                Counter[,] values = new Counter[2, 2];
+                if (values[0,0].Id != 7) return 1;
+                values[0,0].Id = 1; values[0,1].Id = 2; values[1,0].Id = 3; values[1,1].Id = 4;
+                free(values);
+                Counter[] empty = new Counter[0]; free(empty);
+                if (Counter.Trace != 4321 || Counter.Count != 4) return 2;
+                Counter[][] nested = new Counter[1][];
+                Counter[] child = new Counter[1]; child[0].Id = 5;
+                nested[0] = child;
+                free(nested);
+                if (Counter.Count != 4) return 3;
+                free(child);
+                if (Counter.Trace != 43215 || Counter.Count != 5) return 4;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Fact]
+    public void Linker_RunsHighRankDeepNestingAndLargeIndexers()
+    {
+        string suffix = "[" + new string(',', 39) + "]";
+        string dimensions = string.Join(",", Enumerable.Repeat("1", 40));
+        string indices = string.Join(",", Enumerable.Repeat("0", 40));
+        string parameters = string.Join(",", Enumerable.Range(0, 16).Select(i => $"int p{i}"));
+        string arguments = string.Join(",", Enumerable.Range(0, 16));
+        string nested = string.Concat(Enumerable.Repeat("[]", 24));
+        Assert.Equal(42, RunIterationFourProgram($$"""
+            struct Grid { public int this[{{parameters}}] { get { return p15; } set { } } }
+            int Main()
+            {
+                int{{suffix}} values = new int[{{dimensions}}];
+                int{{suffix}} stack = int[{{dimensions}}];
+                stack[{{indices}}] = 42;
+                if (stack.Rank != 40 || stack.GetLength(39) != 1 || stack.Length != 1 || stack[{{indices}}] != 42) return 4;
+                values[{{indices}}] = 42;
+                if (values.Rank != 40 || values.GetLength(39) != 1 || values.Length != 1) return 1;
+                int result = values[{{indices}}];
+                int{{nested}} deep = new int[1]{{nested[2..]}};
+                if (deep.Length != 1 || deep.Rank != 1) return 2;
+                Grid grid = Grid {};
+                if (grid[{{arguments}}] != 15) return 3;
+                grid[{{arguments}}] = 12;
+                free(deep); free(values); return result;
+            }
+            """, 2));
+    }
+
+    [Fact]
+    public void Linker_PreservesZeroSizedDimensionsAndEvaluatesIndicesOnce()
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Counter
+            {
+                public static int Value = 0;
+                public static int Next() { Counter.Value += 1; return Counter.Value; }
+            }
+            int Main()
+            {
+                int[,,] empty = new int[2147483647,2147483647,0];
+                if (empty.Length != 0 || empty.GetLength(1) != 2147483647) return 1;
+                free(empty);
+                int[,] values = new int[Counter.Next(), Counter.Next()];
+                if (values.Length != 2 || Counter.Value != 2) return 2;
+                Counter.Value = -1;
+                values[Counter.Next(), Counter.Next()] = 42;
+                if (Counter.Value != 1) return 3;
+                int result = values[0,1];
+                free(values);
+                int[][] nested = new int[1][];
+                free(nested[0]);
+                free(nested);
+                return result;
+            }
+            """, 2));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsTargetDependentEnumAndCaseConstants(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Packet { public byte Tag; public nint Payload; }
+            const int PayloadOffset = cast<int>(offsetof(Packet, Payload));
+            enum Layout { Size = cast<int>(sizeof(Packet)), After, Offset = PayloadOffset, Alignment = cast<int>(alignof(Packet)) }
+            enum Native : nint { Size = cast<nint>(sizeof(nint)), Next }
+            int Main()
+            {
+                if (cast<int>(Layout.Size) != cast<int>(sizeof(Packet))) return 1;
+                if (cast<int>(Layout.After) != cast<int>(sizeof(Packet)) + 1) return 2;
+                if (cast<int>(Layout.Offset) != cast<int>(offsetof(Packet, Payload))) return 3;
+                if (cast<int>(Layout.Alignment) != cast<int>(alignof(Packet))) return 4;
+                if (cast<int>(Native.Next) != cast<int>(sizeof(nint)) + 1) return 5;
+                const int Size = cast<int>(sizeof(Packet));
+                const int Next = Size + 1;
+                switch (cast<int>(Layout.After)) { case Next: break; default: return 6; }
+                switch (Layout.Size) { case Layout.Size: break; default: return 7; }
+                switch (sizeof(nint)) { case alignof(nint): break; default: return 8; }
+                const nuint High = cast<nuint>(4294967296);
+                switch (High) { case cast<nuint>(4294967296): break; default: return 9; }
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_DestroysStackArraysByAllocationInReverseOrder(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Item
+            {
+                public static int Trace = 0;
+                public static int Count = 0;
+                public int Id = 7;
+                public Item() { Item.Count += 100; }
+                public ~Item() { Item.Trace = Item.Trace * 10 + Id; Item.Count += 1; }
+            }
+            void Nested()
+            {
+                Item[,] outer = Item[1,2];
+                if (Item.Count != 0 || outer[0,0].Id != 7) { Item.Count = -100; return; }
+                outer[0,0].Id = 1; outer[0,1].Id = 2;
+                {
+                    Item[] inner = Item[1]; inner[0].Id = 3;
+                    Item[] alias = inner;
+                    inner = Item[1]; inner[0].Id = 4;
+                    alias[0].Id = 3;
+                    Item[,] empty = Item[0,3];
+                    if (empty.Length != 0 || empty.Rank != 2) Item.Count = -100;
+                }
+                if (Item.Trace != 43 || Item.Count != 2) Item.Count = -100;
+            }
+            int Early()
+            {
+                Item[] values = Item[1]; values[0].Id = 5;
+                return Item.Trace;
+            }
+            int NestedEarly()
+            {
+                Item[] outer = Item[1]; outer[0].Id = 6;
+                {
+                    Item[] inner = Item[1]; inner[0].Id = 7;
+                    return inner[0].Id;
+                }
+            }
+            void HeapReplacement()
+            {
+                Item[] values = Item[1]; values[0].Id = 8;
+                values = new Item[1]; values[0].Id = 9;
+                free(values);
+            }
+            int Main()
+            {
+                Nested();
+                if (Item.Trace != 4321 || Item.Count != 4) return 1;
+                int beforeCleanup = Early();
+                if (beforeCleanup != 4321 || Item.Trace != 43215 || Item.Count != 5) return 2;
+                if (NestedEarly() != 7 || Item.Trace != 4321576 || Item.Count != 7) return 3;
+                Item.Trace = 0;
+                HeapReplacement();
+                if (Item.Trace != 98 || Item.Count != 9) return 4;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_CleansStackArraysAcrossLoopAndSwitchExits(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Item
+            {
+                public static int Trace = 0;
+                public int Id = 1;
+                public ~Item() { Item.Trace = Item.Trace * 10 + Id; }
+            }
+            int Main()
+            {
+                int i = 0;
+                while (i < 2)
+                {
+                    Item[] outer = Item[1]; outer[0].Id = 1;
+                    {
+                        Item[,] inner = Item[1,1]; inner[0,0].Id = 2;
+                        i++;
+                        if (i == 1) continue;
+                        break;
+                    }
+                }
+                if (Item.Trace != 2121) return 1;
+                Item.Trace = 0; i = 0;
+                for (Item[] keep = Item[1]; i < 2; i++)
+                {
+                    keep[0].Id = 9;
+                    Item[] body = Item[1]; body[0].Id = 2;
+                    switch (i)
+                    {
+                        case 0:
+                            Item[] first = Item[1]; first[0].Id = 3;
+                            continue;
+                        default:
+                            Item[] last = Item[1]; last[0].Id = 4;
+                            break;
+                    }
+                    if (Item.Trace != 324) return 2;
+                    break;
+                }
+                if (Item.Trace != 32429) return 3;
+                Item.Trace = 0;
+                if (false) Item[1];
+                if (true) Item[1];
+                else Item[2];
+                for (int j = 0; j < 2; j++) Item[1];
+                if (Item.Trace != 111) return 4;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ReclaimsStackStorageAndHandlesRepeatedTemporaryAllocations(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Count = 0; public static int Dimensions = 0; public static int Next() { State.Dimensions++; return State.Dimensions; } }
+            struct Base { public int Id = 2; public virtual ~Base() { State.Count += Id; } }
+            struct Derived : Base { public long Padding = cast<long>(10); }
+            struct Other { public ~Other() { State.Count += 5; } }
+            void Repeated()
+            {
+                int i = 0;
+                if (false && Derived[1].Length == 1) State.Count = -100;
+                // The condition belongs to this function's scope, so all four
+                // allocations stay registered until it exits, including the last check.
+                while (Derived[1].Length == 1 && i < 3) i++;
+                Other[2];
+            }
+            int Main()
+            {
+                Repeated();
+                if (State.Count != 18) return 1;
+                for (int i = 0; i < 2048; i++)
+                {
+                    int[,] scratch = int[32,64];
+                    scratch[31,63] = i;
+                    if (scratch[31,63] != i) return 2;
+                }
+                int[,] dimensions = int[State.Next(), State.Next()];
+                if (State.Dimensions != 2 || dimensions.Length != 2 || dimensions.GetLength(1) != 2) return 3;
+                int[,,] empty = int[2147483647,2147483647,0];
+                if (empty.Length != 0 || empty.Rank != 3) return 4;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_CleansDestructorBodyArraysBeforeCallingBaseDestructor(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Trace = 0; }
+            struct Temporary { public ~Temporary() { State.Trace = State.Trace * 10 + 3; } }
+            struct Base
+            {
+                public virtual int Read() { return 1; }
+                public virtual ~Base() { State.Trace = State.Trace * 10 + 1; }
+            }
+            struct Derived : Base
+            {
+                public override int Read() { return 42; }
+                public ~Derived()
+                {
+                    Temporary[1];
+                    State.Trace = State.Trace * 10 + 2;
+                }
+            }
+            int Main()
+            {
+                {
+                    Derived[,] array = Derived[1,1];
+                    if (array[0,0].Read() != 42) return 1;
+                }
+                if (State.Trace != 231) return 2;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    private static int RunIterationFourProgram(string source, int optimization)
+    {
+        Compilation compilation = Compilation.Create(SourceText.From("namespace IterationFour; " + source, "iteration4.xe"));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(optimizationLevel: optimization, positionIndependentCode: !OperatingSystem.IsWindows());
+        try
+        {
+            string objectPath = Path.Combine(directory, "iteration4" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+            var objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "iteration4", generateExecutableEntryPoint: true);
+            string executablePath = XenonBuildPaths.GetExecutablePath(directory, "iteration4", "debug", target.Triple);
+            var executable = new NativeLinker().LinkExecutable(objectFile.Path, executablePath, target.Triple);
+            using Process process = Process.Start(new ProcessStartInfo(executable.Path) { UseShellExecute = false, CreateNoWindow = true })!;
+            if (!process.WaitForExit(30000))
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit();
+                throw new Xunit.Sdk.XunitException("Iteration 4 program did not terminate within 30 seconds.");
+            }
+            return process.ExitCode;
         }
         finally
         {

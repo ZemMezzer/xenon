@@ -10,11 +10,13 @@ public sealed class SemanticModel
     internal SemanticModel(
         NamespaceSymbol globalNamespace,
         ImmutableArray<BoundFunction> functions,
-        ImmutableArray<Diagnostic> diagnostics)
+        ImmutableArray<Diagnostic> diagnostics,
+        bool requiresTargetLayout = false)
     {
         GlobalNamespace = globalNamespace;
         Functions = functions;
         Diagnostics = diagnostics;
+        RequiresTargetLayout = requiresTargetLayout;
     }
 
     public NamespaceSymbol GlobalNamespace { get; }
@@ -22,6 +24,7 @@ public sealed class SemanticModel
     public ImmutableArray<BoundFunction> Functions { get; }
 
     public ImmutableArray<Diagnostic> Diagnostics { get; }
+    public bool RequiresTargetLayout { get; }
 
     internal static SemanticModel CreateEmpty() => new(
         new NamespaceSymbol(string.Empty, null),

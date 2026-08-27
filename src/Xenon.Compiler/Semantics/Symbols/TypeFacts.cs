@@ -7,6 +7,12 @@ internal static class TypeFacts
 
     public static bool IsInteger(TypeSymbol type) => type is PrimitiveTypeSymbol { IsInteger: true };
 
+    public static bool CanExplicitlyCast(TypeSymbol target, TypeSymbol source) =>
+        (IsNumeric(target) && IsNumeric(source)) ||
+        (target is EnumTypeSymbol && IsInteger(source)) ||
+        (source is EnumTypeSymbol && IsInteger(target)) ||
+        (target is EnumTypeSymbol && ReferenceEquals(target, source));
+
     public static bool CanAssign(TypeSymbol destination, TypeSymbol source) =>
         GetImplicitConversionCost(destination, source) is not null;
 

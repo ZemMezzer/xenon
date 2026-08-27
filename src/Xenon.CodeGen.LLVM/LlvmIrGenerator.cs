@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Numerics;
 using LLVMSharp.Interop;
 using Xenon.Compiler;
 using Xenon.Compiler.Semantics.Binding;
@@ -44,6 +45,22 @@ public sealed class LlvmIrGenerator
             generateExecutableEntryPoint);
     }
 
+    /// <summary>Performs target-specific semantic validation and returns source-located diagnostics.</summary>
+    public static Compilation BindForTarget(Compilation compilation, LlvmTargetOptions targetOptions)
+    {
+        ArgumentNullException.ThrowIfNull(compilation);
+        ArgumentNullException.ThrowIfNull(targetOptions);
+        if (compilation.HasErrors) return compilation;
+        using NativeTargetMachine target = NativeTargetMachine.Create(targetOptions);
+        return BindForTarget(compilation, target);
+    }
+
+    private static Compilation BindForTarget(Compilation compilation, NativeTargetMachine target)
+    {
+        using var layout = new LlvmTypeLayout(target);
+        return compilation.WithTargetLayout(layout);
+    }
+
     internal TResult GenerateModule<TResult>(
         Compilation compilation,
         string moduleName,
@@ -60,6 +77,17 @@ public sealed class LlvmIrGenerator
             throw new LlvmCodeGenerationException("LLVM IR cannot be generated while the compilation contains errors.");
         }
 
+        if (targetMachine is not null)
+        {
+            compilation = BindForTarget(compilation, targetMachine);
+            if (compilation.HasErrors)
+                throw new LlvmCodeGenerationException("Target-specific semantic validation failed:" + Environment.NewLine +
+                    string.Join(Environment.NewLine, compilation.Diagnostics.Select(diagnostic =>
+                        $"{diagnostic.Location.Source.Path}({diagnostic.Location.Start.Line + 1},{diagnostic.Location.Start.Character + 1}): {diagnostic.Message}")));
+        }
+        if (compilation.RequiresTargetLayout)
+            throw new LlvmCodeGenerationException("Constant evaluation requires a target layout; use GenerateForTarget or select a CLI target.");
+
         _context = LLVMContextRef.Create();
         _module = _context.CreateModuleWithName(moduleName);
         _targetMachine = targetMachine;
@@ -72,6 +100,7 @@ public sealed class LlvmIrGenerator
                 _module.DataLayout = targetMachine.DataLayout;
             }
 
+            ValidateEnumStorage(compilation.SemanticModel.GlobalNamespace);
             DeclareInterfaceTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareStructTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
@@ -444,6 +473,8 @@ public sealed class LlvmIrGenerator
             return LLVMTypeRef.CreatePointer(MapType(array.ElementType), 0);
         }
 
+        if (type is EnumTypeSymbol enumeration) return MapType(enumeration.UnderlyingType);
+
         if (type is PointerTypeSymbol pointer)
         {
             return LLVMTypeRef.CreatePointer(MapType(pointer.ElementType), 0);
@@ -476,8 +507,36 @@ public sealed class LlvmIrGenerator
             $"Target integer type '{type.Name}' has unsupported width {bitWidth}."),
     };
 
+    private void ValidateEnumStorage(NamespaceSymbol scope)
+    {
+        foreach (EnumTypeSymbol enumeration in scope.Enums)
+        {
+            if (enumeration.UnderlyingType.BitWidth is null && _targetMachine is null) continue;
+            int bits = GetIntegerBitWidth(enumeration.UnderlyingType);
+            foreach (ConstantSymbol member in enumeration.Members)
+                if (!FitsTargetInteger(member.Value, bits, enumeration.UnderlyingType.IsSigned))
+                    throw new LlvmCodeGenerationException($"enum member '{enumeration.FullName}.{member.Name}' is out of range for the selected target's '{enumeration.UnderlyingType.Name}'");
+        }
+        foreach (NamespaceSymbol child in scope.Namespaces) ValidateEnumStorage(child);
+    }
+
+    private static bool FitsTargetInteger(object? value, int bits, bool signed)
+    {
+        BigInteger number = value switch
+        {
+            int integer => integer,
+            long integer => integer,
+            ulong integer => integer,
+            _ => throw new LlvmCodeGenerationException("Invalid integer constant."),
+        };
+        return signed
+            ? number >= -(BigInteger.One << (bits - 1)) && number < (BigInteger.One << (bits - 1))
+            : number >= 0 && number < (BigInteger.One << bits);
+    }
+
     private int GetIntegerBitWidth(TypeSymbol type)
     {
+        if (type is EnumTypeSymbol enumeration) return GetIntegerBitWidth(enumeration.UnderlyingType);
         if (type is PrimitiveTypeSymbol { IsInteger: true, BitWidth: int bitWidth })
         {
             return bitWidth;
@@ -550,7 +609,10 @@ public sealed class LlvmIrGenerator
             mallocType,
             _module.AddFunction("free", freeType),
             freeType,
-            sizeType);
+            sizeType,
+            _module.AddFunction("llvm.trap", LLVMTypeRef.CreateFunction(_context.VoidType, [], false)),
+            _module.AddFunction("llvm.stacksave.p0", LLVMTypeRef.CreateFunction(pointerType, [], false)),
+            _module.AddFunction("llvm.stackrestore.p0", freeType));
         return _memoryRuntime;
     }
 
@@ -571,7 +633,10 @@ public sealed class LlvmIrGenerator
         LLVMTypeRef MallocType,
         LLVMValueRef Free,
         LLVMTypeRef FreeType,
-        LLVMTypeRef SizeType);
+        LLVMTypeRef SizeType,
+        LLVMValueRef Trap,
+        LLVMValueRef StackSave,
+        LLVMValueRef StackRestore);
 
     private sealed class FunctionEmitter
     {
@@ -593,6 +658,10 @@ public sealed class LlvmIrGenerator
         private readonly LLVMValueRef _thisValue;
         private readonly Dictionary<VariableSymbol, LLVMValueRef> _addresses = [];
         private readonly Stack<LoopTargets> _loopTargets = [];
+        private readonly Stack<BranchTarget> _breakTargets = [];
+        private readonly List<CleanupScope> _cleanupScopes = [];
+        private LLVMValueRef _cleanupHead;
+        private LLVMTypeRef _cleanupNodeType;
         private bool _terminated;
 
         public FunctionEmitter(
@@ -642,6 +711,15 @@ public sealed class LlvmIrGenerator
         public void Emit(BoundBlockStatement body)
         {
             AllocateLocals(body);
+            if (_function.HasStackArrays)
+            {
+                LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+                // One runtime LIFO list per call tracks allocations, not aliases. Nodes
+                // retain the element stride and destructor so different types can mix.
+                _cleanupNodeType = _context.GetStructType([pointer, pointer, _mapType(BuiltinTypes.NUInt), _mapType(BuiltinTypes.NUInt), pointer], false);
+                _cleanupHead = _builder.BuildAlloca(pointer, "stack.cleanup.head");
+                _builder.BuildStore(LLVMValueRef.CreateConstPointerNull(pointer), _cleanupHead);
+            }
             EmitBlock(body);
 
             if (!_terminated && ReferenceEquals(_function.ReturnType, BuiltinTypes.Void))
@@ -677,6 +755,9 @@ public sealed class LlvmIrGenerator
                 case BoundWhileStatement @while:
                     AllocateLocals(@while.Body);
                     break;
+                case BoundSwitchStatement @switch:
+                    foreach (BoundSwitchSection section in @switch.Sections) AllocateLocals(section.Body);
+                    break;
                 case BoundForStatement @for:
                     if (@for.Initializer is not null)
                     {
@@ -690,6 +771,7 @@ public sealed class LlvmIrGenerator
 
         private void EmitBlock(BoundBlockStatement block)
         {
+            BeginCleanupScope();
             foreach (BoundStatement statement in block.Statements)
             {
                 if (_terminated)
@@ -699,6 +781,65 @@ public sealed class LlvmIrGenerator
 
                 EmitStatement(statement);
             }
+            EndCleanupScope();
+        }
+
+        private void EmitEmbeddedStatement(BoundStatement statement)
+        {
+            if (statement is BoundBlockStatement block)
+            {
+                EmitBlock(block);
+                return;
+            }
+            BeginCleanupScope();
+            EmitStatement(statement);
+            EndCleanupScope();
+        }
+
+        private void BeginCleanupScope()
+        {
+            if (!_function.HasStackArrays) return;
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef stack = _builder.BuildCall2(LLVMTypeRef.CreateFunction(pointer, [], false), _getMemoryRuntime().StackSave, Array.Empty<LLVMValueRef>(), "scope.stack");
+            LLVMValueRef head = _builder.BuildLoad2(pointer, _cleanupHead, "scope.cleanup.head");
+            _cleanupScopes.Add(new CleanupScope(stack, head));
+        }
+
+        private void EndCleanupScope()
+        {
+            if (!_function.HasStackArrays) return;
+            if (!_terminated) EmitCleanup(_cleanupScopes.Count - 1);
+            _cleanupScopes.RemoveAt(_cleanupScopes.Count - 1);
+        }
+
+        private void EmitCleanup(int retainedDepth)
+        {
+            if (_cleanupScopes.Count <= retainedDepth) return;
+            CleanupScope scope = _cleanupScopes[retainedDepth];
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMBasicBlockRef condition = _llvmFunction.AppendBasicBlock("stack.cleanup.condition");
+            LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("stack.cleanup.body");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("stack.cleanup.end");
+            _builder.BuildBr(condition);
+            _builder.PositionAtEnd(condition);
+            LLVMValueRef node = _builder.BuildLoad2(pointer, _cleanupHead, "stack.cleanup.node");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, node, scope.Head), body, end);
+            _builder.PositionAtEnd(body);
+            LLVMValueRef Load(uint index, LLVMTypeRef type) => _builder.BuildLoad2(type, _builder.BuildStructGEP2(_cleanupNodeType, node, index), "stack.cleanup.field");
+            LLVMValueRef next = Load(0, pointer);
+            LLVMValueRef data = Load(1, pointer);
+            LLVMValueRef length = Load(2, _mapType(BuiltinTypes.NUInt));
+            LLVMValueRef stride = Load(3, _mapType(BuiltinTypes.NUInt));
+            LLVMValueRef destructor = Load(4, pointer);
+            EmitElementLoop(length, reverse: true, index =>
+            {
+                LLVMValueRef element = _builder.BuildGEP2(_context.Int8Type, data, new[] { _builder.BuildMul(index, stride) }, "stack.destroy.element");
+                _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false), destructor, new[] { element }, string.Empty);
+            });
+            _builder.BuildStore(next, _cleanupHead);
+            _builder.BuildBr(condition);
+            _builder.PositionAtEnd(end);
+            _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false), _getMemoryRuntime().StackRestore, new[] { scope.Stack }, string.Empty);
         }
 
         private void EmitStatement(BoundStatement statement)
@@ -727,13 +868,57 @@ public sealed class LlvmIrGenerator
                     EmitFor(@for);
                     break;
                 case BoundBreakStatement:
-                    EmitLoopBranch(_loopTargets.Peek().BreakTarget);
+                    EmitLoopBranch(_breakTargets.Peek());
+                    break;
+                case BoundSwitchStatement @switch:
+                    EmitSwitch(@switch);
                     break;
                 case BoundContinueStatement:
                     EmitLoopBranch(_loopTargets.Peek().ContinueTarget);
                     break;
                 default:
                     throw new LlvmCodeGenerationException($"Bound statement '{statement.Kind}' is not supported by LLVM code generation.");
+            }
+        }
+
+        private void EmitSwitch(BoundSwitchStatement statement)
+        {
+            if (statement.Expression.Type is PrimitiveTypeSymbol { IsInteger: true, BitWidth: null } integer)
+                foreach (BoundSwitchSection section in statement.Sections)
+                    if (section.Value is BoundLiteralExpression literal && !FitsTargetInteger(literal.Value, _getIntegerBitWidth(integer), integer.IsSigned))
+                        throw new LlvmCodeGenerationException("case value is out of range for the selected target's switch operand type");
+            LLVMValueRef value = EmitExpression(statement.Expression);
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("switch.end");
+            var blocks = new LLVMBasicBlockRef[statement.Sections.Length];
+            LLVMBasicBlockRef next = end;
+            for (int i = blocks.Length - 1; i >= 0; i--)
+            {
+                if (!statement.Sections[i].Body.Statements.IsEmpty) next = _llvmFunction.AppendBasicBlock("switch.case");
+                blocks[i] = next;
+            }
+            LLVMBasicBlockRef fallback = end;
+            for (int i = 0; i < blocks.Length; i++)
+                if (statement.Sections[i].Value is null) fallback = blocks[i];
+            LLVMValueRef dispatch = _builder.BuildSwitch(value, fallback, (uint)blocks.Length);
+            for (int i = 0; i < blocks.Length; i++)
+                if (statement.Sections[i].Value is BoundLiteralExpression label) dispatch.AddCase(EmitLiteral(label), blocks[i]);
+            _breakTargets.Push(new BranchTarget(end, _cleanupScopes.Count));
+            for (int i = 0; i < blocks.Length; i++)
+            {
+                if (statement.Sections[i].Body.Statements.IsEmpty) continue;
+                _builder.PositionAtEnd(blocks[i]);
+                _terminated = false;
+                EmitBlock(statement.Sections[i].Body);
+                if (!_terminated) _builder.BuildBr(end);
+            }
+            _breakTargets.Pop();
+            _builder.PositionAtEnd(end);
+            _terminated = false;
+            // An exhaustive returning switch has no live merge edge.
+            if (BoundControlFlow.AlwaysReturns(statement))
+            {
+                _builder.BuildUnreachable();
+                _terminated = true;
             }
         }
 
@@ -749,7 +934,7 @@ public sealed class LlvmIrGenerator
 
                 _builder.PositionAtEnd(thenBlock);
                 _terminated = false;
-                EmitStatement(statement.ThenStatement);
+                EmitEmbeddedStatement(statement.ThenStatement);
                 if (!_terminated)
                 {
                     _builder.BuildBr(endBlock);
@@ -765,13 +950,13 @@ public sealed class LlvmIrGenerator
 
             _builder.PositionAtEnd(thenBlock);
             _terminated = false;
-            EmitStatement(statement.ThenStatement);
+            EmitEmbeddedStatement(statement.ThenStatement);
             bool thenFallsThrough = !_terminated;
             LLVMBasicBlockRef thenEnd = _builder.InsertBlock;
 
             _builder.PositionAtEnd(elseBlock);
             _terminated = false;
-            EmitStatement(statement.ElseStatement);
+            EmitEmbeddedStatement(statement.ElseStatement);
             bool elseFallsThrough = !_terminated;
             LLVMBasicBlockRef elseEnd = _builder.InsertBlock;
 
@@ -811,8 +996,10 @@ public sealed class LlvmIrGenerator
 
             _builder.PositionAtEnd(bodyBlock);
             _terminated = false;
-            _loopTargets.Push(new LoopTargets(endBlock, conditionBlock));
-            EmitStatement(statement.Body);
+            _loopTargets.Push(new LoopTargets(new BranchTarget(conditionBlock, _cleanupScopes.Count)));
+            _breakTargets.Push(new BranchTarget(endBlock, _cleanupScopes.Count));
+            EmitEmbeddedStatement(statement.Body);
+            _breakTargets.Pop();
             _loopTargets.Pop();
             if (!_terminated)
             {
@@ -825,6 +1012,7 @@ public sealed class LlvmIrGenerator
 
         private void EmitFor(BoundForStatement statement)
         {
+            BeginCleanupScope();
             if (statement.Initializer is not null)
             {
                 EmitStatement(statement.Initializer);
@@ -844,8 +1032,10 @@ public sealed class LlvmIrGenerator
 
             _builder.PositionAtEnd(bodyBlock);
             _terminated = false;
-            _loopTargets.Push(new LoopTargets(endBlock, incrementBlock));
-            EmitStatement(statement.Body);
+            _loopTargets.Push(new LoopTargets(new BranchTarget(incrementBlock, _cleanupScopes.Count)));
+            _breakTargets.Push(new BranchTarget(endBlock, _cleanupScopes.Count));
+            EmitEmbeddedStatement(statement.Body);
+            _breakTargets.Pop();
             _loopTargets.Pop();
             if (!_terminated)
             {
@@ -863,11 +1053,13 @@ public sealed class LlvmIrGenerator
 
             _builder.PositionAtEnd(endBlock);
             _terminated = false;
+            EndCleanupScope();
         }
 
-        private void EmitLoopBranch(LLVMBasicBlockRef target)
+        private void EmitLoopBranch(BranchTarget target)
         {
-            _builder.BuildBr(target);
+            EmitCleanup(target.RetainedDepth);
+            _builder.BuildBr(target.Block);
             _terminated = true;
         }
 
@@ -883,13 +1075,16 @@ public sealed class LlvmIrGenerator
 
         private void EmitReturn(BoundReturnStatement statement)
         {
+            // Capture the result before destructors can mutate observable state.
+            LLVMValueRef result = statement.Expression is null ? default : EmitExpression(statement.Expression);
+            EmitCleanup(0);
             if (statement.Expression is null)
             {
                 _builder.BuildRetVoid();
             }
             else
             {
-                _builder.BuildRet(EmitExpression(statement.Expression));
+                _builder.BuildRet(result);
             }
 
             _terminated = true;
@@ -926,6 +1121,7 @@ public sealed class LlvmIrGenerator
             BoundConstructorCallExpression constructor => EmitConstructorCall(constructor),
             BoundBaseLifecycleCallExpression lifecycle => EmitLifecycleCall(lifecycle.Function, _thisValue, lifecycle.Arguments, initializeVTable: false),
             BoundArrayCreationExpression array => EmitArrayCreation(array),
+            BoundArrayMetadataExpression metadata => EmitArrayMetadata(metadata),
             BoundNewExpression @new => EmitNew(@new),
             BoundFreeExpression free => EmitFree(free),
             _ => throw new LlvmCodeGenerationException($"Bound expression '{expression.Kind}' is not supported by LLVM code generation."),
@@ -946,7 +1142,7 @@ public sealed class LlvmIrGenerator
                 return LLVMValueRef.CreateConstInt(type, expression.Value is true ? 1UL : 0UL, false);
             }
 
-            if (expression.Type is PrimitiveTypeSymbol { IsInteger: true })
+            if (expression.Type is PrimitiveTypeSymbol { IsInteger: true } or EnumTypeSymbol)
             {
                 ulong value = expression.Value switch
                 {
@@ -1264,23 +1460,141 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitArrayCreation(BoundArrayCreationExpression expression)
         {
-            LLVMValueRef length = ConvertIntegerToSize(EmitExpression(expression.Length), expression.Length.Type);
+            LLVMValueRef[] dimensions = expression.Dimensions.Select(dimension =>
+            {
+                LLVMValueRef value = EmitExpression(dimension);
+                LLVMTypeRef sourceType = _mapType(dimension.Type);
+                int width = _getIntegerBitWidth(dimension.Type);
+                ulong max = width < 32 ? (1UL << width) - 1 : int.MaxValue;
+                LLVMValueRef valid = _builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, value, LLVMValueRef.CreateConstInt(sourceType, max), "array.dimension.valid");
+                if (dimension.Type is PrimitiveTypeSymbol { IsSigned: true })
+                    valid = _builder.BuildAnd(valid, _builder.BuildICmp(LLVMIntPredicate.LLVMIntSGE, value, LLVMValueRef.CreateConstInt(sourceType, 0)), "array.dimension.nonnegative");
+                EmitRuntimeCheck(valid);
+                return ConvertIntegerToSize(value, dimension.Type);
+            }).ToArray();
+            LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            LLVMValueRef hasZeroDimension = LLVMValueRef.CreateConstInt(_context.Int1Type, 0);
+            foreach (LLVMValueRef dimension in dimensions)
+                hasZeroDimension = _builder.BuildOr(hasZeroDimension, _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, dimension, SizeConstant(0)));
+            LLVMValueRef length = _builder.BuildSelect(hasZeroDimension, SizeConstant(0), SizeConstant(1), "array.initial.length");
+            foreach (LLVMValueRef dimension in dimensions)
+            {
+                LLVMValueRef divisor = _builder.BuildSelect(_builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, dimension, SizeConstant(0)), SizeConstant(1), dimension, "array.product.divisor");
+                EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, length, _builder.BuildUDiv(SizeConstant(int.MaxValue), divisor), "array.product.valid"));
+                length = _builder.BuildMul(length, dimension, "array.length");
+            }
+            ulong headerSize = ArrayHeaderSize(expression.ArrayType);
+            ulong elementBytes = _getAbiSize(expression.ElementType);
+            ulong maxSize = _getIntegerBitWidth(BuiltinTypes.NUInt) == 32 ? uint.MaxValue : ulong.MaxValue;
+            if (elementBytes > 0)
+                EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, length, SizeConstant((maxSize - headerSize) / elementBytes), "array.bytes.valid"));
+            LLVMValueRef elementSize = SizeConstant(elementBytes);
+            LLVMValueRef byteCount = _builder.BuildMul(length, elementSize, "array.bytes");
+            LLVMValueRef allocationSize = _builder.BuildAdd(byteCount, SizeConstant(headerSize), "array.allocation.bytes");
+            LLVMValueRef address;
             if (expression.Storage == ArrayStorageKind.Stack)
             {
-                return _builder.BuildArrayAlloca(_mapType(expression.ElementType), length, $"{expression.ElementType.Name}.stack.array");
+                address = _builder.BuildArrayAlloca(_context.Int8Type, allocationSize, $"{expression.ElementType.Name}.stack.array");
+                address.Alignment = Math.Max(4, _getAbiAlignment(expression.ElementType));
             }
+            else
+            {
+                address = _builder.BuildCall2(runtime.MallocType, runtime.Malloc, new LLVMValueRef[] { allocationSize }, $"{expression.ElementType.Name}.heap.array");
+                EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address, LLVMValueRef.CreateConstPointerNull(address.TypeOf), "array.allocation.valid"));
+            }
+            _builder.BuildStore(ToInt32(length), address);
+            for (int i = 0; i < dimensions.Length; i++)
+                _builder.BuildStore(ToInt32(dimensions[i]), MetadataAddress(address, IntConstant(i + 1)));
+            LLVMValueRef data = ArrayData(address, expression.ArrayType);
+            EmitElementLoop(length, reverse: false, index =>
+            {
+                LLVMValueRef element = _builder.BuildGEP2(_mapType(expression.ElementType), data, new LLVMValueRef[] { index }, "array.initialize.element");
+                _builder.BuildStore(LLVMValueRef.CreateConstNull(_mapType(expression.ElementType)), element);
+                if (expression.ElementType is StructTypeSymbol structure)
+                {
+                    if (structure.HasVirtualDispatch && _virtualTables.TryGetValue(structure, out LlvmVTable table))
+                        _builder.BuildStore(table.Value, _builder.BuildStructGEP2(_mapType(structure), element, 0, "vtable.address"));
+                    EmitDefaultInstanceInitialization(structure, element);
+                }
+            });
+            if (expression.Storage == ArrayStorageKind.Stack &&
+                expression.ElementType is StructTypeSymbol elementType && elementType.FindDestructor() is FunctionSymbol destructor)
+            {
+                LLVMValueRef node = _builder.BuildAlloca(_cleanupNodeType, "stack.cleanup.registration");
+                LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+                LLVMValueRef[] fields = [_builder.BuildLoad2(pointer, _cleanupHead), data, length, elementSize, _functions[destructor].Value];
+                for (uint i = 0; i < fields.Length; i++)
+                    _builder.BuildStore(fields[i], _builder.BuildStructGEP2(_cleanupNodeType, node, i));
+                _builder.BuildStore(node, _cleanupHead);
+            }
+            return address;
+        }
 
-            LlvmMemoryRuntime runtime = _getMemoryRuntime();
-            LLVMValueRef elementSize = LLVMValueRef.CreateConstInt(
-                runtime.SizeType,
-                _getAbiSize(expression.ElementType),
-                false);
-            LLVMValueRef byteCount = _builder.BuildMul(length, elementSize, "array.bytes");
-            return _builder.BuildCall2(
-                runtime.MallocType,
-                runtime.Malloc,
-                new LLVMValueRef[] { byteCount },
-                $"{expression.ElementType.Name}.heap.array");
+        private LLVMValueRef SizeConstant(ulong value) => LLVMValueRef.CreateConstInt(_mapType(BuiltinTypes.NUInt), value);
+        private LLVMValueRef IntConstant(int value) => LLVMValueRef.CreateConstInt(_context.Int32Type, unchecked((ulong)value));
+        private LLVMValueRef ToInt32(LLVMValueRef value) => value.TypeOf.IntWidth == 32 ? value : _builder.BuildTrunc(value, _context.Int32Type, "array.int.length");
+
+        // Array values point at a header of int Length followed by Rank int dimensions.
+        // Padding keeps contiguous element storage aligned for the selected target ABI.
+        private ulong ArrayHeaderSize(ArrayTypeSymbol array)
+        {
+            ulong bytes = ((ulong)array.Rank + 1) * 4;
+            ulong alignment = Math.Max(4, _getAbiAlignment(array.ElementType));
+            return (bytes + alignment - 1) / alignment * alignment;
+        }
+
+        private LLVMValueRef ArrayData(LLVMValueRef array, ArrayTypeSymbol type) =>
+            _builder.BuildGEP2(_context.Int8Type, array, new LLVMValueRef[] { SizeConstant(ArrayHeaderSize(type)) }, "array.data");
+
+        private LLVMValueRef MetadataAddress(LLVMValueRef array, LLVMValueRef slot) =>
+            _builder.BuildGEP2(_context.Int32Type, array, new LLVMValueRef[] { slot }, "array.metadata.address");
+
+        private LLVMValueRef ReadDimension(LLVMValueRef array, LLVMValueRef dimension) =>
+            _builder.BuildLoad2(_context.Int32Type, MetadataAddress(array, _builder.BuildAdd(dimension, IntConstant(1))), "array.dimension");
+
+        private LLVMValueRef EmitArrayMetadata(BoundArrayMetadataExpression expression)
+        {
+            LLVMValueRef array = EmitExpression(expression.Receiver);
+            var type = (ArrayTypeSymbol)expression.Receiver.Type;
+            if (expression.Member == "Rank") return IntConstant(type.Rank);
+            EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, array, LLVMValueRef.CreateConstPointerNull(array.TypeOf), "array.valid"));
+            if (expression.Member == "Length") return _builder.BuildLoad2(_context.Int32Type, array, "array.length");
+            LLVMValueRef dimension = EmitExpression(expression.Dimension!);
+            EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULT, dimension, IntConstant(type.Rank), "array.dimension.inrange"));
+            return ReadDimension(array, dimension);
+        }
+
+        private void EmitRuntimeCheck(LLVMValueRef valid)
+        {
+            LLVMBasicBlockRef success = _llvmFunction.AppendBasicBlock("array.check.ok");
+            LLVMBasicBlockRef failure = _llvmFunction.AppendBasicBlock("array.check.failed");
+            _builder.BuildCondBr(valid, success, failure);
+            _builder.PositionAtEnd(failure);
+            _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [], false), _getMemoryRuntime().Trap, Array.Empty<LLVMValueRef>(), string.Empty);
+            _builder.BuildUnreachable();
+            _builder.PositionAtEnd(success);
+        }
+
+        private void EmitElementLoop(LLVMValueRef length, bool reverse, Action<LLVMValueRef> emitElement)
+        {
+            LLVMBasicBlockRef entry = _builder.InsertBlock;
+            LLVMBasicBlockRef condition = _llvmFunction.AppendBasicBlock("array.elements.condition");
+            LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("array.elements.body");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("array.elements.end");
+            _builder.BuildBr(condition);
+            _builder.PositionAtEnd(condition);
+            LLVMValueRef index = _builder.BuildPhi(_mapType(BuiltinTypes.NUInt), "array.element.index");
+            index.AddIncoming([reverse ? length : SizeConstant(0)], [entry], 1);
+            LLVMValueRef test = _builder.BuildICmp(reverse ? LLVMIntPredicate.LLVMIntNE : LLVMIntPredicate.LLVMIntULT, index, reverse ? SizeConstant(0) : length);
+            _builder.BuildCondBr(test, body, end);
+            _builder.PositionAtEnd(body);
+            LLVMValueRef current = reverse ? _builder.BuildSub(index, SizeConstant(1), "array.reverse.index") : index;
+            emitElement(current);
+            LLVMValueRef next = reverse ? current : _builder.BuildAdd(index, SizeConstant(1));
+            LLVMBasicBlockRef backEdge = _builder.InsertBlock;
+            _builder.BuildBr(condition);
+            index.AddIncoming([next], [backEdge], 1);
+            _builder.PositionAtEnd(end);
         }
 
         private LLVMValueRef ConvertIntegerToSize(LLVMValueRef value, TypeSymbol sourceType)
@@ -1334,6 +1648,27 @@ public sealed class LlvmIrGenerator
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
             LLVMValueRef address = EmitExpression(expression.Pointer);
+            if (expression.Pointer.Type is ArrayTypeSymbol array)
+            {
+                LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("array.free");
+                LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("array.free.end");
+                _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address, LLVMValueRef.CreateConstPointerNull(address.TypeOf)), body, end);
+                _builder.PositionAtEnd(body);
+                if (expression.Destructor is not null)
+                {
+                    LLVMValueRef count = ConvertIntegerToSize(_builder.BuildLoad2(_context.Int32Type, address, "array.destroy.length"), BuiltinTypes.Int);
+                    LLVMValueRef data = ArrayData(address, array);
+                    EmitElementLoop(count, reverse: true, index =>
+                    {
+                        LLVMValueRef element = _builder.BuildGEP2(_mapType(array.ElementType), data, new LLVMValueRef[] { index }, "array.destroy.element");
+                        EmitLifecycleCall(expression.Destructor, element, []);
+                    });
+                }
+                _builder.BuildCall2(runtime.FreeType, runtime.Free, new LLVMValueRef[] { address }, string.Empty);
+                _builder.BuildBr(end);
+                _builder.PositionAtEnd(end);
+                return default;
+            }
             if (expression.Destructor is not null)
             {
                 if (expression.Destructor.VTableSlot is int slot &&
@@ -1431,8 +1766,8 @@ public sealed class LlvmIrGenerator
                 return value;
 
             LLVMTypeRef target = _mapType(expression.TargetType);
-            bool sourceInteger = expression.Expression.Type is PrimitiveTypeSymbol { IsInteger: true };
-            bool targetInteger = expression.TargetType is PrimitiveTypeSymbol { IsInteger: true };
+            bool sourceInteger = expression.Expression.Type is PrimitiveTypeSymbol { IsInteger: true } or EnumTypeSymbol;
+            bool targetInteger = expression.TargetType is PrimitiveTypeSymbol { IsInteger: true } or EnumTypeSymbol;
             bool sourceFloat = expression.Expression.Type is PrimitiveTypeSymbol { IsFloatingPoint: true };
             bool targetFloat = expression.TargetType is PrimitiveTypeSymbol { IsFloatingPoint: true };
             if (sourceInteger && targetInteger)
@@ -1443,7 +1778,7 @@ public sealed class LlvmIrGenerator
                     return value;
                 if (sourceWidth > targetWidth)
                     return _builder.BuildTrunc(value, target, "cast.trunc");
-                bool signed = expression.Expression.Type is PrimitiveTypeSymbol { IsSigned: true };
+                bool signed = expression.Expression.Type is PrimitiveTypeSymbol { IsSigned: true } or EnumTypeSymbol { UnderlyingType.IsSigned: true };
                 return signed
                     ? _builder.BuildSExt(value, target, "cast.sext")
                     : _builder.BuildZExt(value, target, "cast.zext");
@@ -1746,18 +2081,35 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitIndexAddress(BoundIndexExpression expression)
         {
-            LLVMValueRef index = EmitExpression(expression.Index);
+            LLVMValueRef pointer = EmitExpression(expression.Receiver);
+            if (expression.Receiver.Type is ArrayTypeSymbol arrayType)
+            {
+                EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, pointer, LLVMValueRef.CreateConstPointerNull(pointer.TypeOf), "array.valid"));
+                LLVMValueRef linear = SizeConstant(0);
+                for (int i = 0; i < expression.Indices.Length; i++)
+                {
+                    BoundExpression argument = expression.Indices[i];
+                    LLVMValueRef value = EmitExpression(argument);
+                    LLVMValueRef index = ConvertIntegerToSize(value, argument.Type);
+                    if (_getIntegerBitWidth(argument.Type) > _getIntegerBitWidth(BuiltinTypes.NUInt))
+                        EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, value, LLVMValueRef.CreateConstInt(value.TypeOf, uint.MaxValue), "array.index.fits"));
+                    LLVMValueRef dimension = ConvertIntegerToSize(ReadDimension(pointer, IntConstant(i)), BuiltinTypes.Int);
+                    EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULT, index, dimension, "array.index.inrange"));
+                    linear = _builder.BuildAdd(_builder.BuildMul(linear, dimension), index, "array.linear.index");
+                }
+                return _builder.BuildGEP2(_mapType(arrayType.ElementType), ArrayData(pointer, arrayType), new LLVMValueRef[] { linear }, "element.address");
+            }
+            LLVMValueRef pointerIndex = EmitExpression(expression.Index);
             TypeSymbol elementType = expression.Receiver.Type switch
             {
                 ArrayTypeSymbol array => array.ElementType,
                 PointerTypeSymbol pointerType => pointerType.ElementType,
                 _ => expression.ElementType,
             };
-            LLVMValueRef pointer = EmitExpression(expression.Receiver);
             return _builder.BuildGEP2(
                 _mapType(elementType),
                 pointer,
-                new LLVMValueRef[] { index },
+                new LLVMValueRef[] { pointerIndex },
                 "element.address");
         }
 
@@ -1981,8 +2333,8 @@ public sealed class LlvmIrGenerator
             _ => throw new LlvmCodeGenerationException($"Invalid compound assignment operator '{kind}'."),
         };
 
-        private readonly record struct LoopTargets(
-            LLVMBasicBlockRef BreakTarget,
-            LLVMBasicBlockRef ContinueTarget);
+        private readonly record struct CleanupScope(LLVMValueRef Stack, LLVMValueRef Head);
+        private readonly record struct BranchTarget(LLVMBasicBlockRef Block, int RetainedDepth);
+        private readonly record struct LoopTargets(BranchTarget ContinueTarget);
     }
 }

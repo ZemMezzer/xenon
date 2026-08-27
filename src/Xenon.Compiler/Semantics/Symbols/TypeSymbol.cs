@@ -64,13 +64,22 @@ public sealed class ReferenceTypeSymbol : TypeSymbol
 
 public sealed class ArrayTypeSymbol : TypeSymbol
 {
-    internal ArrayTypeSymbol(TypeSymbol elementType)
-        : base($"{elementType.Name}[]")
+    internal ArrayTypeSymbol(TypeSymbol elementType, int rank)
+        : base(FormatName(elementType, rank))
     {
         ElementType = elementType;
+        Rank = rank;
     }
 
     public TypeSymbol ElementType { get; }
+    public int Rank { get; }
+
+    private static string FormatName(TypeSymbol element, int rank)
+    {
+        string suffix = $"[{new string(',', rank - 1)}]";
+        int bracket = element.Name.IndexOf('[');
+        return bracket < 0 ? element.Name + suffix : element.Name.Insert(bracket, suffix);
+    }
 }
 
 internal sealed class SpecialTypeSymbol : TypeSymbol

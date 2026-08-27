@@ -27,6 +27,7 @@ public sealed class NamespaceSymbol : Symbol
 
     public IReadOnlyCollection<InterfaceTypeSymbol> Interfaces => _types.Values.OfType<InterfaceTypeSymbol>().ToArray();
     public IReadOnlyCollection<ConstantSymbol> Constants => _constants.Values;
+    public IReadOnlyCollection<EnumTypeSymbol> Enums => _types.Values.OfType<EnumTypeSymbol>().ToArray();
 
     internal NamespaceSymbol? FindNamespace(string name) => _namespaces.GetValueOrDefault(name);
 

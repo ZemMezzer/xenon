@@ -171,6 +171,7 @@ public sealed record BoundIndexExpression(
     TypeSymbol ElementType) : BoundExpression(ElementType)
 {
     public override BoundKind Kind => BoundKind.IndexExpression;
+    public ImmutableArray<BoundExpression> Indices { get; init; } = [Index];
 }
 
 public sealed record BoundStructConstructionExpression(
@@ -202,6 +203,15 @@ public sealed record BoundArrayCreationExpression(
     ArrayStorageKind Storage) : BoundExpression(ArrayType)
 {
     public override BoundKind Kind => BoundKind.ArrayCreationExpression;
+    public ImmutableArray<BoundExpression> Dimensions { get; init; } = [Length];
+}
+
+public sealed record BoundArrayMetadataExpression(
+    BoundExpression Receiver,
+    string Member,
+    BoundExpression? Dimension = null) : BoundExpression(BuiltinTypes.Int)
+{
+    public override BoundKind Kind => BoundKind.ArrayMetadataExpression;
 }
 
 public sealed record BoundNewExpression(
@@ -231,4 +241,11 @@ public sealed record BoundCallExpression(
 public sealed record BoundErrorExpression() : BoundExpression(BuiltinTypes.Error)
 {
     public override BoundKind Kind => BoundKind.ErrorExpression;
+}
+
+// A nominal enum value whose numeric value must be recomputed once a target is selected.
+// This node is never passed to LLVM emission.
+public sealed record BoundDeferredConstantExpression(TypeSymbol ConstantType) : BoundExpression(ConstantType)
+{
+    public override BoundKind Kind => BoundKind.DeferredConstantExpression;
 }

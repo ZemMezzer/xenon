@@ -348,7 +348,7 @@ public sealed class SemanticAnalyzerTests
                 diagnostic.Message == "condition must have type 'bool', but has type 'int'"));
         Assert.Contains(
             compilation.Diagnostics,
-            diagnostic => diagnostic.Message == "'break' can only be used inside a loop");
+            diagnostic => diagnostic.Message == "'break' can only be used inside a loop or switch");
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message == "'continue' can only be used inside a loop");
@@ -1844,13 +1844,13 @@ public sealed class SemanticAnalyzerTests
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
-            void Read(readonly Value& value)
+            void readonly Read(readonly Value& value)
             {
             }
 
             struct Value
             {
-                public readonly void Test()
+                public void readonly Test()
                 {
                     Read(this);
                 }
@@ -1868,7 +1868,7 @@ public sealed class SemanticAnalyzerTests
 
             interface IValue
             {
-                readonly int Read();
+                int readonly Read();
                 readonly int Current { get; }
                 readonly int this[int index] { get; }
             }
@@ -1876,7 +1876,7 @@ public sealed class SemanticAnalyzerTests
             struct Value : IValue
             {
                 int value;
-                public readonly int Read() { return value; }
+                public int readonly Read() { return value; }
                 public readonly int Current { get { return value; } }
                 public readonly int this[int index] { get { return value + index; } }
             }
@@ -1960,7 +1960,7 @@ public sealed class SemanticAnalyzerTests
             {
                 int Value;
 
-                public readonly int Read()
+                public int readonly Read()
                 {
                     return Value;
                 }
@@ -1970,7 +1970,7 @@ public sealed class SemanticAnalyzerTests
                     Value = 0;
                 }
 
-                public readonly int Invalid()
+                public int readonly Invalid()
                 {
                     Reset();
                     Value = 1;
@@ -2006,7 +2006,7 @@ public sealed class SemanticAnalyzerTests
                     return Value;
                 }
 
-                public readonly readonly int& Get()
+                public readonly int& readonly Get()
                 {
                     return Value;
                 }
@@ -2042,6 +2042,319 @@ public sealed class SemanticAnalyzerTests
         var readonlyCall = Assert.IsType<BoundMethodCallExpression>(readonlyDereference.Reference);
         Assert.True(readonlyCall.Method.IsReadonly);
     }
+
+    [Theory]
+    [InlineData("int*", false, false)]
+    [InlineData("readonly int*", true, false)]
+    [InlineData("int* readonly", false, true)]
+    [InlineData("readonly int* readonly", true, true)]
+    public void Analyzer_SeparatesPointerReturnAccessFromMethodReadonly(
+        string signature, bool pointeeReadonly, bool methodReadonly)
+    {
+        string declaration = $$"""
+            namespace Example;
+            struct Value
+            {
+                public int Count;
+                public {{signature}} Get(int* pointer) { return pointer; }
+            }
+            """;
+        Compilation compilation = CreateCompilation(declaration);
+        Assert.Empty(compilation.Diagnostics);
+        var method = Assert.Single(Assert.Single(
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types).Methods);
+        Assert.Equal(methodReadonly, method.IsReadonly);
+        Assert.Equal(pointeeReadonly, Assert.IsType<PointerTypeSymbol>(method.ReturnType).IsReadonly);
+
+        Compilation write = CreateCompilation(declaration + """
+            void Use(Value& value, int* pointer) { *value.Get(pointer) = 10; }
+            """);
+        Assert.Equal(pointeeReadonly, write.HasErrors);
+        if (pointeeReadonly)
+            Assert.Contains(write.Diagnostics, diagnostic => diagnostic.Message == "left side of assignment must be writable");
+
+        Compilation call = CreateCompilation(declaration + """
+            void Use(readonly Value& value, int* pointer) { value.Get(pointer); }
+            """);
+        Assert.Equal(!methodReadonly, call.HasErrors);
+
+        Compilation mutation = CreateCompilation(declaration.Replace("return pointer;", "Count++; return pointer;"));
+        Assert.Equal(methodReadonly, mutation.HasErrors);
+    }
+
+    [Theory]
+    [InlineData("readonly int&", "return Count;")]
+    [InlineData("readonly int*", "return &Count;")]
+    public void Analyzer_ReadonlyReturnAccessDoesNotMakeMethodReadonly(string returnType, string body)
+    {
+        string declaration = $$"""
+            namespace Example;
+            struct Value
+            {
+                public int Count;
+                public {{returnType}} Get() { Count++; {{body}} }
+            }
+            """;
+        Assert.Empty(CreateCompilation(declaration).Diagnostics);
+        Compilation invalid = CreateCompilation(declaration + """
+            void Use(readonly Value& value) { value.Get(); }
+            """);
+        Assert.Contains(invalid.Diagnostics, diagnostic =>
+            diagnostic.Message == "mutable method 'Get' cannot be called on a readonly 'Value' receiver");
+    }
+
+    [Theory]
+    [InlineData("int", "0")]
+    [InlineData("bool", "false")]
+    [InlineData("void", "")]
+    [InlineData("Value", "Value { }")]
+    [InlineData("State", "State.Idle")]
+    [InlineData("int[]", "new int[1]")]
+    [InlineData("int[,]", "new int[1, 2]")]
+    [InlineData("Value[]", "new Value[1]")]
+    [InlineData("int[][]", "new int[1][]")]
+    public void Analyzer_RejectsReadonlyOnByValueReturnTypes(string returnType, string value)
+    {
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            struct Value { }
+            enum State { Idle }
+            struct Source
+            {
+                public readonly {{returnType}} Get() { return {{value}}; }
+                public readonly {{returnType}} readonly Read() { return {{value}}; }
+            }
+            """);
+
+        Assert.Equal(2, compilation.Diagnostics.Count(d => d.Message ==
+            "'readonly' cannot qualify a by-value return type; place 'readonly' before the method name to declare a readonly method"));
+    }
+
+    [Theory]
+    [InlineData("readonly int Get() { return 0; }")]
+    [InlineData("extern readonly int Get();")]
+    [InlineData("export readonly int Get() { return 0; }")]
+    [InlineData("struct Value { public static readonly int Get() { return 0; } }")]
+    [InlineData("struct Value { public virtual readonly int Get() { return 0; } }")]
+    [InlineData("struct Value { public abstract readonly int Get(); }")]
+    [InlineData("interface IValue { readonly int Get(); }")]
+    [InlineData("interface IValue { readonly int readonly Get(); }")]
+    public void Analyzer_RejectsReadonlyByValueReturnsAcrossCallableKinds(string declaration)
+    {
+        string source = "namespace Example; " + declaration;
+        Compilation compilation = CreateCompilation(source);
+        var diagnostic = Assert.Single(compilation.Diagnostics.Where(d => d.Message ==
+            "'readonly' cannot qualify a by-value return type; place 'readonly' before the method name to declare a readonly method"));
+        Assert.Equal(source.IndexOf("readonly", StringComparison.Ordinal), diagnostic.Location.Span.Start);
+        Assert.Equal("readonly".Length, diagnostic.Location.Span.Length);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsReadonlyMethodsReturningValuesWithoutReturnQualifier()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Value { }
+            struct Source
+            {
+                public int readonly GetNumber() { return 0; }
+                public Value readonly GetValue() { return Value { }; }
+                public int[] readonly GetArray() { return new int[1]; }
+                public void readonly Update() { }
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_PreservesMeaningfulReadonlyReturnAccess()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            readonly int& GetReference(int& value) { return value; }
+            readonly int*[] GetPointers(readonly int*[] values) { return values; }
+            interface IValue
+            {
+                readonly int& GetMutable();
+                readonly int& readonly GetReadonly();
+            }
+            struct Value : IValue
+            {
+                public int Count;
+                public readonly int& GetMutable() { Count++; return Count; }
+                public readonly int& readonly GetReadonly() { return Count; }
+                public static readonly int& GetStatic(int& value) { return value; }
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+        var getPointers = compilation.SemanticModel.Functions.Single(f => f.Symbol.Name == "GetPointers");
+        var array = Assert.IsType<ArrayTypeSymbol>(getPointers.Symbol.ReturnType);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(array.ElementType).IsReadonly);
+    }
+
+    [Fact]
+    public void Analyzer_PreservesReadonlyPointeeInFreeFunctionReturns()
+    {
+        const string declarations = """
+            namespace Example;
+            readonly int* GetPointer(int* pointer) { return pointer; }
+            struct Value { public static readonly int* GetPointer(int* pointer) { return pointer; } }
+            """;
+        Compilation valid = CreateCompilation(declarations + """
+            void Use(int* a, int* b)
+            {
+                readonly int* pointer = GetPointer(a);
+                pointer = Value.GetPointer(b);
+            }
+            """);
+        Assert.Empty(valid.Diagnostics);
+        Compilation invalid = CreateCompilation(declarations + """
+            void Use(int* pointer) { *GetPointer(pointer) = 10; *Value.GetPointer(pointer) = 20; }
+            """);
+        Assert.Equal(2, invalid.Diagnostics.Count(d => d.Message == "left side of assignment must be writable"));
+    }
+
+    [Theory]
+    [InlineData("int* readonly Get() { return null; }")]
+    [InlineData("readonly int* readonly Get() { return null; }")]
+    [InlineData("void readonly Update() { }")]
+    [InlineData("struct Value { public static int* readonly Get() { return null; } }")]
+    [InlineData("struct Value { public static void readonly Update() { } }")]
+    public void Analyzer_AllowsReadonlyFunctionsWithoutReceiver(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.Empty(compilation.Diagnostics);
+        Assert.True(Assert.Single(compilation.SemanticModel.Functions).Symbol.IsReadonly);
+    }
+
+    [Fact]
+    public void Analyzer_VoidReadonlyMethodCannotMutateReceiver()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Value
+            {
+                public int Count;
+                public void readonly Update() { Count = 10; }
+            }
+            """);
+        Assert.Contains(compilation.Diagnostics, d => d.Message == "left side of assignment must be writable");
+    }
+
+    [Theory]
+    [InlineData("int readonly Square(int value) { return value * value; }")]
+    [InlineData("void readonly Set(int* value) { *value = 10; }")]
+    [InlineData("void readonly Set(int& value) { value = 10; }")]
+    [InlineData("void readonly Set(int* readonly value) { *value = 10; }")]
+    [InlineData("int readonly Read(readonly int* value) { return *value; }")]
+    [InlineData("int readonly Read(readonly int& value) { return value; }")]
+    [InlineData("void readonly Alias(int* value) { int* p = value; int* readonly fixed = p; *fixed = 10; readonly int* readonly view = p; }")]
+    [InlineData("void readonly Alias(int& value) { int& reference = value; int* pointer = &reference; *pointer = 10; }")]
+    [InlineData("int readonly Local() { int value = 1; int* pointer = &value; *pointer += 9; return value; }")]
+    [InlineData("int readonly Sum(readonly int* values, int count) { int result = 0; for (int i = 0; i < count; i++) result += values[i]; return result; }")]
+    [InlineData("int readonly A() { return B(); } int readonly B() { return 10; }")]
+    [InlineData("int readonly Recurse(int n) { if (n == 0) return 0; return Recurse(n - 1); }")]
+    [InlineData("void readonly Wrapper(int* value) { Write(value); }")]
+    [InlineData("extern int readonly External(int value); int readonly Use() { return External(1); }")]
+    [InlineData("readonly int* readonly View() { return State.Pointer; }")]
+    [InlineData("int* readonly Identity(int* value) { return value; }")]
+    [InlineData("readonly int& readonly View() { return State.Value; }")]
+    [InlineData("int readonly ReadGlobal() { return State.Value; }")]
+    [InlineData("struct Holder { public int Value; } void readonly Set(Holder* value) { value->Value = 10; }")]
+    [InlineData("struct Holder { public int* Pointer; } void readonly Set(Holder& value) { *value.Pointer = 10; }")]
+    [InlineData("struct Holder { public int* Pointer; } void readonly Local(int* pointer) { Holder value = Holder { pointer }; *value.Pointer = 10; }")]
+    [InlineData("int readonly Local() { int[] a = int[2]; a[0] = 10; a[1] = 20; return a[0] + a[1]; }")]
+    [InlineData("int[] readonly Create() { int[] a = new int[2]; a[0] = 10; return a; }")]
+    [InlineData("void readonly Heap() { int[] a = new int[2]; a[0] = 10; free(a); }")]
+    [InlineData("int readonly Initial() { return 3; } struct Item { public int Value = Initial(); } int readonly Local() { Item item = Item {}; return item.Value; }")]
+    [InlineData("struct Value { public int readonly Read() { return 10; } public int Read() { State.Value++; return 20; } } int readonly Use(Value& value) { return value.Read(); }")]
+    [InlineData("struct Value { public static int readonly Read() { return 10; } } int readonly Use() { return Value.Read(); }")]
+    public void Analyzer_AllowsExplicitEffectsInReadonlyFunctions(string source)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation(source);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Theory]
+    [InlineData("void readonly Test() { State.Value = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { State.Value++; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { State.Value += 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { int* p = &State.Value; *p = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { int& p = State.Value; p = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { int* p = State.Pointer; *p = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { int* p = State.Pointer; int** alias = &p; int* q = *alias; *q = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test(int* input) { int* p = input; int** alias = &p; *alias = State.Pointer; *p = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test(bool branch, int* input) { int* p = input; if (branch) p = State.Pointer; *p = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test(bool loop, int* input) { int* p = input; while (loop) { *p = 10; p = State.Pointer; } }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test(int key, int* input) { int* p = input; switch(key) { case 1: p = State.Pointer; break; default: break; } *p = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { int[] a = State.Values; a[0] = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test(int[] a) { a[0] = 10; }", "cannot mutate hidden state")]
+    [InlineData("struct Holder { public int* Pointer; } void readonly Test(Holder value) { *value.Pointer = 10; }", "cannot mutate hidden state")]
+    [InlineData("struct Holder { public int* Pointer; } void readonly Test(readonly Holder& value) { Holder copy = value; *copy.Pointer = 10; }", "cannot mutate hidden state")]
+    [InlineData("struct Holder { public int* Pointer; public void readonly Test() { *Pointer = 10; } }", "cannot mutate hidden state")]
+    [InlineData("struct Holder { public int* Pointer; public void readonly Test() { int* copy = Pointer; *copy = 10; } }", "cannot mutate hidden state")]
+    [InlineData("struct Holder { public int* Pointer; public void readonly Test() { Write(Pointer); } }", "cannot pass a mutable capability")]
+    [InlineData("struct Holder { public int Value; public void readonly Test() { Value = 10; } }", "must be writable")]
+    [InlineData("void readonly Test(readonly int* value) { *value = 10; }", "must be writable")]
+    [InlineData("void readonly Test(readonly int& value) { value = 10; }", "must be writable")]
+    [InlineData("void readonly Test() { Write(State.Pointer); }", "cannot pass a mutable capability")]
+    [InlineData("void readonly Test() { Write(&State.Value); }", "cannot pass a mutable capability")]
+    [InlineData("int* readonly Test() { return State.Pointer; }", "cannot return a mutable capability")]
+    [InlineData("void readonly Test(int** output) { *output = State.Pointer; }", "cannot store a mutable capability")]
+    [InlineData("void readonly WriteNested(int** value) { **value = 10; } void readonly Test() { int* local = State.Pointer; WriteNested(&local); }", "cannot pass a mutable capability")]
+    [InlineData("void readonly WriteNested(int*& value) { *value = 10; } void readonly Test() { int* local = State.Pointer; WriteNested(local); }", "cannot pass a mutable capability")]
+    [InlineData("struct Holder { public int* Pointer; } void readonly WriteNested(Holder& value) { *value.Pointer = 10; } void readonly Test() { Holder local = Holder { State.Pointer }; WriteNested(local); }", "cannot pass a mutable capability")]
+    [InlineData("int** readonly Test() { int* local = State.Pointer; return &local; }", "cannot return a mutable capability")]
+    [InlineData("int*[] readonly Test() { int*[] local = new int*[1]; local[0] = State.Pointer; return local; }", "cannot return a mutable capability")]
+    [InlineData("void readonly Test(int*** output) { int* local = State.Pointer; *output = &local; }", "cannot store a mutable capability")]
+    [InlineData("int*& readonly Identity(int*& value) { return value; } void readonly Test(int* input) { int* local = input; Identity(local) = State.Pointer; *local = 10; }", "cannot mutate hidden state")]
+    [InlineData("int** readonly Identity(int** value) { return value; } void readonly Test(int* input) { int* local = input; *Identity(&local) = State.Pointer; *local = 10; }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test() { free(State.Pointer); }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test(readonly int* input) { free(input); }", "cannot free memory through a readonly pointer")]
+    [InlineData("void Effectful() {} void readonly Test() { Effectful(); }", "cannot call non-readonly")]
+    [InlineData("extern void External(); void readonly Test() { External(); }", "cannot call non-readonly")]
+    [InlineData("struct Value { public static void Effectful() {} } void readonly Test() { Value.Effectful(); }", "cannot call non-readonly")]
+    [InlineData("struct Value { public void Effectful() {} } void readonly Test(Value& value) { value.Effectful(); }", "cannot call non-readonly")]
+    [InlineData("interface IValue { void Effectful(); } void readonly Test(IValue& value) { value.Effectful(); }", "cannot call non-readonly")]
+    [InlineData("struct Value { public int Current { get { return 1; } } } int readonly Test(Value& value) { return value.Current; }", "cannot call non-readonly")]
+    [InlineData("struct Value { public int Current { set { State.Value = value; } } } void readonly Test(Value& value) { value.Current = 10; }", "cannot call non-readonly")]
+    [InlineData("struct Value { public int this[int index] { get { return 1; } } } int readonly Test(Value& value) { return value[0]; }", "cannot call non-readonly")]
+    [InlineData("struct Value { public Value() {} } void readonly Test() { Value value = Value(); }", "cannot call non-readonly")]
+    [InlineData("struct Value { public ~Value() { State.Value++; } } void readonly Test(Value* value) { free(value); }", "cannot call non-readonly")]
+    [InlineData("struct Value { public ~Value() { State.Value++; } } void readonly Test() { Value[] values = Value[1]; }", "cannot call non-readonly")]
+    [InlineData("int Effectful() { return 1; } struct Value { public int Field = Effectful(); } void readonly Test() { Value[] values = Value[1]; }", "cannot call non-readonly")]
+    [InlineData("struct Value { public int Field = (State.Value = 1); } void readonly Test() { Value value = Value {}; }", "cannot mutate hidden state")]
+    public void Analyzer_RejectsHiddenEffectsInReadonlyFunctions(string source, string expected)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation(source);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains(expected, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_RecordsReadonlyExternContractOnFunctionSymbol()
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation("""
+            extern int readonly Trusted(int value);
+            extern int Effectful(int value);
+            int readonly Use(int value) { return Trusted(value); }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+        NamespaceSymbol space = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        Assert.True(space.Functions.Single(f => f.Name == "Trusted").IsReadonly);
+        Assert.False(space.Functions.Single(f => f.Name == "Effectful").IsReadonly);
+        Assert.True(space.Functions.Single(f => f.Name == "Use").IsReadonly);
+    }
+
+    private static Compilation CreateReadonlyEffectCompilation(string source) => CreateCompilation("""
+        namespace Example;
+        struct State
+        {
+            public static int Value;
+            public static int* Pointer;
+            public static int[] Values;
+        }
+        void readonly Write(int* value) { *value = 10; }
+        """ + source);
 
     [Fact]
     public void Analyzer_BindsPropertyGetAndSetAsAccessorsWithoutStorage()
@@ -2252,6 +2565,251 @@ public sealed class SemanticAnalyzerTests
             """);
 
         Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message == "'const T&' is no longer supported; use 'readonly T&'");
+    }
+
+    [Theory]
+    [InlineData("int*", false, false)]
+    [InlineData("readonly int*", false, true)]
+    [InlineData("int* readonly", true, false)]
+    [InlineData("readonly int* readonly", true, true)]
+    public void Analyzer_DistinguishesPointerBindingAndPointeeReadonly(string type, bool bindingReadonly, bool pointeeReadonly)
+    {
+        Compilation binding = CreateCompilation($"namespace Example; void M(int* a, int* b) {{ {type} pointer = a; pointer = b; }}");
+        Compilation pointee = CreateCompilation($"namespace Example; void M(int* a) {{ {type} pointer = a; *pointer = 2; }}");
+        Compilation index = CreateCompilation($"namespace Example; void M(int* a) {{ {type} pointer = a; pointer[0] = 2; }}");
+        Assert.Equal(bindingReadonly, binding.HasErrors);
+        Assert.Equal(pointeeReadonly, pointee.HasErrors);
+        Assert.Equal(pointeeReadonly, index.HasErrors);
+    }
+
+    [Fact]
+    public void Analyzer_BindsEnumsSwitchAndRecursiveArrayTypes()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            const int Start = 10;
+            enum State : byte { Idle, Running = Start + 1, Stopped }
+            int Test(State state)
+            {
+                const int Max = 12;
+                int result;
+                switch (state)
+                {
+                    case State.Idle: result = 0; break;
+                    case State.Running: result = 11; break;
+                    default: result = Max; break;
+                }
+                int[][,] matrices = new int[2][,];
+                matrices[0] = new int[3, 4];
+                int[,][][] rows = new int[1, 2][][];
+                free(rows);
+                free(matrices[0]);
+                free(matrices);
+                return result;
+            }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        var enumeration = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Enums);
+        Assert.Same(BuiltinTypes.Byte, enumeration.UnderlyingType);
+        Assert.Equal([0, 11, 12], enumeration.Members.Select(member => (int)member.Value!));
+        var body = Assert.Single(compilation.SemanticModel.Functions).Body;
+        var matrices = Assert.IsType<BoundVariableDeclarationStatement>(body.Statements[3]);
+        var outer = Assert.IsType<ArrayTypeSymbol>(matrices.Variable.Type);
+        Assert.Equal(1, outer.Rank);
+        Assert.Equal(2, Assert.IsType<ArrayTypeSymbol>(outer.ElementType).Rank);
+        Assert.Equal("int[][,]", outer.Name);
+    }
+
+    [Theory]
+    [InlineData("case 1: case 2: case 3: Handle(); break; default: break;")]
+    [InlineData("case 1: case 2: return; default: break;")]
+    [InlineData("case 1: default: Handle(); break;")]
+    [InlineData("default: case 1: case 2: Handle(); return;")]
+    [InlineData("case 1: case 2: if (value > 0) return; else break; default: break;")]
+    public void Analyzer_AllowsConsecutiveLabelsToShareAnExplicitlyTerminatedBody(string sections)
+    {
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            void Handle() { }
+            void Use(int value) { switch (value) { {{sections}} } }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("case 1: Handle(); case 2: Handle(); break;")]
+    [InlineData("case 1: Handle(); default: Handle(); break;")]
+    [InlineData("case 1: case 2: Handle(); case 3: break;")]
+    [InlineData("case 1: case 2: if (value > 0) return; default: break;")]
+    public void Analyzer_RejectsReachableCaseBodyFallthrough(string sections)
+    {
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            void Handle() { }
+            void Use(int value) { switch (value) { {{sections}} } }
+            """);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.StartsWith("implicit fallthrough", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("enum E : float { A }", "underlying type")]
+    [InlineData("enum E : bool { A }", "underlying type")]
+    [InlineData("enum E { A, A }", "duplicate enum member")]
+    [InlineData("enum E : byte { A = 256 }", "out of range")]
+    [InlineData("enum E : byte { A = 255, B }", "out of range")]
+    [InlineData("enum E : byte { A = -1 }", "out of range")]
+    [InlineData("enum E { A = 1.5 }", "compile-time constant")]
+    [InlineData("int Read() { return 1; } enum E { A = Read() }", "compile-time constant")]
+    [InlineData("enum E { A = B, B = A }", "circular constant dependency")]
+    [InlineData("const int N = cast<int>(E.A); enum E { A = N }", "circular constant dependency")]
+    [InlineData("enum E { A } int M() { return E.A; }", "cannot implicitly convert")]
+    [InlineData("enum E { A } E M() { return 0; }", "cannot implicitly convert")]
+    [InlineData("enum E { A } enum F { A } E M() { return F.A; }", "cannot implicitly convert")]
+    [InlineData("enum E { A } float M() { return cast<float>(E.A); }", "not a valid primitive cast")]
+    [InlineData("void M(float value) { switch(value) { default: break; } }", "switch operand")]
+    [InlineData("void M(int* value) { switch(value) { default: break; } }", "switch operand")]
+    [InlineData("void M(int value) { switch(value) { case value: break; } }", "compile-time constant")]
+    [InlineData("void M(int value) { switch(value) { case 2: break; case 1+1: break; } }", "duplicate case")]
+    [InlineData("void M(int value) { switch(value) { default: break; default: break; } }", "duplicate default")]
+    [InlineData("void M(int value) { switch(value) { case 1: value = 2; case 2: break; } }", "fallthrough")]
+    [InlineData("void M(int value) { switch(value) { case 1: if(value == 1) break; default: break; } }", "fallthrough")]
+    [InlineData("void M(int value) { switch(value) { default: continue; } }", "continue")]
+    [InlineData("enum E { A } void M(E value) { switch(value) { case 0: break; } }", "not compatible")]
+    [InlineData("enum E { A = 1, B = 1 } void M(E value) { switch(value) { case E.A: break; case E.B: break; } }", "duplicate case")]
+    [InlineData("void M(byte value) { switch(value) { case 256: break; } }", "not compatible")]
+    [InlineData("void M() { int[,] a = new int[2,3]; a[0] = 1; }", "requires 2 index")]
+    [InlineData("void M() { int[,] a = new int[2,3]; a[0,1,2] = 1; }", "requires 2 index")]
+    [InlineData("void M() { int[,] a = new int[2,3]; a[0,1.0] = 1; }", "index must be an integer")]
+    [InlineData("void M() { int[,] a = new int[2]; }", "cannot implicitly convert")]
+    [InlineData("void M() { int[] a = new int[-1]; }", "array length")]
+    [InlineData("void M() { int[,] a = new int[50000,50000]; }", "total array length")]
+    [InlineData("void M(int value) { int result; switch(value) { case 1: result = 1; break; } int other = result; }", "before it is initialized")]
+    [InlineData("void M(int value) { int result; switch(value) { case 1: break; default: result = 1; break; } int other = result; }", "before it is initialized")]
+    [InlineData("void M() { int[,] a = new int[2,3]; a.GetLength(1+1); }", "dimension must be")]
+    [InlineData("void M() { int[,] a = new int[2,3]; a.GetLength(-1); }", "dimension must be")]
+    [InlineData("void M() { int[,] a = new int[2,3]; a.GetLength(0.0); }", "one int dimension")]
+    [InlineData("void M(int* readonly value, int* other) { value = other; }", "must be writable")]
+    [InlineData("void M(readonly int* value) { value[0]++; }", "unary operator")]
+    [InlineData("void M(readonly int* value) { int& x = value[0]; }", "cannot implicitly convert")]
+    [InlineData("void M(readonly int* value) { int* x = &value[0]; }", "cannot implicitly convert")]
+    [InlineData("void M() { int* readonly value; }", "must be initialized")]
+    [InlineData("void M(int value) { const int N = value; }", "compile-time constant")]
+    public void Analyzer_RejectsInvalidIterationFourPrograms(string source, string diagnostic)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.True(compilation.HasErrors);
+        Assert.Contains(compilation.Diagnostics, item => item.Message.Contains(diagnostic, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_DoesNotImposeRankNestingOrIndexerParameterLimits()
+    {
+        string rank = "[" + new string(',', 39) + "]";
+        string nesting = string.Concat(Enumerable.Repeat("[]", 24));
+        string dimensions = string.Join(",", Enumerable.Repeat("1", 40));
+        string indices = string.Join(",", Enumerable.Repeat("0", 40));
+        string parameters = string.Join(",", Enumerable.Range(0, 16).Select(i => $"int p{i}"));
+        string arguments = string.Join(",", Enumerable.Range(0, 16));
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            struct Grid { public int this[{{parameters}}] { get { return p15; } set { } } }
+            void Test()
+            {
+                int{{rank}} values = new int[{{dimensions}}];
+                values[{{indices}}] = 42;
+                int{{nesting}} nested = new int[1]{{nesting[2..]}};
+                Grid grid = Grid {};
+                grid[{{arguments}}] = grid[{{arguments}}];
+                free(values);
+                free(nested);
+            }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Fact]
+    public void Analyzer_ResolvesEnumConstantsAcrossFilesAndAliases()
+    {
+        Compilation compilation = CreateCompilation(
+            "namespace Types; const int Start = 40; enum State { Ready = Start + 2 }",
+            "using S = Types.State; namespace Example; const S Value = S.Ready; int Test(S state) { switch(state) { case Value: return cast<int>(Types.State.Ready); default: return 0; } }");
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Fact]
+    public void Analyzer_PreservesPointerFieldQualifiersAndMutableReadonlyPointeeBindings()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Holder
+            {
+                public readonly int* Data;
+                public int* readonly Fixed;
+                public Holder(int* pointer) { Data = pointer; Fixed = pointer; }
+            }
+            void Test(int* pointer)
+            {
+                readonly int* data;
+                data = pointer;
+                Holder holder = Holder(pointer);
+                holder.Data = pointer;
+                *holder.Fixed = 42;
+            }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        var holder = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+        Assert.False(holder.Fields[0].IsReadonly);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(holder.Fields[0].Type).IsReadonly);
+        Assert.True(holder.Fields[1].IsReadonly);
+        Assert.False(Assert.IsType<PointerTypeSymbol>(holder.Fields[1].Type).IsReadonly);
+    }
+
+    [Theory]
+    [InlineData("enum E { A = cast<int>(sizeof(int)) / 0 }", "compile-time constant")]
+    [InlineData("enum E { A = B, B = A + cast<int>(sizeof(int)) }", "circular constant")]
+    [InlineData("enum E { A = cast<int>(sizeof(void)) }", "compile-time constant")]
+    [InlineData("void M(int x) { switch(x) { case cast<int>(sizeof(void)): break; } }", "non-void")]
+    [InlineData("struct Bad { public Bad Value; } enum E { A = cast<int>(sizeof(Bad)) }", "recursive")]
+    public void Analyzer_StillRejectsInvalidTargetDependentExpressionsWithoutASelectedTarget(string source, string message)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.True(compilation.HasErrors);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains(message, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("int[,] a = int[2,3]; int length = a.Length; int rank = a.Rank; int width = a.GetLength(1); a[1,2] = 42;")]
+    [InlineData("Item[,,] a = Item[2,3,4]; a[1,2,3].Id = 42;")]
+    [InlineData("Example.Item[,] a = Example.Item[1,2];")]
+    [InlineData("int[] a = int[2]; { int[] alias = a; alias[0] = 1; }")]
+    [InlineData("int[] a = int[2]; a = new int[3]; free(a);")]
+    [InlineData("int[] a = int[2]; if (flag) a = new int[3]; else a = new int[4]; free(a);")]
+    [InlineData("int[] a = int[2]; switch (1) { case 0: a = new int[3]; break; default: a = new int[4]; break; } free(a);")]
+    public void Analyzer_AcceptsRectangularStackArraysAndInnerAliases(string body)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct Item { public int Id; } void M(bool flag) { " + body + " }");
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Theory]
+    [InlineData("int[][] a = int[2][];", "stack arrays cannot contain array elements")]
+    [InlineData("int[,][] a = int[2,3][];", "stack arrays cannot contain array elements")]
+    [InlineData("int[,] a = int[2];", "cannot implicitly convert")]
+    [InlineData("int[,] a = int[2,-1];", "array length")]
+    [InlineData("int[,] a = int[2147483647,2];", "total array length")]
+    [InlineData("int[,] a = int[2,true];", "array length must be an integer")]
+    [InlineData("int[,] a = int[2,3]; int d = a.GetLength(2);", "GetLength dimension")]
+    [InlineData("int[,] a = int[2,3]; free(a);", "stack array cannot be freed")]
+    [InlineData("int[,] a; { a = int[2,3]; }", "allocation scope")]
+    [InlineData("int[,] a; { int[,] b = int[2,3]; a = b; }", "allocation scope")]
+    [InlineData("int[,] a = int[2,3]; if (flag) a = new int[2,3]; free(a);", "stack array cannot be freed")]
+    [InlineData("int[,] a; free(a = int[2,3]);", "stack array cannot be freed")]
+    [InlineData("int[,] a = int[2,3]; while (flag) { a = new int[2,3]; } free(a);", "stack array cannot be freed")]
+    [InlineData("int[,] a = int[2,3]; switch (1) { case 0: a = new int[2,3]; break; } free(a);", "stack array cannot be freed")]
+    public void Analyzer_RejectsInvalidStackArraysAndScopeEscape(string body, string message)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; void M(bool flag) { " + body + " }");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains(message, StringComparison.Ordinal));
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(

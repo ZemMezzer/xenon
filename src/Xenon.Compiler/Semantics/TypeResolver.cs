@@ -6,6 +6,22 @@ namespace Xenon.Compiler.Semantics;
 
 internal static class TypeResolver
 {
+    public static TypeSymbol ResolveReturnType(
+        TypeSyntax syntax,
+        FileSymbolScope scope,
+        DiagnosticBag diagnostics)
+    {
+        // Return values have no binding to qualify. Keep readonly only where it
+        // restricts pointer/reference access (including inside an array type).
+        if (syntax.IsReadonly && syntax.PointerDepth == 0 && !syntax.IsReference)
+        {
+            diagnostics.Report(syntax.ReadonlyKeyword!.Location,
+                "'readonly' cannot qualify a by-value return type; place 'readonly' before the method name to declare a readonly method");
+        }
+
+        return Resolve(syntax, scope, diagnostics);
+    }
+
     public static TypeSymbol Resolve(
         TypeSyntax syntax,
         FileSymbolScope scope,
@@ -70,6 +86,8 @@ internal static class TypeResolver
             return BuiltinTypes.Error;
         }
 
-        return BuiltinTypes.ArrayOf(type);
+        foreach (int rank in syntax.ArrayRanks.IsEmpty ? [1] : syntax.ArrayRanks.Reverse())
+            type = BuiltinTypes.ArrayOf(type, rank);
+        return type;
     }
 }
