@@ -8,7 +8,7 @@ namespace Xenon.Compiler;
 
 public sealed class Compilation
 {
-    private Compilation(ImmutableArray<SyntaxTree> syntaxTrees)
+    private Compilation(ImmutableArray<SyntaxTree> syntaxTrees, ITargetTypeLayout? targetLayout = null)
     {
         SyntaxTrees = syntaxTrees;
         ImmutableArray<Diagnostic> syntaxDiagnostics = syntaxTrees
@@ -17,7 +17,7 @@ public sealed class Compilation
 
         SemanticModel = syntaxDiagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
             ? SemanticModel.CreateEmpty()
-            : SemanticAnalyzer.Analyze(syntaxTrees);
+            : SemanticAnalyzer.Analyze(syntaxTrees, targetLayout);
         Diagnostics = [.. syntaxDiagnostics, .. SemanticModel.Diagnostics];
     }
 
@@ -28,6 +28,15 @@ public sealed class Compilation
     public SemanticModel SemanticModel { get; }
 
     public bool HasErrors => Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+
+    public bool RequiresTargetLayout => SemanticModel.RequiresTargetLayout;
+
+    /// <summary>Rebinds the immutable syntax trees for an ABI without mutating this compilation.</summary>
+    public Compilation WithTargetLayout(ITargetTypeLayout targetLayout)
+    {
+        ArgumentNullException.ThrowIfNull(targetLayout);
+        return new Compilation(SyntaxTrees, targetLayout);
+    }
 
     public static Compilation Create(params SourceText[] sources)
     {

@@ -59,6 +59,15 @@ public sealed record TypeSyntax(
 
     public bool IsReadonly => ReadonlyKeyword is not null;
 
+    public SyntaxToken? PointerReadonlyKeyword { get; init; }
+
+    public bool IsBindingReadonly => PointerDepth > 0
+        ? PointerReadonlyKeyword is not null
+        : IsReadonly;
+
+    // Suffixes are written outermost first: int[][,] is an array of matrices.
+    public ImmutableArray<int> ArrayRanks { get; init; } = [];
+
     public int PointerDepth => PointerTokens.Length;
 
     public bool IsReference => ReferenceToken is not null;
@@ -73,6 +82,22 @@ public sealed record ParameterSyntax(
     SyntaxToken IdentifierToken) : SyntaxNode
 {
     public override SyntaxKind Kind => SyntaxKind.Parameter;
+}
+
+public sealed record EnumDeclarationSyntax(
+    SyntaxToken EnumKeyword,
+    SyntaxToken IdentifierToken,
+    TypeSyntax? UnderlyingType,
+    ImmutableArray<EnumMemberDeclarationSyntax> Members) : MemberDeclarationSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.EnumDeclaration;
+}
+
+public sealed record EnumMemberDeclarationSyntax(
+    SyntaxToken IdentifierToken,
+    ExpressionSyntax? Value) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.EnumMemberDeclaration;
 }
 
 public sealed record FieldDeclarationSyntax(
@@ -356,6 +381,10 @@ public sealed record FunctionDeclarationSyntax(
     SyntaxToken? SemicolonToken) : MemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.FunctionDeclaration;
+
+    public SyntaxToken? ReadonlyKeyword { get; init; }
+
+    public bool IsReadonly => ReadonlyKeyword is not null;
 
     public bool IsExtern => AbiModifierToken?.Kind == SyntaxKind.ExternKeyword;
 

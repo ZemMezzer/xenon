@@ -3,6 +3,46 @@ using Xenon.Compiler.Semantics.Symbols;
 
 namespace Xenon.Compiler.Semantics.Binding;
 
+public sealed record BoundSwitchStatement(
+    BoundExpression Expression,
+    ImmutableArray<BoundSwitchSection> Sections) : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.SwitchStatement;
+}
+
+public sealed record BoundSwitchSection(BoundExpression? Value, BoundBlockStatement Body);
+
+public static class BoundControlFlow
+{
+    public static bool AlwaysReturns(BoundStatement statement) => statement switch
+    {
+        BoundReturnStatement => true,
+        BoundBlockStatement block => BlockReturns(block),
+        BoundIfStatement { ElseStatement: not null } conditional => AlwaysReturns(conditional.ThenStatement) && AlwaysReturns(conditional.ElseStatement),
+        BoundSwitchStatement selection => selection.Sections.Any(section => section.Value is null) &&
+            selection.Sections.All(section => section.Body.Statements.IsEmpty || AlwaysReturns(section.Body)),
+        _ => false,
+    };
+
+    public static bool TerminatesSection(BoundStatement statement) => statement switch
+    {
+        BoundBreakStatement or BoundReturnStatement or BoundContinueStatement => true,
+        BoundBlockStatement block => block.Statements.Any(TerminatesSection),
+        BoundIfStatement { ElseStatement: not null } conditional => TerminatesSection(conditional.ThenStatement) && TerminatesSection(conditional.ElseStatement),
+        _ => AlwaysReturns(statement),
+    };
+
+    private static bool BlockReturns(BoundBlockStatement block)
+    {
+        foreach (BoundStatement statement in block.Statements)
+        {
+            if (AlwaysReturns(statement)) return true;
+            if (TerminatesSection(statement)) return false;
+        }
+        return false;
+    }
+}
+
 public sealed record BoundBlockStatement(
     ImmutableArray<BoundStatement> Statements) : BoundStatement
 {

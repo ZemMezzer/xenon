@@ -9,6 +9,8 @@ public enum BoundKind
     IfStatement,
     WhileStatement,
     ForStatement,
+    SwitchStatement,
+    ArrayMetadataExpression,
     BreakStatement,
     ContinueStatement,
     LiteralExpression,
@@ -40,4 +42,5 @@ public enum BoundKind
     NewExpression,
     FreeExpression,
     ErrorExpression,
+    DeferredConstantExpression,
 }

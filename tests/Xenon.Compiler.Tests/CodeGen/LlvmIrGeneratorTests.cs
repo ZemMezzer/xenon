@@ -265,7 +265,8 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("@Example.Box.__ctor", llvmIr, StringComparison.Ordinal);
         Assert.Contains("@Example.Box.__dtor", llvmIr, StringComparison.Ordinal);
         Assert.Contains("call void @Example.Box.__dtor", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("stack.array = alloca i32", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("stack.array = alloca i8", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("array.metadata.address", llvmIr, StringComparison.Ordinal);
         Assert.Contains("getelementptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("call ptr @malloc", llvmIr, StringComparison.Ordinal);
     }
@@ -1076,6 +1077,277 @@ public sealed class LlvmIrGeneratorTests
         {
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData("byte", 8)]
+    [InlineData("sbyte", 8)]
+    [InlineData("short", 16)]
+    [InlineData("ushort", 16)]
+    [InlineData("int", 32)]
+    [InlineData("uint", 32)]
+    [InlineData("long", 64)]
+    [InlineData("ulong", 64)]
+    public void Generator_LowersEnumStorageAndSwitchToUnderlyingInteger(string underlying, int bits)
+    {
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            enum E : {{underlying}} { Zero, Value = 42 }
+            int Test(E value)
+            {
+                switch (value) { case E.Zero: return 0; case E.Value: return cast<int>(value); default: return -1; }
+            }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        string ir = new LlvmIrGenerator().Generate(compilation);
+        Assert.Contains($"switch i{bits}", ir, StringComparison.Ordinal);
+        Assert.Contains($"i{bits} 42, label %switch.case", ir, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", 32)]
+    [InlineData("x86_64-pc-windows-msvc", 64)]
+    [InlineData("aarch64-unknown-linux-gnu", 64)]
+    public void Generator_VerifiesArrayMetadataAndCheckedArithmeticAcrossTargets(string triple, int pointerBits)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            enum State : nint { Ready = 1 }
+            int Main()
+            {
+                long[,] values = new long[2,3];
+                values[1,2] = cast<long>(42);
+                int dimension = 1;
+                int length = values.GetLength(dimension);
+                int result = cast<int>(values[1,2]) + cast<int>(State.Ready) - 1;
+                free(values);
+                return result;
+            }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
+        Assert.Contains($"call ptr @malloc(i{pointerBits}", ir, StringComparison.Ordinal);
+        Assert.Contains("array.dimension.inrange = icmp ult i32", ir, StringComparison.Ordinal);
+        Assert.Contains("array.linear.index", ir, StringComparison.Ordinal);
+        Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
+        Assert.Contains("array.free.end", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_KeepsSwitchBreakMergeReachableBeforeUnreachableReturn()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int Test(int value)
+            {
+                switch (value) { default: break; return 0; }
+                return 42;
+            }
+            """);
+        string ir = new LlvmIrGenerator().Generate(compilation);
+        Assert.Contains("ret i32 42", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_RejectsTargetDependentEnumOverflowBeforeEmittingValues()
+    {
+        Compilation compilation = CreateCompilation("namespace Example; enum E : nint { Large = 4294967296 }");
+        Assert.False(compilation.HasErrors);
+        Assert.Throws<LlvmCodeGenerationException>(() => new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions("i686-pc-windows-msvc")));
+        new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
+    }
+
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", 4, 4)]
+    [InlineData("x86_64-pc-windows-msvc", 8, 4)]
+    [InlineData("x86_64-unknown-linux-gnu", 8, 8)]
+    [InlineData("aarch64-unknown-linux-gnu", 8, 8)]
+    public void Generator_BindsLayoutConstantsEnumsAndCasesForSelectedAbi(string triple, int pointerBytes, int cLongBytes)
+    {
+        Compilation original = CreateCompilation("""
+            namespace Example;
+            struct Packet { public byte Tag; public nint Payload; }
+            enum Layout
+            {
+                Size = cast<int>(sizeof(Packet)),
+                Next,
+                TwiceNext = cast<int>(Next) * 2,
+                Alignment = cast<int>(alignof(Packet)),
+                Offset = cast<int>(offsetof(Packet, Payload)),
+                CLong = cast<int>(sizeof(clong))
+            }
+            int Select(Layout layout)
+            {
+                const int NativeSize = cast<int>(sizeof(nint));
+                const int Next = NativeSize + 1;
+                switch (layout) { case Layout.Next: return Next; default: return 0; }
+            }
+            int SelectSize(nuint size)
+            {
+                switch (size) { case sizeof(nint): return 42; default: return 0; }
+            }
+            """);
+        Assert.False(original.HasErrors, string.Join(Environment.NewLine, original.Diagnostics));
+        Assert.True(original.RequiresTargetLayout);
+        var options = new LlvmTargetOptions(triple);
+        Compilation bound = LlvmIrGenerator.BindForTarget(original, options);
+        Assert.False(bound.HasErrors, string.Join(Environment.NewLine, bound.Diagnostics));
+        Assert.False(bound.RequiresTargetLayout);
+        var enumeration = Assert.Single(Assert.Single(bound.SemanticModel.GlobalNamespace.Namespaces).Enums);
+        Assert.Equal([pointerBytes * 2, pointerBytes * 2 + 1, (pointerBytes * 2 + 1) * 2, pointerBytes, pointerBytes, cLongBytes],
+            enumeration.Members.Select(member => (int)member.Value!).ToArray());
+        string ir = new LlvmIrGenerator().GenerateForTarget(original, options);
+        Assert.Contains($"switch i{pointerBytes * 8}", ir, StringComparison.Ordinal);
+        Assert.Contains($"i32 {pointerBytes * 2 + 1}, label %switch.case", ir, StringComparison.Ordinal);
+        Assert.True(original.RequiresTargetLayout);
+        Assert.All(Assert.Single(Assert.Single(original.SemanticModel.GlobalNamespace.Namespaces).Enums).Members,
+            member => Assert.Null(member.Value));
+    }
+
+    [Fact]
+    public void Generator_RebindsOneCompilationAcrossDifferentTargetsWithoutCachingValues()
+    {
+        Compilation original = CreateCompilation("""
+            namespace Example;
+            const nuint Native = cast<nuint>(4294967296);
+            enum E : ulong { Value = cast<ulong>(Native), Next }
+            int Select(nuint value)
+            {
+                switch(value) { case cast<nuint>(0): return 1; case Native: return 2; default: return 3; }
+            }
+            """);
+        Assert.False(original.HasErrors);
+        Compilation wide = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
+        Compilation narrow = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions("i686-pc-windows-msvc"));
+        Compilation wideAgain = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
+        Assert.False(wide.HasErrors, string.Join(Environment.NewLine, wide.Diagnostics));
+        Assert.False(wideAgain.HasErrors);
+        Assert.Contains(narrow.Diagnostics, diagnostic => diagnostic.Message == "duplicate case value");
+        Assert.Equal(4294967296UL, Assert.Single(Assert.Single(wide.SemanticModel.GlobalNamespace.Namespaces).Enums).Members[0].Value);
+        Assert.Equal(0UL, Assert.Single(Assert.Single(narrow.SemanticModel.GlobalNamespace.Namespaces).Enums).Members[0].Value);
+        Assert.False(original.HasErrors);
+    }
+
+    [Theory]
+    [InlineData("enum E : byte { A = cast<int>(sizeof(nint)) * 32 - 1, B }", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "out of range")]
+    [InlineData("enum E { A = 1 / (cast<int>(sizeof(nint)) - 4) }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "valid operations")]
+    [InlineData("void M(nuint x) { switch(x) { case sizeof(nint): break; case cast<nuint>(4): break; } }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "duplicate case")]
+    [InlineData("void M(int x) { switch(x) { case 1 / (cast<int>(sizeof(nint)) - 4): break; } }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "compile-time constant")]
+    [InlineData("void M() { int[] a = new int[1]; a.GetLength(cast<int>(sizeof(nint)) - 4); free(a); }", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "dimension must be")]
+    public void Generator_ReportsTargetDependentErrorsInSemanticPass(string source, string invalidTarget, string validTarget, string diagnostic)
+    {
+        Compilation original = CreateCompilation("namespace Example; " + source);
+        Assert.False(original.HasErrors, string.Join(Environment.NewLine, original.Diagnostics));
+        Compilation valid = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions(validTarget));
+        Assert.False(valid.HasErrors, string.Join(Environment.NewLine, valid.Diagnostics));
+        Compilation invalid = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions(invalidTarget));
+        Assert.Contains(invalid.Diagnostics, item => item.Message.Contains(diagnostic, StringComparison.Ordinal));
+        Assert.All(invalid.Diagnostics, item => Assert.Equal("test.xe", item.Location.Source.Path));
+        LlvmCodeGenerationException error = Assert.Throws<LlvmCodeGenerationException>(() =>
+            new LlvmIrGenerator().GenerateForTarget(original, new LlvmTargetOptions(invalidTarget)));
+        Assert.Contains("Target-specific semantic validation failed", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_UsesInheritanceVirtualDispatchAndInterfaceAbiInConstants()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            interface IValue { int Read(); }
+            struct Base { public int Id; public virtual int Read() { return Id; } }
+            struct Derived : Base { public nint Tail; }
+            enum Layout { DerivedSize = cast<int>(sizeof(Derived)), TailOffset = cast<int>(offsetof(Derived, Tail)), InterfaceSize = cast<int>(sizeof(IValue)) }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        foreach (var (triple, pointer) in new[] { ("i686-pc-windows-msvc", 4), ("x86_64-pc-windows-msvc", 8) })
+        {
+            Compilation bound = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions(triple));
+            Assert.False(bound.HasErrors, string.Join(Environment.NewLine, bound.Diagnostics));
+            var values = Assert.Single(Assert.Single(bound.SemanticModel.GlobalNamespace.Namespaces).Enums).Members.Select(member => (int)member.Value!).ToArray();
+            Assert.Equal([pointer * 3, pointer * 2, pointer * 2], values);
+            new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
+        }
+    }
+
+    [Fact]
+    public void Generator_RequiresExplicitTargetForDeferredValuesAndPreservesExistingObjectOnError()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            enum E : byte { A = cast<int>(sizeof(nint)) * 32 - 1, B }
+            """);
+        Assert.Contains("target layout", Assert.Throws<LlvmCodeGenerationException>(() => new LlvmIrGenerator().Generate(compilation)).Message, StringComparison.Ordinal);
+        string directory = CreateTemporaryDirectory();
+        string path = Path.Combine(directory, "existing.obj");
+        byte[] original = [1, 2, 3, 4];
+        File.WriteAllBytes(path, original);
+        try
+        {
+            Assert.Throws<LlvmCodeGenerationException>(() => new LlvmObjectEmitter().Emit(compilation, path, new LlvmTargetOptions("x86_64-pc-windows-msvc")));
+            Assert.Equal(original, File.ReadAllBytes(path));
+            Assert.Single(Directory.GetFiles(directory));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", 2147483648UL)]
+    [InlineData("x86_64-pc-windows-msvc", 9223372036854775808UL)]
+    public void Generator_FoldsNativeShiftsWithIntegerCountUsingTargetWidth(string triple, ulong expected)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            const nuint HighBit = cast<nuint>(1) << (cast<int>(sizeof(nuint)) * 8 - 1);
+            enum E : ulong { High = cast<ulong>(HighBit) }
+            int Test(nuint value) { switch(value) { case cast<nuint>(1) << (cast<int>(sizeof(nuint)) * 8 - 1): return 42; default: return 0; } }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        Compilation bound = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions(triple));
+        Assert.False(bound.HasErrors, string.Join(Environment.NewLine, bound.Diagnostics));
+        Assert.Equal(expected, Assert.Single(Assert.Single(bound.SemanticModel.GlobalNamespace.Namespaces).Enums).Members[0].Value);
+        new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
+    }
+
+    [Fact]
+    public void Generator_RejectsNativeShiftOutsideTargetWidth()
+    {
+        Compilation compilation = CreateCompilation("namespace Example; enum E : ulong { A = cast<ulong>(cast<nuint>(1) << 32) }");
+        Assert.False(compilation.HasErrors);
+        Compilation narrow = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions("i686-pc-windows-msvc"));
+        Compilation wide = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
+        Assert.True(narrow.HasErrors);
+        Assert.False(wide.HasErrors, string.Join(Environment.NewLine, wide.Diagnostics));
+    }
+
+    [Theory]
+    [InlineData("i686-pc-windows-msvc")]
+    [InlineData("x86_64-pc-windows-msvc")]
+    [InlineData("x86_64-unknown-linux-gnu")]
+    [InlineData("aarch64-unknown-linux-gnu")]
+    public void Generator_VerifiesScopedStackArrayCleanupForTarget(string triple)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Item { public nint Id; public ~Item() { Id = cast<nint>(0); } }
+            int Test(int n)
+            {
+                Item[,] outer = Item[n,2];
+                for (int i = 0; i < n; i++)
+                {
+                    Item[,,] inner = Item[1,2,3];
+                    switch (i) { case 0: continue; case 1: break; default: return inner.Length; }
+                    if (n == 2) break;
+                }
+                return outer.GetLength(1);
+            }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
+        Assert.Contains("call ptr @llvm.stacksave.p0", ir, StringComparison.Ordinal);
+        Assert.Contains("call void @llvm.stackrestore.p0", ir, StringComparison.Ordinal);
+        Assert.Contains("stack.destroy.element", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("call void @free", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("call ptr @malloc", ir, StringComparison.Ordinal);
     }
 
     private static Compilation CreateCompilation(string source) =>

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Numerics;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -9,6 +10,7 @@ namespace Xenon.Compiler.Semantics;
 internal sealed class SemanticAnalyzer
 {
     private readonly ImmutableArray<SyntaxTree> _syntaxTrees;
+    private readonly ConstantEvaluationContext _constants;
     private readonly DiagnosticBag _diagnostics = new();
     private readonly NamespaceSymbol _globalNamespace = new(string.Empty, null);
     private readonly Dictionary<SyntaxTree, NamespaceSymbol> _treeNamespaces = new(ReferenceEqualityComparer.Instance);
@@ -19,17 +21,20 @@ internal sealed class SemanticAnalyzer
     private readonly Dictionary<StructDeclarationSyntax, FileSymbolScope> _structScopes = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<ConstantSymbol, FileSymbolScope> _constantScopes = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<ConstantSymbol> _evaluatingConstants = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<EnumDeclarationSyntax, (EnumTypeSymbol Type, SyntaxTree Tree)> _enums = [];
+    private readonly Dictionary<ConstantSymbol, (EnumTypeSymbol Type, ConstantSymbol? Previous, bool Automatic)> _enumMembers = [];
     private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body, FileSymbolScope Scope)> _functionBodies = [];
     private readonly List<BoundFunction> _synthesizedFunctions = [];
 
-    private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees)
+    private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, ITargetTypeLayout? targetLayout)
     {
         _syntaxTrees = syntaxTrees;
+        _constants = new ConstantEvaluationContext(targetLayout);
     }
 
-    public static SemanticModel Analyze(ImmutableArray<SyntaxTree> syntaxTrees)
+    public static SemanticModel Analyze(ImmutableArray<SyntaxTree> syntaxTrees, ITargetTypeLayout? targetLayout = null)
     {
-        var analyzer = new SemanticAnalyzer(syntaxTrees);
+        var analyzer = new SemanticAnalyzer(syntaxTrees, targetLayout);
         return analyzer.Analyze();
     }
 
@@ -38,6 +43,7 @@ internal sealed class SemanticAnalyzer
         DeclareNamespaces();
         DeclareStructs();
         DeclareInterfaces();
+        DeclareEnums();
         BindUsingDirectives();
         BindTypeInheritance();
         ValidateInheritanceCycles();
@@ -47,6 +53,9 @@ internal sealed class SemanticAnalyzer
         BindStructFields();
         ValidateStructLayouts();
         DeclareConstants();
+        DeclareEnumMembers();
+        // Invalid by-value layouts must not be queried through a native ABI provider.
+        if (_diagnostics.Count != 0) _constants.TargetLayout = null;
         EvaluateConstants();
         DeclareStructProperties();
         DeclareStructIndexers();
@@ -60,12 +69,12 @@ internal sealed class SemanticAnalyzer
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
         {
-            var binder = new FunctionBodyBinder(symbol, scope, _diagnostics);
+            var binder = new FunctionBodyBinder(symbol, scope, _diagnostics, _constants);
             functions.Add(new BoundFunction(symbol, binder.BindBody(body)));
         }
         functions.AddRange(_synthesizedFunctions);
 
-        return new SemanticModel(_globalNamespace, functions.ToImmutable(), [.. _diagnostics]);
+        return new SemanticModel(_globalNamespace, functions.ToImmutable(), [.. _diagnostics], _constants.RequiresTargetLayout);
     }
 
     private void BindInstanceFieldInitializers()
@@ -85,7 +94,8 @@ internal sealed class SemanticAnalyzer
             var binder = new FunctionBodyBinder(
                 initializer,
                 _structScopes[declaration],
-                _diagnostics);
+                _diagnostics,
+                _constants);
 
             foreach (FieldSymbol field in type.Fields)
             {
@@ -132,6 +142,125 @@ internal sealed class SemanticAnalyzer
                 _structSymbols.Add(declaration, type);
             }
         }
+    }
+
+    private void DeclareEnums()
+    {
+        foreach (SyntaxTree tree in _syntaxTrees)
+        foreach (EnumDeclarationSyntax declaration in tree.Root.Members.OfType<EnumDeclarationSyntax>())
+        {
+            var type = new EnumTypeSymbol(declaration.IdentifierToken.Text, _treeNamespaces[tree]);
+            if (!type.ContainingNamespace.TryDeclareType(type))
+                _diagnostics.Report(declaration.IdentifierToken.Location, $"type '{type.FullName}' is already declared");
+            else
+                _enums.Add(declaration, (type, tree));
+        }
+    }
+
+    private void DeclareEnumMembers()
+    {
+        foreach ((EnumDeclarationSyntax syntax, (EnumTypeSymbol type, SyntaxTree tree)) in _enums)
+        {
+            TypeSymbol underlying = syntax.UnderlyingType is null ? BuiltinTypes.Int : TypeResolver.Resolve(syntax.UnderlyingType, _treeScopes[tree], _diagnostics);
+            if (underlying is PrimitiveTypeSymbol { IsInteger: true } integer)
+                type.UnderlyingType = integer;
+            else
+                _diagnostics.Report(syntax.IdentifierToken.Location, "enum underlying type must be an integer type");
+            var members = ImmutableArray.CreateBuilder<ConstantSymbol>();
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            ConstantSymbol? previous = null;
+            foreach (EnumMemberDeclarationSyntax member in syntax.Members)
+            {
+                if (!names.Add(member.IdentifierToken.Text))
+                {
+                    _diagnostics.Report(member.IdentifierToken.Location, $"duplicate enum member '{member.IdentifierToken.Text}'");
+                    continue;
+                }
+                ExpressionSyntax initializer = member.Value ?? new LiteralExpressionSyntax(
+                    new SyntaxToken(SyntaxKind.IntegerLiteralToken, member.IdentifierToken.Location, "0", 0UL));
+                var constant = new ConstantSymbol(member.IdentifierToken.Text, type, type.ContainingNamespace, null, initializer, member.IdentifierToken);
+                _constantScopes.Add(constant, _treeScopes[tree]);
+                _enumMembers.Add(constant, (type, previous, member.Value is null));
+                members.Add(constant);
+                previous = constant;
+            }
+            type.Members = members.ToImmutable();
+        }
+    }
+
+    private bool EvaluateEnumMember(ConstantSymbol member, EnumTypeSymbol type, ConstantSymbol? previous, bool automatic)
+    {
+        object? value;
+        if (automatic)
+        {
+            if (previous is not null && !EvaluateConstant(previous)) return false;
+            if (previous?.BoundValue is BoundDeferredConstantExpression)
+            {
+                member.SetBoundValue(new BoundDeferredConstantExpression(type));
+                return true;
+            }
+            BigInteger number = previous is null ? BigInteger.Zero : ToInteger(previous.Value) + 1;
+            if (!FitsInteger(number, type.UnderlyingType, _constants.TargetLayout))
+            {
+                _diagnostics.Report(member.IdentifierToken.Location, $"enum value is out of range for '{type.UnderlyingType.Name}'");
+                return false;
+            }
+            value = IntegerValue(number, type.UnderlyingType, _constants.TargetLayout);
+        }
+        else
+        {
+            BoundExpression? expression = BindConstantExpression(member.Initializer, member);
+            if (expression is null || !(TypeFacts.IsInteger(expression.Type) || ReferenceEquals(expression.Type, type)))
+            {
+                _diagnostics.Report(member.IdentifierToken.Location, "enum value must be an integer compile-time constant");
+                return false;
+            }
+            ConstantFoldStatus status = _constants.Fold(expression, out value);
+            if (status == ConstantFoldStatus.TargetDependent)
+            {
+                member.SetBoundValue(new BoundDeferredConstantExpression(type));
+                return true;
+            }
+            if (status == ConstantFoldStatus.Invalid)
+            {
+                _diagnostics.Report(member.IdentifierToken.Location, "enum value must be an integer compile-time constant with valid operations");
+                return false;
+            }
+            BigInteger number = ToInteger(value);
+            if (!FitsInteger(number, type.UnderlyingType, _constants.TargetLayout))
+            {
+                _diagnostics.Report(member.IdentifierToken.Location, $"enum value is out of range for '{type.UnderlyingType.Name}'");
+                return false;
+            }
+            value = IntegerValue(number, type.UnderlyingType, _constants.TargetLayout);
+        }
+        member.SetValue(value);
+        member.SetBoundValue(new BoundLiteralExpression(value, type));
+        return true;
+    }
+
+    internal static BigInteger ToInteger(object? value) => value switch
+    {
+        int number => number,
+        long number => number,
+        ulong number => number,
+        _ => throw new InvalidOperationException("Expected an integer constant."),
+    };
+
+    internal static bool FitsInteger(BigInteger value, PrimitiveTypeSymbol type, ITargetTypeLayout? targetLayout = null)
+    {
+        int bits = type.BitWidth ?? targetLayout?.GetIntegerBitWidth(type) ?? 64;
+        return type.IsSigned
+            ? value >= -(BigInteger.One << (bits - 1)) && value < (BigInteger.One << (bits - 1))
+            : value >= 0 && value < (BigInteger.One << bits);
+    }
+
+    internal static object IntegerValue(BigInteger value, PrimitiveTypeSymbol type, ITargetTypeLayout? targetLayout = null)
+    {
+        int bits = type.BitWidth ?? targetLayout?.GetIntegerBitWidth(type) ?? 64;
+        if (!type.IsSigned && bits >= 32) return (ulong)value;
+        if (bits > 32) return (long)value;
+        return (int)value;
     }
 
     private void DeclareInterfaces()
@@ -290,6 +419,8 @@ internal sealed class SemanticAnalyzer
         }
         try
         {
+            if (_enumMembers.TryGetValue(constant, out var enumMember))
+                return EvaluateEnumMember(constant, enumMember.Type, enumMember.Previous, enumMember.Automatic);
             BoundExpression? value = BindConstantExpression(constant.Initializer, constant);
             if (value is null)
             {
@@ -307,7 +438,7 @@ internal sealed class SemanticAnalyzer
                 }
             }
 
-            ConstantFoldStatus foldStatus = FoldConstantExpression(value, out object? foldedValue);
+            ConstantFoldStatus foldStatus = _constants.Fold(value, out object? foldedValue);
             if (foldStatus == ConstantFoldStatus.Invalid)
             {
                 _diagnostics.Report(
@@ -343,7 +474,8 @@ internal sealed class SemanticAnalyzer
                 return BindConstantExpression(parenthesized.Expression, context);
             case NameExpressionSyntax name:
             {
-                ConstantSymbol? referenced = context.ContainingType?.FindConstant(name.IdentifierToken.Text) ??
+                ConstantSymbol? referenced = (_enumMembers.TryGetValue(context, out var enumContext) ? enumContext.Type.FindMember(name.IdentifierToken.Text) : null) ??
+                    context.ContainingType?.FindConstant(name.IdentifierToken.Text) ??
                     _constantScopes[context].ResolveConstant(name.IdentifierToken.Text, name.IdentifierToken.Location, _diagnostics);
                 return referenced is not null && EvaluateConstant(referenced) ? referenced.BoundValue : null;
             }
@@ -351,6 +483,28 @@ internal sealed class SemanticAnalyzer
                 _constantScopes[context].ResolveType(typeName.IdentifierToken.Text, typeName.IdentifierToken.Location, _diagnostics) is StructTypeSymbol structType &&
                 structType.FindConstant(member.MemberToken.Text) is ConstantSymbol associated:
                 return EvaluateConstant(associated) ? associated.BoundValue : null;
+            case MemberAccessExpressionSyntax member:
+            {
+                var parts = new List<SyntaxToken>();
+                ExpressionSyntax receiver = member;
+                while (receiver is MemberAccessExpressionSyntax access && access.OperatorToken.Kind == SyntaxKind.DotToken)
+                {
+                    parts.Insert(0, access.MemberToken);
+                    receiver = access.Receiver;
+                }
+                if (receiver is not NameExpressionSyntax name) return null;
+                parts.Insert(0, name.IdentifierToken);
+                TypeSymbol? resolved = parts.Count == 2
+                    ? _constantScopes[context].ResolveType(parts[0].Text, parts[0].Location, _diagnostics)
+                    : _constantScopes[context].ResolveQualifiedType(parts.Take(parts.Count - 1).Select(part => part.Text).ToArray());
+                ConstantSymbol? referenced = resolved switch
+                {
+                    EnumTypeSymbol enumeration => enumeration.FindMember(parts[^1].Text),
+                    StructTypeSymbol structure => structure.FindConstant(parts[^1].Text),
+                    _ => null,
+                };
+                return referenced is not null && EvaluateConstant(referenced) ? referenced.BoundValue : null;
+            }
             case UnaryExpressionSyntax unary:
             {
                 BoundExpression? operand = BindConstantExpression(unary.Operand, context);
@@ -369,7 +523,10 @@ internal sealed class SemanticAnalyzer
             {
                 BoundExpression? left = BindConstantExpression(binary.Left, context);
                 BoundExpression? right = BindConstantExpression(binary.Right, context);
-                if (left is null || right is null || !ReferenceEquals(left.Type, right.Type))
+                if (left is null || right is null)
+                    return null;
+                bool shift = binary.OperatorToken.Kind is SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken;
+                if (!ReferenceEquals(left.Type, right.Type) && !(shift && TypeFacts.IsInteger(left.Type) && TypeFacts.IsInteger(right.Type)))
                     return null;
                 bool comparison = binary.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken or
                     SyntaxKind.LessToken or SyntaxKind.LessOrEqualsToken or SyntaxKind.GreaterToken or SyntaxKind.GreaterOrEqualsToken;
@@ -386,6 +543,8 @@ internal sealed class SemanticAnalyzer
             case TypeLayoutExpressionSyntax layout:
             {
                 TypeSymbol target = TypeResolver.Resolve(layout.Type, _constantScopes[context], _diagnostics);
+                if (ReferenceEquals(target, BuiltinTypes.Void) || ReferenceEquals(target, BuiltinTypes.Error))
+                    return null;
                 FieldSymbol? field = null;
                 if (layout.Keyword.Kind == SyntaxKind.OffsetOfKeyword)
                 {
@@ -399,7 +558,7 @@ internal sealed class SemanticAnalyzer
             {
                 BoundExpression? expression = BindConstantExpression(cast.Expression, context);
                 TypeSymbol target = TypeResolver.Resolve(cast.Type, _constantScopes[context], _diagnostics);
-                if (expression is null || !TypeFacts.IsNumeric(expression.Type) || !TypeFacts.IsNumeric(target))
+                if (expression is null || !TypeFacts.CanExplicitlyCast(target, expression.Type))
                     return null;
                 return new BoundCastExpression(expression, target);
             }
@@ -408,26 +567,45 @@ internal sealed class SemanticAnalyzer
         }
     }
 
-    private static ConstantFoldStatus FoldConstantExpression(BoundExpression expression, out object? value)
+    internal static ConstantFoldStatus FoldConstantExpression(BoundExpression expression, out object? value, ITargetTypeLayout? targetLayout)
     {
         switch (expression)
         {
             case BoundLiteralExpression literal:
+                if (targetLayout is null && (literal.Type is PrimitiveTypeSymbol { IsInteger: true, BitWidth: null } or EnumTypeSymbol { UnderlyingType.BitWidth: null }))
+                {
+                    value = null;
+                    return ConstantFoldStatus.TargetDependent;
+                }
                 value = literal.Value;
                 return ConstantFoldStatus.Folded;
-            case BoundTypeLayoutExpression:
+            case BoundDeferredConstantExpression:
                 value = null;
                 return ConstantFoldStatus.TargetDependent;
+            case BoundTypeLayoutExpression layout:
+                if (targetLayout is null)
+                {
+                    value = null;
+                    return ConstantFoldStatus.TargetDependent;
+                }
+                value = layout.OperatorKind switch
+                {
+                    SyntaxKind.SizeOfKeyword => targetLayout.GetSize(layout.TargetType),
+                    SyntaxKind.AlignOfKeyword => (ulong)targetLayout.GetAlignment(layout.TargetType),
+                    SyntaxKind.OffsetOfKeyword => targetLayout.GetFieldOffset((StructTypeSymbol)layout.TargetType, layout.Field!),
+                    _ => throw new InvalidOperationException("Unknown layout intrinsic."),
+                };
+                return ConstantFoldStatus.Folded;
             case BoundUnaryExpression unary:
             {
-                ConstantFoldStatus operandStatus = FoldConstantExpression(unary.Operand, out object? operand);
+                ConstantFoldStatus operandStatus = FoldConstantExpression(unary.Operand, out object? operand, targetLayout);
                 if (operandStatus != ConstantFoldStatus.Folded)
                 {
                     value = null;
                     return operandStatus;
                 }
                 if (TryEvaluateUnaryConstant(unary.OperatorKind, operand, out object? unaryValue) &&
-                    TryNormalizeFoldedValue(unaryValue, unary.Type, out value))
+                    TryNormalizeFoldedValue(unaryValue, unary.Type, out value, targetLayout))
                 {
                     return ConstantFoldStatus.Folded;
                 }
@@ -436,7 +614,7 @@ internal sealed class SemanticAnalyzer
             }
             case BoundBinaryExpression binary:
             {
-                ConstantFoldStatus leftStatus = FoldConstantExpression(binary.Left, out object? left);
+                ConstantFoldStatus leftStatus = FoldConstantExpression(binary.Left, out object? left, targetLayout);
                 if (leftStatus == ConstantFoldStatus.Invalid)
                 {
                     value = null;
@@ -456,7 +634,7 @@ internal sealed class SemanticAnalyzer
                     }
                 }
 
-                ConstantFoldStatus rightStatus = FoldConstantExpression(binary.Right, out object? right);
+                ConstantFoldStatus rightStatus = FoldConstantExpression(binary.Right, out object? right, targetLayout);
                 if (rightStatus == ConstantFoldStatus.Invalid ||
                     (binary.OperatorKind is SyntaxKind.SlashToken or SyntaxKind.PercentToken && IsIntegerZero(right)))
                 {
@@ -471,8 +649,36 @@ internal sealed class SemanticAnalyzer
 
                 try
                 {
+                    if (binary.OperatorKind is SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken)
+                    {
+                        var operandType = (PrimitiveTypeSymbol)binary.Left.Type;
+                        int? width = operandType.BitWidth ?? targetLayout?.GetIntegerBitWidth(operandType);
+                        BigInteger count = ToInteger(right);
+                        if (width is null)
+                        {
+                            value = null;
+                            return ConstantFoldStatus.TargetDependent;
+                        }
+                        if (count < 0 || count >= width)
+                        {
+                            value = null;
+                            return ConstantFoldStatus.Invalid;
+                        }
+                        object shifted = (left, binary.OperatorKind) switch
+                        {
+                            (int integer, SyntaxKind.LessLessToken) => (object)(integer << (int)count),
+                            (int integer, _) => integer >> (int)count,
+                            (long integer, SyntaxKind.LessLessToken) => integer << (int)count,
+                            (long integer, _) => integer >> (int)count,
+                            (ulong integer, SyntaxKind.LessLessToken) => integer << (int)count,
+                            (ulong integer, _) => integer >> (int)count,
+                            _ => throw new InvalidOperationException("Invalid shift constant."),
+                        };
+                        return TryNormalizeFoldedValue(shifted, binary.Type, out value, targetLayout)
+                            ? ConstantFoldStatus.Folded : ConstantFoldStatus.Invalid;
+                    }
                     if (TryEvaluateBinaryConstant(left, binary.OperatorKind, right, out object? binaryValue) &&
-                        TryNormalizeFoldedValue(binaryValue, binary.Type, out value))
+                        TryNormalizeFoldedValue(binaryValue, binary.Type, out value, targetLayout))
                     {
                         return ConstantFoldStatus.Folded;
                     }
@@ -486,18 +692,18 @@ internal sealed class SemanticAnalyzer
             }
             case BoundCastExpression cast:
             {
-                ConstantFoldStatus operandStatus = FoldConstantExpression(cast.Expression, out object? operand);
+                ConstantFoldStatus operandStatus = FoldConstantExpression(cast.Expression, out object? operand, targetLayout);
                 if (operandStatus != ConstantFoldStatus.Folded)
                 {
                     value = null;
                     return operandStatus;
                 }
-                if (cast.TargetType is PrimitiveTypeSymbol { IsInteger: true, BitWidth: null })
+                if (targetLayout is null && (cast.TargetType is PrimitiveTypeSymbol { IsInteger: true, BitWidth: null } or EnumTypeSymbol { UnderlyingType.BitWidth: null }))
                 {
                     value = null;
                     return ConstantFoldStatus.TargetDependent;
                 }
-                return TryFoldPrimitiveCast(operand, cast.TargetType, out value)
+                return TryFoldPrimitiveCast(operand, cast.TargetType, out value, targetLayout)
                     ? ConstantFoldStatus.Folded
                     : ConstantFoldStatus.Invalid;
             }
@@ -515,8 +721,21 @@ internal sealed class SemanticAnalyzer
         _ => false,
     };
 
-    private static bool TryFoldPrimitiveCast(object? value, TypeSymbol targetType, out object? converted)
+    private static bool TryFoldPrimitiveCast(object? value, TypeSymbol targetType, out object? converted, ITargetTypeLayout? targetLayout)
     {
+        if (targetType is EnumTypeSymbol enumeration) targetType = enumeration.UnderlyingType;
+        if (targetType is PrimitiveTypeSymbol { IsInteger: true, BitWidth: null } native && targetLayout is not null)
+        {
+            int width = targetLayout.GetIntegerBitWidth(native);
+            targetType = (width, native.IsSigned) switch
+            {
+                (32, true) => BuiltinTypes.Int,
+                (32, false) => BuiltinTypes.UInt,
+                (64, true) => BuiltinTypes.Long,
+                (64, false) => BuiltinTypes.ULong,
+                _ => throw new InvalidOperationException($"Unsupported native integer width {width}."),
+            };
+        }
         try
         {
             if (ReferenceEquals(targetType, BuiltinTypes.Float))
@@ -565,21 +784,14 @@ internal sealed class SemanticAnalyzer
         }
     }
 
-    private static bool TryNormalizeFoldedValue(object? value, TypeSymbol type, out object? normalized)
+    private static bool TryNormalizeFoldedValue(object? value, TypeSymbol type, out object? normalized, ITargetTypeLayout? targetLayout)
     {
         if (ReferenceEquals(type, BuiltinTypes.Bool) && value is bool)
         {
             normalized = value;
             return true;
         }
-        return TryFoldPrimitiveCast(value, type, out normalized);
-    }
-
-    private enum ConstantFoldStatus
-    {
-        Folded,
-        TargetDependent,
-        Invalid,
+        return TryFoldPrimitiveCast(value, type, out normalized, targetLayout);
     }
 
     private static bool IsSupportedStaticInitializer(TypeSymbol type, object? value) =>
@@ -860,7 +1072,7 @@ internal sealed class SemanticAnalyzer
                     _diagnostics.Report(syntax.IdentifierToken.Location, $"interface '{type.Name}' already declares method '{syntax.IdentifierToken.Text}'");
                     continue;
                 }
-                methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, TypeResolver.Resolve(syntax.ReturnType, scope, _diagnostics), BindParameters(syntax.Parameters, scope), syntax));
+                methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, TypeResolver.ResolveReturnType(syntax.ReturnType, scope, _diagnostics), BindParameters(syntax.Parameters, scope), syntax));
             }
             type.SetMethods(methods.ToImmutable());
 
@@ -1134,7 +1346,7 @@ internal sealed class SemanticAnalyzer
                         $"struct '{type.Name}' already contains property '{methodSyntax.IdentifierToken.Text}'");
                 }
 
-                TypeSymbol returnType = TypeResolver.Resolve(
+                TypeSymbol returnType = TypeResolver.ResolveReturnType(
                     methodSyntax.ReturnType,
                     scope,
                     _diagnostics);
@@ -1350,8 +1562,6 @@ internal sealed class SemanticAnalyzer
 
                 if (method.IsStatic && (method.IsVirtual || method.IsOverride || method.IsAbstract))
                     _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, "static methods cannot be virtual, override, or abstract");
-                if (method.IsStatic && method.IsReadonly)
-                    _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, "static methods cannot be readonly");
                 if (method.IsAbstract && method.Declaration is MethodDeclarationSyntax { Body: not null } abstractSyntax)
                     _diagnostics.Report(abstractSyntax.IdentifierToken.Location, "abstract methods cannot have a body");
             }
@@ -1441,7 +1651,7 @@ internal sealed class SemanticAnalyzer
                         $"native symbol '{declaration.IdentifierToken.Text}' is reserved for Xenon memory operations");
                 }
 
-                TypeSymbol returnType = TypeResolver.Resolve(declaration.ReturnType, scope, _diagnostics);
+                TypeSymbol returnType = TypeResolver.ResolveReturnType(declaration.ReturnType, scope, _diagnostics);
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration.Parameters, scope);
                 var function = new FunctionSymbol(
                     declaration.IdentifierToken.Text,
@@ -1534,7 +1744,7 @@ internal sealed class SemanticAnalyzer
                     $"parameter '{syntax.IdentifierToken.Text}' is already declared");
             }
 
-            parameters.Add(new ParameterSymbol(syntax.IdentifierToken.Text, type, index));
+            parameters.Add(new ParameterSymbol(syntax.IdentifierToken.Text, type, index, syntax.Type.IsBindingReadonly));
         }
 
         return parameters.ToImmutable();

@@ -90,7 +90,8 @@ public sealed record StructPositionalConstructionExpressionSyntax(
 public sealed record StackArrayCreationExpressionSyntax(
     TypeSyntax ElementType,
     SyntaxToken OpenBracketToken,
-    ExpressionSyntax Length,
+    ImmutableArray<ExpressionSyntax> Dimensions,
+    ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseBracketToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.StackArrayCreationExpression;

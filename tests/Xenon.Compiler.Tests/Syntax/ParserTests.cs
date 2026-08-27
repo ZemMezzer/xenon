@@ -591,6 +591,24 @@ public sealed class ParserTests
             Assert.IsType<ExpressionStatementSyntax>(function.Body.Statements[2]).Expression);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(40)]
+    public void Parser_ParsesStackArrayDimensionsWithoutRankLimit(int rank)
+    {
+        string suffix = "[" + new string(',', rank - 1) + "]";
+        string dimensions = string.Join(",", Enumerable.Repeat("2", rank));
+        SyntaxTree tree = Parse($"namespace Example; void M() {{ int{suffix} values = int[{dimensions}]; }}");
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var declaration = Assert.IsType<VariableDeclarationStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var allocation = Assert.IsType<StackArrayCreationExpressionSyntax>(declaration.Initializer);
+        Assert.Equal(rank, allocation.Dimensions.Length);
+        Assert.Equal(rank - 1, allocation.CommaTokens.Length);
+    }
+
     [Fact]
     public void Parser_RejectsFixedSizeArrayTypeDeclarations()
     {
@@ -607,6 +625,113 @@ public sealed class ParserTests
             tree.Diagnostics,
             diagnostic => diagnostic.Message ==
                 "fixed-size array type syntax is not supported; use 'T[]' and initialize it with 'T[n]' or 'new T[n]'");
+    }
+
+    [Fact]
+    public void Parser_ParsesIterationFourDeclarationsAndRecursiveArrayShapes()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+            enum State : byte { Idle, Running = 10, Stopped, }
+            void Test(readonly int* readonly pointer)
+            {
+                int[][,,][] arrays = new int[2][,,][];
+                switch (State.Idle) { case State.Idle: break; default: return; }
+            }
+            """);
+        Assert.Empty(tree.Diagnostics);
+        var enumeration = Assert.IsType<EnumDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.Equal(3, enumeration.Members.Length);
+        Assert.Equal("byte", enumeration.UnderlyingType!.Name);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.True(function.Parameters[0].Type.IsReadonly);
+        Assert.True(function.Parameters[0].Type.IsBindingReadonly);
+        var arrays = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
+        Assert.Equal([1, 3, 1], arrays.Type.ArrayRanks.ToArray());
+        Assert.Equal([3, 1], Assert.IsType<NewExpressionSyntax>(arrays.Initializer).Type.ArrayRanks.ToArray());
+        Assert.Equal(2, Assert.IsType<SwitchStatementSyntax>(function.Body.Statements[1]).Sections.Length);
+    }
+
+    [Theory]
+    [InlineData("enum E { A = }")]
+    [InlineData("enum E { A A }")]
+    [InlineData("void M() { switch (1) { case : break; }")]
+    [InlineData("void M() { int[,, x values; }")]
+    public void Parser_RecoversFromMalformedIterationFourSyntax(string declaration)
+    {
+        Assert.NotEmpty(Parse("namespace Example; " + declaration).Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("int", false, false)]
+    [InlineData("readonly int", true, false)]
+    [InlineData("int readonly", false, true)]
+    [InlineData("void readonly", false, true)]
+    [InlineData("int*", false, false)]
+    [InlineData("readonly int*", true, false)]
+    [InlineData("int* readonly", false, true)]
+    [InlineData("readonly int* readonly", true, true)]
+    [InlineData("readonly int& readonly", true, true)]
+    [InlineData("int[,] readonly", false, true)]
+    public void Parser_SeparatesReturnTypeAndMethodReadonly(
+        string signature, bool returnReadonly, bool methodReadonly)
+    {
+        // Preserve the written qualifiers in syntax; semantic analysis rejects
+        // readonly by-value returns such as 'readonly int'.
+        SyntaxTree tree = Parse($$"""
+            namespace Example;
+            struct Value { public {{signature}} Get() { } }
+            interface IValue { {{signature}} Get(); }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var method = Assert.Single(Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]).Methods);
+        var contract = Assert.Single(Assert.IsType<InterfaceDeclarationSyntax>(tree.Root.Members[1]).Methods);
+        Assert.Equal(methodReadonly, method.IsReadonly);
+        Assert.Equal(methodReadonly, contract.IsReadonly);
+        Assert.Equal(returnReadonly, method.ReturnType.IsReadonly);
+        Assert.Equal(returnReadonly, contract.ReturnType.IsReadonly);
+        Assert.Null(method.ReturnType.PointerReadonlyKeyword);
+        Assert.Null(contract.ReturnType.PointerReadonlyKeyword);
+    }
+
+    [Theory]
+    [InlineData("int*", false, false)]
+    [InlineData("readonly int*", true, false)]
+    [InlineData("int* readonly", false, true)]
+    [InlineData("readonly int* readonly", true, true)]
+    public void Parser_KeepsPointerBindingReadonlyOnVariablesOnly(
+        string signature, bool pointeeReadonly, bool bindingReadonly)
+    {
+        SyntaxTree tree = Parse($$"""
+            namespace Example;
+            struct Value { public {{signature}} Pointer; }
+            void Use({{signature}} parameter) { {{signature}} local = parameter; }
+            {{signature}} Get() { return null; }
+            """);
+        Assert.Empty(tree.Diagnostics);
+        var field = Assert.Single(Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]).Fields);
+        var use = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        var local = Assert.IsType<VariableDeclarationStatementSyntax>(Assert.Single(use.Body!.Statements));
+        foreach (TypeSyntax type in new[] { field.Type, use.Parameters[0].Type, local.Type })
+        {
+            Assert.Equal(pointeeReadonly, type.IsReadonly);
+            Assert.Equal(bindingReadonly, type.IsBindingReadonly);
+        }
+        var get = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[2]);
+        Assert.Equal(bindingReadonly, get.IsReadonly);
+        Assert.Equal(pointeeReadonly, get.ReturnType.IsReadonly);
+        Assert.Null(get.ReturnType.PointerReadonlyKeyword);
+    }
+
+    [Theory]
+    [InlineData("readonly readonly int&", "duplicate readonly return type qualifier")]
+    [InlineData("int* readonly readonly", "duplicate readonly method qualifier")]
+    [InlineData("int* readonly []", "return types cannot have a readonly pointer binding")]
+    public void Parser_RejectsInvalidReadonlyReturnQualifiers(string signature, string diagnostic)
+    {
+        SyntaxTree tree = Parse($"namespace Example; struct Value {{ public {signature} Get() {{ }} }}");
+        Assert.Contains(tree.Diagnostics, item => item.Message == diagnostic);
     }
 
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));

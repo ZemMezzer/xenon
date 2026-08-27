@@ -2,6 +2,22 @@ using System.Collections.Immutable;
 
 namespace Xenon.Compiler.Syntax;
 
+public sealed record SwitchStatementSyntax(
+    SyntaxToken SwitchKeyword,
+    ExpressionSyntax Expression,
+    ImmutableArray<SwitchSectionSyntax> Sections) : StatementSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.SwitchStatement;
+}
+
+public sealed record SwitchSectionSyntax(
+    SyntaxToken Label,
+    ExpressionSyntax? Value,
+    ImmutableArray<StatementSyntax> Statements) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.SwitchSection;
+}
+
 public sealed record BlockStatementSyntax(
     SyntaxToken OpenBraceToken,
     ImmutableArray<StatementSyntax> Statements,

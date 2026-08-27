@@ -5,6 +5,8 @@ namespace Xenon.Compiler.Semantics.Symbols;
 
 public sealed class FunctionSymbol : Symbol
 {
+    public bool HasStackArrays { get; internal set; }
+
     internal FunctionSymbol(
         string name,
         NamespaceSymbol containingNamespace,
@@ -19,6 +21,7 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
         FunctionKind = FunctionKind.Ordinary;
+        IsReadonly = declaration.IsReadonly;
     }
 
     internal FunctionSymbol(
@@ -258,8 +261,8 @@ public abstract class VariableSymbol : Symbol
 
 public sealed class ParameterSymbol : VariableSymbol
 {
-    internal ParameterSymbol(string name, TypeSymbol type, int ordinal)
-        : base(name, SymbolKind.Parameter, type)
+    internal ParameterSymbol(string name, TypeSymbol type, int ordinal, bool isReadonly = false)
+        : base(name, SymbolKind.Parameter, type, isReadonly)
     {
         Ordinal = ordinal;
     }
@@ -275,4 +278,5 @@ public sealed class LocalVariableSymbol : VariableSymbol
     }
 
     public ArrayStorageKind ArrayStorage { get; internal set; }
+    internal Binding.BoundExpression? ConstantValue { get; set; }
 }
