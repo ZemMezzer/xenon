@@ -1117,7 +1117,8 @@ public sealed class LlvmIrGenerator
             BoundIndexExpression index => EmitIndex(index),
             BoundStructConstructionExpression construction => EmitStructConstruction(
                 construction.StructType,
-                construction.Arguments),
+                construction.Arguments,
+                construction.IsDefaultInitialization),
             BoundConstructorCallExpression constructor => EmitConstructorCall(constructor),
             BoundBaseLifecycleCallExpression lifecycle => EmitLifecycleCall(lifecycle.Function, _thisValue, lifecycle.Arguments, initializeVTable: false),
             BoundArrayCreationExpression array => EmitArrayCreation(array),
@@ -1400,11 +1401,14 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitStructConstruction(
             StructTypeSymbol structType,
-            ImmutableArray<BoundExpression> arguments)
+            ImmutableArray<BoundExpression> arguments,
+            bool defaultInitialize = false)
         {
             if (structType.AllInstanceFields.Any(field => field.Initializer is not null))
             {
                 LLVMValueRef address = _builder.BuildAlloca(_mapType(structType), $"{structType.Name}.init.tmp");
+                if (defaultInitialize)
+                    _builder.BuildStore(LLVMValueRef.CreateConstNull(_mapType(structType)), address);
                 if (structType.HasVirtualDispatch && _virtualTables.TryGetValue(structType, out LlvmVTable initializedVTable))
                 {
                     LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(structType), address, 0, "vtable.address");
@@ -1426,7 +1430,9 @@ public sealed class LlvmIrGenerator
                 return _builder.BuildLoad2(_mapType(structType), address, $"{structType.Name}.value");
             }
 
-            LLVMValueRef value = _mapType(structType).Poison;
+            LLVMValueRef value = defaultInitialize
+                ? LLVMValueRef.CreateConstNull(_mapType(structType))
+                : _mapType(structType).Poison;
             if (structType.HasVirtualDispatch && _virtualTables.TryGetValue(structType, out LlvmVTable vtable))
             {
                 value = _builder.BuildInsertValue(value, vtable.Value, 0, "vtable.init");
@@ -1633,7 +1639,7 @@ public sealed class LlvmIrGenerator
 
             if (expression.IsPositionalInitialization)
             {
-                LLVMValueRef value = EmitStructConstruction(expression.StructType, expression.Arguments);
+                LLVMValueRef value = EmitStructConstruction(expression.StructType, expression.Arguments, expression.IsDefaultInitialization);
                 _builder.BuildStore(value, address);
             }
             else

@@ -62,6 +62,34 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_ReadonlyExternContractDoesNotChangeNativeAbi()
+    {
+        const string source = """
+            namespace Example;
+            extern int abs(int value);
+            extern void Process(int* output, readonly int* input);
+            int Main()
+            {
+                int input = -42;
+                int output = 0;
+                Process(&output, &input);
+                return abs(output);
+            }
+            """;
+        Compilation ordinary = CreateCompilation(source);
+        Compilation qualified = CreateCompilation(source
+            .Replace("int abs", "int readonly abs", StringComparison.Ordinal)
+            .Replace("void Process", "void readonly Process", StringComparison.Ordinal));
+        Assert.Empty(ordinary.Diagnostics);
+        Assert.Empty(qualified.Diagnostics);
+        string ordinaryIr = new LlvmIrGenerator().Generate(ordinary, "abi");
+        string qualifiedIr = new LlvmIrGenerator().Generate(qualified, "abi");
+        Assert.Equal(ordinaryIr, qualifiedIr);
+        Assert.Contains("declare i32 @abs(i32)", qualifiedIr, StringComparison.Ordinal);
+        Assert.Contains("declare void @Process(ptr, ptr)", qualifiedIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_RejectsCompilationWithSemanticErrors()
     {
         Compilation compilation = CreateCompilation("""

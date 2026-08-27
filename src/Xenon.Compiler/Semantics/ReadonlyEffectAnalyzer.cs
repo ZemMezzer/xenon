@@ -10,86 +10,48 @@ namespace Xenon.Compiler.Semantics;
 // Readonly is an effect contract, independent of pointer/reference qualifiers.
 // Track the storage reachable through values so copying a hidden pointer, taking
 // its address, or storing it in a local aggregate cannot grant mutation rights.
-// The points-to graph is monotone and flow-insensitive: joins include every
-// possible origin, including loop back-edges and writes through local aliases.
-internal sealed class ReadonlyEffectAnalyzer(
+// Exact locations use strong updates. Control-flow joins and summary locations
+// retain all possible origins, including loop back-edges and ambiguous aliases.
+internal sealed partial class ReadonlyEffectAnalyzer(
     FunctionSymbol function,
     DiagnosticBag diagnostics,
     IReadOnlyDictionary<BoundExpression, TextLocation> locations,
-    TextLocation fallbackLocation)
+    TextLocation fallbackLocation,
+    IReadOnlyDictionary<FunctionSymbol, BoundBlockStatement> bodies,
+    ImmutableArray<StructTypeSymbol> types)
 {
     private readonly object _hidden = new();
     private readonly object _external = new();
-    private readonly Dictionary<object, HashSet<object>> _memory = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<object, object> _roots = new(ReferenceEqualityComparer.Instance);
+    private MemoryState _memory = new();
+    private readonly HashSet<object> _summaryLocations = new(ReferenceEqualityComparer.Instance);
+    // Intern each (parent location, field symbol) so aliases share the same
+    // field path, while siblings and fields in separate value copies do not.
+    private readonly Dictionary<object, Dictionary<FieldSymbol, object>> _fields = new(ReferenceEqualityComparer.Instance);
+    private readonly EvaluationContext _rootContext = new();
+    private EvaluationContext _context = null!;
+    private readonly Dictionary<object, UncertainLocation> _uncertainLocations = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<FunctionSymbol> _activeFunctions = [];
     private readonly HashSet<(TextLocation Location, string Message)> _reported = [];
     private readonly HashSet<StructTypeSymbol> _initializing = [];
     private object? _initializerReceiver;
-    private bool _changed;
-    private bool _reportErrors;
     private TextLocation _location = fallbackLocation;
 
     public void Analyze(BoundBlockStatement body)
     {
+        _context = _rootContext;
+        _context.Receiver.Add(_hidden);
         foreach (ParameterSymbol parameter in function.Parameters)
         {
             if (ContainsAccess(parameter.Type))
-                Store([Root(parameter)], [IsMutableParameter(parameter.Type) ? _external : _hidden]);
+                StoreValue([Root(parameter)], [IsMutableParameter(parameter.Type) ? _external : _hidden], parameter.Type);
         }
 
-        do
+        Flow result = Visit(body);
+        if (result.Return is { } returnedState && _context.ReturnSite is { } site)
         {
-            _changed = false;
-            Visit(body);
-        } while (_changed);
-
-        // Report only after alias information has reached a fixed point.
-        _reportErrors = true;
-        Visit(body);
-    }
-
-    private void Visit(BoundStatement statement)
-    {
-        switch (statement)
-        {
-            case BoundBlockStatement block:
-                foreach (BoundStatement child in block.Statements) Visit(child);
-                break;
-            case BoundVariableDeclarationStatement declaration:
-                if (declaration.Initializer is { } initializer)
-                    Store([Root(declaration.Variable)], Evaluate(initializer));
-                break;
-            case BoundExpressionStatement expression:
-                Evaluate(expression.Expression);
-                break;
-            case BoundReturnStatement { Expression: { } expression }:
-                HashSet<object> returned = Evaluate(expression);
-                if (ExposesWritableAccess(function.ReturnType) && HasHiddenAccess(returned, function.ReturnType))
-                    Report(expression, "cannot return a mutable capability obtained from hidden state");
-                break;
-            case BoundIfStatement conditional:
-                Evaluate(conditional.Condition);
-                Visit(conditional.ThenStatement);
-                if (conditional.ElseStatement is { } alternative) Visit(alternative);
-                break;
-            case BoundWhileStatement loop:
-                Evaluate(loop.Condition);
-                Visit(loop.Body);
-                break;
-            case BoundForStatement loop:
-                if (loop.Initializer is { } init) Visit(init);
-                if (loop.Condition is { } condition) Evaluate(condition);
-                Visit(loop.Body);
-                if (loop.Increment is { } increment) Evaluate(increment);
-                break;
-            case BoundSwitchStatement selection:
-                Evaluate(selection.Expression);
-                foreach (BoundSwitchSection section in selection.Sections) Visit(section.Body);
-                break;
-            case BoundReturnStatement or BoundBreakStatement or BoundContinueStatement:
-                break;
-            default:
-                throw new InvalidOperationException($"Missing readonly effect analysis for '{statement.Kind}'.");
+            _memory = returnedState;
+            if (HasHiddenAccess(_context.Returned, function.ReturnType))
+                Report(site, "cannot return a mutable capability obtained from hidden state");
         }
     }
 
@@ -112,11 +74,10 @@ internal sealed class ReadonlyEffectAnalyzer(
             case BoundVariableExpression variable:
                 return Read([Root(variable.Variable)], variable.Type);
             case BoundThisExpression:
-                return [_initializerReceiver ?? _hidden];
+                return _initializerReceiver is { } receiver ? [receiver] : new(_context.Receiver);
             case BoundStaticFieldExpression field:
                 return ContainsAccess(field.Type) ? [_hidden] : [];
             case BoundMemberAccessExpression member:
-                Evaluate(member.Receiver);
                 return Read(Address(member), member.Type);
             case BoundReferenceConversionExpression conversion:
                 return conversion.Source is BoundThisExpression
@@ -129,82 +90,114 @@ internal sealed class ReadonlyEffectAnalyzer(
                 return Evaluate(cast.Expression);
             case BoundUnaryExpression unary:
             {
-                HashSet<object> operand = Evaluate(unary.Operand);
                 if (unary.OperatorKind == SyntaxKind.AmpersandToken) return Address(unary.Operand);
-                if (unary.OperatorKind == SyntaxKind.StarToken) return Read(operand, unary.Type);
                 if (unary.OperatorKind is SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken)
-                    CheckWrite(Address(unary.Operand), unary);
+                {
+                    HashSet<object> address = Address(unary.Operand);
+                    CheckWrite(address, unary);
+                    HashSet<object> value = Read(address, unary.Type);
+                    if (unary.Type is PointerTypeSymbol)
+                    {
+                        value = Uncertain(value);
+                        StoreValue(address, value, unary.Type);
+                    }
+                    return value;
+                }
+                HashSet<object> operand = Evaluate(unary.Operand);
+                if (unary.OperatorKind == SyntaxKind.StarToken) return Read(operand, unary.Type);
                 return ContainsAccess(unary.Type) ? operand : [];
             }
             case BoundBinaryExpression binary:
             {
                 HashSet<object> left = Evaluate(binary.Left);
+                if (binary.OperatorKind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken)
+                {
+                    bool? known = BooleanConstant(binary.Left);
+                    bool skip = binary.OperatorKind == SyntaxKind.AmpersandAmpersandToken ? known == false : known == true;
+                    if (skip) return [];
+                    MemoryState skipped = _memory.Copy();
+                    Evaluate(binary.Right);
+                    if (known is null) _memory = Join(skipped, _memory)!;
+                    return [];
+                }
                 left.UnionWith(Evaluate(binary.Right));
-                return ContainsAccess(binary.Type) ? left : [];
+                return binary.Type is PointerTypeSymbol ? Uncertain(left) : ContainsAccess(binary.Type) ? left : [];
             }
             case BoundAssignmentExpression assignment:
             {
+                // Match lowering: evaluate the RHS before the target address.
+                HashSet<object> value = Capture(Evaluate(assignment.Expression), assignment.Expression.Type, assignment);
                 HashSet<object> target = Address(assignment.Target);
-                HashSet<object> value = Evaluate(assignment.Expression);
                 if (assignment.OperatorKind != SyntaxKind.EqualsToken)
-                    value.UnionWith(Evaluate(assignment.Target));
+                {
+                    value.UnionWith(Read(target, assignment.Target.Type));
+                    if (assignment.Target.Type is PointerTypeSymbol) value = Uncertain(value);
+                }
                 CheckWrite(target, assignment);
                 if (target.Contains(_external) && ExposesWritableAccess(assignment.Target.Type) && HasHiddenAccess(value, assignment.Target.Type))
                     Report(assignment, "cannot store a mutable capability obtained from hidden state through an output parameter");
-                if (ContainsAccess(assignment.Target.Type)) Store(target, value);
+                StoreValue(target, value, assignment.Target.Type);
                 return value;
             }
             case BoundIndexExpression index:
-                foreach (BoundExpression argument in index.Indices) Evaluate(argument);
-                return Read(Evaluate(index.Receiver), index.Type);
+                return Read(Address(index), index.Type);
             case BoundArrayMetadataExpression metadata:
                 Evaluate(metadata.Receiver);
                 if (metadata.Dimension is { } dimension) Evaluate(dimension);
                 return [];
             case BoundCallExpression call:
-                return Call(call.Function, call.Arguments, call);
+                return IsAccessor(call.Function) && !call.Function.IsReadonly
+                    ? ContextualDispatch(call.Function, call.Arguments, [], call)
+                    : Call(call.Function, call.Arguments, call);
             case BoundMethodCallExpression call:
-                Evaluate(call.Receiver);
-                return Call(call.Method, call.Arguments, call);
+                return AccessorOrMethodCall(call.Method, call.Arguments, call.Receiver, call.IsPointerAccess, call);
             case BoundInterfaceMethodCallExpression call:
-                Evaluate(call.Receiver);
-                return Call(call.Method, call.Arguments, call);
+                return AccessorOrMethodCall(call.Method, call.Arguments, call.Receiver, call.IsPointerAccess, call);
             case BoundPropertySetExpression set:
-                Evaluate(set.Receiver);
-                return Call(set.Property.Setter!, [set.Value], set);
+                return AccessorOrMethodCall(set.Property.Setter!, [set.Value], set.Receiver, set.IsPointerAccess, set);
             case BoundInterfacePropertySetExpression set:
-                Evaluate(set.Receiver);
-                return Call(set.Property.Setter!, [set.Value], set);
+                return AccessorOrMethodCall(set.Property.Setter!, [set.Value], set.Receiver, set.IsPointerAccess, set);
             case BoundIndexerSetExpression set:
-                Evaluate(set.Receiver);
-                return Call(set.Indexer.Setter!, set.Arguments.Add(set.Value), set);
+                return AccessorOrMethodCall(set.Indexer.Setter!, set.Arguments.Add(set.Value), set.Receiver, false, set);
             case BoundInterfaceIndexerSetExpression set:
-                Evaluate(set.Receiver);
-                return Call(set.Indexer.Setter!, set.Arguments.Add(set.Value), set);
+                return AccessorOrMethodCall(set.Indexer.Setter!, set.Arguments.Add(set.Value), set.Receiver, false, set);
             case BoundCompoundAccessorAssignmentExpression set:
-                Evaluate(set.Receiver);
-                Call(set.Getter, set.Arguments, set);
-                return Call(set.Setter, set.Arguments.Add(set.Value), set);
+            {
+                HashSet<object> targetReceiver = set.IsPointerAccess ? Evaluate(set.Receiver) : Address(set.Receiver);
+                HashSet<object>[] arguments = EvaluateArguments(set.Arguments);
+                HashSet<object> value = InvokeMember(set.Getter, arguments, targetReceiver, set);
+                value.UnionWith(Evaluate(set.Value));
+                return InvokeMember(set.Setter, [.. arguments, value], targetReceiver, set);
+            }
             case BoundConstructorCallExpression construction:
-                return Call(construction.Constructor, construction.Arguments, construction);
+                ResetConstruction(construction, construction.Type);
+                ContextualCall(construction.Constructor, construction.Arguments, [Root(construction)], construction);
+                return Read([Root(construction)], construction.Type);
             case BoundBaseLifecycleCallExpression call:
-                return Call(call.Function, call.Arguments, call);
+                return ContextualCall(call.Function, call.Arguments, _context.Receiver, call);
             case BoundStructConstructionExpression construction:
                 Initialize(construction.StructType, construction.Arguments, construction);
                 return Read([Root(construction)], construction.Type);
             case BoundNewExpression allocation:
+                ResetConstruction(allocation, allocation.StructType);
                 if (allocation.Constructor is { } constructor)
-                    Call(constructor, allocation.Arguments, allocation);
+                    ContextualCall(constructor, allocation.Arguments, [Root(allocation)], allocation);
                 else
                     Initialize(allocation.StructType, allocation.Arguments, allocation);
                 return [Root(allocation)];
             case BoundArrayCreationExpression allocation:
                 foreach (BoundExpression length in allocation.Dimensions) Evaluate(length);
+                _summaryLocations.Add(Root(allocation));
                 if (allocation.ElementType is StructTypeSymbol element)
                 {
                     Initialize(element, [], allocation);
                     if (allocation.Storage == ArrayStorageKind.Stack && element.FindDestructor() is { } destructor)
-                        CheckCall(destructor, allocation);
+                    {
+                        object root = Root(allocation);
+                        _memory.Allocations.Add(root);
+                        if (_cleanupScopes.TryPeek(out var cleanups) && !cleanups.Any(item => ReferenceEquals(item.Root, root)))
+                            cleanups.Add(new(root, destructor, allocation));
+                    }
                 }
                 return [Root(allocation)];
             case BoundFreeExpression free:
@@ -213,7 +206,11 @@ internal sealed class ReadonlyEffectAnalyzer(
                 CheckWrite(pointer, free);
                 if (free.Pointer.Type is PointerTypeSymbol { IsReadonly: true })
                     Report(free, "cannot free memory through a readonly pointer");
-                if (free.Destructor is { } destructor) CheckCall(destructor, free);
+                if (free.Destructor is { } destructor)
+                {
+                    if (free.Pointer.Type is ArrayTypeSymbol) DestroyElements(destructor, pointer, free);
+                    else ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), pointer, free);
+                }
                 return [];
             }
             default:
@@ -225,6 +222,8 @@ internal sealed class ReadonlyEffectAnalyzer(
     {
         switch (expression)
         {
+            case BoundThisExpression:
+                return Evaluate(expression);
             case BoundVariableExpression variable:
                 return [Root(variable.Variable)];
             case BoundStaticFieldExpression:
@@ -234,47 +233,189 @@ internal sealed class ReadonlyEffectAnalyzer(
             case BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } pointer:
                 return Evaluate(pointer.Operand);
             case BoundMemberAccessExpression member:
-                return member.IsPointerAccess ? Evaluate(member.Receiver) : Address(member.Receiver);
+                return Project(member.IsPointerAccess ? Evaluate(member.Receiver) : Address(member.Receiver), member.Field);
             case BoundIndexExpression index:
+            {
+                HashSet<object> receiver = Evaluate(index.Receiver);
                 foreach (BoundExpression argument in index.Indices) Evaluate(argument);
-                return Evaluate(index.Receiver);
+                return Uncertain(receiver);
+            }
             default:
                 // A reference may bind to a materialized struct/interface value.
-                Store([Root(expression)], Evaluate(expression));
+                StoreValue([Root(expression)], Evaluate(expression), expression.Type);
                 return [Root(expression)];
         }
     }
 
     private HashSet<object> Call(FunctionSymbol callee, ImmutableArray<BoundExpression> arguments, BoundExpression site)
+        => Call(callee, EvaluateArguments(arguments), site);
+
+    private HashSet<object>[] EvaluateArguments(ImmutableArray<BoundExpression> arguments) =>
+        arguments.Select(argument => Capture(Evaluate(argument), argument.Type, argument)).ToArray();
+
+    private HashSet<object> Call(FunctionSymbol callee, HashSet<object>[] arguments, BoundExpression site)
     {
         CheckCall(callee, site);
-        var mutableArguments = new List<HashSet<object>>();
+        _summaryLocations.Add(Root(site));
+        var mutableArguments = new List<(HashSet<object> Storage, TypeSymbol Type)>();
         HashSet<object> available = [Root(site)]; // A readonly callee may allocate fresh storage.
         for (int index = 0; index < arguments.Length; index++)
         {
-            HashSet<object> argument = Evaluate(arguments[index]);
+            HashSet<object> argument = arguments[index];
             if (index >= callee.Parameters.Length || !IsMutableParameter(callee.Parameters[index].Type)) continue;
             if (HasHiddenAccess(argument, callee.Parameters[index].Type))
                 Report(site, $"cannot pass a mutable capability obtained from hidden state to parameter '{callee.Parameters[index].Name}' of '{callee.Name}'");
             available.UnionWith(argument);
-            mutableArguments.Add(argument);
+            TypeSymbol elementType = callee.Parameters[index].Type switch
+            {
+                PointerTypeSymbol pointer => pointer.ElementType,
+                ReferenceTypeSymbol reference => reference.ElementType,
+                _ => throw new InvalidOperationException("Expected mutable pointer/reference parameter."),
+            };
+            CollectReachableStorage(argument, elementType, available, []);
+            mutableArguments.Add((argument, elementType));
         }
 
         // Calls can store explicit input capabilities or freshly allocated values
         // through mutable outputs. Preserve those aliases for subsequent loads.
-        foreach (HashSet<object> argument in mutableArguments) Store(argument, available);
+        foreach (var argument in mutableArguments) StoreUnknown(argument.Storage, available, argument.Type, []);
         Store([Root(site)], available);
         if (!ContainsAccess(callee.ReturnType)) return [];
+        if (callee.ReturnType is StructTypeSymbol)
+        {
+            StoreUnknown([Root(site)], available, callee.ReturnType, []);
+            return [Root(site)];
+        }
         // A returned pointer/reference may alias any explicit input, not just
         // fresh storage. Writes through that result must reach the original roots.
         return available;
     }
 
+    private HashSet<object> AccessorOrMethodCall(FunctionSymbol callee,
+        ImmutableArray<BoundExpression> arguments, BoundExpression receiver, bool pointerAccess, BoundExpression site)
+    {
+        HashSet<object> storage = pointerAccess ? Evaluate(receiver) : Address(receiver);
+        return InvokeMember(callee, EvaluateArguments(arguments), storage, site);
+    }
+
+    private HashSet<object> InvokeMember(FunctionSymbol callee, HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site) =>
+        IsAccessor(callee) && !callee.IsReadonly
+            ? ContextualDispatch(callee, arguments, receiver, site)
+            : Call(callee, arguments, site);
+
+    private static bool IsAccessor(FunctionSymbol callee) =>
+        callee.ContainingProperty is not null || callee.ContainingIndexer is not null ||
+        callee.ContainingInterfaceProperty is not null || callee.ContainingInterfaceIndexer is not null;
+
+    private HashSet<object> ContextualDispatch(FunctionSymbol callee,
+        ImmutableArray<BoundExpression> arguments, HashSet<object> receiver, BoundExpression site)
+        => ContextualDispatch(callee, EvaluateArguments(arguments), receiver, site);
+
+    private HashSet<object> ContextualDispatch(FunctionSymbol callee,
+        HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site)
+    {
+        if (callee.FunctionKind == FunctionKind.Destructor) CheckWrite(receiver, site);
+        var targets = new HashSet<FunctionSymbol>();
+        if (callee.ContainingInterface is not null)
+        {
+            foreach (StructTypeSymbol type in types)
+                if (!type.IsAbstract && type.Implements(callee.ContainingInterface) &&
+                    type.FindInterfaceImplementation(callee) is { } implementation)
+                    targets.Add(implementation);
+        }
+        else if (callee.VTableSlot is int slot && callee.ContainingType is { } declaringType)
+        {
+            foreach (StructTypeSymbol type in types)
+            {
+                if (type.IsAbstract || !IsDerivedFrom(type, declaringType) || slot >= type.VirtualMethods.Length) continue;
+                targets.Add(type.VirtualMethods[slot]);
+            }
+        }
+        else targets.Add(callee);
+
+        if (targets.Count == 0)
+            Report(site, $"cannot verify effects of member '{callee.Name}' without an implementation");
+        HashSet<object> result = [];
+        MemoryState entry = _memory.Copy();
+        MemoryState? exit = null;
+        foreach (FunctionSymbol target in targets)
+        {
+            _memory = entry.Copy();
+            result.UnionWith(ContextualCall(target, arguments, receiver, site));
+            exit = Join(exit, _memory);
+        }
+        _memory = exit ?? entry;
+        return result;
+    }
+
+    private HashSet<object> ContextualCall(FunctionSymbol callee,
+        ImmutableArray<BoundExpression> arguments, HashSet<object> receiver, BoundExpression site)
+        => ContextualCall(callee, EvaluateArguments(arguments), receiver, site);
+
+    private HashSet<object> ContextualCall(FunctionSymbol callee,
+        HashSet<object>[] values, HashSet<object> receiver, BoundExpression site)
+    {
+        // Lifecycle members and accessors are checked with the actual receiver
+        // and arguments, without inventing a readonly declaration for the member.
+        if (!bodies.TryGetValue(callee, out BoundBlockStatement? body))
+        {
+            Report(site, $"cannot verify effects of member '{callee.Name}' without a body");
+            return [_hidden];
+        }
+        if (_activeFunctions.Contains(callee))
+            return RecursiveCall(callee, values, receiver, site);
+        if (!_context.Calls.TryGetValue(callee, out var sites))
+            _context.Calls.Add(callee, sites = new(ReferenceEqualityComparer.Instance));
+        if (!sites.TryGetValue(site, out EvaluationContext? context))
+            sites.Add(site, context = new());
+        _activeFunctions.Add(callee);
+        context.Receiver.Clear();
+        context.Receiver.UnionWith(receiver);
+        context.Returned.Clear();
+        context.ReturnSite = null;
+        EvaluationContext previous = _context;
+        object? initializerReceiver = _initializerReceiver;
+        _context = context;
+        _initializerReceiver = null;
+        try
+        {
+            for (int index = 0; index < Math.Min(values.Length, callee.Parameters.Length); index++)
+                StoreValue([Root(callee.Parameters[index])], values[index], callee.Parameters[index].Type);
+            Flow flow = Visit(body);
+            _memory = Join(flow.Next, flow.Return) ?? _memory;
+            return new(context.Returned);
+        }
+        finally
+        {
+            _context = previous;
+            _initializerReceiver = initializerReceiver;
+            _activeFunctions.Remove(callee);
+        }
+    }
+
+    private static bool IsDerivedFrom(StructTypeSymbol type, StructTypeSymbol candidate)
+    {
+        for (StructTypeSymbol? current = type; current is not null; current = current.BaseType)
+            if (ReferenceEquals(current, candidate)) return true;
+        return false;
+    }
+
+    private sealed class EvaluationContext
+    {
+        public HashSet<object> Receiver { get; } = [];
+        public HashSet<object> Returned { get; } = [];
+        public BoundExpression? ReturnSite { get; set; }
+        public Dictionary<object, object> Roots { get; } = new(ReferenceEqualityComparer.Instance);
+        public Dictionary<object, object> Snapshots { get; } = new(ReferenceEqualityComparer.Instance);
+        public Dictionary<FunctionSymbol, Dictionary<BoundExpression, EvaluationContext>> Calls { get; } = [];
+    }
+
     private void Initialize(StructTypeSymbol type, ImmutableArray<BoundExpression> arguments, BoundExpression site)
     {
+        ResetConstruction(site, type);
         if (!_initializing.Add(type))
         {
-            Store([Root(site)], [_hidden]);
+            StoreUnknown([Root(site)], [_hidden], type, []);
             return;
         }
         object? previous = _initializerReceiver;
@@ -285,14 +426,23 @@ internal sealed class ReadonlyEffectAnalyzer(
             foreach (FieldSymbol field in type.AllInstanceFields)
             {
                 if (field.Initializer is { } initializer)
-                    Store([Root(site)], Evaluate(initializer));
+                    StoreValue(Project([Root(site)], field), Evaluate(initializer), field.Type);
             }
-            foreach (BoundExpression argument in arguments) Store([Root(site)], Evaluate(argument));
         }
         finally
         {
             _initializerReceiver = previous;
             _initializing.Remove(type);
+        }
+        // Positional arguments belong to the caller, not the object being built.
+        for (int index = 0; index < arguments.Length; index++)
+        {
+            HashSet<object> value = Evaluate(arguments[index]);
+            if (index < type.AllInstanceFields.Length)
+            {
+                FieldSymbol field = type.AllInstanceFields[index];
+                StoreValue(Project([Root(site)], field), value, field.Type);
+            }
         }
     }
 
@@ -300,31 +450,191 @@ internal sealed class ReadonlyEffectAnalyzer(
     {
         HashSet<object> result = new(ReferenceEqualityComparer.Instance);
         if (!ContainsAccess(type)) return result;
-        foreach (object origin in storage)
+        // Aggregate values retain their field shape. StoreValue performs the
+        // field-by-field copy; pointer/reference reads still load capabilities.
+        if (type is StructTypeSymbol) return new(storage, ReferenceEqualityComparer.Instance);
+        foreach (object location in storage)
         {
+            object origin = Unwrap(location);
             if (ReferenceEquals(origin, _hidden) || ReferenceEquals(origin, _external)) result.Add(origin);
             else if (_memory.TryGetValue(origin, out HashSet<object>? contents)) result.UnionWith(contents);
         }
         return result;
     }
 
+    private HashSet<object> Project(IEnumerable<object> storage, FieldSymbol field)
+    {
+        HashSet<object> result = new(ReferenceEqualityComparer.Instance);
+        foreach (object parent in storage)
+        {
+            if (parent is UncertainLocation uncertain)
+            {
+                result.UnionWith(Uncertain(Project([uncertain.Origin], field)));
+                continue;
+            }
+            // Unknown external objects keep their receiver provenance. Local
+            // objects, including local aliases, have distinct storage per field.
+            if (ReferenceEquals(parent, _hidden) || ReferenceEquals(parent, _external))
+            {
+                result.Add(parent);
+                continue;
+            }
+            if (!_fields.TryGetValue(parent, out var fields))
+                _fields.Add(parent, fields = []);
+            if (!fields.TryGetValue(field, out object? location))
+            {
+                // A legal by-value field path cannot repeat the same field
+                // symbol (that would require an infinite struct layout). Coarse
+                // call summaries can form such recursive aliases; widen those
+                // paths to the earlier location to keep the fixed point finite.
+                for (object current = parent; current is FieldLocation ancestor; current = ancestor.Parent)
+                {
+                    if (!ReferenceEquals(ancestor.Field, field)) continue;
+                    location = ancestor;
+                    _summaryLocations.Add(location);
+                    break;
+                }
+                fields.Add(field, location ??= new FieldLocation(parent, field));
+            }
+            result.Add(location);
+        }
+        return result;
+    }
+
+    private sealed class FieldLocation(object parent, FieldSymbol field)
+    {
+        public object Parent { get; } = parent;
+        public FieldSymbol Field { get; } = field;
+    }
+
+    private void StoreValue(HashSet<object> storage, HashSet<object> values, TypeSymbol type) =>
+        StoreValue(storage, values, type, []);
+
+    private void StoreValue(HashSet<object> storage, HashSet<object> values, TypeSymbol type, HashSet<TypeSymbol> path)
+    {
+        if (!ContainsAccess(type)) return;
+        if (type is not StructTypeSymbol structure)
+        {
+            Store(storage, values, strong: true);
+            return;
+        }
+        // Invalid recursive value layouts already have a binding diagnostic.
+        if (!path.Add(type)) return;
+        foreach (FieldSymbol field in structure.AllInstanceFields)
+        {
+            if (!ContainsAccess(field.Type)) continue;
+            StoreValue(Project(storage, field), Read(Project(values, field), field.Type), field.Type, path);
+        }
+        path.Remove(type);
+    }
+
+    private void StoreUnknown(HashSet<object> storage, HashSet<object> capabilities, TypeSymbol type, HashSet<TypeSymbol> path)
+    {
+        if (!ContainsAccess(type)) return;
+        if (type is not StructTypeSymbol structure)
+        {
+            Store(storage, capabilities);
+            return;
+        }
+        if (!path.Add(type)) return;
+        foreach (FieldSymbol field in structure.AllInstanceFields)
+            StoreUnknown(Project(storage, field), capabilities, field.Type, path);
+        path.Remove(type);
+    }
+
+    private void CollectReachableStorage(HashSet<object> storage, TypeSymbol type, HashSet<object> result,
+        HashSet<(object, TypeSymbol)> visited, HashSet<TypeSymbol>? valuePath = null)
+    {
+        HashSet<object> local = [];
+        foreach (object origin in storage)
+        {
+            // A valid readonly callee cannot export hidden writable access.
+            if (ReferenceEquals(origin, _hidden)) continue;
+            result.Add(origin);
+            if (!ReferenceEquals(origin, _external) && visited.Add((origin, type))) local.Add(origin);
+        }
+        if (local.Count == 0) return;
+        if (type is StructTypeSymbol structure)
+        {
+            valuePath ??= [];
+            if (!valuePath.Add(type)) return;
+            foreach (FieldSymbol field in structure.AllInstanceFields)
+                CollectReachableStorage(Project(local, field), field.Type, result, visited, valuePath);
+            valuePath.Remove(type);
+        }
+        else if (ElementType(type) is { } element)
+            CollectReachableStorage(Read(local, type), element, result, visited);
+    }
+
+    private static TypeSymbol? ElementType(TypeSymbol type) => type switch
+    {
+        PointerTypeSymbol pointer => pointer.ElementType,
+        ReferenceTypeSymbol reference => reference.ElementType,
+        ArrayTypeSymbol array => array.ElementType,
+        _ => null,
+    };
+
     private object Root(object identity)
     {
-        if (!_roots.TryGetValue(identity, out object? root))
-            _roots.Add(identity, root = new object());
+        if (!_context.Roots.TryGetValue(identity, out object? root))
+            _context.Roots.Add(identity, root = new object());
         return root;
     }
 
-    private void Store(IEnumerable<object> storage, HashSet<object> values)
+    private void Store(IEnumerable<object> storage, HashSet<object> values, bool strong = false)
     {
-        if (values.Count == 0) return;
-        foreach (object origin in storage)
+        object[] destinations = storage.ToArray();
+        bool replace = strong && destinations.Length == 1 && IsExact(destinations[0]);
+        foreach (object destination in destinations)
         {
+            object origin = Unwrap(destination);
             if (ReferenceEquals(origin, _hidden) || ReferenceEquals(origin, _external)) continue;
+            if (replace)
+            {
+                _memory[origin] = new(values, ReferenceEqualityComparer.Instance);
+                continue;
+            }
+            if (values.Count == 0) continue;
             if (!_memory.TryGetValue(origin, out HashSet<object>? contents))
                 _memory.Add(origin, contents = new(ReferenceEqualityComparer.Instance));
-            foreach (object value in values) _changed |= contents.Add(value);
+            contents.UnionWith(values);
         }
+    }
+
+    private bool IsExact(object location)
+    {
+        if (location is UncertainLocation) return false;
+        if (ReferenceEquals(location, _hidden) || ReferenceEquals(location, _external)) return false;
+        for (object current = location; ;)
+        {
+            if (_summaryLocations.Contains(current)) return false;
+            if (current is not FieldLocation field) return true;
+            current = field.Parent;
+        }
+    }
+
+    private sealed class UncertainLocation(object origin)
+    {
+        public object Origin { get; } = origin;
+    }
+
+    private static object Unwrap(object location) => location is UncertainLocation uncertain ? uncertain.Origin : location;
+
+    private HashSet<object> Uncertain(IEnumerable<object> origins)
+    {
+        HashSet<object> result = [];
+        foreach (object origin in origins)
+        {
+            if (origin is UncertainLocation || ReferenceEquals(origin, _hidden) || ReferenceEquals(origin, _external))
+                result.Add(origin);
+            else
+            {
+                if (!_uncertainLocations.TryGetValue(origin, out var uncertain))
+                    _uncertainLocations.Add(origin, uncertain = new(origin));
+                result.Add(uncertain);
+            }
+        }
+        return result;
     }
 
     private void CheckWrite(HashSet<object> storage, BoundExpression site)
@@ -333,28 +643,45 @@ internal sealed class ReadonlyEffectAnalyzer(
             Report(site, "cannot mutate hidden state; use an explicitly mutable pointer/reference parameter");
     }
 
-    private bool HasHiddenAccess(HashSet<object> origins, TypeSymbol type)
+    private bool HasHiddenAccess(HashSet<object> origins, TypeSymbol type) =>
+        HasHiddenAccess(origins, type, [], []);
+
+    private bool HasHiddenAccess(HashSet<object> origins, TypeSymbol type,
+        HashSet<(object, TypeSymbol)> visited, HashSet<TypeSymbol> valuePath)
     {
+        if (!ExposesWritableAccess(type)) return false;
         if (origins.Contains(_hidden)) return true;
-        // Passing &localPointer must not launder the hidden pointer stored in it.
-        // Scalar pointees cannot carry another capability, even when their
-        // containing aggregate shares an abstract storage root with other fields.
-        bool followContents = type switch
+        HashSet<object> fresh = new(origins.Where(origin => visited.Add((origin, type))));
+        if (fresh.Count == 0) return false;
+        if (type is StructTypeSymbol structure)
         {
-            PointerTypeSymbol pointer => ExposesWritableAccess(pointer.ElementType),
-            ReferenceTypeSymbol reference => ExposesWritableAccess(reference.ElementType),
-            ArrayTypeSymbol array => ExposesWritableAccess(array.ElementType),
-            StructTypeSymbol or InterfaceTypeSymbol => true,
-            _ => false,
-        };
-        if (!followContents) return false;
-        var pending = new Stack<object>(origins);
-        var visited = new HashSet<object>();
-        while (pending.TryPop(out object? origin))
+            if (!valuePath.Add(type)) return false;
+            foreach (FieldSymbol field in structure.AllInstanceFields)
+            {
+                if (HasHiddenAccess(Read(Project(fresh, field), field.Type), field.Type, visited, valuePath))
+                    return true;
+            }
+            valuePath.Remove(type);
+            return false;
+        }
+        if (ElementType(type) is { } element)
+            return HasHiddenAccess(Read(fresh, element), element, visited, []);
+        // Interface values erase the concrete field layout. Follow the known
+        // graph conservatively rather than losing capabilities in that view.
+        if (type is InterfaceTypeSymbol)
         {
-            if (ReferenceEquals(origin, _hidden)) return true;
-            if (!visited.Add(origin) || !_memory.TryGetValue(origin, out HashSet<object>? contents)) continue;
-            foreach (object value in contents) pending.Push(value);
+            var pending = new Stack<object>(fresh);
+            var seen = new HashSet<object>();
+            while (pending.TryPop(out object? origin))
+            {
+                origin = Unwrap(origin);
+                if (ReferenceEquals(origin, _hidden)) return true;
+                if (!seen.Add(origin)) continue;
+                if (_memory.TryGetValue(origin, out var contents))
+                    foreach (object value in contents) pending.Push(value);
+                if (_fields.TryGetValue(origin, out var fields))
+                    foreach (object value in fields.Values) pending.Push(value);
+            }
         }
         return false;
     }
@@ -367,7 +694,6 @@ internal sealed class ReadonlyEffectAnalyzer(
 
     private void Report(BoundExpression site, string message)
     {
-        if (!_reportErrors) return;
         TextLocation location = locations.TryGetValue(site, out TextLocation source) ? source : _location;
         string diagnostic = $"readonly function '{function.Name}' {message}";
         if (_reported.Add((location, diagnostic))) diagnostics.Report(location, diagnostic);

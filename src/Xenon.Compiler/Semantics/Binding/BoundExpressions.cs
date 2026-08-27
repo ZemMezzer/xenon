@@ -179,6 +179,7 @@ public sealed record BoundStructConstructionExpression(
     ImmutableArray<BoundExpression> Arguments) : BoundExpression(StructType)
 {
     public override BoundKind Kind => BoundKind.StructConstructionExpression;
+    public bool IsDefaultInitialization { get; init; }
 }
 
 public sealed record BoundConstructorCallExpression(
@@ -222,6 +223,7 @@ public sealed record BoundNewExpression(
     PointerTypeSymbol PointerType) : BoundExpression(PointerType)
 {
     public override BoundKind Kind => BoundKind.NewExpression;
+    public bool IsDefaultInitialization { get; init; }
 }
 
 public sealed record BoundFreeExpression(
