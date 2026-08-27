@@ -12,11 +12,15 @@ internal sealed partial class ReadonlyEffectAnalyzer
     {
         public MemoryState() : base(ReferenceEqualityComparer.Instance) { }
         public HashSet<object> Allocations { get; } = new(ReferenceEqualityComparer.Instance);
+        // Empty sets mean unknown runtime type. Missing entries are storage not
+        // yet initialized on this flow path (important at loop/branch joins).
+        public Dictionary<object, HashSet<StructTypeSymbol>> ReceiverTypes { get; } = new(ReferenceEqualityComparer.Instance);
         public MemoryState Copy()
         {
             var copy = new MemoryState();
             foreach (var entry in this) copy.Add(entry.Key, new(entry.Value, ReferenceEqualityComparer.Instance));
             copy.Allocations.UnionWith(Allocations);
+            foreach (var entry in ReceiverTypes) copy.ReceiverTypes.Add(entry.Key, new(entry.Value));
             return copy;
         }
     }
@@ -31,7 +35,14 @@ internal sealed partial class ReadonlyEffectAnalyzer
         foreach (MemoryState? state in states)
         {
             if (state is null) continue;
-            result ??= new();
+            if (result is null) { result = state.Copy(); continue; }
+            foreach (var entry in state.ReceiverTypes)
+            {
+                if (!result.ReceiverTypes.TryGetValue(entry.Key, out var receiverTypes))
+                    result.ReceiverTypes.Add(entry.Key, new(entry.Value));
+                else if (entry.Value.Count == 0) receiverTypes.Clear();
+                else if (receiverTypes.Count != 0) receiverTypes.UnionWith(entry.Value);
+            }
             result.Allocations.UnionWith(state.Allocations);
             foreach (var entry in state)
             {
@@ -44,6 +55,8 @@ internal sealed partial class ReadonlyEffectAnalyzer
 
     private static bool SameState(MemoryState left, MemoryState right) =>
         left.Allocations.SetEquals(right.Allocations) &&
+        left.ReceiverTypes.Count == right.ReceiverTypes.Count &&
+        left.ReceiverTypes.All(entry => right.ReceiverTypes.TryGetValue(entry.Key, out var types) && entry.Value.SetEquals(types)) &&
         left.All(entry => right.TryGetValue(entry.Key, out var values) ? entry.Value.SetEquals(values) : entry.Value.Count == 0) &&
         right.All(entry => left.TryGetValue(entry.Key, out var values) ? entry.Value.SetEquals(values) : entry.Value.Count == 0);
 
@@ -191,6 +204,13 @@ internal sealed partial class ReadonlyEffectAnalyzer
 
     private void DestroyElements(FunctionSymbol destructor, HashSet<object> receiver, BoundExpression site)
     {
+        if (receiver.Count == 1 && _arrays.TryGetValue(receiver.Single(), out var array))
+        {
+            for (int index = array.Elements.Length - 1; index >= 0; index--)
+                ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), [array.Elements[index]], site);
+            return;
+        }
+        receiver = ArrayElements(receiver);
         // Array length and indices are summarized: cleanup can run zero or more
         // times, so it must not strongly erase an origin in some other object.
         MemoryState entry = _memory.Copy();
@@ -215,6 +235,7 @@ internal sealed partial class ReadonlyEffectAnalyzer
         if (type is not StructTypeSymbol) return value;
         if (!_context.Snapshots.TryGetValue(identity, out object? root))
             _context.Snapshots.Add(identity, root = new object());
+        if (_context.IsRecursive) _summaryLocations.Add(root);
         StoreValue([root], value, type);
         return [root];
     }
@@ -223,40 +244,56 @@ internal sealed partial class ReadonlyEffectAnalyzer
     {
         object root = Root(site);
         if (_loopDepth != 0 || site is BoundArrayCreationExpression) _summaryLocations.Add(root);
+        bool initialized = _memory.ReceiverTypes.TryGetValue(root, out var previous);
+        HashSet<StructTypeSymbol>? previousTypes = previous is null ? null : new(previous);
         StoreValue([root], [], type);
+        if (type is StructTypeSymbol structure)
+        {
+            if (!initialized || IsExact(root)) _memory.ReceiverTypes[root] = [structure];
+            else if (previousTypes is { Count: > 0 })
+            {
+                previousTypes.Add(structure);
+                _memory.ReceiverTypes[root] = previousTypes;
+            }
+        }
+    }
+
+    private sealed class RecursiveFrame(EvaluationContext context, MemoryState input,
+        HashSet<object> receiver, HashSet<object>[] arguments)
+    {
+        public EvaluationContext Context { get; } = context;
+        public MemoryState Input { get; set; } = input;
+        public MemoryState? Output { get; set; }
+        public HashSet<object> Receiver { get; } = receiver;
+        public HashSet<object>[] Arguments { get; } = arguments;
+        public HashSet<object> Returned { get; } = [];
+        public bool Recursive { get; set; }
+        public bool ArgumentsChanged { get; set; }
     }
 
     private HashSet<object> RecursiveCall(FunctionSymbol callee, HashSet<object>[] arguments,
         HashSet<object> receiver, BoundExpression site)
     {
-        // Recursive lifecycle/accessor calls have a conservative weak summary.
-        // Do not assume a recursive call overwrites a particular local field.
-        _summaryLocations.Add(Root(site));
-        HashSet<object> available = new(receiver) { Root(site) };
-        for (int index = 0; index < Math.Min(arguments.Length, callee.Parameters.Length); index++)
-            if (IsMutableParameter(callee.Parameters[index].Type)) available.UnionWith(arguments[index]);
-        if (callee.ContainingType is { } type)
+        RecursiveFrame frame = _activeCalls[callee];
+        frame.Recursive = true;
+        frame.ArgumentsChanged |= !receiver.IsSubsetOf(frame.Receiver);
+        frame.Receiver.UnionWith(receiver);
+        for (int index = 0; index < Math.Min(arguments.Length, frame.Arguments.Length); index++)
         {
-            if (HasHiddenAccess(receiver, BuiltinTypes.PointerTo(type)))
-                Report(site, "cannot verify recursive member effects through a hidden mutable capability");
-            CollectReachableStorage(receiver, type, available, []);
-            StoreUnknown(receiver, available, type, []);
+            frame.ArgumentsChanged |= !arguments[index].IsSubsetOf(frame.Arguments[index]);
+            frame.Arguments[index].UnionWith(arguments[index]);
         }
-        for (int index = 0; index < Math.Min(arguments.Length, callee.Parameters.Length); index++)
+        // Reuse the ancestor context instead of constructing an infinite call
+        // tree. Re-evaluate its body until both recursive inputs and effects
+        // converge; fields and by-value argument shapes remain independent.
+        frame.Input = Join(frame.Input, _memory)!;
+        foreach (RecursiveFrame active in _activeCalls.Values)
         {
-            TypeSymbol parameterType = callee.Parameters[index].Type;
-            if (!IsMutableParameter(parameterType)) continue;
-            if (HasHiddenAccess(arguments[index], parameterType))
-                Report(site, "cannot pass a mutable capability obtained from hidden state to a recursive member");
-            available.UnionWith(arguments[index]);
-            StoreUnknown(arguments[index], available, ElementType(parameterType)!, []);
+            active.Context.IsRecursive = true;
+            _summaryLocations.UnionWith(active.Context.Roots.Values);
+            _summaryLocations.UnionWith(active.Context.Snapshots.Values);
         }
-        if (!ContainsAccess(callee.ReturnType)) return [];
-        if (callee.ReturnType is StructTypeSymbol)
-        {
-            StoreUnknown([Root(site)], available, callee.ReturnType, []);
-            return [Root(site)];
-        }
-        return available;
+        _memory = Join(_memory, frame.Output)!;
+        return new(frame.Returned);
     }
 }

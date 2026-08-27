@@ -1596,6 +1596,266 @@ public sealed class NativeLinkerTests
     [Theory]
     [InlineData(0)]
     [InlineData(2)]
+    public void Linker_RunsReadonlyContextualInstanceMethods(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Value = 7; }
+            struct Counter
+            {
+                public int Value;
+                public void Increment() { Add(1); }
+                void Add(int amount) { Value += amount; }
+            }
+            struct Writer
+            {
+                public int* Hidden;
+                public int* Output;
+                public void Rewrite(int* output)
+                {
+                    Output = &State.Value;
+                    Output = output;
+                    Write();
+                }
+                void Write() { *Output = 40; }
+            }
+            void readonly Run(Counter& counter) { counter.Increment(); }
+            void readonly RunPointer(Counter* counter) { counter->Increment(); }
+            int readonly Local()
+            {
+                Counter counter = Counter();
+                Writer writer = Writer { &State.Value, &State.Value };
+                writer.Rewrite(&counter.Value);
+                counter.Increment();
+                return counter.Value;
+            }
+            int Main()
+            {
+                Counter counter = Counter();
+                Run(counter);
+                if (counter.Value != 1) return 1;
+                RunPointer(&counter);
+                if (counter.Value != 2) return 2;
+                int result = Local();
+                if (State.Value != 7) return 3;
+                return result + 1;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyContextualDisposeAndDispatch(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            interface IDisposable { void Dispose(); }
+            struct Payload
+            {
+                public int* Trace;
+                public ~Payload() { *Trace += 1; }
+            }
+            struct Resource : IDisposable
+            {
+                public Payload* Memory;
+                public void Dispose() { Release(); }
+                void Release() { free(Memory); Memory = null; }
+            }
+            struct Base
+            {
+                public int* Trace;
+                public virtual void Increment() { *Trace += 1; }
+            }
+            struct Derived : Base
+            {
+                public override void Increment() { *Trace += 40; }
+            }
+            void readonly Destroy(Resource& resource) { resource.Dispose(); }
+            void readonly DestroyInterface(IDisposable& resource) { resource.Dispose(); }
+            void readonly Increment(Base& value) { value.Increment(); }
+            int readonly Run()
+            {
+                int trace = 0;
+                Resource local = Resource { new Payload { &trace } };
+                Destroy(local);
+                if (local.Memory != null || trace != 1) return 1;
+                local.Memory = new Payload { &trace };
+                local.Dispose();
+                if (local.Memory != null || trace != 2) return 2;
+                local.Memory = new Payload { &trace };
+                DestroyInterface(local);
+                if (local.Memory != null || trace != 3) return 3;
+                Derived derived = Derived();
+                derived.Trace = &trace;
+                Increment(derived);
+                return trace - 1;
+            }
+            int Main() { return Run(); }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyConcreteVirtualAndInterfaceDispatch(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Value = 7; }
+            interface IReset { void Reset(); }
+            struct Base : IReset
+            {
+                public int Value;
+                public virtual void Reset() { Value = 10; }
+            }
+            struct Good : Base { public override void Reset() { Value = 20; } }
+            struct Evil : Base { public override void Reset() { State.Value++; } }
+            int readonly Run()
+            {
+                Base value = Base();
+                Base& reference = value;
+                reference.Reset();
+                if (value.Value != 10) return 1;
+                Base copy = value;
+                copy.Reset();
+                if (copy.Value != 10) return 2;
+                Good good = Good();
+                Base* pointer = &good;
+                pointer->Reset();
+                if (good.Value != 20) return 3;
+                IReset directView = good;
+                IReset& viewAlias = directView;
+                viewAlias.Reset();
+                if (good.Value != 20) return 4;
+                Good derived = Good();
+                Base* basePointer = &derived;
+                IReset baseView = *basePointer;
+                baseView.Reset();
+                // Conversion through Base preserves the runtime implementation.
+                if (derived.Value != 20 || State.Value != 7) return 5;
+                Base* heap = new Base();
+                heap->Reset();
+                int result = heap->Value;
+                free(heap);
+                if (result != 10) return 6;
+                return 42;
+            }
+            int Main()
+            {
+                int result = Run();
+                Evil evil = Evil();
+                Base* pointer = &evil;
+                IReset view = *pointer;
+                view.Reset();
+                if (State.Value != 8) return 7;
+                return result;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsRuntimeInterfaceMapsAndAccessors(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            interface IValue
+            {
+                int Read();
+                int Current { get; set; }
+                int this[int index] { get; set; }
+            }
+            struct Base : IValue
+            {
+                public int Value;
+                public virtual int Read() { return Value; }
+                public virtual int Current { get { return Value; } set { Value = value; } }
+                public virtual int this[int index] { get { return Value; } set { Value = value; } }
+            }
+            struct Derived : Base
+            {
+                public override int Read() { return Value + 1; }
+                public override int Current { get { return Value + 2; } set { Value = value + 3; } }
+                public override int this[int index] { get { return Value + index; } set { Value = value + index; } }
+            }
+            interface IPlain { int Read(); }
+            struct Plain : IPlain { public int Read() { return 1; } }
+            struct PlainDerived : Plain { public int Read() { return 42; } }
+            struct Nested { public Plain Value; }
+            struct Globals { public static Nested Value; }
+            int ViaReference(Base& value) { IValue view = value; return view.Read(); }
+            int Main()
+            {
+                Derived derived = Derived();
+                Base* pointer = &derived;
+                IValue view = *pointer;
+                view.Current = 7;
+                if (derived.Value != 10 || view.Current != 12 || ViaReference(derived) != 11) return 1;
+                view[2] = 20;
+                if (derived.Value != 22 || view[3] != 25) return 2;
+                PlainDerived plain = PlainDerived();
+                Plain* plainPointer = &plain;
+                IPlain plainView = *plainPointer;
+                if (plainView.Read() != 42) return 3;
+                Nested nested = Nested();
+                IPlain nestedView = nested.Value;
+                if (nestedView.Read() != 1) return 4;
+                IPlain staticView = Globals.Value.Value;
+                if (staticView.Read() != 1) return 5;
+                Nested[] values = Nested[1];
+                IPlain arrayView = values[0].Value;
+                return plainView.Read() + arrayView.Read() - 1;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyLoopArrayAndRecursivePrecision(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Value = 7; }
+            struct Base { public int Value; public virtual void Reset() { Value = 1; } }
+            struct Evil : Base { public override void Reset() { State.Value++; } }
+            struct Data { public int* Pointer; }
+            struct Recursive
+            {
+                public int* Hidden;
+                public int* Output;
+                public void A(int n) { if (n > 0) B(n - 1); *Output += 1; }
+                void B(int n) { C(n); }
+                void C(int n) { A(n); }
+            }
+            int readonly Run()
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    Base value = Base();
+                    value.Reset();
+                    if (value.Value != 1) return 1;
+                }
+                int output = 0;
+                Data[] heap = new Data[2];
+                heap[0].Pointer = &State.Value;
+                heap[1].Pointer = &output;
+                *heap[1].Pointer = 10;
+                free(heap);
+                if (output != 10 || State.Value != 7) return 2;
+                Data[,] stack = Data[2, 2];
+                stack[0, 1].Pointer = &State.Value;
+                stack[1, 0].Pointer = &output;
+                *stack[1, 0].Pointer = 39;
+                Recursive recursive = Recursive { &State.Value, &output };
+                recursive.A(2);
+                if (State.Value != 7) return 3;
+                return output;
+            }
+            int Main() { return Run(); }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
     public void Linker_RunsReadonlyFlowStrongUpdates(int optimization)
     {
         Assert.Equal(42, RunIterationFourProgram("""

@@ -815,6 +815,8 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "inherited-interface-implementation");
 
         Assert.Contains("@Example.Derived.IValue.__itable = internal global [1 x ptr] [ptr @Example.Base.Get]", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("interface.runtime.map = load ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@Example.Derived.__vtable = internal global [1 x ptr] [ptr @Example.Derived.__imap]", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]

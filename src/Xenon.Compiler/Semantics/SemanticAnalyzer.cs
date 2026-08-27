@@ -1211,7 +1211,7 @@ internal sealed class SemanticAnalyzer
     {
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
-            if (declaration.Methods.Any(method => method.IsVirtual || method.IsOverride || method.IsAbstract) ||
+            if (!type.Interfaces.IsEmpty || declaration.Methods.Any(method => method.IsVirtual || method.IsOverride || method.IsAbstract) ||
                 declaration.Properties.Any(property => property.IsVirtual || property.IsOverride || property.IsAbstract) ||
                 declaration.Indexers.Any(indexer => indexer.IsVirtual || indexer.IsOverride || indexer.IsAbstract) ||
                 declaration.Destructor?.IsVirtual == true)
