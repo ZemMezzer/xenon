@@ -2360,8 +2360,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("void Effectful() {} void readonly Test() { Effectful(); }", "cannot call non-readonly")]
     [InlineData("extern void External(); void readonly Test() { External(); }", "cannot call non-readonly")]
     [InlineData("struct Value { public static void Effectful() {} } void readonly Test() { Value.Effectful(); }", "cannot call non-readonly")]
-    [InlineData("struct Value { public void Effectful() {} } void readonly Test(Value& value) { value.Effectful(); }", "cannot call non-readonly")]
-    [InlineData("interface IValue { void Effectful(); } void readonly Test(IValue& value) { value.Effectful(); }", "cannot call non-readonly")]
+    [InlineData("interface IValue { void Effectful(); } void readonly Test(IValue& value) { value.Effectful(); }", "cannot verify effects of member 'Effectful' without an implementation")]
     [InlineData("struct Value { public int Current { set { State.Value = value; } } } void readonly Test(Value& value) { value.Current = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Value { public ~Value() { State.Value++; } } void readonly Test(Value* value) { free(value); }", "cannot mutate hidden state")]
     [InlineData("struct Value { public ~Value() { State.Value++; } } void readonly Test() { Value[] values = Value[1]; }", "cannot mutate hidden state")]
@@ -2399,13 +2398,210 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Item { public int** Slot; public int* Value; public ~Item() { *Slot = Value; } } void readonly Test(int* output) { int* ptr = output; { Item[] items = Item[1]; items[0].Slot = &ptr; items[0].Value = State.Pointer; } *ptr = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Item { public int** Slot; public ~Item() { **Slot += 1; } } void readonly Test(bool stop, int* output) { int* ptr = State.Pointer; { Item[] items = Item[1]; items[0].Slot = &ptr; if (stop) return; ptr = output; } }", "cannot mutate hidden state")]
     [InlineData("struct Value { public int* Pointer; public int* Current { get { int* result = Pointer; Pointer = State.Pointer; return result; } } } void readonly Test(int* output) { Value value = Value { output }; *value.Current = 10; *value.Pointer = 10; }", "cannot mutate hidden state")]
-    [InlineData("struct Base { public int* Pointer; public virtual int* Current { set { Pointer = value; } } } struct Derived : Base { public override int* Current { set { } } } void readonly Test(int* output) { Base value = Base { State.Pointer }; value.Current = output; *value.Pointer = 10; }", "cannot mutate hidden state")]
+    [InlineData("struct Base { public int* Pointer; public virtual int* Current { set { Pointer = value; } } } struct Derived : Base { public override int* Current { set { } } } void readonly Test(bool choose, Base& other, int* output) { Base value = Base { State.Pointer }; Base* alias = &value; if (choose) alias = &other; alias->Current = output; *value.Pointer = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Item { public int** Slot; public ~Item() { **Slot += 1; } } void readonly Test(int* output) { int* ptr = output; while (true) { Item[] items = Item[1]; items[0].Slot = &ptr; ptr = State.Pointer; break; } }", "cannot mutate hidden state")]
     public void Analyzer_RejectsHiddenEffectsInReadonlyFunctions(string source, string expected)
     {
         Compilation compilation = CreateReadonlyEffectCompilation(source);
         Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains(expected, StringComparison.Ordinal));
     }
+
+    [Theory]
+    [InlineData("struct Data { public void Reset() {} } void readonly Test(Data& data) { data.Reset(); }")]
+    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; } } void readonly Test() { Data data = Data(); data.Reset(); }")]
+    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; } } void readonly Test(Data& data) { data.Reset(); }")]
+    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; } } void readonly Test(Data* data) { data->Reset(); }")]
+    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; } public void readonly Test(Data& other) { other.Reset(); Data local = Data(); local.Reset(); } }")]
+    [InlineData("struct Data { public int Value; public void Reset() { Clear(); } void Clear() { Value = 0; } } void readonly Test(Data& data) { data.Reset(); }")]
+    [InlineData("struct Data { public int* Hidden; public int* Output; public void Write() { *Output = 10; } } void readonly Test(int* output) { Data data = Data { State.Pointer, output }; data.Write(); }")]
+    [InlineData("struct Data { public int* Hidden; public int* Output; public void Write() { *Output = 10; } } void readonly Test(int* output) { Data data = Data { State.Pointer, output }; Data copy = data; Data* alias = &copy; alias->Write(); }")]
+    [InlineData("struct Data { public int* Pointer; public void Write(int* output) { Pointer = State.Pointer; Pointer = output; *Pointer = 10; } } void readonly Test(int* output) { Data data = Data(); data.Write(output); *data.Pointer = 20; }")]
+    [InlineData("struct Data { public int* Pointer; public void Set(int* output) { Pointer = output; } public void Write() { *Pointer = 10; } } void readonly Test(int* output) { Data data = Data { State.Pointer }; data.Set(output); data.Write(); }")]
+    [InlineData("struct Data { public void Write(int* output) { *output = 10; } } void readonly Test(int* output) { Data data = Data(); data.Write(output); }")]
+    [InlineData("struct Data { public void Read(readonly int* input) { int value = *input; } } void readonly Test() { Data data = Data(); data.Read(State.Pointer); }")]
+    [InlineData("struct Data { public int* Pointer; public int* Get() { return Pointer; } } void readonly Test(int* output) { Data data = Data { output }; *data.Get() = 10; }")]
+    [InlineData("struct Resource { public int* Memory; public void Dispose() { free(Memory); Memory = null; } } void readonly Test(Resource& resource) { resource.Dispose(); }")]
+    [InlineData("struct Resource { public int* Memory; public void Dispose() { free(Memory); Memory = null; } } void readonly Test(int* memory) { Resource resource = Resource { memory }; resource.Dispose(); }")]
+    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; } public Data() { Reset(); } public ~Data() { Reset(); } public int Current { set { Reset(); Value = value; } } } void readonly Test() { Data* data = new Data(); data->Current = 10; free(data); }")]
+    [InlineData("struct Data { public int Value; public void Recurse(int count) { if (count > 0) Recurse(count - 1); Value++; } } void readonly Test(Data& data) { data.Recurse(2); }")]
+    [InlineData("struct Data { public int Value; public void First(int count) { if (count > 0) Second(count - 1); Value++; } void Second(int count) { First(count); } } void readonly Test(Data& data) { data.First(2); }")]
+    [InlineData("struct Base { public int Value; public virtual void Reset() { Value = 0; } } struct Data : Base { public override void Reset() { Value = 1; } } void readonly Test(Base& data) { data.Reset(); }")]
+    [InlineData("interface IData { void Reset(); } struct Data : IData { public int Value; public void Reset() { Value = 0; } } void readonly Test(IData& data) { data.Reset(); }")]
+    public void Analyzer_ContextuallyAllowsMutableInstanceMethods(string source)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation(source);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("struct Data { public void Reset() {} } struct Globals { public static Data* Item; } void readonly Test() { Globals.Item->Reset(); }", "cannot call mutable instance method 'Reset' on hidden state")]
+    [InlineData("struct Data { public void Reset() {} } struct Globals { public static Data Item; } void readonly Test() { Globals.Item.Reset(); }", "readonly")]
+    [InlineData("struct Data { public void Reset() {} } struct Owner { public Data Item; public void readonly Test() { Item.Reset(); } }", "readonly")]
+    [InlineData("struct Data { public void Reset() {} } void readonly Test(readonly Data& data) { data.Reset(); }", "readonly")]
+    [InlineData("struct Data { public void Reset() {} } void readonly Test(readonly Data* data) { data->Reset(); }", "readonly")]
+    [InlineData("struct Data { public void Reset() {} public void readonly Test() { Reset(); } }", "cannot call mutable method")]
+    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; State.Value++; } } void readonly Test(Data& data) { data.Reset(); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public void Reset() { Clear(); } void Clear() { State.Value++; } } void readonly Test(Data& data) { data.Reset(); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Hidden; public int* Output; public void Write() { *Hidden = 10; } } void readonly Test(int* output) { Data data = Data { State.Pointer, output }; data.Write(); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Pointer; public void Write() { *Pointer = 10; } } void readonly Test() { Data data = Data { &State.Value }; data.Write(); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public readonly int* Pointer; public void Write() { *Pointer = 10; } } void readonly Test(Data& data) { data.Write(); }", "must be writable")]
+    [InlineData("struct Data { public void Write(int* output) { *output = 10; } } void readonly Test() { Data data = Data(); data.Write(State.Pointer); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public void Write(readonly int* output) { *output = 10; } } void readonly Test(int* output) { Data data = Data(); data.Write(output); }", "must be writable")]
+    [InlineData("struct Data { public int* Pointer; public void Write(bool condition, int* output) { Pointer = State.Pointer; if (condition) Pointer = output; *Pointer = 10; } } void readonly Test(bool condition, int* output) { Data data = Data(); data.Write(condition, output); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Pointer; public void Set(int* output) { Pointer = output; } } void readonly Test(int* output) { Data data = Data { output }; data.Set(State.Pointer); *data.Pointer = 10; }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Pointer; public int* Get() { return Pointer; } } void readonly Test() { Data data = Data { State.Pointer }; *data.Get() = 10; }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Pointer; public void Set() { Pointer = State.Pointer; } } void readonly Test(Data& data) { data.Set(); }", "cannot store a mutable capability")]
+    [InlineData("struct Resource { public int* Memory; public void Dispose() { free(Memory); Memory = null; } } void readonly Test() { Resource resource = Resource { State.Pointer }; resource.Dispose(); }", "cannot mutate hidden state")]
+    [InlineData("struct Resource { public void Dispose() {} } struct Globals { public static Resource* Item; } void readonly Test() { Globals.Item->Dispose(); }", "cannot call mutable instance method 'Dispose' on hidden state")]
+    [InlineData("void Helper() {} struct Data { public void Reset() { Helper(); } } void readonly Test(Data& data) { data.Reset(); }", "cannot call non-readonly")]
+    [InlineData("struct Data { static void Helper() {} public void Reset() { Data.Helper(); } } void readonly Test(Data& data) { data.Reset(); }", "cannot call non-readonly")]
+    [InlineData("struct Data { public void Recurse(int count) { if (count > 0) Recurse(count - 1); State.Value++; } } void readonly Test(Data& data) { data.Recurse(2); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Pointer; public void Recurse(int count) { if (count > 0) Recurse(count - 1); *Pointer = 10; } } void readonly Test() { Data data = Data { State.Pointer }; data.Recurse(2); }", "hidden")]
+    [InlineData("struct Base { public virtual void Reset() {} } struct Data : Base { public override void Reset() { State.Value++; } } void readonly Test(Base& data) { data.Reset(); }", "cannot mutate hidden state")]
+    [InlineData("interface IData { void Reset(); } struct Safe : IData { public void Reset() {} } struct Unsafe : IData { public void Reset() { State.Value++; } } void readonly Test(IData& data) { data.Reset(); }", "cannot mutate hidden state")]
+    [InlineData("struct Arg { public int* Pointer; } struct Data { public void Recurse(Arg argument, int count) { if (count > 0) Recurse(Arg { State.Pointer }, count - 1); *argument.Pointer = 10; } } void readonly Test(int* output) { Data data = Data(); data.Recurse(Arg { output }, 2); }", "hidden")]
+    [InlineData("struct Data { public void Recurse(int[] argument, int count) { if (count > 0) Recurse(State.Values, count - 1); argument[0] = 10; } } void readonly Test() { Data data = Data(); int[] values = new int[1]; data.Recurse(values, 2); free(values); }", "hidden")]
+    public void Analyzer_ContextuallyRejectsMutableInstanceMethodHiddenEffects(string source, string expected)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation(source);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains(expected, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Holder value = Holder { State.Pointer }; Consume(value);")]
+    [InlineData("Holder value = Holder { State.Pointer }; Holder& alias = value; Consume(alias);")]
+    [InlineData("Holder value = Holder { State.Pointer }; Holder* alias = &value; Consume(*alias);")]
+    [InlineData("Holder value = Holder { State.Pointer }; Holder copy = value; Consume(copy);")]
+    [InlineData("Outer outer = Outer { Holder { State.Pointer } }; Consume(outer.Inner);")]
+    [InlineData("Holder value = Holder { State.Pointer }; ConsumePointer(&value);")]
+    [InlineData("int* pointer = State.Pointer; ConsumeSlot(pointer);")]
+    public void Analyzer_ReferenceArgumentsPreserveHiddenReferentFields(string body)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation("""
+            struct Holder { public int* Pointer; }
+            struct Outer { public Holder Inner; }
+            void readonly Consume(Holder& value) { *value.Pointer = 10; }
+            void readonly ConsumePointer(Holder* value) { *value->Pointer = 10; }
+            void readonly ConsumeSlot(int*& value) { *value = 10; }
+            void readonly Test() {
+            """ + body + "}");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("cannot pass a mutable capability", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Data[] values = new Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; *values[1].Pointer = 10; free(values);")]
+    [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; Data[] alias = values; *alias[1].Pointer = 10;")]
+    [InlineData("Data[,] values = Data[2, 2]; values[0, 1].Pointer = State.Pointer; values[1, 0].Pointer = output; *values[1, 0].Pointer = 10;")]
+    [InlineData("int*[] values = new int*[2]; values[0] = State.Pointer; values[1] = output; *values[1] = 10; free(values);")]
+    [InlineData("Data[] values = Data[2]; values[key].Pointer = State.Pointer; values[1].Pointer = output; *values[1].Pointer = 10;")]
+    [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[0].Pointer = output; *values[0].Pointer = 10;")]
+    public void Analyzer_ReadonlyTracksSeparateArrayElements(string body)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation("struct Data { public int* Pointer; } void readonly Test(int key, int* output) {" + body + "}");
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; *values[0].Pointer = 10;")]
+    [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; *values[key].Pointer = 10;")]
+    [InlineData("Data[] values = Data[2]; values[1].Pointer = output; values[key].Pointer = State.Pointer; *values[1].Pointer = 10;")]
+    [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; Data* pointer = &values[1]; *pointer[-1].Pointer = 10;")]
+    [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; int** pointer = &values[1].Pointer; *pointer[-1] = 10;")]
+    [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; if (condition) values[0].Pointer = output; *values[0].Pointer = 10;")]
+    public void Analyzer_ReadonlyArrayAliasesRetainPossibleHiddenElements(string body)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation("struct Data { public int* Pointer; } void readonly Test(bool condition, int key, int* output) {" + body + "}");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("cannot mutate hidden state", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Data* pointer", "pointer[-1].Pointer", "&values[1]")]
+    [InlineData("Data& value", "(&value)[-1].Pointer", "values[1]")]
+    [InlineData("int** pointer", "pointer[-1]", "&values[1].Pointer")]
+    public void Analyzer_ReadonlyArrayElementArgumentsCannotHideReachableSiblings(string parameter, string target, string argument)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation("struct Data { public int* Pointer; } void readonly WriteSibling(" + parameter + ") { *" + target + " = 10; } void readonly Test(int* output) { Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; WriteSibling(" + argument + "); }");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("cannot pass a mutable capability", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("struct Data { public int* Hidden; public int* Output; public void A(int n) { if (n > 0) B(n - 1); *Output = 10; } void B(int n) { C(n); } void C(int n) { A(n); } } void readonly Test(int* output) { Data data = Data { State.Pointer, output }; data.A(3); }")]
+    [InlineData("struct Arg { public int* Hidden; public int* Output; } struct Data { public void A(Arg arg, int n) { if (n > 0) B(arg, n - 1); *arg.Output = 10; } void B(Arg arg, int n) { A(arg, n); } } void readonly Test(int* output) { Data data = Data(); data.A(Arg { State.Pointer, output }, 3); }")]
+    [InlineData("struct Data { public void A(int[] values, int n) { if (n > 0) B(values, n - 1); values[0] = 10; } void B(int[] values, int n) { A(values, n); } } void readonly Test() { Data data = Data(); int[] values = new int[2]; data.A(values, 3); free(values); }")]
+    [InlineData("interface IReset { void Reset(); } struct Base : IReset { public void Reset() {} } struct Good : Base {} struct Unrelated : IReset { public void Reset() { State.Value++; } } void readonly Test(Base& value) { IReset view = value; view.Reset(); }")]
+    public void Analyzer_ReadonlyVerifiesRecursiveEffectsAndBoundedDispatch(string source)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation(source);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("struct Arg { public int* Pointer; } struct Data { public void A(Arg arg, int n) { if (n > 0) B(Arg { State.Pointer }, n - 1); *arg.Pointer = 10; } void B(Arg arg, int n) { A(arg, n); } } void readonly Test(int* output) { Data data = Data(); data.A(Arg { output }, 3); }")]
+    [InlineData("struct Data { public int* Pointer; public void A(int n) { if (n > 0) B(n - 1); *Pointer = 10; } void B(int n) { Pointer = State.Pointer; A(n); } } void readonly Test(int* output) { Data data = Data { output }; data.A(3); }")]
+    [InlineData("struct Data { public int* Pointer; public int* A(int n) { if (n > 0) return B(n - 1); return State.Pointer; } int* B(int n) { return A(n); } } void readonly Test() { Data data = Data(); *data.A(3) = 10; }")]
+    public void Analyzer_ReadonlyRejectsHiddenEffectsAcrossRecursiveCycles(string source)
+    {
+        Compilation compilation = CreateReadonlyEffectCompilation(source);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("hidden state", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("void readonly Test() { Base value = Base(); value.Reset(); }")]
+    [InlineData("void readonly Test() { Base* value = new Base(); value->Reset(); free(value); }")]
+    [InlineData("void readonly Test() { Base value = Base(); Base& alias = value; alias.Reset(); }")]
+    [InlineData("void readonly Test() { Base value = Base(); Base* alias = &value; alias->Reset(); }")]
+    [InlineData("void readonly Test() { Base value = Base(); Base copy = value; copy.Reset(); }")]
+    [InlineData("void readonly Test() { Good value = Good(); Base* alias = &value; alias->Reset(); }")]
+    [InlineData("void readonly Test() { Base value = Base(); IReset view = value; view.Reset(); }")]
+    [InlineData("void readonly Test() { Base value = Base(); IReset view = value; IReset& alias = view; alias.Reset(); }")]
+    [InlineData("void readonly Test() { Good value = Good(); Base* alias = &value; IReset view = *alias; view.Reset(); }")]
+    [InlineData("interface IEffect { void Reset(); } struct Root : IEffect { public virtual void Reset() { State.Value++; } } struct Safe : Root { public override void Reset() {} } void readonly Test() { Safe value = Safe(); Root* pointer = &value; IEffect view = *pointer; view.Reset(); }")]
+    [InlineData("void readonly Test(bool condition) { while (condition) { Base value = Base(); value.Reset(); break; } }")]
+    [InlineData("void readonly Test(bool condition) { while (condition) { Base* value = new Base(); value->Reset(); free(value); } }")]
+    [InlineData("void readonly Test(bool condition) { while (condition) { Base value = Base(); IReset view = value; view.Reset(); } }")]
+    [InlineData("void readonly Test() { Good value = Good(); IReset view = value; Good replacement = Good(); value = replacement; view.Reset(); }")]
+    [InlineData("void readonly Test(bool condition) { Base first = Base(); Good second = Good(); IReset view = first; if (condition) view = second; view.Reset(); }")]
+    [InlineData("void readonly Test(bool condition) { Base first = Base(); Good second = Good(); Base* value = &first; if (condition) value = &second; value->Reset(); }")]
+    [InlineData("struct Wrapper { public Base Value; public Wrapper() { Value = Base(); } public void Reset() { Value.Reset(); } } void readonly Test() { Wrapper value = Wrapper(); value.Reset(); }")]
+    [InlineData("struct Wrapper { public void Reset(Base& value) { value.Reset(); } } void readonly Test() { Wrapper wrapper = Wrapper(); Base value = Base(); wrapper.Reset(value); }")]
+    [InlineData("void readonly Test(Base value) { value = Base(); value.Reset(); }")]
+    public void Analyzer_ReadonlyDispatchUsesKnownConcreteReceiver(string source)
+    {
+        Compilation compilation = CreateReadonlyDispatchCompilation(source);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("void readonly Test(Base& value) { value.Reset(); }")]
+    [InlineData("void readonly Test(IReset& value) { value.Reset(); }")]
+    [InlineData("void readonly Test(IReset value) { value.Reset(); }")]
+    [InlineData("void readonly Test() { Evil value = Evil(); Base* alias = &value; alias->Reset(); }")]
+    [InlineData("void readonly Test() { Evil value = Evil(); IReset view = value; view.Reset(); }")]
+    [InlineData("void readonly Test(bool condition) { Base safe = Base(); Evil evil = Evil(); IReset view = safe; if (condition) view = evil; view.Reset(); }")]
+    [InlineData("void readonly Test(IReset& other) { Base safe = Base(); IReset view = safe; IReset& alias = view; alias = other; view.Reset(); }")]
+    [InlineData("interface IWrite { void Write(); } struct Writer : IWrite { public int* Pointer; public void Write() { *Pointer = 10; } } void readonly Test() { Writer writer = Writer { State.Pointer }; IWrite view = writer; view.Write(); }")]
+    [InlineData("void readonly Test() { Evil value = Evil(); Base* alias = &value; IReset view = *alias; view.Reset(); }")]
+    [InlineData("void readonly Test(bool condition) { Base safe = Base(); Evil evil = Evil(); Base* value = &safe; if (condition) value = &evil; value->Reset(); }")]
+    [InlineData("void readonly Test(bool condition, Base& other) { Base value = Base(); if (condition) value = other; value.Reset(); }")]
+    [InlineData("void readonly Test(bool condition, Base& other) { Base value = Base(); while (condition) { value.Reset(); value = other; } }")]
+    [InlineData("void readonly Test(Base& other) { Base value = Base(); Base& alias = value; alias = other; value.Reset(); }")]
+    [InlineData("void readonly Touch(Base& value) { value.Value = 1; } void readonly Test() { Base value = Base(); Touch(value); value.Reset(); }")]
+    public void Analyzer_ReadonlyDispatchPreservesUnknownAndAlternativeTargets(string source)
+    {
+        Compilation compilation = CreateReadonlyDispatchCompilation(source);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("cannot mutate hidden state", StringComparison.Ordinal));
+    }
+
+    private static Compilation CreateReadonlyDispatchCompilation(string source) => CreateReadonlyEffectCompilation("""
+        interface IReset { void Reset(); }
+        struct Base : IReset
+        {
+            public int Value;
+            public virtual void Reset() { Value = 0; }
+        }
+        struct Good : Base { public override void Reset() { Value = 1; } }
+        struct Evil : Base { public override void Reset() { State.Value++; } }
+        """ + source);
 
     [Fact]
     public void Analyzer_RecordsReadonlyExternContractOnFunctionSymbol()
@@ -2470,7 +2666,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("Data data = Data(); data.Output = input;", "cannot implicitly convert")]
     [InlineData("Data data = Data(); data.Hidden = State.Pointer; data.Property = data.Hidden; *data.Property = 10;", "cannot mutate hidden state")]
     [InlineData("Data data = Data(); data.Hidden = State.Pointer; data[0] = data.Hidden; *data[0] = 10;", "cannot mutate hidden state")]
-    [InlineData("Data[] data = Data[2]; data[0].Hidden = State.Pointer; data[1].Output = output; *data[1].Hidden = 10;", "cannot mutate hidden state")]
+    [InlineData("Data[] data = Data[2]; data[0].Hidden = State.Pointer; data[1].Output = output; *data[0].Hidden = 10;", "cannot mutate hidden state")]
     public void Analyzer_FieldProvenanceDoesNotLaunderHiddenAccess(string body, string expected)
     {
         Compilation compilation = CreateFieldProvenanceCompilation(body);

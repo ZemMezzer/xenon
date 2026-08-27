@@ -30,7 +30,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private readonly EvaluationContext _rootContext = new();
     private EvaluationContext _context = null!;
     private readonly Dictionary<object, UncertainLocation> _uncertainLocations = new(ReferenceEqualityComparer.Instance);
-    private readonly HashSet<FunctionSymbol> _activeFunctions = [];
+    private readonly Dictionary<FunctionSymbol, RecursiveFrame> _activeCalls = [];
     private readonly HashSet<(TextLocation Location, string Message)> _reported = [];
     private readonly HashSet<StructTypeSymbol> _initializing = [];
     private object? _initializerReceiver;
@@ -42,7 +42,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         _context.Receiver.Add(_hidden);
         foreach (ParameterSymbol parameter in function.Parameters)
         {
-            if (ContainsAccess(parameter.Type))
+            if (ContainsAccess(parameter.Type) || parameter.Type is StructTypeSymbol)
                 StoreValue([Root(parameter)], [IsMutableParameter(parameter.Type) ? _external : _hidden], parameter.Type);
         }
 
@@ -85,7 +85,16 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             case BoundReferenceDereferenceExpression dereference:
                 return Read(Evaluate(dereference.Reference), dereference.Type);
             case BoundInterfaceConversionExpression conversion:
-                return Address(conversion.Source);
+            {
+                // The runtime object selects the interface map at conversion.
+                if (!_context.InterfaceValues.TryGetValue(conversion, out var value))
+                    _context.InterfaceValues.Add(conversion, value = new(conversion.SourceType));
+                if (_loopDepth != 0) _summaryLocations.Add(value);
+                HashSet<object> source = Address(conversion.Source);
+                StoreReceiverTypes([value], KnownReceiverTypes(source));
+                Store([value], source, strong: true);
+                return [value];
+            }
             case BoundCastExpression cast:
                 return Evaluate(cast.Expression);
             case BoundUnaryExpression unary:
@@ -164,10 +173,12 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             case BoundCompoundAccessorAssignmentExpression set:
             {
                 HashSet<object> targetReceiver = set.IsPointerAccess ? Evaluate(set.Receiver) : Address(set.Receiver);
+                HashSet<StructTypeSymbol>? interfaceTypes = null;
+                if (set.InterfaceType is { } interfaceType) targetReceiver = InterfaceReceiver(targetReceiver, interfaceType, out interfaceTypes);
                 HashSet<object>[] arguments = EvaluateArguments(set.Arguments);
-                HashSet<object> value = InvokeMember(set.Getter, arguments, targetReceiver, set);
+                HashSet<object> value = InvokeMember(set.Getter, arguments, targetReceiver, set, interfaceTypes);
                 value.UnionWith(Evaluate(set.Value));
-                return InvokeMember(set.Setter, [.. arguments, value], targetReceiver, set);
+                return InvokeMember(set.Setter, [.. arguments, value], targetReceiver, set, interfaceTypes);
             }
             case BoundConstructorCallExpression construction:
                 ResetConstruction(construction, construction.Type);
@@ -190,7 +201,11 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 _summaryLocations.Add(Root(allocation));
                 if (allocation.ElementType is StructTypeSymbol element)
                 {
-                    Initialize(element, [], allocation);
+                    // Each element runs its initializer. Allocations made by an
+                    // initializer must not be mistaken for one exact object.
+                    _loopDepth++;
+                    try { Initialize(element, [], allocation); }
+                    finally { _loopDepth--; }
                     if (allocation.Storage == ArrayStorageKind.Stack && element.FindDestructor() is { } destructor)
                     {
                         object root = Root(allocation);
@@ -199,6 +214,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                             cleanups.Add(new(root, destructor, allocation));
                     }
                 }
+                InitializeArrayElements(allocation);
                 return [Root(allocation)];
             case BoundFreeExpression free:
             {
@@ -238,7 +254,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             {
                 HashSet<object> receiver = Evaluate(index.Receiver);
                 foreach (BoundExpression argument in index.Indices) Evaluate(argument);
-                return Uncertain(receiver);
+                return index.Receiver.Type is ArrayTypeSymbol ? ArrayElements(receiver, index.Indices) : Uncertain(receiver);
             }
             default:
                 // A reference may bind to a materialized struct/interface value.
@@ -272,12 +288,14 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 ReferenceTypeSymbol reference => reference.ElementType,
                 _ => throw new InvalidOperationException("Expected mutable pointer/reference parameter."),
             };
-            CollectReachableStorage(argument, elementType, available, []);
-            mutableArguments.Add((argument, elementType));
+            HashSet<object> range = ArrayCapabilityRange(argument);
+            CollectReachableStorage(range, elementType, available, []);
+            mutableArguments.Add((range, elementType));
         }
 
         // Calls can store explicit input capabilities or freshly allocated values
         // through mutable outputs. Preserve those aliases for subsequent loads.
+        ForgetReceiverTypes(available);
         foreach (var argument in mutableArguments) StoreUnknown(argument.Storage, available, argument.Type, []);
         Store([Root(site)], available);
         if (!ContainsAccess(callee.ReturnType)) return [];
@@ -295,13 +313,28 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         ImmutableArray<BoundExpression> arguments, BoundExpression receiver, bool pointerAccess, BoundExpression site)
     {
         HashSet<object> storage = pointerAccess ? Evaluate(receiver) : Address(receiver);
-        return InvokeMember(callee, EvaluateArguments(arguments), storage, site);
+        HashSet<StructTypeSymbol>? interfaceTypes = null;
+        if (callee.ContainingInterface is { } interfaceType) storage = InterfaceReceiver(storage, interfaceType, out interfaceTypes);
+        return InvokeMember(callee, EvaluateArguments(arguments), storage, site, interfaceTypes);
     }
 
-    private HashSet<object> InvokeMember(FunctionSymbol callee, HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site) =>
-        IsAccessor(callee) && !callee.IsReadonly
-            ? ContextualDispatch(callee, arguments, receiver, site)
-            : Call(callee, arguments, site);
+    private HashSet<object> InvokeMember(FunctionSymbol callee, HashSet<object>[] arguments, HashSet<object> receiver,
+        BoundExpression site, HashSet<StructTypeSymbol>? interfaceTypes = null)
+    {
+        if (callee.IsReadonly) return Call(callee, arguments, site);
+        if (IsAccessor(callee)) return ContextualDispatch(callee, arguments, receiver, site, interfaceTypes);
+        if (callee.FunctionKind == FunctionKind.Method && !callee.IsStatic)
+        {
+            // Gate the receiver storage, not every capability in its fields.
+            // A local object may contain an unused hidden pointer alongside an
+            // explicit output. The body decides which of those fields is used.
+            // Type-level readonly receivers have already been rejected by binding.
+            if (receiver.Contains(_hidden))
+                Report(site, $"cannot call mutable instance method '{callee.Name}' on hidden state");
+            return ContextualDispatch(callee, arguments, receiver, site, interfaceTypes);
+        }
+        return Call(callee, arguments, site);
+    }
 
     private static bool IsAccessor(FunctionSymbol callee) =>
         callee.ContainingProperty is not null || callee.ContainingIndexer is not null ||
@@ -312,20 +345,22 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         => ContextualDispatch(callee, EvaluateArguments(arguments), receiver, site);
 
     private HashSet<object> ContextualDispatch(FunctionSymbol callee,
-        HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site)
+        HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site, HashSet<StructTypeSymbol>? interfaceTypes = null)
     {
         if (callee.FunctionKind == FunctionKind.Destructor) CheckWrite(receiver, site);
         var targets = new HashSet<FunctionSymbol>();
+        HashSet<StructTypeSymbol>? known = callee.ContainingInterface is null ? KnownReceiverTypes(receiver) : interfaceTypes;
+        IEnumerable<StructTypeSymbol> receiverTypes = known is not null ? known : types;
         if (callee.ContainingInterface is not null)
         {
-            foreach (StructTypeSymbol type in types)
+            foreach (StructTypeSymbol type in receiverTypes)
                 if (!type.IsAbstract && type.Implements(callee.ContainingInterface) &&
                     type.FindInterfaceImplementation(callee) is { } implementation)
                     targets.Add(implementation);
         }
         else if (callee.VTableSlot is int slot && callee.ContainingType is { } declaringType)
         {
-            foreach (StructTypeSymbol type in types)
+            foreach (StructTypeSymbol type in receiverTypes)
             {
                 if (type.IsAbstract || !IsDerivedFrom(type, declaringType) || slot >= type.VirtualMethods.Length) continue;
                 targets.Add(type.VirtualMethods[slot]);
@@ -355,41 +390,60 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private HashSet<object> ContextualCall(FunctionSymbol callee,
         HashSet<object>[] values, HashSet<object> receiver, BoundExpression site)
     {
-        // Lifecycle members and accessors are checked with the actual receiver
+        // Mutable instance methods, lifecycle members and accessors use the actual receiver
         // and arguments, without inventing a readonly declaration for the member.
         if (!bodies.TryGetValue(callee, out BoundBlockStatement? body))
         {
             Report(site, $"cannot verify effects of member '{callee.Name}' without a body");
             return [_hidden];
         }
-        if (_activeFunctions.Contains(callee))
+        if (_activeCalls.ContainsKey(callee))
             return RecursiveCall(callee, values, receiver, site);
         if (!_context.Calls.TryGetValue(callee, out var sites))
             _context.Calls.Add(callee, sites = new(ReferenceEqualityComparer.Instance));
         if (!sites.TryGetValue(site, out EvaluationContext? context))
             sites.Add(site, context = new());
-        _activeFunctions.Add(callee);
-        context.Receiver.Clear();
-        context.Receiver.UnionWith(receiver);
-        context.Returned.Clear();
-        context.ReturnSite = null;
+        var frame = new RecursiveFrame(context, _memory.Copy(), new(receiver), values.Select(value => new HashSet<object>(value)).ToArray());
+        _activeCalls.Add(callee, frame);
         EvaluationContext previous = _context;
         object? initializerReceiver = _initializerReceiver;
         _context = context;
         _initializerReceiver = null;
         try
         {
-            for (int index = 0; index < Math.Min(values.Length, callee.Parameters.Length); index++)
-                StoreValue([Root(callee.Parameters[index])], values[index], callee.Parameters[index].Type);
-            Flow flow = Visit(body);
-            _memory = Join(flow.Next, flow.Return) ?? _memory;
-            return new(context.Returned);
+            for (int iteration = 0; iteration < 128; iteration++)
+            {
+                MemoryState input = frame.Input.Copy();
+                _memory = input.Copy();
+                frame.ArgumentsChanged = false;
+                context.Receiver.Clear();
+                context.Receiver.UnionWith(frame.Receiver);
+                context.Returned.Clear();
+                context.ReturnSite = null;
+                for (int index = 0; index < Math.Min(frame.Arguments.Length, callee.Parameters.Length); index++)
+                    StoreValue([Root(callee.Parameters[index])], frame.Arguments[index], callee.Parameters[index].Type);
+                Flow flow = Visit(body);
+                _memory = Join(flow.Next, flow.Return) ?? _memory;
+                if (!frame.Recursive) return new(context.Returned);
+
+                bool newReturns = !context.Returned.IsSubsetOf(frame.Returned);
+                frame.Returned.UnionWith(context.Returned);
+                frame.Output = Join(frame.Output, _memory);
+                frame.Input = Join(frame.Input, _memory)!;
+                if (!newReturns && !frame.ArgumentsChanged && SameState(input, frame.Input))
+                {
+                    _memory = frame.Output!;
+                    return new(frame.Returned);
+                }
+            }
+            Report(site, $"cannot verify recursive effects of '{callee.Name}' within the analysis limit");
+            return [_hidden];
         }
         finally
         {
             _context = previous;
             _initializerReceiver = initializerReceiver;
-            _activeFunctions.Remove(callee);
+            _activeCalls.Remove(callee);
         }
     }
 
@@ -400,6 +454,68 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         return false;
     }
 
+    private HashSet<StructTypeSymbol>? KnownReceiverTypes(IEnumerable<object> storage)
+    {
+        HashSet<StructTypeSymbol> result = [];
+        foreach (object location in storage)
+        {
+            if (!_memory.ReceiverTypes.TryGetValue(Unwrap(location), out var known) || known.Count == 0) return null;
+            result.UnionWith(known);
+        }
+        return result.Count == 0 ? null : result;
+    }
+
+    private HashSet<object> InterfaceReceiver(HashSet<object> storage, InterfaceTypeSymbol type,
+        out HashSet<StructTypeSymbol>? sourceTypes)
+    {
+        HashSet<object> result = [];
+        HashSet<StructTypeSymbol> known = [];
+        bool unknown = false;
+        foreach (object value in Read(storage, type))
+        {
+            if (Unwrap(value) is InterfaceValue view)
+            {
+                if (KnownReceiverTypes([view]) is { } runtimeTypes) known.UnionWith(runtimeTypes);
+                else known.UnionWith(types.Where(candidate => !candidate.IsAbstract && IsDerivedFrom(candidate, view.SourceType)));
+                result.UnionWith(Read([view], type));
+            }
+            else { result.Add(value); unknown = true; }
+        }
+        sourceTypes = !unknown && known.Count != 0 ? known : null;
+        return result;
+    }
+
+    private sealed class InterfaceValue(StructTypeSymbol sourceType)
+    {
+        public StructTypeSymbol SourceType { get; } = sourceType;
+    }
+
+    private void StoreReceiverTypes(HashSet<object> storage, HashSet<StructTypeSymbol>? types)
+    {
+        foreach (object location in storage)
+        {
+            object origin = Unwrap(location);
+            if (types is null) _memory.ReceiverTypes[origin] = [];
+            else if ((storage.Count == 1 && IsExact(location)) || !_memory.ReceiverTypes.ContainsKey(origin)) _memory.ReceiverTypes[origin] = new(types);
+            else if (_memory.ReceiverTypes.TryGetValue(origin, out var previous) && previous.Count != 0) previous.UnionWith(types);
+            // A weak write cannot refine an unknown previous runtime type.
+        }
+    }
+
+    private void ForgetReceiverTypes(IEnumerable<object> storage)
+    {
+        var pending = new Stack<object>(storage);
+        HashSet<object> visited = [];
+        while (pending.TryPop(out object? location))
+        {
+            location = Unwrap(location);
+            if (!visited.Add(location)) continue;
+            if (_memory.ReceiverTypes.ContainsKey(location)) _memory.ReceiverTypes[location] = [];
+            if (_fields.TryGetValue(location, out var fields))
+                foreach (object field in fields.Values) pending.Push(field);
+        }
+    }
+
     private sealed class EvaluationContext
     {
         public HashSet<object> Receiver { get; } = [];
@@ -407,7 +523,9 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         public BoundExpression? ReturnSite { get; set; }
         public Dictionary<object, object> Roots { get; } = new(ReferenceEqualityComparer.Instance);
         public Dictionary<object, object> Snapshots { get; } = new(ReferenceEqualityComparer.Instance);
+        public Dictionary<BoundInterfaceConversionExpression, InterfaceValue> InterfaceValues { get; } = new(ReferenceEqualityComparer.Instance);
         public Dictionary<FunctionSymbol, Dictionary<BoundExpression, EvaluationContext>> Calls { get; } = [];
+        public bool IsRecursive { get; set; }
     }
 
     private void Initialize(StructTypeSymbol type, ImmutableArray<BoundExpression> arguments, BoundExpression site)
@@ -449,10 +567,10 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private HashSet<object> Read(IEnumerable<object> storage, TypeSymbol type)
     {
         HashSet<object> result = new(ReferenceEqualityComparer.Instance);
-        if (!ContainsAccess(type)) return result;
         // Aggregate values retain their field shape. StoreValue performs the
         // field-by-field copy; pointer/reference reads still load capabilities.
         if (type is StructTypeSymbol) return new(storage, ReferenceEqualityComparer.Instance);
+        if (!ContainsAccess(type)) return result;
         foreach (object location in storage)
         {
             object origin = Unwrap(location);
@@ -512,17 +630,16 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private void StoreValue(HashSet<object> storage, HashSet<object> values, TypeSymbol type, HashSet<TypeSymbol> path)
     {
-        if (!ContainsAccess(type)) return;
         if (type is not StructTypeSymbol structure)
         {
-            Store(storage, values, strong: true);
+            if (ContainsAccess(type)) Store(storage, values, strong: true);
             return;
         }
+        StoreReceiverTypes(storage, KnownReceiverTypes(values));
         // Invalid recursive value layouts already have a binding diagnostic.
         if (!path.Add(type)) return;
         foreach (FieldSymbol field in structure.AllInstanceFields)
         {
-            if (!ContainsAccess(field.Type)) continue;
             StoreValue(Project(storage, field), Read(Project(values, field), field.Type), field.Type, path);
         }
         path.Remove(type);
@@ -530,6 +647,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private void StoreUnknown(HashSet<object> storage, HashSet<object> capabilities, TypeSymbol type, HashSet<TypeSymbol> path)
     {
+        ForgetReceiverTypes(storage);
         if (!ContainsAccess(type)) return;
         if (type is not StructTypeSymbol structure)
         {
@@ -562,8 +680,22 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 CollectReachableStorage(Project(local, field), field.Type, result, visited, valuePath);
             valuePath.Remove(type);
         }
+        else if (type is ArrayTypeSymbol array)
+            CollectReachableStorage(ArrayElements(Read(local, type)), array.ElementType, result, visited);
         else if (ElementType(type) is { } element)
             CollectReachableStorage(Read(local, type), element, result, visited);
+        else if (type is InterfaceTypeSymbol)
+        {
+            foreach (object value in Read(local, type))
+            {
+                if (Unwrap(value) is InterfaceValue view)
+                {
+                    result.Add(view);
+                    CollectReachableStorage(Read([view], type), view.SourceType, result, visited);
+                }
+                else CollectReachableStorage([value], type, result, visited);
+            }
+        }
     }
 
     private static TypeSymbol? ElementType(TypeSymbol type) => type switch
@@ -578,6 +710,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     {
         if (!_context.Roots.TryGetValue(identity, out object? root))
             _context.Roots.Add(identity, root = new object());
+        if (_context.IsRecursive) _summaryLocations.Add(root);
         return root;
     }
 
@@ -608,6 +741,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         for (object current = location; ;)
         {
             if (_summaryLocations.Contains(current)) return false;
+            if (current is ArrayElement element) return !_arrays[element.Array].Repeated;
             if (current is not FieldLocation field) return true;
             current = field.Parent;
         }
@@ -625,6 +759,16 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         HashSet<object> result = [];
         foreach (object origin in origins)
         {
+            if (ArrayAliasLocations(origin) is { } locations)
+            {
+                foreach (object possible in locations)
+                {
+                    if (!_uncertainLocations.TryGetValue(possible, out var uncertain))
+                        _uncertainLocations.Add(possible, uncertain = new(possible));
+                    result.Add(uncertain);
+                }
+                continue;
+            }
             if (origin is UncertainLocation || ReferenceEquals(origin, _hidden) || ReferenceEquals(origin, _external))
                 result.Add(origin);
             else
@@ -664,8 +808,13 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             valuePath.Remove(type);
             return false;
         }
+        // Origins already address the referent/pointee storage. Read using the
+        // element type, NOT the pointer/reference type: a struct read preserves
+        // its field locations, while int*& must load the referenced int* binding.
+        if (type is ArrayTypeSymbol array)
+            return HasHiddenAccess(Read(ArrayElements(fresh), array.ElementType), array.ElementType, visited, []);
         if (ElementType(type) is { } element)
-            return HasHiddenAccess(Read(fresh, element), element, visited, []);
+            return HasHiddenAccess(Read(ArrayCapabilityRange(fresh), element), element, visited, []);
         // Interface values erase the concrete field layout. Follow the known
         // graph conservatively rather than losing capabilities in that view.
         if (type is InterfaceTypeSymbol)
