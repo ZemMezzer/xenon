@@ -4,6 +4,7 @@ using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
+using Xenon.Compiler.Text;
 
 namespace Xenon.Compiler.Semantics;
 
@@ -25,6 +26,7 @@ internal sealed class SemanticAnalyzer
     private readonly Dictionary<ConstantSymbol, (EnumTypeSymbol Type, ConstantSymbol? Previous, bool Automatic)> _enumMembers = [];
     private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body, FileSymbolScope Scope)> _functionBodies = [];
     private readonly List<BoundFunction> _synthesizedFunctions = [];
+    private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, ITargetTypeLayout? targetLayout)
     {
@@ -71,8 +73,20 @@ internal sealed class SemanticAnalyzer
         {
             var binder = new FunctionBodyBinder(symbol, scope, _diagnostics, _constants);
             functions.Add(new BoundFunction(symbol, binder.BindBody(body)));
+            foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
         }
         functions.AddRange(_synthesizedFunctions);
+
+        // Lifecycle/accessor checks need all bodies, including declarations that
+        // occur after the readonly caller and synthesized field initializers.
+        var bodies = functions.ToDictionary(bound => bound.Symbol, bound => bound.Body);
+        ImmutableArray<StructTypeSymbol> types = [.. _structSymbols.Values];
+        foreach ((FunctionSymbol symbol, BlockStatementSyntax body, _) in _functionBodies)
+        {
+            if (symbol.IsReadonly)
+                new ReadonlyEffectAnalyzer(symbol, _diagnostics, _expressionLocations,
+                    body.OpenBraceToken.Location, bodies, types).Analyze(bodies[symbol]);
+        }
 
         return new SemanticModel(_globalNamespace, functions.ToImmutable(), [.. _diagnostics], _constants.RequiresTargetLayout);
     }
@@ -102,6 +116,7 @@ internal sealed class SemanticAnalyzer
                 if (binder.BindFieldInitializer(field) is BoundExpression boundInitializer)
                     field.SetInitializer(boundInitializer);
             }
+            foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
 
             _synthesizedFunctions.Add(new BoundFunction(
                 initializer,

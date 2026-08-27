@@ -1596,6 +1596,308 @@ public sealed class NativeLinkerTests
     [Theory]
     [InlineData(0)]
     [InlineData(2)]
+    public void Linker_RunsReadonlyFlowStrongUpdates(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Value = 7; }
+            struct Data { public int* Output; }
+            struct Outer { public Data Inner; }
+            void readonly Fill(bool choose, int key, int* output, int* other)
+            {
+                int* ptr = &State.Value;
+                int** alias = &ptr;
+                ptr = output;
+                **alias = 10;
+                Data source = Data();
+                source.Output = output;
+                Data destination = Data();
+                destination.Output = &State.Value;
+                destination = source;
+                *destination.Output += 1;
+                Outer nested = Outer();
+                nested.Inner.Output = &State.Value;
+                nested.Inner.Output = other;
+                *nested.Inner.Output = 20;
+                if (choose) ptr = output;
+                else ptr = other;
+                *ptr += 1;
+                for (int i = 0; i < 3; i++)
+                {
+                    ptr = &State.Value;
+                    ptr = output;
+                    *ptr += 1;
+                }
+                while (true)
+                {
+                    ptr = &State.Value;
+                    ptr = other;
+                    break;
+                }
+                *ptr += 1;
+                switch (key)
+                {
+                    case 0:
+                    case 1: ptr = output; break;
+                    default: ptr = other; break;
+                }
+                *ptr += 1;
+            }
+            int Main()
+            {
+                int output = 0;
+                int other = 0;
+                Fill(true, 0, &output, &other);
+                if (output != 16 || other != 21) return 1;
+                Fill(false, 2, &output, &other);
+                if (output != 14 || other != 23 || State.Value != 7) return 2;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyCleanupWithCurrentFlowState(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Value = 7; }
+            struct Item
+            {
+                public int** Slot;
+                public ~Item() { **Slot += 1; }
+            }
+            void readonly Clean(int* output, bool stop)
+            {
+                int* ptr = &State.Value;
+                {
+                    Item[] items = Item[1];
+                    items[0].Slot = &ptr;
+                    ptr = output;
+                    if (stop) return;
+                }
+                while (true)
+                {
+                    ptr = &State.Value;
+                    Item[] items = Item[1];
+                    items[0].Slot = &ptr;
+                    ptr = output;
+                    break;
+                }
+                for (int i = 0; i < 2; i++)
+                {
+                    ptr = &State.Value;
+                    Item[] items = Item[1];
+                    items[0].Slot = &ptr;
+                    ptr = output;
+                    continue;
+                }
+            }
+            int Main()
+            {
+                int value = 38;
+                Clean(&value, false);
+                if (value != 42) return 1;
+                value = 41;
+                Clean(&value, true);
+                if (value != 42 || State.Value != 7) return 2;
+                return value;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyIndependentFieldProvenance(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Value = 7; }
+            struct Pair
+            {
+                public int* Hidden;
+                public int* Output;
+                public readonly int* Input;
+                public Pair(int* hidden, int* output, readonly int* input)
+                {
+                    Hidden = hidden;
+                    Output = output;
+                    Input = input;
+                }
+                public int* Destination
+                {
+                    get { return Output; }
+                    set { Output = value; }
+                }
+                public ~Pair() { *Output += 1; }
+            }
+            struct Outer { public Pair Left; public Pair Right; }
+            void readonly Process(int* output, readonly int* input)
+            {
+                Pair local = Pair(&State.Value, output, input);
+                *local.Output = *local.Input;
+                Outer value = Outer();
+                value.Left = Pair(&State.Value, &State.Value, input);
+                value.Right = local;
+                Outer copy = value;
+                Pair& alias = copy.Right;
+                alias.Destination = output;
+                *alias.Destination += 1;
+                Pair* heap = new Pair(&State.Value, output, input);
+                free(heap);
+                {
+                    Pair[] items = Pair[2];
+                    items[0].Hidden = &State.Value;
+                    items[0].Output = output;
+                    items[1].Hidden = &State.Value;
+                    items[1].Output = output;
+                }
+            }
+            int Main()
+            {
+                int input = 38;
+                int output = 0;
+                Process(&output, &input);
+                if (State.Value != 7 || input != 38) return 1;
+                return output;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyLocalStructsAndAccessors(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Inner { public int Value; public int* Pointer; }
+            struct Data
+            {
+                public Inner Inner;
+                public int Current
+                {
+                    get { return Inner.Value; }
+                    set { Inner.Value = value; }
+                }
+                public int this[int x, int y]
+                {
+                    get { return Inner.Value + x + y; }
+                    set { Inner.Value = value - x - y; }
+                }
+            }
+            Data readonly Build(int* output)
+            {
+                Data result = Data();
+                result.Inner.Pointer = output;
+                result.Current = 30;
+                result.Current += 2;
+                result[2, 3] += 5;
+                *result.Inner.Pointer = result[2, 3];
+                return result;
+            }
+            int readonly Run()
+            {
+                Data initial = Data();
+                if (initial.Inner.Value != 0 || initial.Inner.Pointer != null) return 1;
+                Data* heap = new Data();
+                if (heap->Inner.Value != 0 || heap->Inner.Pointer != null) return 2;
+                free(heap);
+                int output = 0;
+                Data result = Build(&output);
+                Data& alias = result;
+                if (alias.Current != 37) return 3;
+                return output;
+            }
+            int Main() { return Run(); }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyLifecycleWithExplicitResources(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Resource
+            {
+                public int* Trace;
+                public int Id = 1;
+                public Resource(int* trace, int id) { Trace = trace; Id = id; }
+                public ~Resource() { *Trace = *Trace * 10 + Id; }
+            }
+            void readonly Destroy(Resource* resource) { free(resource); }
+            int readonly Run()
+            {
+                int trace = 0;
+                Resource* resource = new Resource(&trace, 4);
+                Destroy(resource);
+                resource = new Resource(&trace, 2);
+                free(resource);
+                if (trace != 42) return 1;
+                trace = 0;
+                {
+                    Resource[,] values = Resource[1, 2];
+                    values[0, 0].Trace = &trace;
+                    values[0, 0].Id = 2;
+                    values[0, 1].Trace = &trace;
+                    values[0, 1].Id = 4;
+                }
+                if (trace != 42) return 2;
+                trace = 0;
+                Resource[] values = new Resource[2];
+                values[0].Trace = &trace;
+                values[0].Id = 2;
+                values[1].Trace = &trace;
+                values[1].Id = 4;
+                free(values);
+                return trace;
+            }
+            int Main() { return Run(); }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsReadonlyVirtualLifecycleAndAccessors(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            interface IValue { int Current { get; set; } }
+            struct Base
+            {
+                public int* Trace;
+                public Base(int* trace) { Trace = trace; }
+                public virtual ~Base() { *Trace = *Trace * 10 + 2; }
+            }
+            struct Data : Base, IValue
+            {
+                public int Value;
+                public Data(int* trace) : base(trace) { Value = 0; }
+                public override ~Data() { *Trace = *Trace * 10 + 4; }
+                public int Current
+                {
+                    get { return Value; }
+                    set { Value = value; }
+                }
+            }
+            void readonly Set(IValue& value) { value.Current = 42; }
+            void readonly Destroy(Base* value) { free(value); }
+            int readonly Run()
+            {
+                int trace = 0;
+                Data* data = new Data(&trace);
+                Set(*data);
+                if (data->Current != 42) return 1;
+                Destroy(data);
+                return trace;
+            }
+            int Main() { return Run(); }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
     public void Linker_RunsReadonlyMethodQualifiersAndPointerReturns(int optimization)
     {
         Assert.Equal(42, RunIterationFourProgram("""

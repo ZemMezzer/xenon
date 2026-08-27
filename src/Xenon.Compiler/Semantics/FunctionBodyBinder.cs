@@ -14,6 +14,7 @@ internal sealed class FunctionBodyBinder
     private readonly DiagnosticBag _diagnostics;
     private readonly ConstantEvaluationContext _constants;
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
+    internal IReadOnlyDictionary<BoundExpression, TextLocation> ExpressionLocations => _expressionLocations;
     private readonly HashSet<LocalVariableSymbol> _definitelyAssigned = [];
     private BoundScope _scope = new(null);
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _localScopes = [];
@@ -103,9 +104,6 @@ internal sealed class FunctionBodyBinder
                 body.CloseBraceToken.Location,
                 $"not all code paths in function '{_function.Name}' return a value");
         }
-
-        if (_function.IsReadonly)
-            new ReadonlyEffectAnalyzer(_function, _diagnostics, _expressionLocations, body.OpenBraceToken.Location).Analyze(boundBody);
 
         return boundBody;
     }
@@ -525,11 +523,9 @@ internal sealed class FunctionBodyBinder
             CastExpressionSyntax cast => BindCastExpression(cast),
             _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
         };
-        if (_function.IsReadonly)
-            _expressionLocations[expression] = GetLocation(syntax);
+        _expressionLocations[expression] = GetLocation(syntax);
         BoundExpression result = DereferenceReference(expression);
-        if (_function.IsReadonly)
-            _expressionLocations[result] = GetLocation(syntax);
+        _expressionLocations[result] = GetLocation(syntax);
         return result;
     }
 
@@ -1514,6 +1510,8 @@ internal sealed class FunctionBodyBinder
                 _diagnostics.Report(name.IdentifierToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
                 return new BoundErrorExpression();
             }
+            if (structType.Constructors.IsEmpty && arguments.IsEmpty)
+                return new BoundStructConstructionExpression(structType, []) { IsDefaultInitialization = true };
             FunctionSymbol? constructor = ResolveConstructor(structType, arguments, syntax.Arguments, name.IdentifierToken.Location);
             if (constructor is null)
             {
@@ -1652,6 +1650,8 @@ internal sealed class FunctionBodyBinder
                 _diagnostics.Report(target.MemberToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
                 return new BoundErrorExpression();
             }
+            if (structType.Constructors.IsEmpty && arguments.IsEmpty)
+                return new BoundStructConstructionExpression(structType, []) { IsDefaultInitialization = true };
             FunctionSymbol? constructor = ResolveConstructor(structType, arguments, argumentSyntax, target.MemberToken.Location);
             if (constructor is null)
             {
@@ -1851,6 +1851,9 @@ internal sealed class FunctionBodyBinder
 
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
         FunctionSymbol? constructor = null;
+        if (!syntax.IsPositionalInitialization && structType.Constructors.IsEmpty && arguments.IsEmpty)
+            return new BoundNewExpression(structType, null, [], true, BuiltinTypes.PointerTo(structType))
+                { IsDefaultInitialization = true };
         if (syntax.IsPositionalInitialization)
         {
             arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
