@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics;
+using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 
@@ -16,8 +17,8 @@ public sealed class Compilation
             .ToImmutableArray();
 
         SemanticModel = syntaxDiagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
-            ? SemanticModel.CreateEmpty()
-            : SemanticAnalyzer.Analyze(syntaxTrees, targetLayout);
+            ? SemanticModel.CreateEmpty(TypeFactory)
+            : SemanticAnalyzer.Analyze(syntaxTrees, TypeFactory, targetLayout);
         Diagnostics = [.. syntaxDiagnostics, .. SemanticModel.Diagnostics];
     }
 
@@ -26,6 +27,8 @@ public sealed class Compilation
     public ImmutableArray<Diagnostic> Diagnostics { get; }
 
     public SemanticModel SemanticModel { get; }
+
+    public TypeFactory TypeFactory { get; } = new();
 
     public bool HasErrors => Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
 

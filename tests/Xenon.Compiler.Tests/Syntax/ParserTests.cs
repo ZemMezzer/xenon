@@ -54,8 +54,8 @@ public sealed class ParserTests
         Assert.Null(external.Body);
         Assert.NotNull(external.SemicolonToken);
         ParameterSyntax parameter = Assert.Single(external.Parameters);
-        Assert.True(parameter.Type.IsReadonly);
-        Assert.Equal(1, parameter.Type.PointerDepth);
+        Assert.True(parameter.Type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null);
+        Assert.Single(parameter.Type.ConstructionChain().OfType<PointerTypeSyntax>());
 
         var exported = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
         Assert.True(exported.IsExport);
@@ -76,10 +76,10 @@ public sealed class ParserTests
 
         Assert.Empty(tree.Diagnostics);
         var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
-        Assert.True(function.Parameters[0].Type.IsReference);
-        Assert.False(function.Parameters[0].Type.IsConst);
-        Assert.True(function.Parameters[1].Type.IsReference);
-        Assert.True(function.Parameters[1].Type.IsReadonly);
+        Assert.True(function.Parameters[0].Type.Contains<ReferenceTypeSyntax>());
+        Assert.False(function.Parameters[0].Type.GetQualifier(SyntaxKind.ConstKeyword) is not null);
+        Assert.True(function.Parameters[1].Type.Contains<ReferenceTypeSyntax>());
+        Assert.True(function.Parameters[1].Type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null);
     }
 
     [Fact]
@@ -583,7 +583,7 @@ public sealed class ParserTests
         Assert.Empty(tree.Diagnostics);
         var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
         var heap = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
-        Assert.True(heap.Type.IsUnsizedArray);
+        Assert.True(heap.Type.Contains<ArrayTypeSyntax>());
         Assert.True(Assert.IsType<NewExpressionSyntax>(heap.Initializer).IsArrayAllocation);
         var stack = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[1]);
         Assert.IsType<StackArrayCreationExpressionSyntax>(stack.Initializer);
@@ -644,11 +644,11 @@ public sealed class ParserTests
         Assert.Equal(3, enumeration.Members.Length);
         Assert.Equal("byte", enumeration.UnderlyingType!.Name);
         var function = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
-        Assert.True(function.Parameters[0].Type.IsReadonly);
-        Assert.True(function.Parameters[0].Type.IsBindingReadonly);
+        Assert.True(function.Parameters[0].Type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null);
+        Assert.True(function.Parameters[0].Type.IsBindingReadonly());
         var arrays = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
-        Assert.Equal([1, 3, 1], arrays.Type.ArrayRanks.ToArray());
-        Assert.Equal([3, 1], Assert.IsType<NewExpressionSyntax>(arrays.Initializer).Type.ArrayRanks.ToArray());
+        Assert.Equal([1, 3, 1], arrays.Type.ConstructionChain().OfType<ArrayTypeSyntax>().Select(array => array.Rank).ToArray());
+        Assert.Equal([3, 1], Assert.IsType<NewExpressionSyntax>(arrays.Initializer).Type.ConstructionChain().OfType<ArrayTypeSyntax>().Select(array => array.Rank).ToArray());
         Assert.Equal(2, Assert.IsType<SwitchStatementSyntax>(function.Body.Statements[1]).Sections.Length);
     }
 
@@ -689,10 +689,10 @@ public sealed class ParserTests
         var contract = Assert.Single(Assert.IsType<InterfaceDeclarationSyntax>(tree.Root.Members[1]).Methods);
         Assert.Equal(methodReadonly, method.IsReadonly);
         Assert.Equal(methodReadonly, contract.IsReadonly);
-        Assert.Equal(returnReadonly, method.ReturnType.IsReadonly);
-        Assert.Equal(returnReadonly, contract.ReturnType.IsReadonly);
-        Assert.Null(method.ReturnType.PointerReadonlyKeyword);
-        Assert.Null(contract.ReturnType.PointerReadonlyKeyword);
+        Assert.Equal(returnReadonly, method.ReturnType.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null);
+        Assert.Equal(returnReadonly, contract.ReturnType.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null);
+        Assert.Null(method.ReturnType.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix));
+        Assert.Null(contract.ReturnType.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix));
     }
 
     [Theory]
@@ -715,13 +715,13 @@ public sealed class ParserTests
         var local = Assert.IsType<VariableDeclarationStatementSyntax>(Assert.Single(use.Body!.Statements));
         foreach (TypeSyntax type in new[] { field.Type, use.Parameters[0].Type, local.Type })
         {
-            Assert.Equal(pointeeReadonly, type.IsReadonly);
-            Assert.Equal(bindingReadonly, type.IsBindingReadonly);
+            Assert.Equal(pointeeReadonly, type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null);
+            Assert.Equal(bindingReadonly, type.IsBindingReadonly());
         }
         var get = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[2]);
         Assert.Equal(bindingReadonly, get.IsReadonly);
-        Assert.Equal(pointeeReadonly, get.ReturnType.IsReadonly);
-        Assert.Null(get.ReturnType.PointerReadonlyKeyword);
+        Assert.Equal(pointeeReadonly, get.ReturnType.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null);
+        Assert.Null(get.ReturnType.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix));
     }
 
     [Theory]
@@ -812,6 +812,90 @@ public sealed class ParserTests
     {
         SyntaxTree tree = Parse("namespace Example; abstract struct A { " + member + " }");
         Assert.Contains(tree.Diagnostics, d => d.Message.Contains(diagnostic, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Parser_RepresentsEachTypeConstructorAndQualifierAsANode()
+    {
+        var tree = Parse("namespace Example; extern void F(readonly Foo** readonly&[][,] value);");
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var prefix = Assert.IsType<QualifiedTypeSyntax>(Assert.Single(function.Parameters).Type);
+        Assert.Equal(TypeQualifierPosition.Prefix, prefix.Position);
+        var outer = Assert.IsType<ArrayTypeSyntax>(prefix.ElementType);
+        Assert.Equal(1, outer.Rank);
+        var inner = Assert.IsType<ArrayTypeSyntax>(outer.ElementType);
+        Assert.Equal(2, inner.Rank);
+        var reference = Assert.IsType<ReferenceTypeSyntax>(inner.ElementType);
+        var binding = Assert.IsType<QualifiedTypeSyntax>(reference.ElementType);
+        Assert.Equal(TypeQualifierPosition.Postfix, binding.Position);
+        var pointer = Assert.IsType<PointerTypeSyntax>(binding.ElementType);
+        var pointee = Assert.IsType<PointerTypeSyntax>(pointer.ElementType);
+        Assert.Equal("Foo", Assert.IsType<NamedTypeSyntax>(pointee.ElementType).Name);
+    }
+
+    [Fact]
+    public void Parser_ParsesNestedTypeArgumentsWithoutChangingShiftExpressions()
+    {
+        var tree = Parse("namespace Example; void F(Foo<Bar<int>, readonly Baz<byte*>[] > value) { Foo<Bar<int>> local; int shifted = 8 >> 1; }");
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var named = Assert.IsType<NamedTypeSyntax>(Assert.Single(function.Parameters).Type);
+        Assert.Equal(2, named.TypeArguments!.Arguments.Length);
+        var nested = Assert.IsType<NamedTypeSyntax>(named.TypeArguments.Arguments[0]);
+        Assert.Equal("int", Assert.Single(nested.TypeArguments!.Arguments).Name);
+        Assert.IsType<QualifiedTypeSyntax>(named.TypeArguments.Arguments[1]);
+        var local = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body!.Statements[0]);
+        var outer = Assert.IsType<NamedTypeSyntax>(local.Type).TypeArguments!;
+        var inner = Assert.IsType<NamedTypeSyntax>(Assert.Single(outer.Arguments)).TypeArguments!;
+        Assert.Equal(inner.GreaterToken.Location.Span.Start + 1, outer.GreaterToken.Location.Span.Start);
+        var shifted = Assert.IsType<VariableDeclarationStatementSyntax>(function.Body.Statements[1]);
+        Assert.Equal(SyntaxKind.GreaterGreaterToken, Assert.IsType<BinaryExpressionSyntax>(shifted.Initializer).OperatorToken.Kind);
+    }
+
+    [Theory]
+    [InlineData("Foo<>")]
+    [InlineData("Foo<int,>")]
+    [InlineData("Foo<,int>")]
+    [InlineData("Foo<Bar<int>")]
+    public void Parser_RecoversMalformedTypeArgumentsAndPreservesFollowingDeclarations(string type)
+    {
+        var tree = Parse($"namespace Example; extern void F({type} value); int Next() {{ return 1; }}");
+        Assert.NotEmpty(tree.Diagnostics);
+        Assert.Contains(tree.Root.Members.OfType<FunctionDeclarationSyntax>(), function => function.IdentifierToken.Text == "Next");
+    }
+
+    [Fact]
+    public void Parser_RecoversTypeArgumentListAtEndOfFile()
+    {
+        var tree = Parse("namespace Example; extern void F(Foo<Bar<int");
+        Assert.NotEmpty(tree.Diagnostics);
+        Assert.Equal(SyntaxKind.EndOfFileToken, tree.Root.EndOfFileToken.Kind);
+    }
+
+    [Fact]
+    public void Parser_UsesGeneralTypeMembersForStructsAndInterfaces()
+    {
+        var tree = Parse("namespace Example; struct S { int x; const int N = 1; void F() {} } interface I { void F(); int P { get; } }");
+        Assert.Empty(tree.Diagnostics);
+        var structure = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.All(structure.Members, member => Assert.IsAssignableFrom<TypeMemberDeclarationSyntax>(member));
+        Assert.IsType<TypeConstantDeclarationSyntax>(structure.Members[1]);
+        var contract = Assert.IsType<InterfaceDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.IsAssignableFrom<TypeMemberDeclarationSyntax>(Assert.Single(contract.Methods));
+        Assert.IsAssignableFrom<TypeMemberDeclarationSyntax>(Assert.Single(contract.Properties));
+    }
+
+    [Theory]
+    [InlineData("a < b && c > d;")]
+    [InlineData("a < b || c > d;")]
+    [InlineData("a < b == c > d;")]
+    public void Parser_DoesNotConfuseRelationalExpressionsWithTypeArguments(string expression)
+    {
+        var tree = Parse($"namespace Example; void F() {{ {expression} }}");
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.IsType<ExpressionStatementSyntax>(Assert.Single(function.Body!.Statements));
     }
 
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));

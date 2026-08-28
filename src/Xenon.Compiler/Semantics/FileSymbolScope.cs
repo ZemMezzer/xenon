@@ -15,13 +15,16 @@ internal sealed class FileSymbolScope
     private readonly List<NamespaceSymbol> _importedNamespaces = [];
     private readonly Dictionary<string, UsingAliasTarget> _aliases = new(StringComparer.Ordinal);
 
-    public FileSymbolScope(NamespaceSymbol globalNamespace, NamespaceSymbol containingNamespace)
+    public FileSymbolScope(NamespaceSymbol globalNamespace, NamespaceSymbol containingNamespace, TypeFactory typeFactory)
     {
         GlobalNamespace = globalNamespace;
+        TypeFactory = typeFactory;
         ContainingNamespace = containingNamespace;
     }
 
     public NamespaceSymbol GlobalNamespace { get; }
+
+    public TypeFactory TypeFactory { get; }
 
     public NamespaceSymbol ContainingNamespace { get; }
 
@@ -318,19 +321,12 @@ internal sealed class FileSymbolScope
     private static string FormatTypeCandidates(IEnumerable<TypeSymbol> types) =>
         string.Join(
             " and ",
-            types.Select(type => $"'{GetFullTypeName(type)}'"));
-
-    private static string GetFullTypeName(TypeSymbol type) => type switch
-    {
-        StructTypeSymbol @struct => @struct.FullName,
-        InterfaceTypeSymbol @interface => @interface.FullName,
-        _ => type.Name,
-    };
+            types.Select(type => $"'{type.ToDisplayString(TypeDisplayFormat.FullyQualified)}'"));
 
     private static string FormatFunctionCandidates(IEnumerable<FunctionSymbol> functions) =>
         string.Join(
             " and ",
-            functions.Select(function => $"'{function.FullName}'"));
+            functions.Select(function => $"'{function.ToDisplayString(SymbolDisplayFormat.QualifiedName)}'"));
 
     private sealed record UsingAliasTarget(NamespaceSymbol? Namespace, TypeSymbol? Type);
 }

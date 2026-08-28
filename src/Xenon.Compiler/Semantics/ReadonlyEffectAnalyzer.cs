@@ -42,7 +42,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         _context.Receiver.Add(_hidden);
         foreach (ParameterSymbol parameter in function.Parameters)
         {
-            if (ContainsAccess(parameter.Type) || parameter.Type is StructTypeSymbol)
+            if (ContainsAccess(parameter.Type) || parameter.Type is IFieldStorageTypeSymbol)
                 StoreValue([Root(parameter)], [IsMutableParameter(parameter.Type) ? _external : _hidden], parameter.Type);
         }
 
@@ -298,7 +298,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         foreach (var argument in mutableArguments) StoreUnknown(argument.Storage, available, argument.Type, []);
         Store([Root(site)], available);
         if (!ContainsAccess(callee.ReturnType)) return [];
-        if (callee.ReturnType is StructTypeSymbol)
+        if (callee.ReturnType is IFieldStorageTypeSymbol)
         {
             StoreUnknown([Root(site)], available, callee.ReturnType, []);
             return [Root(site)];
@@ -357,7 +357,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     type.FindInterfaceImplementation(callee) is { } implementation)
                     targets.Add(implementation);
         }
-        else if (callee.VTableSlot is int slot && callee.ContainingType is { } declaringType)
+        else if (callee.VTableSlot is int slot && callee.ContainingType is StructTypeSymbol declaringType)
         {
             foreach (StructTypeSymbol type in receiverTypes)
             {
@@ -449,7 +449,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private static bool IsDerivedFrom(StructTypeSymbol type, StructTypeSymbol candidate)
     {
         for (StructTypeSymbol? current = type; current is not null; current = current.BaseType)
-            if (ReferenceEquals(current, candidate)) return true;
+            if (TypeIdentity.AreSame(current, candidate)) return true;
         return false;
     }
 
@@ -568,7 +568,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         HashSet<object> result = new(ReferenceEqualityComparer.Instance);
         // Aggregate values retain their field shape. StoreValue performs the
         // field-by-field copy; pointer/reference reads still load capabilities.
-        if (type is StructTypeSymbol) return new(storage, ReferenceEqualityComparer.Instance);
+        if (type is IFieldStorageTypeSymbol) return new(storage, ReferenceEqualityComparer.Instance);
         if (!ContainsAccess(type)) return result;
         foreach (object location in storage)
         {
@@ -629,12 +629,12 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private void StoreValue(HashSet<object> storage, HashSet<object> values, TypeSymbol type, HashSet<TypeSymbol> path)
     {
-        if (type is not StructTypeSymbol structure)
+        if (type is not IFieldStorageTypeSymbol structure)
         {
             if (ContainsAccess(type)) Store(storage, values, strong: true);
             return;
         }
-        StoreReceiverTypes(storage, KnownReceiverTypes(values));
+        if (type is StructTypeSymbol) StoreReceiverTypes(storage, KnownReceiverTypes(values));
         // Invalid recursive value layouts already have a binding diagnostic.
         if (!path.Add(type)) return;
         foreach (FieldSymbol field in structure.AllInstanceFields)
@@ -648,7 +648,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     {
         ForgetReceiverTypes(storage);
         if (!ContainsAccess(type)) return;
-        if (type is not StructTypeSymbol structure)
+        if (type is not IFieldStorageTypeSymbol structure)
         {
             Store(storage, capabilities);
             return;
@@ -671,7 +671,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             if (!ReferenceEquals(origin, _external) && visited.Add((origin, type))) local.Add(origin);
         }
         if (local.Count == 0) return;
-        if (type is StructTypeSymbol structure)
+        if (type is IFieldStorageTypeSymbol structure)
         {
             valuePath ??= [];
             if (!valuePath.Add(type)) return;
@@ -796,7 +796,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         if (origins.Contains(_hidden)) return true;
         HashSet<object> fresh = new(origins.Where(origin => visited.Add((origin, type))));
         if (fresh.Count == 0) return false;
-        if (type is StructTypeSymbol structure)
+        if (type is IFieldStorageTypeSymbol structure)
         {
             if (!valuePath.Add(type)) return false;
             foreach (FieldSymbol field in structure.AllInstanceFields)
@@ -855,7 +855,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private static bool ContainsAccess(TypeSymbol type, HashSet<TypeSymbol> visited) => type switch
     {
         PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or InterfaceTypeSymbol => true,
-        StructTypeSymbol structure when visited.Add(type) => structure.AllInstanceFields.Any(field => ContainsAccess(field.Type, visited)),
+        IFieldStorageTypeSymbol structure when visited.Add(type) => structure.AllInstanceFields.Any(field => ContainsAccess(field.Type, visited)),
         _ => false,
     };
 
@@ -869,7 +869,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             PointerTypeSymbol pointer => !pointer.IsReadonly || ExposesWritableAccess(pointer.ElementType, visited),
             ReferenceTypeSymbol reference => !reference.IsReadonly || ExposesWritableAccess(reference.ElementType, visited),
             ArrayTypeSymbol or InterfaceTypeSymbol => true,
-            StructTypeSymbol structure => structure.AllInstanceFields.Any(field => ExposesWritableAccess(field.Type, visited)),
+            IFieldStorageTypeSymbol structure => structure.AllInstanceFields.Any(field => ExposesWritableAccess(field.Type, visited)),
             _ => false,
         };
     }

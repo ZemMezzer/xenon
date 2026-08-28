@@ -5,8 +5,8 @@ internal static class TypeFacts
     // Raw aggregate storage does not invoke nested constructors/initializers.
     public static bool ContainsReferenceStorage(TypeSymbol type) => ContainsReferenceStorage(type, []);
 
-    private static bool ContainsReferenceStorage(TypeSymbol type, HashSet<StructTypeSymbol> visited) =>
-        type is ReferenceTypeSymbol || type is StructTypeSymbol structure && visited.Add(structure) &&
+    private static bool ContainsReferenceStorage(TypeSymbol type, HashSet<TypeSymbol> visited) =>
+        type is ReferenceTypeSymbol || type is IFieldStorageTypeSymbol structure && visited.Add(type) &&
         structure.AllInstanceFields.Any(field => ContainsReferenceStorage(field.Type, visited));
 
     public static bool IsNumeric(TypeSymbol type) =>
@@ -16,13 +16,13 @@ internal static class TypeFacts
 
     public static bool CanCompareEquality(TypeSymbol left, TypeSymbol right)
     {
-        if (ReferenceEquals(left, right) && (IsNumeric(left) || left is EnumTypeSymbol || ReferenceEquals(left, BuiltinTypes.Bool)))
+        if (TypeIdentity.AreSame(left, right) && (IsNumeric(left) || left is EnumTypeSymbol || TypeIdentity.AreSame(left, BuiltinTypes.Bool)))
             return true;
-        if (left is PointerTypeSymbol && ReferenceEquals(right, BuiltinTypes.Null) ||
-            right is PointerTypeSymbol && ReferenceEquals(left, BuiltinTypes.Null))
+        if (left is PointerTypeSymbol && TypeIdentity.AreSame(right, BuiltinTypes.Null) ||
+            right is PointerTypeSymbol && TypeIdentity.AreSame(left, BuiltinTypes.Null))
             return true;
         if (left is not PointerTypeSymbol a || right is not PointerTypeSymbol b) return false;
-        return ReferenceEquals(a.ElementType, b.ElementType) ||
+        return TypeIdentity.AreSame(a.ElementType, b.ElementType) ||
             a.ElementType is StructTypeSymbol aStruct && b.ElementType is StructTypeSymbol bStruct &&
             (GetInheritanceDistance(aStruct, bStruct) is not null || GetInheritanceDistance(bStruct, aStruct) is not null);
     }
@@ -31,24 +31,24 @@ internal static class TypeFacts
         (IsNumeric(target) && IsNumeric(source)) ||
         (target is EnumTypeSymbol && IsInteger(source)) ||
         (source is EnumTypeSymbol && IsInteger(target)) ||
-        (target is EnumTypeSymbol && ReferenceEquals(target, source));
+        (target is EnumTypeSymbol && TypeIdentity.AreSame(target, source));
 
     public static bool CanAssign(TypeSymbol destination, TypeSymbol source) =>
         GetImplicitConversionCost(destination, source) is not null;
 
     public static int? GetImplicitConversionCost(TypeSymbol destination, TypeSymbol source)
     {
-        if (ReferenceEquals(destination, BuiltinTypes.Error) || ReferenceEquals(source, BuiltinTypes.Error))
+        if (TypeIdentity.AreSame(destination, BuiltinTypes.Error) || TypeIdentity.AreSame(source, BuiltinTypes.Error))
         {
             return 0;
         }
 
-        if (ReferenceEquals(destination, source))
+        if (TypeIdentity.AreSame(destination, source))
         {
             return 0;
         }
 
-        if (destination is PointerTypeSymbol && ReferenceEquals(source, BuiltinTypes.Null))
+        if (destination is PointerTypeSymbol && TypeIdentity.AreSame(source, BuiltinTypes.Null))
             return 1000;
 
         if (destination is PointerTypeSymbol { IsReadonly: var destinationReadonly } destinationPointer &&
@@ -56,7 +56,7 @@ internal static class TypeFacts
             (!sourceReadonly || destinationReadonly))
         {
             int readonlyQualificationCost = sourceReadonly == destinationReadonly ? 0 : 1;
-            if (ReferenceEquals(destinationPointer.ElementType, sourcePointer.ElementType))
+            if (TypeIdentity.AreSame(destinationPointer.ElementType, sourcePointer.ElementType))
                 return readonlyQualificationCost;
             if (destinationPointer.ElementType is StructTypeSymbol destinationStruct &&
                 sourcePointer.ElementType is StructTypeSymbol sourceStruct &&
@@ -83,7 +83,7 @@ internal static class TypeFacts
             source = sourceReference.ElementType;
         }
 
-        if (ReferenceEquals(destination.ElementType, source))
+        if (TypeIdentity.AreSame(destination.ElementType, source))
             return readonlyQualificationCost;
 
         if (destination.ElementType is StructTypeSymbol destinationStruct &&
@@ -108,7 +108,7 @@ internal static class TypeFacts
     {
         int distance = 0;
         for (StructTypeSymbol? current = candidate; current is not null; current = current.BaseType, distance++)
-            if (ReferenceEquals(current, expected)) return distance;
+            if (TypeIdentity.AreSame(current, expected)) return distance;
         return null;
     }
 }

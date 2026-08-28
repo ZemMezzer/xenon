@@ -4,7 +4,7 @@ using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
 
-public sealed class StructTypeSymbol : TypeSymbol
+public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymbol
 {
     private ImmutableArray<FieldSymbol> _fields = [];
     private ImmutableArray<FieldSymbol> _staticFields = [];
@@ -19,15 +19,21 @@ public sealed class StructTypeSymbol : TypeSymbol
         string name,
         NamespaceSymbol containingNamespace,
         StructDeclarationSyntax declaration)
-        : base(name)
+        : base(name, containingNamespace)
     {
-        ContainingNamespace = containingNamespace;
         Declaration = declaration;
     }
 
-    public NamespaceSymbol ContainingNamespace { get; }
+    public override string DeclarationKind => "struct";
+    public override IEnumerable<Symbol> GetMembers() =>
+        Fields.Cast<Symbol>().Concat(StaticFields).Concat(Properties).Concat(Indexers).Concat(Constants)
+            .Concat(Methods.Where(method => method.ContainingSymbol == this)).Concat(Constructors)
+            .Concat(new[] { InstanceInitializer, Destructor }.OfType<Symbol>());
 
-    public string FullName => $"{ContainingNamespace.FullName}.{Name}";
+    public override IEnumerable<Symbol> LookupMembers(string name)
+    {
+        return base.LookupMembers(name).Concat(BaseType?.LookupMembers(name) ?? []);
+    }
 
     public ImmutableArray<FieldSymbol> Fields => _fields;
 
@@ -66,7 +72,7 @@ public sealed class StructTypeSymbol : TypeSymbol
 
     public bool IsAbstract => Declaration.IsAbstract;
 
-    internal StructDeclarationSyntax Declaration { get; }
+    public override StructDeclarationSyntax Declaration { get; }
 
     internal void SetFields(ImmutableArray<FieldSymbol> fields)
     {
@@ -136,9 +142,6 @@ public sealed class StructTypeSymbol : TypeSymbol
     public FieldSymbol? FindField(string name) =>
         _fields.FirstOrDefault(field => string.Equals(field.Name, name, StringComparison.Ordinal)) ??
         BaseType?.FindField(name);
-
-    public FieldSymbol? FindStaticField(string name) =>
-        _staticFields.FirstOrDefault(field => string.Equals(field.Name, name, StringComparison.Ordinal));
 
     public FunctionSymbol? FindMethod(string name) =>
         _methods.FirstOrDefault(method => string.Equals(method.Name, name, StringComparison.Ordinal)) ??
@@ -214,27 +217,26 @@ public sealed class ConstantSymbol : Symbol
     internal ConstantSymbol(
         string name,
         TypeSymbol type,
-        NamespaceSymbol containingNamespace,
-        StructTypeSymbol? containingType,
+        Symbol containingSymbol,
         ExpressionSyntax initializer,
-        SyntaxToken identifierToken)
-        : base(name, SymbolKind.Constant)
+        SyntaxNode declaration)
+        : base(name, SymbolKind.Constant, containingSymbol)
     {
         Type = type;
-        ContainingNamespace = containingNamespace;
-        ContainingType = containingType;
         Initializer = initializer;
-        IdentifierToken = identifierToken;
+        Declaration = declaration;
     }
 
     public TypeSymbol Type { get; }
-    public NamespaceSymbol ContainingNamespace { get; }
-    public StructTypeSymbol? ContainingType { get; }
+    public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
+    public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
     public object? Value { get; private set; }
     public BoundExpression? BoundValue { get; private set; }
     public bool HasValue { get; private set; }
     internal ExpressionSyntax Initializer { get; }
-    internal SyntaxToken IdentifierToken { get; }
+    internal SyntaxNode Declaration { get; }
+    internal SyntaxToken IdentifierToken => new SyntaxReference(Declaration).IdentifierToken;
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
 
     internal void SetValue(object? value)
     {
@@ -252,21 +254,20 @@ public sealed class ConstantSymbol : Symbol
 public sealed class IndexerSymbol : Symbol
 {
     internal IndexerSymbol(
-        StructTypeSymbol containingType,
+        DeclaredTypeSymbol containingType,
         TypeSymbol type,
         ImmutableArray<ParameterSymbol> parameters,
         Accessibility accessibility,
         IndexerDeclarationSyntax declaration)
-        : base("this", SymbolKind.Property)
+        : base("this", SymbolKind.Property, containingType)
     {
-        ContainingType = containingType;
         Type = type;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Accessibility = accessibility;
         Declaration = declaration;
     }
 
-    public StructTypeSymbol ContainingType { get; }
+    public DeclaredTypeSymbol ContainingType => GetContainingSymbol<DeclaredTypeSymbol>()!;
     public TypeSymbol Type { get; }
     public ImmutableArray<ParameterSymbol> Parameters { get; }
     public Accessibility Accessibility { get; }
@@ -274,6 +275,7 @@ public sealed class IndexerSymbol : Symbol
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
     internal IndexerDeclarationSyntax Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
     {
@@ -288,7 +290,7 @@ public sealed class IndexerSymbol : Symbol
     {
         string signature = parameters.IsEmpty
             ? "none"
-            : string.Join("__", parameters.Select(parameter => EncodeTypeName(TypeIdentity.Get(parameter.Type))));
+            : string.Join("__", parameters.Select(parameter => EncodeTypeName(TypeSignature.Get(parameter.Type))));
         return $"{prefix}__{signature}";
     }
 
@@ -300,25 +302,25 @@ public sealed class PropertySymbol : Symbol
 {
     internal PropertySymbol(
         string name,
-        StructTypeSymbol containingType,
+        DeclaredTypeSymbol containingType,
         TypeSymbol type,
         Accessibility accessibility,
         PropertyDeclarationSyntax declaration)
-        : base(name, SymbolKind.Property)
+        : base(name, SymbolKind.Property, containingType)
     {
-        ContainingType = containingType;
         Type = type;
         Accessibility = accessibility;
         Declaration = declaration;
     }
 
-    public StructTypeSymbol ContainingType { get; }
+    public DeclaredTypeSymbol ContainingType => GetContainingSymbol<DeclaredTypeSymbol>()!;
     public TypeSymbol Type { get; }
     public Accessibility Accessibility { get; }
     public bool IsPublic => Accessibility == Accessibility.Public;
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
     internal PropertyDeclarationSyntax Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
     {
@@ -331,7 +333,7 @@ public sealed class FieldSymbol : Symbol
 {
     internal FieldSymbol(
         string name,
-        StructTypeSymbol containingType,
+        DeclaredTypeSymbol containingType,
         TypeSymbol type,
         int ordinal,
         Accessibility accessibility,
@@ -339,19 +341,18 @@ public sealed class FieldSymbol : Symbol
         bool isReadonly,
         object? constantValue,
         FieldDeclarationSyntax declaration)
-        : base(name, SymbolKind.Field)
+        : base(name, SymbolKind.Field, containingType)
     {
-        ContainingType = containingType;
         Type = type;
         Ordinal = ordinal;
         Accessibility = accessibility;
         IsStatic = isStatic;
-        IsReadonly = isReadonly || declaration.Type.PointerReadonlyKeyword is not null;
+        IsReadonly = isReadonly || declaration.Type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is not null;
         ConstantValue = constantValue;
         Declaration = declaration;
     }
 
-    public StructTypeSymbol ContainingType { get; }
+    public DeclaredTypeSymbol ContainingType => GetContainingSymbol<DeclaredTypeSymbol>()!;
 
     public TypeSymbol Type { get; }
 
@@ -374,6 +375,7 @@ public sealed class FieldSymbol : Symbol
     public BoundExpression? Initializer { get; private set; }
 
     internal FieldDeclarationSyntax Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
 
     internal void SetInitializer(BoundExpression initializer) => Initializer = initializer;
 }

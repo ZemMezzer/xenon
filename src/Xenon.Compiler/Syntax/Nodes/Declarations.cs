@@ -37,46 +37,6 @@ public sealed record NamespaceDeclarationSyntax(
     public string Name => string.Join('.', NameParts.Select(part => part.Text));
 }
 
-public sealed record TypeSyntax(
-    SyntaxToken? ConstKeyword,
-    SyntaxToken? ReadonlyKeyword,
-    ImmutableArray<SyntaxToken> NameParts,
-    ImmutableArray<SyntaxToken> DotTokens,
-    ImmutableArray<SyntaxToken> PointerTokens,
-    SyntaxToken? ReferenceToken,
-    SyntaxToken? OpenBracketToken,
-    SyntaxToken? CloseBracketToken) : SyntaxNode
-{
-    public override SyntaxKind Kind => SyntaxKind.Type;
-
-    public SyntaxToken NameToken => NameParts[^1];
-
-    public string Name => string.Join('.', NameParts.Select(part => part.Text));
-
-    public bool IsQualifiedName => NameParts.Length > 1;
-
-    public bool IsConst => ConstKeyword is not null;
-
-    public bool IsReadonly => ReadonlyKeyword is not null;
-
-    public SyntaxToken? PointerReadonlyKeyword { get; init; }
-
-    public bool IsBindingReadonly => PointerDepth > 0
-        ? PointerReadonlyKeyword is not null
-        : IsReadonly;
-
-    // Suffixes are written outermost first: int[][,] is an array of matrices.
-    public ImmutableArray<int> ArrayRanks { get; init; } = [];
-
-    public int PointerDepth => PointerTokens.Length;
-
-    public bool IsReference => ReferenceToken is not null;
-
-    public bool IsArray => OpenBracketToken is not null;
-
-    public bool IsUnsizedArray => IsArray;
-}
-
 public sealed record ParameterSyntax(
     TypeSyntax Type,
     SyntaxToken IdentifierToken) : SyntaxNode
@@ -88,7 +48,7 @@ public sealed record EnumDeclarationSyntax(
     SyntaxToken EnumKeyword,
     SyntaxToken IdentifierToken,
     TypeSyntax? UnderlyingType,
-    ImmutableArray<EnumMemberDeclarationSyntax> Members) : MemberDeclarationSyntax
+    ImmutableArray<EnumMemberDeclarationSyntax> Members) : TypeDeclarationSyntax(IdentifierToken)
 {
     public override SyntaxKind Kind => SyntaxKind.EnumDeclaration;
 }
@@ -108,7 +68,7 @@ public sealed record FieldDeclarationSyntax(
     SyntaxToken IdentifierToken,
     SyntaxToken? EqualsToken,
     ExpressionSyntax? Initializer,
-    SyntaxToken SemicolonToken) : StructMemberDeclarationSyntax
+    SyntaxToken SemicolonToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.FieldDeclaration;
 
@@ -130,13 +90,13 @@ public sealed record ModuleConstantDeclarationSyntax(
     public override SyntaxKind Kind => SyntaxKind.ConstantDeclaration;
 }
 
-public sealed record StructConstantDeclarationSyntax(
+public sealed record TypeConstantDeclarationSyntax(
     SyntaxToken ConstKeyword,
     TypeSyntax Type,
     SyntaxToken IdentifierToken,
     SyntaxToken EqualsToken,
     ExpressionSyntax Initializer,
-    SyntaxToken SemicolonToken) : StructMemberDeclarationSyntax
+    SyntaxToken SemicolonToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.ConstantDeclaration;
 }
@@ -163,7 +123,7 @@ public sealed record PropertyDeclarationSyntax(
     SyntaxToken IdentifierToken,
     SyntaxToken OpenBraceToken,
     ImmutableArray<PropertyAccessorDeclarationSyntax> Accessors,
-    SyntaxToken CloseBraceToken) : StructMemberDeclarationSyntax
+    SyntaxToken CloseBraceToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.PropertyDeclaration;
 
@@ -192,7 +152,7 @@ public sealed record IndexerDeclarationSyntax(
     SyntaxToken CloseBracketToken,
     SyntaxToken OpenBraceToken,
     ImmutableArray<PropertyAccessorDeclarationSyntax> Accessors,
-    SyntaxToken CloseBraceToken) : StructMemberDeclarationSyntax
+    SyntaxToken CloseBraceToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.IndexerDeclaration;
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;
@@ -219,7 +179,7 @@ public sealed record MethodDeclarationSyntax(
     ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseParenthesisToken,
     BlockStatementSyntax? Body,
-    SyntaxToken? SemicolonToken) : StructMemberDeclarationSyntax
+    SyntaxToken? SemicolonToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.MethodDeclaration;
 
@@ -246,7 +206,7 @@ public sealed record ConstructorDeclarationSyntax(
     ImmutableArray<ExpressionSyntax> BaseArguments,
     ImmutableArray<SyntaxToken> BaseCommaTokens,
     SyntaxToken? BaseCloseParenthesisToken,
-    BlockStatementSyntax Body) : StructMemberDeclarationSyntax
+    BlockStatementSyntax Body) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.ConstructorDeclaration;
 
@@ -262,7 +222,7 @@ public sealed record DestructorDeclarationSyntax(
     SyntaxToken IdentifierToken,
     SyntaxToken OpenParenthesisToken,
     SyntaxToken CloseParenthesisToken,
-    BlockStatementSyntax Body) : StructMemberDeclarationSyntax
+    BlockStatementSyntax Body) : TypeMemberDeclarationSyntax
 {
     public SyntaxToken? OverrideKeyword { get; init; }
     public bool IsOverride => OverrideKeyword is not null;
@@ -282,8 +242,8 @@ public sealed record StructDeclarationSyntax(
     ImmutableArray<TypeSyntax> BaseTypes,
     ImmutableArray<SyntaxToken> BaseCommaTokens,
     SyntaxToken OpenBraceToken,
-    ImmutableArray<StructMemberDeclarationSyntax> Members,
-    SyntaxToken CloseBraceToken) : MemberDeclarationSyntax
+    ImmutableArray<TypeMemberDeclarationSyntax> Members,
+    SyntaxToken CloseBraceToken) : TypeDeclarationSyntax(IdentifierToken)
 {
     public SyntaxToken? AbstractKeyword { get; init; }
     public bool IsAbstract => AbstractKeyword is not null;
@@ -301,8 +261,8 @@ public sealed record StructDeclarationSyntax(
     public ImmutableArray<IndexerDeclarationSyntax> Indexers =>
         Members.OfType<IndexerDeclarationSyntax>().ToImmutableArray();
 
-    public ImmutableArray<StructConstantDeclarationSyntax> Constants =>
-        Members.OfType<StructConstantDeclarationSyntax>().ToImmutableArray();
+    public ImmutableArray<TypeConstantDeclarationSyntax> Constants =>
+        Members.OfType<TypeConstantDeclarationSyntax>().ToImmutableArray();
 
     public ImmutableArray<ConstructorDeclarationSyntax> Constructors =>
         Members.OfType<ConstructorDeclarationSyntax>().ToImmutableArray();
@@ -319,7 +279,7 @@ public sealed record InterfaceMethodDeclarationSyntax(
     ImmutableArray<ParameterSyntax> Parameters,
     ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseParenthesisToken,
-    SyntaxToken SemicolonToken) : SyntaxNode
+    SyntaxToken SemicolonToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.InterfaceMethodDeclaration;
     public bool IsReadonly => ReadonlyKeyword is not null;
@@ -331,7 +291,7 @@ public sealed record InterfacePropertyDeclarationSyntax(
     SyntaxToken IdentifierToken,
     SyntaxToken OpenBraceToken,
     ImmutableArray<PropertyAccessorDeclarationSyntax> Accessors,
-    SyntaxToken CloseBraceToken) : SyntaxNode
+    SyntaxToken CloseBraceToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.PropertyDeclaration;
     public PropertyAccessorDeclarationSyntax? Getter => Accessors.FirstOrDefault(accessor => accessor.IsGetter);
@@ -349,7 +309,7 @@ public sealed record InterfaceIndexerDeclarationSyntax(
     SyntaxToken CloseBracketToken,
     SyntaxToken OpenBraceToken,
     ImmutableArray<PropertyAccessorDeclarationSyntax> Accessors,
-    SyntaxToken CloseBraceToken) : SyntaxNode
+    SyntaxToken CloseBraceToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.IndexerDeclaration;
     public PropertyAccessorDeclarationSyntax? Getter => Accessors.FirstOrDefault(accessor => accessor.IsGetter);
@@ -367,7 +327,7 @@ public sealed record InterfaceDeclarationSyntax(
     ImmutableArray<InterfaceMethodDeclarationSyntax> Methods,
     ImmutableArray<InterfacePropertyDeclarationSyntax> Properties,
     ImmutableArray<InterfaceIndexerDeclarationSyntax> Indexers,
-    SyntaxToken CloseBraceToken) : MemberDeclarationSyntax
+    SyntaxToken CloseBraceToken) : TypeDeclarationSyntax(IdentifierToken)
 {
     public override SyntaxKind Kind => SyntaxKind.InterfaceDeclaration;
 }

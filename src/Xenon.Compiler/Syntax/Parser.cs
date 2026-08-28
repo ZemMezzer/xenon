@@ -6,12 +6,12 @@ namespace Xenon.Compiler.Syntax;
 
 internal sealed class Parser
 {
-    private readonly ImmutableArray<SyntaxToken> _tokens;
+    private readonly List<SyntaxToken> _tokens;
     private int _position;
 
     public Parser(ImmutableArray<SyntaxToken> tokens)
     {
-        _tokens = tokens.Where(token => token.Kind != SyntaxKind.BadToken).ToImmutableArray();
+        _tokens = tokens.Where(token => token.Kind != SyntaxKind.BadToken).ToList();
     }
 
     public DiagnosticBag Diagnostics { get; } = new();
@@ -135,7 +135,7 @@ internal sealed class Parser
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
         (SyntaxToken? colon, ImmutableArray<TypeSyntax> bases, ImmutableArray<SyntaxToken> baseCommas) = ParseBaseTypeList();
         SyntaxToken openBrace = MatchToken(SyntaxKind.OpenBraceToken);
-        var members = ImmutableArray.CreateBuilder<StructMemberDeclarationSyntax>();
+        var members = ImmutableArray.CreateBuilder<TypeMemberDeclarationSyntax>();
 
         while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
         {
@@ -184,12 +184,12 @@ internal sealed class Parser
                 else
                 {
                     ValidateMemberModifiers("field", modifiers, SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.ReadonlyKeyword);
-                    if (@readonly is not null && type.ReadonlyKeyword is not null && type.PointerDepth == 0 && !type.IsReference)
-                        Diagnostics.Report(type.ReadonlyKeyword.Location, "duplicate readonly field modifier");
+                    if (@readonly is not null && type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null && !type.Contains<PointerTypeSyntax>() && !type.Contains<ReferenceTypeSyntax>())
+                        Diagnostics.Report(type.GetQualifier(SyntaxKind.ReadonlyKeyword)!.Location, "duplicate readonly field modifier");
                     // On pointer fields a leading readonly qualifies the pointee.
-                    if (@readonly is not null && (type.PointerDepth > 0 || type.IsReference) && type.ReadonlyKeyword is null)
+                    if (@readonly is not null && (type.Contains<PointerTypeSyntax>() || type.Contains<ReferenceTypeSyntax>()) && type.GetQualifier(SyntaxKind.ReadonlyKeyword) is null)
                     {
-                        type = type with { ReadonlyKeyword = @readonly };
+                        type = new QualifiedTypeSyntax(type, @readonly);
                         @readonly = null;
                     }
                     SyntaxToken? equals = Current.Kind == SyntaxKind.EqualsToken ? NextToken() : null;
@@ -227,14 +227,14 @@ internal sealed class Parser
         return new ModuleConstantDeclarationSyntax(keyword, type, identifier, equals, initializer, MatchToken(SyntaxKind.SemicolonToken));
     }
 
-    private StructConstantDeclarationSyntax ParseStructConstantDeclaration()
+    private TypeConstantDeclarationSyntax ParseStructConstantDeclaration()
     {
         SyntaxToken keyword = MatchToken(SyntaxKind.ConstKeyword);
         TypeSyntax type = ParseType();
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
         SyntaxToken equals = MatchToken(SyntaxKind.EqualsToken);
         ExpressionSyntax initializer = ParseExpression();
-        return new StructConstantDeclarationSyntax(keyword, type, identifier, equals, initializer, MatchToken(SyntaxKind.SemicolonToken));
+        return new TypeConstantDeclarationSyntax(keyword, type, identifier, equals, initializer, MatchToken(SyntaxKind.SemicolonToken));
     }
 
     private MethodDeclarationSyntax ParseMethodDeclaration(
@@ -554,7 +554,7 @@ internal sealed class Parser
 
     private void ValidateAccessorReturnBinding(TypeSyntax type)
     {
-        if (type.PointerReadonlyKeyword is { } modifier)
+        if (type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is { } modifier)
             Diagnostics.Report(modifier.Location, "return types cannot have a readonly pointer binding");
     }
 
@@ -665,22 +665,22 @@ internal sealed class Parser
         // A leading member qualifier belongs to the return type, never to this.
         if (leadingReadonly is not null)
         {
-            if (type.ReadonlyKeyword is not null)
-                Diagnostics.Report(type.ReadonlyKeyword.Location, "duplicate readonly return type qualifier");
-            type = type with { ReadonlyKeyword = leadingReadonly };
+            if (type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null)
+                Diagnostics.Report(type.GetQualifier(SyntaxKind.ReadonlyKeyword)!.Location, "duplicate readonly return type qualifier");
+            type = new QualifiedTypeSyntax(type, leadingReadonly);
         }
 
-        if (type.PointerReadonlyKeyword is { } pointerReadonly)
+        if (type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is { } pointerReadonly)
         {
             // ParseType also serves variables. Only their '*' suffix can qualify
             // a binding; immediately before a method name it qualifies the method.
-            if (type.IsReference || type.IsArray)
+            if (type.Contains<ReferenceTypeSyntax>() || type.Contains<ArrayTypeSyntax>())
                 Diagnostics.Report(pointerReadonly.Location, "return types cannot have a readonly pointer binding");
             else if (methodReadonly is not null)
                 Diagnostics.Report(methodReadonly.Location, "duplicate readonly method qualifier");
             else
                 methodReadonly = pointerReadonly;
-            type = type with { PointerReadonlyKeyword = null };
+            type = type.WithoutQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix);
         }
 
         return (type, methodReadonly);
@@ -722,12 +722,9 @@ internal sealed class Parser
         SyntaxToken? constKeyword = Current.Kind == SyntaxKind.ConstKeyword ? NextToken() : null;
         var nameParts = ImmutableArray.CreateBuilder<SyntaxToken>();
         var dotTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
-
         SyntaxToken firstName = SyntaxFacts.IsTypeName(Current.Kind)
-            ? NextToken()
-            : MatchToken(SyntaxKind.IdentifierToken);
+            ? NextToken() : MatchToken(SyntaxKind.IdentifierToken);
         nameParts.Add(firstName);
-
         if (firstName.Kind == SyntaxKind.IdentifierToken)
         {
             while (Current.Kind == SyntaxKind.DotToken)
@@ -737,53 +734,83 @@ internal sealed class Parser
             }
         }
 
-        var pointerTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
+        TypeArgumentListSyntax? arguments = Current.Kind == SyntaxKind.LessToken ? ParseTypeArgumentList() : null;
+        TypeSyntax type = new NamedTypeSyntax(nameParts.ToImmutable(), dotTokens.ToImmutable(), arguments);
         while (Current.Kind == SyntaxKind.StarToken)
+            type = new PointerTypeSyntax(type, NextToken());
+        if (type is PointerTypeSyntax && Current.Kind == SyntaxKind.ReadonlyKeyword)
+            type = new QualifiedTypeSyntax(type, NextToken(), TypeQualifierPosition.Postfix);
+        if (Current.Kind == SyntaxKind.AmpersandToken)
+            type = new ReferenceTypeSyntax(type, NextToken());
+        if (allowArraySuffix)
+            type = ParseArrayTypeSuffixes(type, allocation: false);
+        if (constKeyword is not null) type = new QualifiedTypeSyntax(type, constKeyword);
+        if (readonlyKeyword is not null) type = new QualifiedTypeSyntax(type, readonlyKeyword);
+        return type;
+    }
+
+    private TypeSyntax ParseArrayTypeSuffixes(TypeSyntax type, bool allocation)
+    {
+        var suffixes = new List<(SyntaxToken Open, ImmutableArray<SyntaxToken> Commas, SyntaxToken Close)>();
+        while (Current.Kind == SyntaxKind.OpenBracketToken &&
+               (!allocation || Peek(1).Kind is SyntaxKind.CommaToken or SyntaxKind.CloseBracketToken))
         {
-            pointerTokens.Add(NextToken());
-        }
-
-        SyntaxToken? pointerReadonly = pointerTokens.Count > 0 && Current.Kind == SyntaxKind.ReadonlyKeyword
-            ? NextToken() : null;
-
-        SyntaxToken? referenceToken = Current.Kind == SyntaxKind.AmpersandToken
-            ? NextToken()
-            : null;
-
-        SyntaxToken? openBracket = null;
-        SyntaxToken? closeBracket = null;
-        var ranks = ImmutableArray.CreateBuilder<int>();
-        while (allowArraySuffix && Current.Kind == SyntaxKind.OpenBracketToken)
-        {
-            openBracket ??= Current;
-            NextToken();
-            int rank = 1;
-            while (Current.Kind == SyntaxKind.CommaToken) { NextToken(); rank++; }
-            ranks.Add(rank);
+            SyntaxToken open = NextToken();
+            var commas = ImmutableArray.CreateBuilder<SyntaxToken>();
+            while (Current.Kind == SyntaxKind.CommaToken) commas.Add(NextToken());
             if (Current.Kind != SyntaxKind.CloseBracketToken)
             {
-                Diagnostics.Report(
-                    Current.Location,
+                Diagnostics.Report(Current.Location,
                     "fixed-size array type syntax is not supported; use 'T[]' and initialize it with 'T[n]' or 'new T[n]'");
-
-                while (Current.Kind is not SyntaxKind.CloseBracketToken and not SyntaxKind.EndOfFileToken)
-                {
+                while (Current.Kind is not (SyntaxKind.CloseBracketToken or SyntaxKind.EndOfFileToken or
+                       SyntaxKind.SemicolonToken or SyntaxKind.CloseBraceToken or SyntaxKind.CloseParenthesisToken))
                     NextToken();
-                }
             }
-
-            closeBracket = MatchToken(SyntaxKind.CloseBracketToken);
+            suffixes.Add((open, commas.ToImmutable(), MatchToken(SyntaxKind.CloseBracketToken)));
         }
+        for (int index = suffixes.Count - 1; index >= 0; index--)
+        {
+            var suffix = suffixes[index];
+            type = new ArrayTypeSyntax(type, suffix.Open, suffix.Commas, suffix.Close);
+        }
+        return type;
+    }
 
-        return new TypeSyntax(
-            constKeyword,
-            readonlyKeyword,
-            nameParts.ToImmutable(),
-            dotTokens.ToImmutable(),
-            pointerTokens.ToImmutable(),
-            referenceToken,
-            openBracket,
-            closeBracket) { PointerReadonlyKeyword = pointerReadonly, ArrayRanks = ranks.ToImmutable() };
+    // Reusable type grammar. Expression shifts retain their original lexer tokens.
+    private TypeArgumentListSyntax ParseTypeArgumentList()
+    {
+        SyntaxToken less = MatchToken(SyntaxKind.LessToken);
+        var arguments = ImmutableArray.CreateBuilder<TypeSyntax>();
+        var commas = ImmutableArray.CreateBuilder<SyntaxToken>();
+        do
+        {
+            int start = _position;
+            arguments.Add(ParseType());
+            if (Current.Kind != SyntaxKind.CommaToken) break;
+            commas.Add(NextToken());
+            if (_position == start) break;
+        } while (Current.Kind != SyntaxKind.EndOfFileToken);
+        return new TypeArgumentListSyntax(less, arguments.ToImmutable(), commas.ToImmutable(), MatchTypeGreaterToken());
+    }
+
+    private SyntaxToken MatchTypeGreaterToken()
+    {
+        if (Current.Kind is SyntaxKind.GreaterGreaterToken or SyntaxKind.GreaterGreaterEqualsToken or SyntaxKind.GreaterOrEqualsToken)
+        {
+            SyntaxToken token = Current;
+            SyntaxKind remainder = token.Kind switch
+            {
+                SyntaxKind.GreaterGreaterToken => SyntaxKind.GreaterToken,
+                SyntaxKind.GreaterGreaterEqualsToken => SyntaxKind.GreaterOrEqualsToken,
+                _ => SyntaxKind.EqualsToken,
+            };
+            _tokens[_position] = new SyntaxToken(SyntaxKind.GreaterToken,
+                new TextLocation(token.Location.Source, new TextSpan(token.Location.Span.Start, 1)), ">");
+            _tokens.Insert(_position + 1, new SyntaxToken(remainder,
+                new TextLocation(token.Location.Source, new TextSpan(token.Location.Span.Start + 1, token.Text.Length - 1)),
+                token.Text[1..]));
+        }
+        return MatchToken(SyntaxKind.GreaterToken);
     }
 
     private BlockStatementSyntax ParseBlockStatement()
@@ -1140,7 +1167,7 @@ internal sealed class Parser
             SyntaxToken keyword = NextToken();
             SyntaxToken less = MatchToken(SyntaxKind.LessToken);
             TypeSyntax type = ParseType();
-            SyntaxToken greater = MatchToken(SyntaxKind.GreaterToken);
+            SyntaxToken greater = MatchTypeGreaterToken();
             SyntaxToken open = MatchToken(SyntaxKind.OpenParenthesisToken);
             ExpressionSyntax expression = ParseExpression();
             SyntaxToken close = MatchToken(SyntaxKind.CloseParenthesisToken);
@@ -1279,20 +1306,8 @@ internal sealed class Parser
         return new NameExpressionSyntax(missing);
     }
 
-    private TypeSyntax ParseAllocationElementSuffixes(TypeSyntax type)
-    {
-        var ranks = ImmutableArray.CreateBuilder<int>();
-        while (Current.Kind == SyntaxKind.OpenBracketToken && Peek(1).Kind is SyntaxKind.CommaToken or SyntaxKind.CloseBracketToken)
-        {
-            SyntaxToken open = NextToken();
-            int rank = 1;
-            while (Current.Kind == SyntaxKind.CommaToken) { NextToken(); rank++; }
-            SyntaxToken close = MatchToken(SyntaxKind.CloseBracketToken);
-            ranks.Add(rank);
-            type = type with { OpenBracketToken = open, CloseBracketToken = close };
-        }
-        return type with { ArrayRanks = ranks.ToImmutable() };
-    }
+    private TypeSyntax ParseAllocationElementSuffixes(TypeSyntax type) =>
+        ParseArrayTypeSuffixes(type, allocation: true);
 
     private bool IsVariableDeclaration()
     {
@@ -1311,6 +1326,25 @@ internal sealed class Parser
             {
                 offset += 2;
             }
+        }
+
+        if (Peek(offset).Kind == SyntaxKind.LessToken)
+        {
+            int depth = 0;
+            do
+            {
+                SyntaxKind kind = Peek(offset++).Kind;
+                if (kind == SyntaxKind.LessToken) depth++;
+                else if (kind == SyntaxKind.GreaterToken) depth--;
+                else if (kind == SyntaxKind.GreaterGreaterToken) depth -= 2;
+                else if (kind is SyntaxKind.EndOfFileToken or SyntaxKind.SemicolonToken or
+                         SyntaxKind.OpenBraceToken or SyntaxKind.CloseBraceToken) return false;
+                else if (!SyntaxFacts.IsTypeName(kind) && kind is not (SyntaxKind.ReadonlyKeyword or
+                         SyntaxKind.ConstKeyword or SyntaxKind.DotToken or SyntaxKind.CommaToken or
+                         SyntaxKind.StarToken or SyntaxKind.AmpersandToken or SyntaxKind.OpenBracketToken or
+                         SyntaxKind.CloseBracketToken)) return false;
+            } while (depth > 0);
+            if (depth != 0) return false;
         }
 
         while (Peek(offset).Kind == SyntaxKind.StarToken)
@@ -1405,6 +1439,6 @@ internal sealed class Parser
     private SyntaxToken Peek(int offset)
     {
         int index = _position + offset;
-        return index >= _tokens.Length ? _tokens[^1] : _tokens[index];
+        return index >= _tokens.Count ? _tokens[^1] : _tokens[index];
     }
 }

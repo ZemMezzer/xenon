@@ -14,7 +14,7 @@ public sealed record BoundVariableExpression(VariableSymbol Variable) : BoundExp
     public override BoundKind Kind => BoundKind.VariableExpression;
 }
 
-public sealed record BoundThisExpression(StructTypeSymbol StructType, PointerTypeSymbol PointerType) : BoundExpression(PointerType)
+public sealed record BoundThisExpression(DeclaredTypeSymbol ContainingType, PointerTypeSymbol PointerType) : BoundExpression(PointerType)
 {
     public override BoundKind Kind => BoundKind.ThisExpression;
 }
