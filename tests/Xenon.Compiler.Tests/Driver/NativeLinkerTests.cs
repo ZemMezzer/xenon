@@ -695,7 +695,7 @@ public sealed class NativeLinkerTests
         Compilation compilation = Compilation.Create(SourceText.From("""
             namespace Example;
 
-            struct Entity
+            abstract struct Entity
             {
                 public abstract int Score();
             }
@@ -2221,7 +2221,7 @@ public sealed class NativeLinkerTests
                 public int readonly Read() { return Count; }
                 public void readonly Update() { int snapshot = Count; }
             }
-            struct Base { public abstract int readonly Score(); }
+            abstract struct Base { public abstract int readonly Score(); }
             struct Derived : Base { public override int readonly Score() { return 42; } }
             int Main()
             {
@@ -2664,7 +2664,7 @@ public sealed class NativeLinkerTests
             struct Derived : Base
             {
                 public override int Read() { return 42; }
-                public ~Derived()
+                public override ~Derived()
                 {
                     Temporary[1];
                     State.Trace = State.Trace * 10 + 2;
@@ -2782,7 +2782,7 @@ public sealed class NativeLinkerTests
                 public override int Read() { return Value + Extra; }
                 public override int Current { get { return Value + Extra; } set { Value = value + Extra; } }
                 public override int this[int index] { get { return Value + index; } set { Value = value + index; } }
-                public ~Derived() { State.Trace = State.Trace * 10 + 2; }
+                public override ~Derived() { State.Trace = State.Trace * 10 + 2; }
             }
             struct Leaf : Derived { }
             struct Nested { public Leaf Value; }
@@ -3131,7 +3131,7 @@ public sealed class NativeLinkerTests
             {
                 public B() { Log.Calls = Log.Calls * 10 + Read(); }
                 public override int Read() { return 2; }
-                public ~B() { Log.Calls = Log.Calls * 10 + Read(); }
+                public override ~B() { Log.Calls = Log.Calls * 10 + Read(); }
             }
             struct C : B
             {
@@ -3140,7 +3140,7 @@ public sealed class NativeLinkerTests
                 public override int Read() { return Stage + 3; }
                 public override int Value { get { return Stage + 30; } }
                 public override int this[int x] { get { return Stage + x + 30; } }
-                public ~C() { Log.Calls = Log.Calls * 10 + Read(); Stage = 5; }
+                public override ~C() { Log.Calls = Log.Calls * 10 + Read(); Stage = 5; }
             }
             int Main()
             {
@@ -3179,12 +3179,12 @@ public sealed class NativeLinkerTests
             struct Log { public static int Value; }
             struct Local { public ~Local() { Log.Value = Log.Value * 10 + 4; } }
             struct A { public virtual ~A() { Log.Value = Log.Value * 10 + 1; } }
-            struct B : A { public ~B() { Log.Value = Log.Value * 10 + 2; return; } }
+            struct B : A { public override ~B() { Log.Value = Log.Value * 10 + 2; return; } }
             struct C : B
             {
                 public int Mode;
                 public C(int mode) { Mode = mode; }
-                public ~C() { Local[] local = Local[1]; Log.Value = Log.Value * 10 + 3; {{exit}} }
+                public override ~C() { Local[] local = Local[1]; Log.Value = Log.Value * 10 + 3; {{exit}} }
             }
             int Main()
             {
@@ -3207,7 +3207,7 @@ public sealed class NativeLinkerTests
             struct H { public int& Value; public H(int& value) { Value = value; } }
             struct D : H { public readonly int& Other; public D(int& v) : base(v) { this.Other = v; } }
             struct Outer { public H Inner; public Outer(int& v) { Inner = H(v); } }
-            struct A { public abstract int Read(); }
+            abstract struct A { public abstract int Read(); }
             struct C : A { public override int Read() { return 42; } }
             struct Resource
             {
@@ -3486,6 +3486,98 @@ public sealed class NativeLinkerTests
             struct Item { public int Value; }
             void readonly Destroy(Item* readonly pointer) { free(pointer); }
             int Main() { R.Run(); if (R.Count != 1) return 1; Item* readonly p = new Item(); Destroy(p); return 42; }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_CompletesAbstractMethodPropertyAndIndexerSlotsAcrossLevels(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            interface Root { int Read(); int Value { get; set; } int this[int x] { get; set; } }
+            interface Left : Root {}
+            interface Right : Root {}
+            interface Both : Left, Right {}
+            abstract struct A : Both
+            {
+                public abstract int Read();
+                public abstract int Value { get; set; }
+                public abstract int this[int x] { get; set; }
+            }
+            abstract struct B : A {}
+            abstract struct C : B {}
+            struct D : C
+            {
+                public int N;
+                public override int Read() { return N; }
+                public override int Value { get { return N; } set { N = value; } }
+                public override int this[int x] { get { return N + x; } set { N = value - x; } }
+            }
+            int Main()
+            {
+                D* d = new D(); A* a = d; B& b = *d; C& c = *d;
+                d->N = 10; if (a->Read() != 10 || b.Value != 10 || c[2] != 12) return 1;
+                b.Value = 20; if (a->Read() != 20) return 2;
+                c[2] = 40; if (a->Read() != 38) return 3;
+                Both view = *a; if (view.Read() != 38 || view[2] != 40) return 4;
+                view.Value = 40; if (c[2] != 42) return 5;
+                view[1] = 43; if (b.Value != 42) return 6;
+                free(a); return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_ExplicitDestructorOverridesAndInheritedCleanupKeepTheSameDispatch(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Log { public static int Trace; }
+            struct A
+            {
+                public virtual int Read() { return 1; }
+                public virtual ~A() { Log.Trace = Log.Trace * 10 + Read(); }
+            }
+            struct B : A { public override ~B() { Log.Trace = Log.Trace * 10 + 2; } }
+            struct C : B {}
+            struct D : C
+            {
+                public override int Read() { return 7; }
+                public override ~D() { Log.Trace = Log.Trace * 10 + 4; }
+            }
+            struct E : D {}
+            struct F : A {}
+            int Main()
+            {
+                A* p = new E(); free(p); if (Log.Trace != 427) return 1;
+                Log.Trace = 0; { E value = E(); } if (Log.Trace != 427) return 2;
+                Log.Trace = 0; { E[] values = E[2]; } if (Log.Trace != 427427) return 3;
+                Log.Trace = 0; p = new F(); if (p->Read() != 1) return 4;
+                free(p); if (Log.Trace != 1) return 5;
+                Log.Trace = 0; { F value = F(); } if (Log.Trace != 1) return 6;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_OverrideLookupSkipsDifferentOverloadsInIntermediateTypes(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct A { public virtual int M(int x) { return x; } }
+            struct B : A { public int M(float x) { return cast<int>(x) + 1; } }
+            struct C : B {}
+            struct D : C { public override int M(int x) { return x + 40; } }
+            int Main()
+            {
+                D d = D(); A& a = d; B& b = d;
+                if (a.M(2) != 42 || d.M(2) != 42 || b.M(1.0f) != 2) return 1;
+                return 42;
+            }
             """, optimization));
     }
 

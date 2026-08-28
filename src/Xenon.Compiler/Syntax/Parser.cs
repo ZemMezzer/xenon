@@ -42,7 +42,7 @@ internal sealed class Parser
             {
                 members.Add(Current.Kind switch
                 {
-                    SyntaxKind.StructKeyword => ParseStructDeclaration(),
+                    SyntaxKind.StructKeyword or SyntaxKind.AbstractKeyword => ParseStructDeclaration(),
                     SyntaxKind.EnumKeyword => ParseEnumDeclaration(),
                     SyntaxKind.InterfaceKeyword => ParseInterfaceDeclaration(),
                     SyntaxKind.ConstKeyword => ParseModuleConstantDeclaration(),
@@ -124,6 +124,13 @@ internal sealed class Parser
 
     private StructDeclarationSyntax ParseStructDeclaration()
     {
+        SyntaxToken? abstractKeyword = null;
+        while (Current.Kind == SyntaxKind.AbstractKeyword)
+        {
+            SyntaxToken modifier = NextToken();
+            if (abstractKeyword is not null) Diagnostics.Report(modifier.Location, "duplicate abstract struct modifier");
+            abstractKeyword ??= modifier;
+        }
         SyntaxToken structKeyword = MatchToken(SyntaxKind.StructKeyword);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
         (SyntaxToken? colon, ImmutableArray<TypeSyntax> bases, ImmutableArray<SyntaxToken> baseCommas) = ParseBaseTypeList();
@@ -207,7 +214,7 @@ internal sealed class Parser
             baseCommas,
             openBrace,
             members.ToImmutable(),
-            closeBrace);
+            closeBrace) { AbstractKeyword = abstractKeyword };
     }
 
     private ModuleConstantDeclarationSyntax ParseModuleConstantDeclaration()

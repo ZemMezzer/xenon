@@ -753,6 +753,7 @@ public sealed class ParserTests
     [InlineData("virtual virtual void M() {}")]
     [InlineData("virtual override abstract void M();")]
     [InlineData("static virtual int Value { get { return 0; } }")]
+    [InlineData("static override void M() {}")]
     [InlineData("virtual override int this[int i] { get { return i; } }")]
     [InlineData("int* readonly Value { get { return null; } }")]
     [InlineData("readonly int Value { set {} }")]
@@ -787,6 +788,30 @@ public sealed class ParserTests
     {
         SyntaxTree tree = Parse("namespace Example; interface I { " + member + " }");
         Assert.Contains(tree.Diagnostics, d => d.Message.Contains("modifier", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Parser_PreservesExplicitAbstractStructModifier()
+    {
+        SyntaxTree tree = Parse("namespace Example; abstract struct A {} struct B : A {}");
+        Assert.Empty(tree.Diagnostics);
+        var abstractType = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.True(abstractType.IsAbstract);
+        Assert.Equal(SyntaxKind.AbstractKeyword, abstractType.AbstractKeyword!.Kind);
+        Assert.False(Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[1]).IsAbstract);
+        Assert.Contains(Parse("namespace Example; abstract abstract struct A {}").Diagnostics,
+            d => d.Message == "duplicate abstract struct modifier");
+    }
+
+    [Theory]
+    [InlineData("abstract override void M();", "mutually exclusive")]
+    [InlineData("abstract override int Value { get; }", "mutually exclusive")]
+    [InlineData("abstract override int this[int x] { get; }", "mutually exclusive")]
+    [InlineData("abstract ~A();", "not allowed on a destructor")]
+    public void Parser_ExplicitlyRejectsUnsupportedAbstractMemberForms(string member, string diagnostic)
+    {
+        SyntaxTree tree = Parse("namespace Example; abstract struct A { " + member + " }");
+        Assert.Contains(tree.Diagnostics, d => d.Message.Contains(diagnostic, StringComparison.Ordinal));
     }
 
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));

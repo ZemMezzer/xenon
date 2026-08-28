@@ -285,6 +285,8 @@ public sealed record StructDeclarationSyntax(
     ImmutableArray<StructMemberDeclarationSyntax> Members,
     SyntaxToken CloseBraceToken) : MemberDeclarationSyntax
 {
+    public SyntaxToken? AbstractKeyword { get; init; }
+    public bool IsAbstract => AbstractKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.StructDeclaration;
 
     public ImmutableArray<FieldDeclarationSyntax> Fields =>

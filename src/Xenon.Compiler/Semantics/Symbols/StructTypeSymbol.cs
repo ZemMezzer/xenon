@@ -64,7 +64,7 @@ public sealed class StructTypeSymbol : TypeSymbol
     // The complete base subobject (including tail padding) occupies element zero.
     public int DeclaredFieldStart => (BaseType is null ? 0 : 1) + (IntroducesVirtualDispatch ? 1 : 0);
 
-    public bool IsAbstract => _virtualMethods.Any(method => method.IsAbstract);
+    public bool IsAbstract => Declaration.IsAbstract;
 
     internal StructDeclarationSyntax Declaration { get; }
 
