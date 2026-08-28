@@ -13,6 +13,7 @@ internal sealed class ConstantEvaluationContext(ITargetTypeLayout? targetLayout)
 {
     public ITargetTypeLayout? TargetLayout { get; set; } = targetLayout;
     public bool RequiresTargetLayout { get; private set; }
+    public void RequireTargetLayout() => RequiresTargetLayout = true;
 
     public ConstantFoldStatus Fold(BoundExpression expression, out object? value)
     {

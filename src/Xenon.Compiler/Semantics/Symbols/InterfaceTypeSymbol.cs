@@ -52,12 +52,28 @@ public sealed class InterfaceTypeSymbol : TypeSymbol
     public int GetMethodSlot(FunctionSymbol method) => _methodSlots.TryGetValue(method, out int slot)
         ? slot
         : throw new InvalidOperationException($"method '{method.Name}' does not belong to interface '{FullName}'");
-    public FunctionSymbol? FindMethod(string name) => _methods.FirstOrDefault(m => m.Name == name) ?? BaseInterfaces.Select(i => i.FindMethod(name)).FirstOrDefault(m => m is not null);
+    public IEnumerable<FunctionSymbol> FindMethods(string name) =>
+        SelfAndBaseInterfaces.SelectMany(type => type.Methods)
+            .Where(method => method.Name == name)
+            .OrderBy(method => method.FullName, StringComparer.Ordinal)
+            .DistinctBy(TypeIdentity.Method);
+
+    public FunctionSymbol? FindMethod(string name)
+    {
+        FunctionSymbol[] candidates = FindMethods(name).ToArray();
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    internal IEnumerable<InterfacePropertySymbol> AllProperties =>
+        SelfAndBaseInterfaces.SelectMany(type => type.Properties);
+
     public InterfacePropertySymbol? FindProperty(string name) =>
-        _properties.FirstOrDefault(property => string.Equals(property.Name, name, StringComparison.Ordinal)) ??
-        BaseInterfaces.Select(@interface => @interface.FindProperty(name)).FirstOrDefault(property => property is not null);
+        AllProperties.Where(property => property.Name == name)
+            .OrderBy(property => property.ContainingInterface.FullName, StringComparer.Ordinal).FirstOrDefault();
     public IEnumerable<InterfaceIndexerSymbol> AllIndexers =>
-        _indexers.Concat(BaseInterfaces.SelectMany(@interface => @interface.AllIndexers));
+        SelfAndBaseInterfaces.SelectMany(type => type.Indexers)
+            .OrderBy(indexer => indexer.ContainingInterface.FullName, StringComparer.Ordinal)
+            .DistinctBy(indexer => TypeIdentity.Parameters(indexer.Parameters));
 
     public bool IsOrInherits(InterfaceTypeSymbol target) =>
         ReferenceEquals(this, target) || BaseInterfaces.Any(@interface => @interface.IsOrInherits(target));

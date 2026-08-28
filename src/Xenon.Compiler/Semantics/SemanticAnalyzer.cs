@@ -51,6 +51,7 @@ internal sealed class SemanticAnalyzer
         ValidateInheritanceCycles();
         MarkVirtualDispatchRequirements();
         DeclareInterfaceMethods();
+        ValidateInheritedInterfaceMembers();
         AssignInterfaceMethodSlots();
         BindStructFields();
         ValidateStructLayouts();
@@ -59,6 +60,7 @@ internal sealed class SemanticAnalyzer
         // Invalid by-value layouts must not be queried through a native ABI provider.
         if (_diagnostics.Count != 0) _constants.TargetLayout = null;
         EvaluateConstants();
+        BindStaticFieldInitializers();
         DeclareStructProperties();
         DeclareStructIndexers();
         DeclareStructMethods();
@@ -67,6 +69,7 @@ internal sealed class SemanticAnalyzer
         ValidateMethodOverridesAndInterfaces();
         DeclareFunctions();
         BindInstanceFieldInitializers();
+        ValidateNativeSymbols();
 
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
@@ -340,24 +343,6 @@ internal sealed class SemanticAnalyzer
                         $"field '{fieldSyntax.IdentifierToken.Text}' is already declared in struct '{type.Name}'");
                 }
 
-                object? constantValue = null;
-                if (fieldSyntax.IsStatic && fieldSyntax.Initializer is not null && !TryEvaluateConstant(fieldSyntax.Initializer, out constantValue))
-                {
-                    _diagnostics.Report(fieldSyntax.IdentifierToken.Location, "static field initializers must be compile-time constants");
-                }
-                else if (fieldSyntax.IsStatic && fieldSyntax.Initializer is not null)
-                {
-                    TypeSymbol constantType = GetConstantExpressionType(fieldSyntax.Initializer);
-                    if (ReferenceEquals(constantType, BuiltinTypes.Error) || !TypeFacts.CanAssign(fieldType, constantType))
-                    {
-                        _diagnostics.Report(fieldSyntax.IdentifierToken.Location, $"cannot implicitly convert '{constantType.Name}' to '{fieldType.Name}'");
-                    }
-                    else if (!IsSupportedStaticInitializer(fieldType, constantValue))
-                    {
-                        _diagnostics.Report(fieldSyntax.IdentifierToken.Location, $"static field type '{fieldType.Name}' does not support this constant initializer");
-                    }
-                }
-
                 var field = new FieldSymbol(
                     fieldSyntax.IdentifierToken.Text,
                     type,
@@ -366,7 +351,7 @@ internal sealed class SemanticAnalyzer
                     fieldSyntax.IsPublic ? Accessibility.Public : Accessibility.Private,
                     fieldSyntax.IsStatic,
                     fieldSyntax.IsReadonly,
-                    constantValue,
+                    null,
                     fieldSyntax);
                 if (fieldSyntax.IsStatic)
                     staticFields.Add(field);
@@ -376,6 +361,32 @@ internal sealed class SemanticAnalyzer
 
             type.SetFields(fields.ToImmutable());
             type.SetStaticFields(staticFields.ToImmutable());
+        }
+    }
+
+    private void BindStaticFieldInitializers()
+    {
+        // Layout queries are safe only after every struct's fields and layout are known.
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        foreach (FieldSymbol field in type.StaticFields.Where(field => field.Declaration.Initializer is not null))
+        {
+            FieldDeclarationSyntax syntax = field.Declaration;
+            var context = new ConstantSymbol(field.Name, field.Type, type.ContainingNamespace,
+                type, syntax.Initializer!, syntax.IdentifierToken);
+            _constantScopes.Add(context, _structScopes[declaration]);
+            BoundExpression? initializer = BindConstantExpression(syntax.Initializer!, context);
+            _constantScopes.Remove(context);
+            object? value = null;
+            ConstantFoldStatus status = initializer is null ? ConstantFoldStatus.Invalid : _constants.Fold(initializer, out value);
+            TypeSymbol constantType = initializer?.Type ?? BuiltinTypes.Error;
+            if (status == ConstantFoldStatus.Invalid)
+                _diagnostics.Report(syntax.IdentifierToken.Location, "static field initializers must be compile-time constants");
+            else if (ReferenceEquals(constantType, BuiltinTypes.Error) || !TypeFacts.CanAssign(field.Type, constantType))
+                _diagnostics.Report(syntax.IdentifierToken.Location, $"cannot implicitly convert '{constantType.Name}' to '{field.Type.Name}'");
+            else if (!IsSupportedStaticInitializer(field.Type, value))
+                _diagnostics.Report(syntax.IdentifierToken.Location, $"static field type '{field.Type.Name}' does not support this constant initializer");
+            else
+                field.SetConstantValue(value);
         }
     }
 
@@ -664,6 +675,21 @@ internal sealed class SemanticAnalyzer
 
                 try
                 {
+                    if (binary.OperatorKind is SyntaxKind.SlashToken or SyntaxKind.PercentToken &&
+                        binary.Left.Type is PrimitiveTypeSymbol { IsInteger: true, IsSigned: true } signedType)
+                    {
+                        int? signedWidth = signedType.BitWidth ?? targetLayout?.GetIntegerBitWidth(signedType);
+                        if (signedWidth is null)
+                        {
+                            value = null;
+                            return ConstantFoldStatus.TargetDependent;
+                        }
+                        if (ToInteger(left) == -(BigInteger.One << (signedWidth.Value - 1)) && ToInteger(right) == -1)
+                        {
+                            value = null;
+                            return ConstantFoldStatus.Invalid;
+                        }
+                    }
                     if (binary.OperatorKind is SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken)
                     {
                         var operandType = (PrimitiveTypeSymbol)binary.Left.Type;
@@ -815,37 +841,10 @@ internal sealed class SemanticAnalyzer
         (type is PrimitiveTypeSymbol { IsInteger: true } && value is not bool) ||
         type is PrimitiveTypeSymbol { IsFloatingPoint: true };
 
-    private static bool TryEvaluateConstant(ExpressionSyntax syntax, out object? value)
-    {
-        try
-        {
-            switch (syntax)
-            {
-                case LiteralExpressionSyntax literal:
-                    value = GetConstantLiteralValue(literal);
-                    return true;
-                case ParenthesizedExpressionSyntax parenthesized:
-                    return TryEvaluateConstant(parenthesized.Expression, out value);
-                case UnaryExpressionSyntax unary when TryEvaluateConstant(unary.Operand, out object? operand):
-                    return TryEvaluateUnaryConstant(unary.OperatorToken.Kind, operand, out value);
-                case BinaryExpressionSyntax binary when
-                    TryEvaluateConstant(binary.Left, out object? left) &&
-                    TryEvaluateConstant(binary.Right, out object? right):
-                    return TryEvaluateBinaryConstant(left, binary.OperatorToken.Kind, right, out value);
-                default:
-                    value = null;
-                    return false;
-            }
-        }
-        catch (Exception exception) when (exception is OverflowException or DivideByZeroException or InvalidCastException or FormatException)
-        {
-            value = null;
-            return false;
-        }
-    }
-
     private static object? GetConstantLiteralValue(LiteralExpressionSyntax literal) => literal.LiteralToken switch
     {
+        { Kind: SyntaxKind.TrueKeyword } => true,
+        { Kind: SyntaxKind.FalseKeyword } => false,
         { Kind: SyntaxKind.IntegerLiteralToken, Value: ulong integer } when integer <= int.MaxValue => (int)integer,
         { Kind: SyntaxKind.IntegerLiteralToken, Value: ulong integer } when integer <= long.MaxValue => (long)integer,
         { Kind: SyntaxKind.IntegerLiteralToken, Value: ulong integer } => integer,
@@ -1074,6 +1073,38 @@ internal sealed class SemanticAnalyzer
         }
     }
 
+    private void ValidateInheritedInterfaceMembers()
+    {
+        foreach (InterfaceTypeSymbol type in _interfaceSymbols.Values)
+        {
+            foreach (var group in type.AllMethods.GroupBy(TypeIdentity.Method))
+            {
+                FunctionSymbol first = group.First();
+                if (group.Any(method => !ReferenceEquals(method.ReturnType, first.ReturnType) || method.IsReadonly != first.IsReadonly))
+                    _diagnostics.Report(type.Declaration.IdentifierToken.Location,
+                        $"interface '{type.Name}' inherits incompatible member '{first.Name}'");
+            }
+            foreach (var group in type.AllProperties.GroupBy(property => property.Name))
+            {
+                InterfacePropertySymbol first = group.First();
+                if (group.Any(property => !ReferenceEquals(property.Type, first.Type) ||
+                    (property.Getter is null) != (first.Getter is null) || (property.Setter is null) != (first.Setter is null)) ||
+                    type.SelfAndBaseInterfaces.SelectMany(parent => parent.Methods).Any(method => method.Name == first.Name))
+                    _diagnostics.Report(type.Declaration.IdentifierToken.Location,
+                        $"interface '{type.Name}' inherits incompatible member '{first.Name}'");
+            }
+            foreach (var group in type.SelfAndBaseInterfaces.SelectMany(parent => parent.Indexers)
+                .GroupBy(indexer => TypeIdentity.Parameters(indexer.Parameters)))
+            {
+                InterfaceIndexerSymbol first = group.First();
+                if (group.Any(indexer => !ReferenceEquals(indexer.Type, first.Type) ||
+                    (indexer.Getter is null) != (first.Getter is null) || (indexer.Setter is null) != (first.Setter is null)))
+                    _diagnostics.Report(type.Declaration.IdentifierToken.Location,
+                        $"interface '{type.Name}' inherits incompatible indexers");
+            }
+        }
+    }
+
     private void DeclareInterfaceMethods()
     {
         foreach ((InterfaceDeclarationSyntax declaration, InterfaceTypeSymbol type) in _interfaceSymbols)
@@ -1082,12 +1113,13 @@ internal sealed class SemanticAnalyzer
             var methods = ImmutableArray.CreateBuilder<FunctionSymbol>();
             foreach (InterfaceMethodDeclarationSyntax syntax in declaration.Methods)
             {
-                if (methods.Any(m => m.Name == syntax.IdentifierToken.Text))
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(syntax.Parameters, scope);
+                if (methods.Any(m => m.Name == syntax.IdentifierToken.Text && HaveSameParameterTypes(m.Parameters, parameters)))
                 {
                     _diagnostics.Report(syntax.IdentifierToken.Location, $"interface '{type.Name}' already declares method '{syntax.IdentifierToken.Text}'");
                     continue;
                 }
-                methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, TypeResolver.ResolveReturnType(syntax.ReturnType, scope, _diagnostics), BindParameters(syntax.Parameters, scope), syntax));
+                methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, TypeResolver.ResolveReturnType(syntax.ReturnType, scope, _diagnostics), parameters, syntax));
             }
             type.SetMethods(methods.ToImmutable());
 
@@ -1599,7 +1631,7 @@ internal sealed class SemanticAnalyzer
             foreach (ConstructorDeclarationSyntax constructorSyntax in declaration.Constructors)
             {
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(constructorSyntax.Parameters, scope);
-                string signature = string.Join(",", parameters.Select(parameter => parameter.Type.Name));
+                string signature = TypeIdentity.Parameters(parameters);
                 if (!signatures.Add(signature))
                 {
                     _diagnostics.Report(constructorSyntax.IdentifierToken.Location, $"constructor '{type.Name}({signature})' is already declared");
@@ -1609,6 +1641,15 @@ internal sealed class SemanticAnalyzer
                     constructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
                 constructors.Add(constructor);
                 _functionBodies.Add((constructor, constructorSyntax.Body, scope));
+            }
+            if (constructors.Count == 0 && type.BaseType is not null)
+            {
+                // Use the same body binder as an explicit empty constructor, including
+                // overload/access checks and the base-before-fields initialization order.
+                var constructor = new FunctionSymbol(FunctionKind.Constructor, type, [], declaration, Accessibility.Public);
+                constructors.Add(constructor);
+                _functionBodies.Add((constructor,
+                    new BlockStatementSyntax(declaration.OpenBraceToken, [], declaration.CloseBraceToken), scope));
             }
             type.SetConstructors(constructors.ToImmutable());
 
@@ -1687,6 +1728,34 @@ internal sealed class SemanticAnalyzer
                     _functionBodies.Add((function, declaration.Body, scope));
                 }
             }
+        }
+    }
+
+    private void ValidateNativeSymbols()
+    {
+        var symbols = new Dictionary<string, FunctionSymbol>(StringComparer.Ordinal);
+        IEnumerable<FunctionSymbol> functions = _functionSymbols.Values.Concat(_structSymbols.Values.SelectMany(type =>
+            type.Methods.Concat(type.Constructors).Concat(new[] { type.Destructor, type.InstanceInitializer }.OfType<FunctionSymbol>())));
+        foreach (FunctionSymbol function in functions)
+        {
+            string name = NativeSymbolNames.Get(function);
+            if (symbols.TryAdd(name, function)) continue;
+            FunctionSymbol previous = symbols[name];
+            string? signature = NativeSymbolNames.GetAbiSignature(function, _constants.TargetLayout);
+            string? previousSignature = NativeSymbolNames.GetAbiSignature(previous, _constants.TargetLayout);
+            if (function.IsExtern && previous.IsExtern)
+            {
+                if (signature is null || previousSignature is null)
+                {
+                    _constants.RequireTargetLayout();
+                    continue;
+                }
+                if (signature == previousSignature) continue;
+            }
+            TextLocation location = function.Declaration is FunctionDeclarationSyntax declaration
+                ? declaration.IdentifierToken.Location : function.ContainingType!.Declaration.IdentifierToken.Location;
+            _diagnostics.Report(location,
+                $"native symbol '{name}' collides between '{previous.FullName}' and '{function.FullName}' with incompatible ABI or multiple definitions");
         }
     }
 
