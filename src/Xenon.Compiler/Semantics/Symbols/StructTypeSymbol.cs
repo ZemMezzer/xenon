@@ -288,19 +288,9 @@ public sealed class IndexerSymbol : Symbol
     {
         string signature = parameters.IsEmpty
             ? "none"
-            : string.Join("__", parameters.Select(parameter => EncodeTypeName(GetTypeIdentity(parameter.Type))));
+            : string.Join("__", parameters.Select(parameter => EncodeTypeName(TypeIdentity.Get(parameter.Type))));
         return $"{prefix}__{signature}";
     }
-
-    private static string GetTypeIdentity(TypeSymbol type) => type switch
-    {
-        StructTypeSymbol structure => structure.FullName,
-        InterfaceTypeSymbol @interface => @interface.FullName,
-        PointerTypeSymbol pointer => $"{(pointer.IsReadonly ? "readonly_" : string.Empty)}ptr_{GetTypeIdentity(pointer.ElementType)}",
-        ReferenceTypeSymbol reference => $"{(reference.IsReadonly ? "readonly_" : string.Empty)}ref_{GetTypeIdentity(reference.ElementType)}",
-        ArrayTypeSymbol array => $"array_{GetTypeIdentity(array.ElementType)}",
-        _ => type.Name,
-    };
 
     private static string EncodeTypeName(string name) => string.Concat(name.Select(character =>
         char.IsAsciiLetterOrDigit(character) ? character.ToString() : $"_{(int)character:X2}"));
@@ -377,7 +367,9 @@ public sealed class FieldSymbol : Symbol
 
     public bool IsReadonly { get; }
 
-    public object? ConstantValue { get; }
+    public object? ConstantValue { get; private set; }
+
+    internal void SetConstantValue(object? value) => ConstantValue = value;
 
     public BoundExpression? Initializer { get; private set; }
 

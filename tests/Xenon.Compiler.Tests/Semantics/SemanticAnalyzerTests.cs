@@ -8,6 +8,170 @@ namespace Xenon.Compiler.Tests.Semantics;
 
 public sealed class SemanticAnalyzerTests
 {
+
+    [Theory]
+    [InlineData("int x = 0; x /= 1.5f;")]
+    [InlineData("int x = 0; x <<= true;")]
+    [InlineData("int* x = null; x -= x;")]
+    public void Analyzer_ReportsInvalidCompoundOperandsWithoutCrashing(string statement)
+    {
+        Assert.True(CreateCompilation("namespace Example; void F() { " + statement + " }").HasErrors);
+    }
+
+    [Fact]
+    public void Analyzer_ShortCircuitsInvalidConstantOperationsConsistently()
+    {
+        Assert.Empty(CreateCompilation("""
+            namespace Example;
+            const bool A = false && (1 / 0 == 0);
+            struct S { public static bool B = true || (1 << -1 == 0); }
+            bool F() { const bool C = false && (1 % 0 == 0); return true || (1 << -1 == 0); }
+            """).Diagnostics);
+    }
+
+
+    [Theory]
+    [InlineData("a + 1", "int* a")]
+    [InlineData("1 + a", "int* a")]
+    [InlineData("a - 1", "int* a")]
+    [InlineData("a - b", "int* a, readonly int* b")]
+    [InlineData("a++", "int* a")]
+    [InlineData("++a", "int* a")]
+    [InlineData("a += 2", "int* a")]
+    [InlineData("a -= 2", "int* a")]
+    public void Analyzer_AcceptsElementPointerArithmetic(string expression, string parameters)
+    {
+        Assert.Empty(CreateCompilation($"namespace Example; void F({parameters}) {{ {expression}; }}").Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("int* a, float* b", "a - b")]
+    [InlineData("int* a, int* b", "a + b")]
+    [InlineData("void* a", "a + 1")]
+    [InlineData("void* a", "a++")]
+    public void Analyzer_RejectsInvalidPointerArithmetic(string parameters, string expression)
+    {
+        Assert.True(CreateCompilation($"namespace Example; void F({parameters}) {{ {expression}; }}").HasErrors);
+    }
+
+    [Theory]
+    [InlineData("Base() {}", "private")]
+    [InlineData("public Base(int value) {}", "no constructor")]
+    public void Analyzer_ValidatesImplicitAndExplicitBaseConstructor(string constructor, string diagnostic)
+    {
+        foreach (string derived in new[] { "", "public Derived() {}" })
+        {
+            Compilation compilation = CreateCompilation($$"""
+                namespace Example;
+                struct Base { {{constructor}} }
+                struct Derived : Base { {{derived}} }
+                """);
+            Assert.Contains(compilation.Diagnostics, item => item.Message.Contains(diagnostic, StringComparison.Ordinal));
+        }
+    }
+
+    [Theory]
+    [InlineData("IA, IB")]
+    [InlineData("IB, IA")]
+    public void Analyzer_RejectsConflictingInheritedInterfaceMembers(string bases)
+    {
+        foreach (string member in new[] { "Get();", "Value { get; }", "this[int index] { get; }" })
+        {
+            Compilation compilation = CreateCompilation($$"""
+                namespace Example;
+                interface IA { int {{member}} }
+                interface IB { float {{member}} }
+                interface IC : {{bases}} {}
+                """);
+            Assert.Contains(compilation.Diagnostics, item => item.Message.Contains("incompatible", StringComparison.Ordinal));
+        }
+    }
+
+    [Theory]
+    [InlineData("IA, IB")]
+    [InlineData("IB, IA")]
+    public void Analyzer_ResolvesInheritedOverloadsAndDiamond(string bases)
+    {
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            interface Root { int Read(); int this[int index] { get; } }
+            interface IA : Root { int Get(int value); }
+            interface IB : Root { float Get(float value); }
+            interface IC : {{bases}} {}
+            float F(IC value) { int a = value.Get(1); int b = value.Read(); int c = value[0]; return value.Get(1.0f); }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_DiagnosesAmbiguousInheritedOverloads()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            interface IA { int Get(int* value); }
+            interface IB { int Get(float* value); }
+            interface IC : IA, IB {}
+            int F(IC value) { return value.Get(null); }
+            """);
+        Assert.Contains(compilation.Diagnostics, item => item.Message.Contains("ambiguous", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("extern int Foo(int x);", "extern double Foo(double x);")]
+    [InlineData("extern int Foo(int x);", "extern int Foo(int x, int y);")]
+    [InlineData("export int F() { return 1; }", "export int F() { return 2; }")]
+    public void Analyzer_DiagnosesGlobalNativeCollisions(string first, string second)
+    {
+        Compilation compilation = Compilation.Create(
+            SourceText.From("namespace A_B; " + first, "first.xe"),
+            SourceText.From("namespace A.B; " + second, "second.xe"));
+        Assert.Contains(compilation.Diagnostics, item => item.Message.Contains("native symbol", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_AcceptsIdenticalExternAbiDespiteReadonlyQualifiers()
+    {
+        Compilation compilation = Compilation.Create(
+            SourceText.From("namespace A; extern int Foo(int* value);", "first.xe"),
+            SourceText.From("namespace B; extern int readonly Foo(readonly int* value);", "second.xe"));
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("sbyte", 8, true)]
+    [InlineData("byte", 8, false)]
+    [InlineData("short", 16, true)]
+    [InlineData("ushort", 16, false)]
+    [InlineData("int", 32, true)]
+    [InlineData("uint", 32, false)]
+    [InlineData("long", 64, true)]
+    [InlineData("ulong", 64, false)]
+    public void Analyzer_ValidatesConstantIntegerEdges(string type, int width, bool signed)
+    {
+        foreach (string operation in new[] { "<<", ">>" })
+        {
+            foreach (int count in new[] { 0, width - 1, width, width + 1, -1 })
+            {
+                string expression = $"cast<{type}>(1) {operation} {count}";
+                Compilation compilation = CreateCompilation($"namespace Example; const {type} Result = {expression};");
+                Assert.Equal(count < 0 || count >= width, compilation.HasErrors);
+                Compilation field = CreateCompilation($"namespace Example; struct S {{ public static {type} Result = {expression}; }}");
+                Assert.Equal(compilation.HasErrors, field.HasErrors);
+            }
+        }
+        foreach (string operation in new[] { "/", "%" })
+        {
+            string expression = $"cast<{type}>(1) {operation} cast<{type}>(0)";
+            Assert.True(CreateCompilation($"namespace Example; const {type} Result = {expression};").HasErrors);
+            Assert.True(CreateCompilation($"namespace Example; {type} F({type} x) {{ return x {operation} cast<{type}>(0); }}").HasErrors);
+            if (signed)
+            {
+                string minimum = $"(cast<{type}>(1) << {width - 1})";
+                Assert.True(CreateCompilation($"namespace Example; const {type} Result = {minimum} {operation} cast<{type}>(-1);").HasErrors);
+            }
+        }
+    }
+
     [Theory]
     [InlineData("Base copy = derived;")]
     [InlineData("Derived* downcast = basePointer;")]

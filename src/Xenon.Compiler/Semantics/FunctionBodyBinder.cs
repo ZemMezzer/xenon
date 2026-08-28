@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Numerics;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -23,6 +24,7 @@ internal sealed class FunctionBodyBinder
     private int _switchDepth;
     private readonly Stack<(int LoopDepth, List<HashSet<LocalVariableSymbol>> Exits, List<Dictionary<LocalVariableSymbol, ArrayState>> ArrayExits)> _switchExits = [];
     private bool _bindingBaseConstructorArguments;
+    private bool _suppressIntegerOperationDiagnostics;
 
     public FunctionBodyBinder(FunctionSymbol function, FileSymbolScope fileScope, DiagnosticBag diagnostics, ConstantEvaluationContext constants)
     {
@@ -43,33 +45,35 @@ internal sealed class FunctionBodyBinder
 
         if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingType?.BaseType is StructTypeSymbol baseType && !baseType.Constructors.IsEmpty)
         {
-            ConstructorDeclarationSyntax syntax = (ConstructorDeclarationSyntax)_function.Declaration;
+            ConstructorDeclarationSyntax? syntax = _function.Declaration as ConstructorDeclarationSyntax;
+            ImmutableArray<ExpressionSyntax> baseArguments = syntax?.BaseArguments ?? [];
+            TextLocation location = syntax?.IdentifierToken.Location ?? _function.ContainingType.Declaration.IdentifierToken.Location;
             _bindingBaseConstructorArguments = true;
             ImmutableArray<BoundExpression> arguments;
             try
             {
-                arguments = syntax.BaseArguments.Select(BindExpression).ToImmutableArray();
+                arguments = baseArguments.Select(BindExpression).ToImmutableArray();
             }
             finally
             {
                 _bindingBaseConstructorArguments = false;
             }
-            FunctionSymbol? baseConstructor = ResolveConstructor(baseType, arguments, syntax.BaseArguments, syntax.IdentifierToken.Location);
+            FunctionSymbol? baseConstructor = ResolveConstructor(baseType, arguments, baseArguments, location);
             if (baseConstructor is not null)
             {
                 if (!baseConstructor.IsPublic)
                 {
-                    _diagnostics.Report(syntax.BaseKeyword?.Location ?? syntax.IdentifierToken.Location, $"constructor '{baseType.Name}' is private");
+                    _diagnostics.Report(syntax?.BaseKeyword?.Location ?? location, $"constructor '{baseType.Name}' is private");
                 }
-                arguments = ValidateFunctionArguments(baseConstructor, arguments, syntax.BaseArguments, syntax.IdentifierToken.Location);
+                arguments = ValidateFunctionArguments(baseConstructor, arguments, baseArguments, location);
                 baseConstructorCall = new BoundExpressionStatement(new BoundBaseLifecycleCallExpression(baseConstructor, arguments));
             }
         }
         else if (_function.FunctionKind == FunctionKind.Constructor &&
                  _function.ContainingType?.BaseType is StructTypeSymbol baseWithoutConstructor)
         {
-            ConstructorDeclarationSyntax syntax = (ConstructorDeclarationSyntax)_function.Declaration;
-            if (!syntax.BaseArguments.IsEmpty)
+            ConstructorDeclarationSyntax? syntax = _function.Declaration as ConstructorDeclarationSyntax;
+            if (syntax is not null && !syntax.BaseArguments.IsEmpty)
             {
                 _diagnostics.Report(syntax.BaseKeyword?.Location ?? syntax.IdentifierToken.Location, $"base struct '{baseWithoutConstructor.Name}' does not declare a constructor");
             }
@@ -685,7 +689,8 @@ internal sealed class FunctionBodyBinder
             SyntaxKind.StarToken when operand.Type is PointerTypeSymbol pointer => pointer.ElementType,
             SyntaxKind.AmpersandToken when IsAddressable(operand) => BuiltinTypes.PointerTo(operand.Type, isReadonly: !IsWritable(operand)),
             SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken
-                when IsWritable(operand) && TypeFacts.IsNumeric(operand.Type) => operand.Type,
+                when IsWritable(operand) && (TypeFacts.IsNumeric(operand.Type) ||
+                    operand.Type is PointerTypeSymbol pointer && !ReferenceEquals(pointer.ElementType, BuiltinTypes.Void)) => operand.Type,
             _ => null,
         };
 
@@ -707,7 +712,14 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindBinaryExpression(BinaryExpressionSyntax syntax)
     {
         BoundExpression left = BindExpression(syntax.Left);
-        BoundExpression right = BindExpression(syntax.Right);
+        bool previousSuppression = _suppressIntegerOperationDiagnostics;
+        if (syntax.OperatorToken.Kind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken &&
+            _constants.TryFold(left, out object? value) && value is bool condition &&
+            condition == (syntax.OperatorToken.Kind == SyntaxKind.PipePipeToken))
+            _suppressIntegerOperationDiagnostics = true;
+        BoundExpression right;
+        try { right = BindExpression(syntax.Right); }
+        finally { _suppressIntegerOperationDiagnostics = previousSuppression; }
 
         if (syntax.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken)
         {
@@ -735,7 +747,34 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        ValidateIntegerOperation(left, syntax.OperatorToken.Kind, right, syntax.OperatorToken.Location);
         return new BoundBinaryExpression(left, syntax.OperatorToken.Kind, right, resultType);
+    }
+
+    private void ValidateIntegerOperation(BoundExpression left, SyntaxKind operation, BoundExpression right, TextLocation location)
+    {
+        if (_suppressIntegerOperationDiagnostics ||
+            operation is not (SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken or SyntaxKind.SlashToken or SyntaxKind.PercentToken) ||
+            left.Type is not PrimitiveTypeSymbol { IsInteger: true } integer ||
+            !TypeFacts.IsInteger(right.Type) ||
+            !_constants.TryFold(right, out object? rightValue))
+            return;
+        BigInteger count = SemanticAnalyzer.ToInteger(rightValue);
+        int? width = integer.BitWidth ?? _constants.TargetLayout?.GetIntegerBitWidth(integer);
+        if (operation is SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken)
+        {
+            if (count < 0 || width is int bits && count >= bits)
+                _diagnostics.Report(location, "invalid integer shift: count must be nonnegative and less than the operand bit width");
+        }
+        else if (operation is SyntaxKind.SlashToken or SyntaxKind.PercentToken)
+        {
+            if (count == 0)
+                _diagnostics.Report(location, "invalid integer division or remainder by zero");
+            else if (integer.IsSigned && width is int bits && count == -1 &&
+                     _constants.TryFold(left, out object? leftValue) &&
+                     SemanticAnalyzer.ToInteger(leftValue) == -(BigInteger.One << (bits - 1)))
+                _diagnostics.Report(location, "invalid integer division or remainder: signed minimum with -1");
+        }
     }
 
     private BoundExpression BindAssignmentExpression(AssignmentExpressionSyntax syntax)
@@ -778,6 +817,7 @@ internal sealed class FunctionBodyBinder
         else
         {
             SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
+            ValidateIntegerOperation(target, binaryOperator, expression, syntax.OperatorToken.Location);
             TypeSymbol? resultType = GetBinaryResultType(target.Type, binaryOperator, expression.Type);
             if (!ReferenceEquals(resultType, target.Type))
             {
@@ -1351,6 +1391,8 @@ internal sealed class FunctionBodyBinder
             GetLocation(syntax.Target));
         BoundExpression value = BindExpression(syntax.Expression);
         SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
+        ValidateIntegerOperation(new BoundMethodCallExpression(receiver, getter, arguments, isPointerAccess),
+            binaryOperator, value, syntax.OperatorToken.Location);
         TypeSymbol? resultType = GetBinaryResultType(getter.ReturnType, binaryOperator, value.Type);
         if (!ReferenceEquals(resultType, getter.ReturnType))
         {
@@ -1752,10 +1794,10 @@ internal sealed class FunctionBodyBinder
             : receiver.Type as InterfaceTypeSymbol;
         if (interfaceType is not null)
         {
-            FunctionSymbol? interfaceMethod = interfaceType.FindMethod(target.MemberToken.Text);
+            FunctionSymbol? interfaceMethod = ResolveInterfaceMethod(interfaceType, target.MemberToken.Text, arguments,
+                IsReadonlyReceiver(receiver, pointerAccess), target.MemberToken.Location);
             if (interfaceMethod is null)
             {
-                _diagnostics.Report(target.MemberToken.Location, $"interface '{interfaceType.Name}' does not contain method '{target.MemberToken.Text}'");
                 return new BoundErrorExpression();
             }
             if (IsReadonlyReceiver(receiver, pointerAccess) && !interfaceMethod.IsReadonly)
@@ -1884,6 +1926,8 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindFreeExpression(FreeExpressionSyntax syntax)
     {
         BoundExpression pointer = BindExpression(syntax.Pointer);
+        if (ReferenceEquals(pointer.Type, BuiltinTypes.Null))
+            pointer = ContextualizeNull(pointer, BuiltinTypes.PointerTo(BuiltinTypes.Void));
         if (GetArrayStorage(pointer) == ArrayStorageKind.Stack)
         {
             _diagnostics.Report(syntax.FreeKeyword.Location, "stack array cannot be freed");
@@ -1994,6 +2038,33 @@ internal sealed class FunctionBodyBinder
         }
 
         return convertedArguments.ToImmutable();
+    }
+
+    private FunctionSymbol? ResolveInterfaceMethod(InterfaceTypeSymbol type, string name,
+        ImmutableArray<BoundExpression> arguments, bool readonlyReceiver, TextLocation location)
+    {
+        FunctionSymbol[] candidates = type.FindMethods(name).ToArray();
+        if (candidates.Length == 0)
+        {
+            _diagnostics.Report(location, $"interface '{type.Name}' does not contain method '{name}'");
+            return null;
+        }
+        // Preserve the established argument/readonly diagnostics for a single candidate.
+        if (candidates.Length == 1) return candidates[0];
+        var matches = candidates.Where(candidate => candidate.Parameters.Length == arguments.Length &&
+                (!readonlyReceiver || candidate.IsReadonly))
+            .Select(candidate => (Method: candidate, Costs: candidate.Parameters.Zip(arguments)
+                .Select(pair => GetArgumentConversionCost(pair.First.Type, pair.Second)).ToArray()))
+            .Where(candidate => candidate.Costs.All(cost => cost.HasValue))
+            .Select(candidate => (candidate.Method, Costs: candidate.Costs.Select(cost => cost!.Value).ToArray())).ToArray();
+        FunctionSymbol[] best = matches.Where(candidate => !matches.Any(other =>
+                !ReferenceEquals(other.Method, candidate.Method) && IsBetterConversionSequence(other.Costs, candidate.Costs)))
+            .Select(candidate => candidate.Method).ToArray();
+        if (best.Length == 1) return best[0];
+        _diagnostics.Report(location, best.Length == 0
+            ? $"no interface method '{type.Name}.{name}' matches the provided arguments"
+            : $"interface method call '{type.Name}.{name}' is ambiguous");
+        return null;
     }
 
     private FunctionSymbol? ResolveConstructor(
@@ -2301,17 +2372,18 @@ internal sealed class FunctionBodyBinder
                 return left;
             }
 
-            if (left is PointerTypeSymbol && TypeFacts.IsInteger(right) && operatorKind is SyntaxKind.PlusToken or SyntaxKind.MinusToken)
+            if (left is PointerTypeSymbol lp && !ReferenceEquals(lp.ElementType, BuiltinTypes.Void) && TypeFacts.IsInteger(right) && operatorKind is SyntaxKind.PlusToken or SyntaxKind.MinusToken)
             {
                 return left;
             }
 
-            if (right is PointerTypeSymbol && TypeFacts.IsInteger(left) && operatorKind == SyntaxKind.PlusToken)
+            if (right is PointerTypeSymbol rp && !ReferenceEquals(rp.ElementType, BuiltinTypes.Void) && TypeFacts.IsInteger(left) && operatorKind == SyntaxKind.PlusToken)
             {
                 return right;
             }
 
             if (left is PointerTypeSymbol leftPointer && right is PointerTypeSymbol rightPointer &&
+                !ReferenceEquals(leftPointer.ElementType, BuiltinTypes.Void) &&
                 ReferenceEquals(leftPointer.ElementType, rightPointer.ElementType) && operatorKind == SyntaxKind.MinusToken)
             {
                 return BuiltinTypes.NInt;

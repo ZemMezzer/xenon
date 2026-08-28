@@ -6,6 +6,104 @@ namespace Xenon.Compiler.Tests.CodeGen;
 
 public sealed class LlvmIrGeneratorTests
 {
+
+    [Fact]
+    public void Generator_VerifiesCheckedArithmeticWithoutMemoryRuntime()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int Divide(int value, int divisor) { return value / divisor; }
+            uint Remainder(uint value, uint divisor) { return value % divisor; }
+            long Shift(long value, int count) { return value << count; }
+            """);
+        string ir = new LlvmIrGenerator().Generate(compilation);
+        Assert.Contains("@llvm.trap", ir, StringComparison.Ordinal);
+        Assert.Contains("division.valid", ir, StringComparison.Ordinal);
+        Assert.Contains("shift.count.valid", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("@malloc", ir, StringComparison.Ordinal);
+    }
+
+
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", "i32", "i32")]
+    [InlineData("x86_64-pc-windows-msvc", "i64", "i32")]
+    [InlineData("x86_64-unknown-linux-gnu", "i64", "i64")]
+    public void Generator_VerifiesTargetSizedArithmetic(string triple, string nativeType, string cLongType)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            nint Distance(int* a, int* b) { return a - b; }
+            int* Advance(int* value, sbyte count) { return value + count; }
+            nint Shift(nint value, int count) { return value << count; }
+            clong Divide(clong value, clong divisor) { return value / divisor; }
+            """);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
+        Assert.Contains("getelementptr i32", ir, StringComparison.Ordinal);
+        Assert.Contains("ptrtoint ptr", ir, StringComparison.Ordinal);
+        Assert.Contains("sdiv " + nativeType, ir, StringComparison.Ordinal);
+        Assert.Contains("shl " + nativeType, ir, StringComparison.Ordinal);
+        Assert.Contains("sdiv " + cLongType, ir, StringComparison.Ordinal);
+        Assert.Contains("shift.count.valid", ir, StringComparison.Ordinal);
+        Assert.Contains("division.valid", ir, StringComparison.Ordinal);
+        Assert.Contains("@llvm.trap", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("add ptr", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("sub ptr", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_ChecksAllHeapAllocationsBeforeInitialization()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct S { public int Value; public S() { Value = 42; } }
+            S* Object() { return new S(); }
+            S* Positional() { return new S { 12 }; }
+            int[] Vector(int count) { return new int[count]; }
+            int[,] Matrix(int x, int y) { return new int[x,y]; }
+            """);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
+        foreach (string function in new[] { "Object", "Positional", "Vector", "Matrix" })
+        {
+            int start = ir.IndexOf("@Example." + function + "(", StringComparison.Ordinal);
+            string body = ir[start..ir.IndexOf("\n}", start, StringComparison.Ordinal)];
+            int allocation = body.IndexOf("call ptr @malloc", StringComparison.Ordinal);
+            int check = body.IndexOf("allocation.valid = icmp ne ptr", StringComparison.Ordinal);
+            int branch = body.IndexOf("br i1 %allocation.valid", StringComparison.Ordinal);
+            Assert.True(allocation >= 0 && check > allocation && branch > check, body);
+            Assert.Contains("@llvm.trap", body, StringComparison.Ordinal);
+            if (function == "Object")
+                Assert.True(body.IndexOf("call void @Example.S.__ctor", StringComparison.Ordinal) > branch, body);
+        }
+    }
+
+    [Fact]
+    public void Generator_ReusesCompatibleExternSymbolsAcrossNamespaces()
+    {
+        Compilation compilation = Compilation.Create(
+            SourceText.From("namespace A; extern int Foo(int* value); int Call(int* p) { return Foo(p); }", "a.xe"),
+            SourceText.From("namespace B; extern int readonly Foo(readonly int* value); int Call(readonly int* p) { return Foo(p); }", "b.xe"));
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().Generate(compilation);
+        Assert.Equal(1, ir.Split("declare i32 @Foo(", StringSplitOptions.None).Length - 1);
+        Assert.Equal(2, ir.Split("call i32 @Foo(", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("@Foo.1", ir, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", false)]
+    [InlineData("x86_64-pc-windows-msvc", true)]
+    public void Generator_ValidatesExternAbiAfterTargetSelection(string triple, bool errors)
+    {
+        Compilation compilation = Compilation.Create(
+            SourceText.From("namespace A; extern nint Foo(nint x);", "a.xe"),
+            SourceText.From("namespace B; extern int Foo(int x);", "b.xe"));
+        Assert.False(compilation.HasErrors);
+        Compilation bound = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions(triple));
+        Assert.Equal(errors, bound.HasErrors);
+        if (errors) Assert.Contains(bound.Diagnostics, diagnostic => diagnostic.Message.Contains("native symbol", StringComparison.Ordinal));
+        else new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
+    }
+
     [Fact]
     public void Generator_EmitsAndVerifiesMinimalMain()
     {

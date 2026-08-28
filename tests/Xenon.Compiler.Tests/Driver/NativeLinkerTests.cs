@@ -2839,6 +2839,266 @@ public sealed class NativeLinkerTests
             """, optimization));
     }
 
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_RunsElementPointerArithmetic(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Pair { public byte Tag; public long Value; }
+            struct Cursor
+            {
+                public static int Calls;
+                public static int* Data;
+                public static int** Address() { Cursor.Calls += 1; return &Cursor.Data; }
+                public int* Current { get { return Cursor.Data; } set { Cursor.Data = value; } }
+                public long Storage;
+                public long Bits { get { return Storage; } set { Storage = value; } }
+            }
+            int Main()
+            {
+                int[] values = int[4];
+                values[0] = 10; values[1] = 20; values[2] = 42; values[3] = 30;
+                int* start = &values[0]; int* ptr = start;
+                int* old = ptr++;
+                if (old != start || *ptr != 20) return 1;
+                ptr += 2; ptr -= 1;
+                if (*ptr != 42 || ptr - start != cast<nint>(2)) return 2;
+                if (start - ptr != cast<nint>(-2)) return 3;
+                if (2 + start != ptr || ptr - 2 != start) return 4;
+                sbyte negative = cast<sbyte>(-1);
+                if (*(ptr + negative) != 20) return 5;
+                byte positive = cast<byte>(1);
+                if (*(positive + ptr) != 30) return 6;
+                if (--ptr != start + 1 || ptr-- != start + 1 || ptr != start) return 7;
+                Pair[] pairs = Pair[3];
+                Pair* first = &pairs[0]; Pair* last = first + 2;
+                if (last - first != cast<nint>(2) || last != &pairs[2]) return 8;
+                Cursor.Data = start;
+                int* prior = (*Cursor.Address())++;
+                if (Cursor.Calls != 1 || prior != start || Cursor.Data != start + 1) return 9;
+                Cursor cursor = Cursor(); cursor.Current += cast<sbyte>(1); cursor.Current -= 1;
+                if (Cursor.Data != start + 1) return 10;
+                cursor.Bits = cast<long>(1); cursor.Bits <<= 33;
+                if (cursor.Bits != (cast<long>(1) << 33)) return 11;
+                byte large = cast<byte>(255);
+                if ((start + large) - start != cast<nint>(255)) return 12;
+                if ((start - cast<sbyte>(-128)) - start != cast<nint>(128)) return 13;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_RunsImplicitDerivedConstructorsAndNullFree(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Calls; public static int[] Empty; }
+            struct Base
+            {
+                public int Value;
+                public Base() { Value = 42; }
+                public virtual ~Base() { State.Calls += 1; }
+            }
+            struct Implicit : Base { public int Extra; }
+            struct Explicit : Base { public int Extra; public Explicit() {} }
+            struct Third : Implicit {}
+            struct Plain { public int Value; }
+            int Main()
+            {
+                Implicit a = Implicit(); Explicit b = Explicit(); Third c = Third();
+                if (a.Value != 42 || b.Value != 42 || c.Value != 42) return 1;
+                if (a.Extra != 0 || b.Extra != 0 || c.Extra != 0) return 5;
+                Base* nil = null; free(nil);
+                free(null);
+                Plain* plain = null; free(plain);
+                free(State.Empty);
+                if (State.Calls != 0) return 2;
+                Third* live = new Third();
+                if (live->Value != 42) return 3;
+                Base* up = live; free(up);
+                if (State.Calls != 1) return 4;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData("float", "f", 0)]
+    [InlineData("float", "f", 3)]
+    [InlineData("double", "", 0)]
+    [InlineData("double", "", 3)]
+    public void Linker_MatchesIeeeConstantAndRuntimeComparisons(string type, string suffix, int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram($$"""
+            const {{type}} Nan = 0.0{{suffix}} / 0.0{{suffix}};
+            const {{type}} Inf = 1.0{{suffix}} / 0.0{{suffix}};
+            const bool NanEq = Nan == Nan;
+            const bool NanNe = Nan != Nan;
+            const bool FiniteEq = Nan == 10.0{{suffix}};
+            const bool FiniteNe = Nan != 10.0{{suffix}};
+            const bool Zeros = 0.0{{suffix}} == -0.0{{suffix}};
+            const bool Infinities = Inf > 10.0{{suffix}} && Inf == Inf && -Inf < Inf;
+            int Check({{type}} nan, {{type}} inf, {{type}} zero, {{type}} negativeZero)
+            {
+                if (NanEq || !NanNe || FiniteEq || !FiniteNe || !Zeros || !Infinities) return 1;
+                if ((nan == nan) != NanEq || (nan != nan) != NanNe) return 2;
+                if ((nan == 10.0{{suffix}}) != FiniteEq || (nan != 10.0{{suffix}}) != FiniteNe) return 3;
+                if ((zero == negativeZero) != Zeros) return 4;
+                if ((inf > 10.0{{suffix}} && inf == inf && -inf < inf) != Infinities) return 5;
+                return 42;
+            }
+            int Main() { return Check(Nan, Inf, 0.0{{suffix}}, -0.0{{suffix}}); }
+            """, optimization));
+    }
+
+    public static IEnumerable<object[]> IntegerTypes()
+    {
+        foreach (string type in new[] { "sbyte", "byte", "short", "ushort", "int", "uint", "long", "ulong", "nint", "nuint", "clong", "culong" })
+            foreach (int optimization in new[] { 0, 3 })
+                yield return new object[] { type, optimization };
+    }
+
+    [Theory]
+    [MemberData(nameof(IntegerTypes))]
+    public void Linker_MatchesIntegerConstantAndRuntimeBoundaries(string type, int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram($$"""
+            const int Width = cast<int>(sizeof({{type}})) * 8;
+            const {{type}} One = cast<{{type}}>(1);
+            const {{type}} High = One << (Width - 1);
+            const {{type}} Shifted = High >> (Width - 1);
+            const {{type}} Quotient = High / One;
+            const {{type}} Remainder = High % One;
+            const {{type}} Half = High / cast<{{type}}>(2);
+            const {{type}} BelowHigh = High - One;
+            {{type}} Left({{type}} value, long count) { return value << count; }
+            {{type}} Right({{type}} value, byte count) { return value >> count; }
+            {{type}} Divide({{type}} value, {{type}} divisor) { return value / divisor; }
+            {{type}} Mod({{type}} value, {{type}} divisor) { return value % divisor; }
+            int Main()
+            {
+                if (Left(One, cast<long>(0)) != One || Right(High, cast<byte>(0)) != High) return 1;
+                if (Left(One, cast<long>(Width - 1)) != High) return 2;
+                if (Right(High, cast<byte>(Width - 1)) != Shifted) return 3;
+                if (Divide(High, One) != Quotient || Mod(High, One) != Remainder) return 4;
+                if (Divide(High, cast<{{type}}>(2)) != Half || BelowHigh + One != High) return 6;
+                {{type}} copy = High; copy >>= cast<long>(Width - 1);
+                if (copy != Shifted) return 5;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    public static IEnumerable<object[]> InvalidIntegerOperations()
+    {
+        foreach (object[] row in IntegerTypes())
+        {
+            string type = (string)row[0];
+            int optimization = (int)row[1];
+            foreach (string operation in new[] { "<<", ">>" })
+                foreach (string count in new[] { "-1", "Width", "Width + 1", "4294967296" })
+                    yield return new object[] { type, operation, "cast<" + type + ">(1)", "cast<long>(" + count + ")", optimization };
+            foreach (string operation in new[] { "/", "%" })
+            {
+                yield return new object[] { type, operation, "cast<" + type + ">(1)", "cast<" + type + ">(0)", optimization };
+                if (type is "sbyte" or "short" or "int" or "long" or "nint" or "clong")
+                    yield return new object[] { type, operation, "(cast<" + type + ">(1) << (Width - 1))", "cast<" + type + ">(-1)", optimization };
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidIntegerOperations))]
+    public void Linker_TrapsInvalidIntegerOperations(string type, string operation, string left, string right, int optimization)
+    {
+        string countType = operation is "<<" or ">>" ? "long" : type;
+        int exitCode = RunIterationFourProgram($$"""
+            const int Width = cast<int>(sizeof({{type}})) * 8;
+            {{type}} Apply({{type}} value, {{countType}} count) { return value {{operation}} count; }
+            int Main() { {{type}} result = Apply({{left}}, {{right}}); return 42; }
+            """, optimization);
+        // A trap must terminate the process, including when the result is unused at -O3.
+        Assert.NotEqual(42, exitCode);
+        Assert.NotEqual(0, exitCode);
+    }
+
+    [Theory]
+    [InlineData("IA, IB", 0)]
+    [InlineData("IB, IA", 3)]
+    public void Linker_ResolvesInheritedInterfaceOverloads(string bases, int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram($$"""
+            interface Root { int Read(); }
+            interface IA : Root { int Get(int value); }
+            interface IB : Root { float Get(float value); }
+            interface IC : {{bases}} {}
+            struct Parent { public int Read() { return 10; } public int Get(int value) { return value + 10; } }
+            struct Child : Parent, IC { public float Get(float value) { return value + 20.0f; } }
+            int Call(IC value) { return value.Read() + value.Get(1) + cast<int>(value.Get(1.0f)); }
+            int Main() { Child value = Child(); return Call(value); }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_DistinguishesIndexerArrayRanksAndNestedArrays(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Parent
+            {
+                public int this[int[] value] { get { return 1; } }
+                public int this[int[][] value] { get { return 4; } }
+            }
+            struct Child : Parent
+            {
+                public int this[int[,] value] { get { return 2; } }
+                public int this[int[,,] value] { get { return 3; } }
+                public int this[int[][,] value] { get { return 5; } }
+                public int this[int[,][] value] { get { return 6; } }
+            }
+            int Main()
+            {
+                Child c = Child();
+                int[] a = new int[0]; int[,] b = new int[0,0]; int[,,] d = new int[0,0,0];
+                int[][] e = new int[0][]; int[][,] f = new int[0][,]; int[,][] g = new int[0,0][];
+                int sum = c[a] + c[b] + c[d] + c[e] + c[f] + c[g];
+                free(a); free(b); free(d); free(e); free(f); free(g);
+                return sum * 2;
+            }
+            """, optimization));
+    }
+
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_MatchesStaticConstantsAndShortCircuitRuntime(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Layout
+            {
+                public static nuint Bytes = sizeof(Layout);
+                public byte Tag; public long Value;
+                public static byte Wrapped = cast<byte>(255) + cast<byte>(1);
+                public static bool NanDifferent = (0.0 / 0.0) != (0.0 / 0.0);
+                public static bool Skipped = false && (1 / 0 == 0);
+            }
+            bool Check() { return true || (1 << -1 == 0); }
+            int Main()
+            {
+                if (Layout.Bytes != sizeof(Layout) || Layout.Bytes < cast<nuint>(9)) return 1;
+                if (Layout.Wrapped != cast<byte>(0) || !Layout.NanDifferent || Layout.Skipped) return 2;
+                if (!Check()) return 3;
+                return 42;
+            }
+            """, optimization));
+    }
+
     private static int RunIterationFourProgram(string source, int optimization)
     {
         Compilation compilation = Compilation.Create(SourceText.From("namespace IterationFour; " + source, "iteration4.xe"));

@@ -11,6 +11,7 @@ namespace Xenon.CodeGen.LLVM;
 public sealed class LlvmIrGenerator
 {
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
+    private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
     private readonly Dictionary<InterfaceTypeSymbol, LLVMTypeRef> _interfaceTypes = [];
     private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields = [];
@@ -129,6 +130,7 @@ public sealed class LlvmIrGenerator
             _module.Dispose();
             _context.Dispose();
             _functions.Clear();
+            _nativeFunctions.Clear();
             _structTypes.Clear();
             _interfaceTypes.Clear();
             _staticFields.Clear();
@@ -332,7 +334,15 @@ public sealed class LlvmIrGenerator
 
         parameterTypes.AddRange(function.Parameters.Select(parameter => MapType(parameter.Type)));
         LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, [.. parameterTypes], false);
-        LLVMValueRef value = _module.AddFunction(NativeSymbolNames.Get(function), functionType);
+        string nativeName = NativeSymbolNames.Get(function);
+        if (_nativeFunctions.TryGetValue(nativeName, out LlvmFunction existing))
+        {
+            if (!function.IsExtern || existing.Type != functionType)
+                throw new LlvmCodeGenerationException($"Native symbol '{nativeName}' has incompatible declarations.");
+            _functions.Add(function, existing);
+            return;
+        }
+        LLVMValueRef value = _module.AddFunction(nativeName, functionType);
         if (function.IsAbstract)
         {
             value.Linkage = LLVMLinkage.LLVMInternalLinkage;
@@ -350,7 +360,9 @@ public sealed class LlvmIrGenerator
             value.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
         }
 
-        _functions.Add(function, new LlvmFunction(value, functionType));
+        var llvmFunction = new LlvmFunction(value, functionType);
+        _functions.Add(function, llvmFunction);
+        _nativeFunctions.Add(nativeName, llvmFunction);
     }
 
     private void EmitFunctionBodies(ImmutableArray<BoundFunction> functions)
@@ -374,6 +386,7 @@ public sealed class LlvmIrGenerator
                 _interfaceTypes.Count,
                 MapType,
                 GetOrDeclareMemoryRuntime,
+                GetOrDeclareTrap,
                 GetAbiSize,
                 GetAbiAlignment,
                 GetFieldOffset,
@@ -624,10 +637,16 @@ public sealed class LlvmIrGenerator
             _module.AddFunction("free", freeType),
             freeType,
             sizeType,
-            _module.AddFunction("llvm.trap", LLVMTypeRef.CreateFunction(_context.VoidType, [], false)),
             _module.AddFunction("llvm.stacksave.p0", LLVMTypeRef.CreateFunction(pointerType, [], false)),
             _module.AddFunction("llvm.stackrestore.p0", freeType));
         return _memoryRuntime;
+    }
+
+    private LLVMValueRef GetOrDeclareTrap()
+    {
+        LLVMValueRef trap = _module.GetNamedFunction("llvm.trap");
+        return trap.Handle != IntPtr.Zero ? trap
+            : _module.AddFunction("llvm.trap", LLVMTypeRef.CreateFunction(_context.VoidType, [], false));
     }
 
     private int GetPointerBitWidth() => _targetMachine?.PointerBitWidth
@@ -648,7 +667,6 @@ public sealed class LlvmIrGenerator
         LLVMValueRef Free,
         LLVMTypeRef FreeType,
         LLVMTypeRef SizeType,
-        LLVMValueRef Trap,
         LLVMValueRef StackSave,
         LLVMValueRef StackRestore);
 
@@ -665,6 +683,7 @@ public sealed class LlvmIrGenerator
         private readonly int _interfaceCount;
         private readonly Func<TypeSymbol, LLVMTypeRef> _mapType;
         private readonly Func<LlvmMemoryRuntime> _getMemoryRuntime;
+        private readonly Func<LLVMValueRef> _getTrap;
         private readonly Func<TypeSymbol, ulong> _getAbiSize;
         private readonly Func<TypeSymbol, uint> _getAbiAlignment;
         private readonly Func<StructTypeSymbol, FieldSymbol, ulong> _getFieldOffset;
@@ -690,6 +709,7 @@ public sealed class LlvmIrGenerator
             int interfaceCount,
             Func<TypeSymbol, LLVMTypeRef> mapType,
             Func<LlvmMemoryRuntime> getMemoryRuntime,
+            Func<LLVMValueRef> getTrap,
             Func<TypeSymbol, ulong> getAbiSize,
             Func<TypeSymbol, uint> getAbiAlignment,
             Func<StructTypeSymbol, FieldSymbol, ulong> getFieldOffset,
@@ -706,6 +726,7 @@ public sealed class LlvmIrGenerator
             _interfaceCount = interfaceCount;
             _mapType = mapType;
             _getMemoryRuntime = getMemoryRuntime;
+            _getTrap = getTrap;
             _getAbiSize = getAbiSize;
             _getAbiAlignment = getAbiAlignment;
             _getFieldOffset = getFieldOffset;
@@ -1220,6 +1241,8 @@ public sealed class LlvmIrGenerator
             {
                 return EmitAddress(expression.Operand);
             }
+            if (expression.OperatorKind is SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken)
+                return EmitIncrement(expression);
 
             LLVMValueRef operand = EmitExpression(expression.Operand);
             return expression.OperatorKind switch
@@ -1231,20 +1254,22 @@ public sealed class LlvmIrGenerator
                 SyntaxKind.BangToken or SyntaxKind.TildeToken => _builder.BuildNot(operand, "not"),
                 SyntaxKind.StarToken when expression.Operand.Type is PointerTypeSymbol pointer =>
                     _builder.BuildLoad2(_mapType(pointer.ElementType), operand, "deref"),
-                SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken => EmitIncrement(expression, operand),
                 _ => throw new LlvmCodeGenerationException($"Unary operator '{expression.OperatorKind}' is not supported."),
             };
         }
 
-        private LLVMValueRef EmitIncrement(BoundUnaryExpression expression, LLVMValueRef operand)
+        private LLVMValueRef EmitIncrement(BoundUnaryExpression expression)
         {
+            LLVMValueRef address = EmitAddress(expression.Operand);
+            LLVMValueRef operand = _builder.BuildLoad2(_mapType(expression.Type), address, "increment.current");
+            TypeSymbol stepType = expression.Type is PointerTypeSymbol ? BuiltinTypes.NInt : expression.Type;
             LLVMValueRef one = expression.Type is PrimitiveTypeSymbol { IsFloatingPoint: true }
                 ? LLVMValueRef.CreateConstReal(_mapType(expression.Type), 1.0)
-                : LLVMValueRef.CreateConstInt(_mapType(expression.Type), 1, false);
+                : LLVMValueRef.CreateConstInt(_mapType(stepType), 1, false);
             LLVMValueRef result = expression.OperatorKind == SyntaxKind.PlusPlusToken
-                ? EmitArithmetic(SyntaxKind.PlusToken, expression.Type, operand, one)
-                : EmitArithmetic(SyntaxKind.MinusToken, expression.Type, operand, one);
-            _builder.BuildStore(result, EmitAddress(expression.Operand));
+                ? EmitArithmetic(SyntaxKind.PlusToken, expression.Type, operand, one, stepType)
+                : EmitArithmetic(SyntaxKind.MinusToken, expression.Type, operand, one, stepType);
+            _builder.BuildStore(result, address);
             return expression.IsPostfix ? operand : result;
         }
 
@@ -1265,7 +1290,7 @@ public sealed class LlvmIrGenerator
                 return EmitComparison(expression, left, right);
             }
 
-            return EmitArithmetic(expression.OperatorKind, expression.Left.Type, left, right);
+            return EmitArithmetic(expression.OperatorKind, expression.Left.Type, left, right, expression.Right.Type);
         }
 
         private LLVMValueRef EmitShortCircuit(BoundBinaryExpression expression)
@@ -1307,8 +1332,32 @@ public sealed class LlvmIrGenerator
             SyntaxKind operatorKind,
             TypeSymbol operandType,
             LLVMValueRef left,
-            LLVMValueRef right)
+            LLVMValueRef right,
+            TypeSymbol? rightType = null)
         {
+            rightType ??= operandType;
+            if (operandType is PointerTypeSymbol pointer)
+            {
+                if (rightType is PointerTypeSymbol)
+                {
+                    LLVMTypeRef nativeInt = _mapType(BuiltinTypes.NInt);
+                    LLVMValueRef bytes = _builder.BuildSub(
+                        _builder.BuildPtrToInt(left, nativeInt, "pointer.left"),
+                        _builder.BuildPtrToInt(right, nativeInt, "pointer.right"), "pointer.bytes");
+                    ulong size = _getAbiSize(pointer.ElementType);
+                    // Empty objects have no distinguishable element addresses.
+                    EmitRuntimeCheck(LLVMValueRef.CreateConstInt(_context.Int1Type, size == 0 ? 0UL : 1UL));
+                    return _builder.BuildSDiv(bytes, LLVMValueRef.CreateConstInt(nativeInt, Math.Max(1UL, size)), "pointer.distance");
+                }
+                LLVMValueRef offset = ConvertIntegerToSize(right, rightType);
+                if (operatorKind == SyntaxKind.MinusToken)
+                    offset = _builder.BuildNeg(offset, "pointer.offset.neg");
+                // Deliberately not inbounds: merely computing an address must not create poison.
+                return _builder.BuildGEP2(_mapType(pointer.ElementType), left, new LLVMValueRef[] { offset }, "pointer.offset");
+            }
+            if (rightType is PointerTypeSymbol)
+                return EmitArithmetic(operatorKind, rightType, right, left, operandType);
+
             if (operandType is PrimitiveTypeSymbol { IsFloatingPoint: true })
             {
                 return operatorKind switch
@@ -1323,6 +1372,33 @@ public sealed class LlvmIrGenerator
             }
 
             bool signed = operandType is PrimitiveTypeSymbol { IsSigned: true };
+            if (operatorKind is SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken)
+            {
+                // Validate before truncating; otherwise a large count could become a valid one.
+                uint width = left.TypeOf.IntWidth;
+                LLVMValueRef valid = _builder.BuildICmp(LLVMIntPredicate.LLVMIntULT, right,
+                    LLVMValueRef.CreateConstInt(right.TypeOf, width), "shift.count.valid");
+                EmitRuntimeCheck(valid); // Unsigned comparison rejects negative counts as well.
+                if (right.TypeOf.IntWidth < width)
+                    right = _builder.BuildZExt(right, left.TypeOf, "shift.count");
+                else if (right.TypeOf.IntWidth > width)
+                    right = _builder.BuildTrunc(right, left.TypeOf, "shift.count");
+            }
+            if (operatorKind is SyntaxKind.SlashToken or SyntaxKind.PercentToken)
+            {
+                LLVMValueRef valid = _builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, right,
+                    LLVMValueRef.CreateConstInt(right.TypeOf, 0), "division.nonzero");
+                if (signed)
+                {
+                    LLVMValueRef minimum = LLVMValueRef.CreateConstInt(left.TypeOf, 1UL << ((int)left.TypeOf.IntWidth - 1));
+                    LLVMValueRef overflow = _builder.BuildAnd(
+                        _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, left, minimum),
+                        _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, right, LLVMValueRef.CreateConstInt(right.TypeOf, ulong.MaxValue)),
+                        "division.overflow");
+                    valid = _builder.BuildAnd(valid, _builder.BuildNot(overflow), "division.valid");
+                }
+                EmitRuntimeCheck(valid);
+            }
             return operatorKind switch
             {
                 SyntaxKind.PlusToken => _builder.BuildAdd(left, right, "add"),
@@ -1352,7 +1428,7 @@ public sealed class LlvmIrGenerator
                 LLVMRealPredicate realPredicate = expression.OperatorKind switch
                 {
                     SyntaxKind.EqualsEqualsToken => LLVMRealPredicate.LLVMRealOEQ,
-                    SyntaxKind.BangEqualsToken => LLVMRealPredicate.LLVMRealONE,
+                    SyntaxKind.BangEqualsToken => LLVMRealPredicate.LLVMRealUNE,
                     SyntaxKind.LessToken => LLVMRealPredicate.LLVMRealOLT,
                     SyntaxKind.LessOrEqualsToken => LLVMRealPredicate.LLVMRealOLE,
                     SyntaxKind.GreaterToken => LLVMRealPredicate.LLVMRealOGT,
@@ -1392,7 +1468,8 @@ public sealed class LlvmIrGenerator
                     GetBinaryOperatorForCompoundAssignment(expression.OperatorKind),
                     expression.Target.Type,
                     current,
-                    value);
+                    value,
+                    expression.Expression.Type);
             }
 
             _builder.BuildStore(value, address);
@@ -1511,6 +1588,7 @@ public sealed class LlvmIrGenerator
         private LLVMValueRef EmitConstructorCall(BoundConstructorCallExpression expression)
         {
             LLVMValueRef address = _builder.BuildAlloca(_mapType(expression.StructType), $"{expression.StructType.Name}.ctor.tmp");
+            _builder.BuildStore(DefaultValue(expression.StructType, _mapType, _virtualTables), address);
             EmitLifecycleCall(expression.Constructor, address, expression.Arguments);
             return _builder.BuildLoad2(_mapType(expression.StructType), address, $"{expression.StructType.Name}.value");
         }
@@ -1556,8 +1634,7 @@ public sealed class LlvmIrGenerator
             }
             else
             {
-                address = _builder.BuildCall2(runtime.MallocType, runtime.Malloc, new LLVMValueRef[] { allocationSize }, $"{expression.ElementType.Name}.heap.array");
-                EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address, LLVMValueRef.CreateConstPointerNull(address.TypeOf), "array.allocation.valid"));
+                address = EmitAllocation(allocationSize, $"{expression.ElementType.Name}.heap.array");
             }
             _builder.BuildStore(ToInt32(length), address);
             for (int i = 0; i < dimensions.Length; i++)
@@ -1627,7 +1704,7 @@ public sealed class LlvmIrGenerator
             LLVMBasicBlockRef failure = _llvmFunction.AppendBasicBlock("array.check.failed");
             _builder.BuildCondBr(valid, success, failure);
             _builder.PositionAtEnd(failure);
-            _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [], false), _getMemoryRuntime().Trap, Array.Empty<LLVMValueRef>(), string.Empty);
+            _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [], false), _getTrap(), Array.Empty<LLVMValueRef>(), string.Empty);
             _builder.BuildUnreachable();
             _builder.PositionAtEnd(success);
         }
@@ -1680,13 +1757,9 @@ public sealed class LlvmIrGenerator
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
             LLVMValueRef size = LLVMValueRef.CreateConstInt(
                 runtime.SizeType,
-                _getAbiSize(expression.StructType),
+                Math.Max(1UL, _getAbiSize(expression.StructType)),
                 false);
-            LLVMValueRef address = _builder.BuildCall2(
-                runtime.MallocType,
-                runtime.Malloc,
-                new LLVMValueRef[] { size },
-                $"{expression.StructType.Name}.heap");
+            LLVMValueRef address = EmitAllocation(size, $"{expression.StructType.Name}.heap");
 
             if (expression.IsPositionalInitialization)
             {
@@ -1695,9 +1768,19 @@ public sealed class LlvmIrGenerator
             }
             else
             {
+                _builder.BuildStore(DefaultValue(expression.StructType, _mapType, _virtualTables), address);
                 EmitLifecycleCall(expression.Constructor!, address, expression.Arguments);
             }
 
+            return address;
+        }
+
+        private LLVMValueRef EmitAllocation(LLVMValueRef size, string name)
+        {
+            LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            LLVMValueRef address = _builder.BuildCall2(runtime.MallocType, runtime.Malloc, new LLVMValueRef[] { size }, name);
+            EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
+                LLVMValueRef.CreateConstPointerNull(address.TypeOf), "allocation.valid"));
             return address;
         }
 
@@ -1726,6 +1809,11 @@ public sealed class LlvmIrGenerator
                 _builder.PositionAtEnd(end);
                 return default;
             }
+            LLVMBasicBlockRef pointerBody = _llvmFunction.AppendBasicBlock("pointer.free");
+            LLVMBasicBlockRef pointerEnd = _llvmFunction.AppendBasicBlock("pointer.free.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
+                LLVMValueRef.CreateConstPointerNull(address.TypeOf)), pointerBody, pointerEnd);
+            _builder.PositionAtEnd(pointerBody);
             if (expression.Destructor is not null)
             {
                 if (expression.Destructor.VTableSlot is int slot &&
@@ -1740,11 +1828,14 @@ public sealed class LlvmIrGenerator
                 }
             }
 
-            return _builder.BuildCall2(
+            _builder.BuildCall2(
                 runtime.FreeType,
                 runtime.Free,
                 new LLVMValueRef[] { address },
                 string.Empty);
+            _builder.BuildBr(pointerEnd);
+            _builder.PositionAtEnd(pointerEnd);
+            return default;
         }
 
         private void EmitVirtualDestructor(FunctionSymbol destructor, LLVMValueRef address, LlvmVTable vtable, int slot)
@@ -2013,7 +2104,7 @@ public sealed class LlvmIrGenerator
                     arguments,
                     "interface.get");
                 LLVMValueRef value = EmitExpression(expression.Value);
-                LLVMValueRef result = EmitArithmetic(expression.OperatorKind, expression.Type, current, value);
+                LLVMValueRef result = EmitArithmetic(expression.OperatorKind, expression.Type, current, value, expression.Value.Type);
                 EmitInterfaceAccessorCall(
                     interfaceType,
                     expression.Setter,
@@ -2044,7 +2135,8 @@ public sealed class LlvmIrGenerator
                 expression.OperatorKind,
                 expression.Type,
                 instanceCurrent,
-                instanceValue);
+                instanceValue,
+                expression.Value.Type);
             EmitInstanceAccessorCall(
                 expression.Setter,
                 receiverType,
