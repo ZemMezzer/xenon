@@ -150,9 +150,7 @@ public sealed class LlvmIrGenerator
 
         foreach (StructTypeSymbol type in types)
         {
-            LLVMTypeRef[] fields = type.HasVirtualDispatch
-                ? [LLVMTypeRef.CreatePointer(_context.Int8Type, 0), .. type.AllInstanceFields.Select(field => MapType(field.Type))]
-                : type.AllInstanceFields.Select(field => MapType(field.Type)).ToArray();
+            LLVMTypeRef[] fields = LlvmStructLayout.Elements(type, MapType, LLVMTypeRef.CreatePointer(_context.Int8Type, 0));
             _structTypes[type].StructSetBody(fields, false);
         }
     }
@@ -257,12 +255,15 @@ public sealed class LlvmIrGenerator
     }
 
     private static LLVMValueRef DefaultValue(TypeSymbol type, Func<TypeSymbol, LLVMTypeRef> mapType,
-        Dictionary<StructTypeSymbol, LlvmVTable> virtualTables)
+        Dictionary<StructTypeSymbol, LlvmVTable> virtualTables, StructTypeSymbol? runtimeType = null)
     {
         if (type is not StructTypeSymbol structure) return LLVMValueRef.CreateConstNull(mapType(type));
         var fields = new List<LLVMValueRef>();
-        if (structure.HasVirtualDispatch) fields.Add(virtualTables[structure].Value);
-        foreach (FieldSymbol field in structure.AllInstanceFields)
+        runtimeType ??= structure;
+        if (structure.BaseType is not null)
+            fields.Add(DefaultValue(structure.BaseType, mapType, virtualTables, runtimeType));
+        if (structure.IntroducesVirtualDispatch) fields.Add(virtualTables[runtimeType].Value);
+        foreach (FieldSymbol field in structure.Fields)
             fields.Add(DefaultValue(field.Type, mapType, virtualTables));
         return LLVMValueRef.CreateConstNamedStruct(mapType(type), fields.ToArray());
     }
@@ -590,7 +591,7 @@ public sealed class LlvmIrGenerator
     {
         if (_targetMachine is null)
             throw new LlvmCodeGenerationException("offsetof requires a configured LLVM target and data layout.");
-        return _targetMachine.TargetData.OffsetOfElement(MapType(type), (uint)field.Ordinal);
+        return _targetMachine.TargetData.OffsetOfElement(MapType(field.ContainingType), (uint)field.Ordinal);
     }
 
     private LlvmMemoryRuntime GetOrDeclareMemoryRuntime()
@@ -1403,7 +1404,8 @@ public sealed class LlvmIrGenerator
             if (!expression.IsPointerAccess && !IsAddressable(expression.Receiver))
             {
                 return _builder.BuildExtractValue(
-                    EmitExpression(expression.Receiver),
+                    ExtractBaseValue(EmitExpression(expression.Receiver),
+                        (StructTypeSymbol)expression.Receiver.Type, expression.Field.ContainingType),
                     checked((uint)expression.Field.Ordinal),
                     expression.Field.Name);
             }
@@ -1424,7 +1426,7 @@ public sealed class LlvmIrGenerator
                     _builder.BuildStore(DefaultValue(structType, _mapType, _virtualTables), address);
                 if (structType.HasVirtualDispatch && _virtualTables.TryGetValue(structType, out LlvmVTable initializedVTable))
                 {
-                    LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(structType), address, 0, "vtable.address");
+                    LLVMValueRef vtableAddress = EmitDispatchAddress(structType, address);
                     _builder.BuildStore(initializedVTable.Value, vtableAddress);
                 }
 
@@ -1433,7 +1435,7 @@ public sealed class LlvmIrGenerator
                 {
                     FieldSymbol field = structType.AllInstanceFields[index];
                     LLVMValueRef fieldAddress = _builder.BuildStructGEP2(
-                        _mapType(structType),
+                        _mapType(field.ContainingType),
                         address,
                         checked((uint)field.Ordinal),
                         $"{field.Name}.address");
@@ -1448,12 +1450,14 @@ public sealed class LlvmIrGenerator
                 : _mapType(structType).Poison;
             if (structType.HasVirtualDispatch && _virtualTables.TryGetValue(structType, out LlvmVTable vtable))
             {
-                value = _builder.BuildInsertValue(value, vtable.Value, 0, "vtable.init");
+                StructTypeSymbol owner = structType.DispatchStorageOwner!;
+                value = InsertSubobjectElement(value, structType, owner, vtable.Value,
+                    LlvmStructLayout.DispatchIndex(owner), "vtable.init");
             }
             for (int index = 0; index < arguments.Length; index++)
             {
-                value = _builder.BuildInsertValue(
-                    value,
+                value = InsertSubobjectElement(
+                    value, structType, structType.AllInstanceFields[index].ContainingType,
                     EmitExpression(arguments[index]),
                     checked((uint)structType.AllInstanceFields[index].Ordinal),
                     $"{structType.AllInstanceFields[index].Name}.init");
@@ -1461,6 +1465,40 @@ public sealed class LlvmIrGenerator
 
             return value;
         }
+
+        private LLVMValueRef ExtractBaseValue(LLVMValueRef value, StructTypeSymbol type, StructTypeSymbol baseType)
+        {
+            while (!ReferenceEquals(type, baseType))
+            {
+                value = _builder.BuildExtractValue(value, 0, "base.value");
+                type = type.BaseType ?? throw new LlvmCodeGenerationException("Invalid base subobject.");
+            }
+            return value;
+        }
+
+        private LLVMValueRef InsertSubobjectElement(LLVMValueRef value, StructTypeSymbol type,
+            StructTypeSymbol owner, LLVMValueRef element, uint index, string name)
+        {
+            if (ReferenceEquals(type, owner))
+                return _builder.BuildInsertValue(value, element, index, name);
+            LLVMValueRef baseValue = _builder.BuildExtractValue(value, 0, "base.value");
+            baseValue = InsertSubobjectElement(baseValue, type.BaseType!, owner, element, index, name);
+            return _builder.BuildInsertValue(value, baseValue, 0, "base.init");
+        }
+
+        // Every base shares the object's address. The storage owner's declaration,
+        // not the receiver's descendants, determines the dispatch pointer offset.
+        private LLVMValueRef EmitDispatchAddress(StructTypeSymbol type, LLVMValueRef address)
+        {
+            StructTypeSymbol owner = type.DispatchStorageOwner
+                ?? throw new LlvmCodeGenerationException($"struct '{type.Name}' has no runtime dispatch storage.");
+            return _builder.BuildStructGEP2(_mapType(owner), address,
+                LlvmStructLayout.DispatchIndex(owner), "dispatch.address");
+        }
+
+        private LLVMValueRef EmitRuntimeDispatch(StructTypeSymbol type, LLVMValueRef address) =>
+            _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0),
+                EmitDispatchAddress(type, address), "dispatch.table");
 
         private void EmitDefaultInstanceInitialization(StructTypeSymbol type, LLVMValueRef address)
         {
@@ -1532,7 +1570,7 @@ public sealed class LlvmIrGenerator
                 if (expression.ElementType is StructTypeSymbol structure)
                 {
                     if (structure.HasVirtualDispatch && _virtualTables.TryGetValue(structure, out LlvmVTable table))
-                        _builder.BuildStore(table.Value, _builder.BuildStructGEP2(_mapType(structure), element, 0, "vtable.address"));
+                        _builder.BuildStore(table.Value, EmitDispatchAddress(structure, element));
                     EmitDefaultInstanceInitialization(structure, element);
                 }
             });
@@ -1712,8 +1750,7 @@ public sealed class LlvmIrGenerator
         private void EmitVirtualDestructor(FunctionSymbol destructor, LLVMValueRef address, LlvmVTable vtable, int slot)
         {
             StructTypeSymbol staticType = destructor.ContainingType!;
-            LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(staticType), address, 0, "vtable.address");
-            LLVMValueRef vtablePointer = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), vtableAddress, "vtable");
+            LLVMValueRef vtablePointer = EmitRuntimeDispatch(staticType, address);
             LLVMValueRef functionAddress = _builder.BuildGEP2(vtable.Type, vtablePointer,
                 new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)slot + 1, false) },
                 "destructor.slot");
@@ -1732,7 +1769,7 @@ public sealed class LlvmIrGenerator
                 function.ContainingType is StructTypeSymbol type &&
                 type.HasVirtualDispatch && _virtualTables.TryGetValue(type, out LlvmVTable vtable))
             {
-                LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(type), thisAddress, 0, "vtable.address");
+                LLVMValueRef vtableAddress = EmitDispatchAddress(type, thisAddress);
                 _builder.BuildStore(vtable.Value, vtableAddress);
             }
 
@@ -1833,8 +1870,7 @@ public sealed class LlvmIrGenerator
                 ? EmitAddress(expression.Source)
                 : StoreTemporary(expression.Source, expression.SourceType);
             LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMValueRef header = _builder.BuildStructGEP2(_mapType(expression.SourceType), data, 0, "dispatch.address");
-            LLVMValueRef dispatch = _builder.BuildLoad2(pointerType, header, "dispatch.table");
+            LLVMValueRef dispatch = EmitRuntimeDispatch(expression.SourceType, data);
             LLVMValueRef map = _builder.BuildLoad2(pointerType, dispatch, "interface.runtime.map");
             LLVMValueRef value = _mapType(expression.InterfaceType).Poison;
             value = _builder.BuildInsertValue(value, data, 0, "interface.data");
@@ -2074,15 +2110,7 @@ public sealed class LlvmIrGenerator
 
             if (!_virtualTables.TryGetValue(receiverType, out LlvmVTable vtable))
                 throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
-            LLVMValueRef vtableAddress = _builder.BuildStructGEP2(
-                _mapType(receiverType),
-                receiver,
-                0,
-                "vtable.address");
-            LLVMValueRef vtablePointer = _builder.BuildLoad2(
-                LLVMTypeRef.CreatePointer(_context.Int8Type, 0),
-                vtableAddress,
-                "vtable");
+            LLVMValueRef vtablePointer = EmitRuntimeDispatch(receiverType, receiver);
             LLVMValueRef functionAddress = _builder.BuildGEP2(
                 vtable.Type,
                 vtablePointer,
@@ -2135,22 +2163,18 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitMemberAddress(BoundMemberAccessExpression expression)
         {
-            StructTypeSymbol structType;
             LLVMValueRef receiverAddress;
             if (expression.IsPointerAccess)
             {
-                var pointer = (PointerTypeSymbol)expression.Receiver.Type;
-                structType = (StructTypeSymbol)pointer.ElementType;
                 receiverAddress = EmitExpression(expression.Receiver);
             }
             else
             {
-                structType = (StructTypeSymbol)expression.Receiver.Type;
                 receiverAddress = EmitAddress(expression.Receiver);
             }
 
             return _builder.BuildStructGEP2(
-                _mapType(structType),
+                _mapType(expression.Field.ContainingType),
                 receiverAddress,
                 checked((uint)expression.Field.Ordinal),
                 $"{expression.Field.Name}.address");
@@ -2207,8 +2231,7 @@ public sealed class LlvmIrGenerator
             if (!_virtualTables.TryGetValue(receiverType, out LlvmVTable vtable))
                 throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
 
-            LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(receiverType), receiver, 0, "vtable.address");
-            LLVMValueRef vtablePointer = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), vtableAddress, "vtable");
+            LLVMValueRef vtablePointer = EmitRuntimeDispatch(receiverType, receiver);
             LLVMValueRef functionAddress = _builder.BuildGEP2(
                 vtable.Type,
                 vtablePointer,
@@ -2250,8 +2273,7 @@ public sealed class LlvmIrGenerator
             var receiverType = (StructTypeSymbol)expression.Receiver.Type;
             if (!_virtualTables.TryGetValue(receiverType, out LlvmVTable vtable))
                 throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
-            LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(receiverType), receiver, 0, "vtable.address");
-            LLVMValueRef vtablePointer = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), vtableAddress, "vtable");
+            LLVMValueRef vtablePointer = EmitRuntimeDispatch(receiverType, receiver);
             LLVMValueRef functionAddress = _builder.BuildGEP2(
                 vtable.Type,
                 vtablePointer,
@@ -2276,8 +2298,7 @@ public sealed class LlvmIrGenerator
                 throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
 
             LLVMValueRef receiver = EmitMethodReceiverAddress(expression);
-            LLVMValueRef vtableAddress = _builder.BuildStructGEP2(_mapType(receiverType), receiver, 0, "vtable.address");
-            LLVMValueRef vtablePointer = _builder.BuildLoad2(LLVMTypeRef.CreatePointer(_context.Int8Type, 0), vtableAddress, "vtable");
+            LLVMValueRef vtablePointer = EmitRuntimeDispatch(receiverType, receiver);
             LLVMValueRef functionAddress = _builder.BuildGEP2(
                 vtable.Type,
                 vtablePointer,

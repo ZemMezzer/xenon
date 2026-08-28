@@ -362,7 +362,7 @@ internal sealed class SemanticAnalyzer
                     fieldSyntax.IdentifierToken.Text,
                     type,
                     fieldType,
-                    fieldSyntax.IsStatic ? staticFields.Count : (type.BaseType?.AllInstanceFields.Length ?? 0) + (type.HasVirtualDispatch ? 1 : 0) + fields.Count,
+                    fieldSyntax.IsStatic ? staticFields.Count : type.DeclaredFieldStart + fields.Count,
                     fieldSyntax.IsPublic ? Accessibility.Public : Accessibility.Private,
                     fieldSyntax.IsStatic,
                     fieldSyntax.IsReadonly,
@@ -1209,6 +1209,8 @@ internal sealed class SemanticAnalyzer
 
     private void MarkVirtualDispatchRequirements()
     {
+        // Dispatch is a declaration/inherited contract, not a property of the set
+        // of known descendants. Propagate only downwards before assigning fields.
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
             if (!type.Interfaces.IsEmpty || declaration.Methods.Any(method => method.IsVirtual || method.IsOverride || method.IsAbstract) ||
@@ -1216,7 +1218,7 @@ internal sealed class SemanticAnalyzer
                 declaration.Indexers.Any(indexer => indexer.IsVirtual || indexer.IsOverride || indexer.IsAbstract) ||
                 declaration.Destructor?.IsVirtual == true)
             {
-                MarkBaseChainForVirtualDispatch(type);
+                type.SetHasVirtualDispatch();
             }
         }
 
@@ -1230,12 +1232,6 @@ internal sealed class SemanticAnalyzer
                 changed = true;
             }
         } while (changed);
-    }
-
-    private static void MarkBaseChainForVirtualDispatch(StructTypeSymbol? type)
-    {
-        for (StructTypeSymbol? current = type; current is not null; current = current.BaseType)
-            current.SetHasVirtualDispatch();
     }
 
     private void BuildVirtualMethodTables()

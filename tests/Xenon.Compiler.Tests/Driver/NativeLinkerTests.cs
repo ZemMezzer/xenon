@@ -28,6 +28,9 @@ public sealed class NativeLinkerTests
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate float SumVectorDelegate(ref NativeVector2 value);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate nint AddressDelegate(nint value);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeVector2
     {
@@ -463,8 +466,10 @@ public sealed class NativeLinkerTests
         }
     }
 
-    [Fact]
-    public void Linker_ExportsStructPointerFunctionWithCLayout()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Linker_ExportsStructPointerFunctionWithCLayout(bool hasPolymorphicDescendant)
     {
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
@@ -481,7 +486,14 @@ public sealed class NativeLinkerTests
             {
                 return value->X + value->Y;
             }
-            """, "vector.xe"));
+            export Vector2* Second(Vector2* value) { return &value[1]; }
+            """ + (hasPolymorphicDescendant ? """
+
+            interface IValue { float Read(); }
+            struct DerivedVector : Vector2, IValue { public float Read() { return X + Y; } }
+            export Vector2* Upcast(DerivedVector* value) { return value; }
+            export Vector2* Reference(DerivedVector* value) { Vector2& reference = *value; return &reference; }
+            """ : ""), "vector.xe"));
         string objectPath = Path.Combine(
             directory,
             $"vector{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
@@ -498,7 +510,9 @@ public sealed class NativeLinkerTests
                 objectFile.Path,
                 libraryPath,
                 target.Triple,
-                new NativeLinkOptions(ExportedSymbols: ["Example_Sum"]),
+                new NativeLinkOptions(ExportedSymbols: hasPolymorphicDescendant
+                    ? ["Example_Sum", "Example_Second", "Example_Upcast", "Example_Reference"]
+                    : ["Example_Sum", "Example_Second"]),
                 importLibraryPath);
 
             nint handle = NativeLibrary.Load(library.Path);
@@ -508,6 +522,24 @@ public sealed class NativeLinkerTests
                     NativeLibrary.GetExport(handle, "Example_Sum"));
                 var vector = new NativeVector2 { X = 20.0f, Y = 22.0f };
                 Assert.Equal(42.0f, sum(ref vector));
+                nint storage = Marshal.AllocHGlobal(64);
+                try
+                {
+                    AddressDelegate second = Marshal.GetDelegateForFunctionPointer<AddressDelegate>(NativeLibrary.GetExport(handle, "Example_Second"));
+                    Assert.Equal(storage + Marshal.SizeOf<NativeVector2>(), second(storage));
+                    if (hasPolymorphicDescendant)
+                    {
+                        AddressDelegate upcast = Marshal.GetDelegateForFunctionPointer<AddressDelegate>(NativeLibrary.GetExport(handle, "Example_Upcast"));
+                        AddressDelegate reference = Marshal.GetDelegateForFunctionPointer<AddressDelegate>(NativeLibrary.GetExport(handle, "Example_Reference"));
+                        Assert.Equal(storage, upcast(storage));
+                        Assert.Equal(storage, reference(storage));
+                        Assert.Equal(nint.Zero, upcast(nint.Zero));
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(storage);
+                }
             }
             finally
             {
@@ -2633,6 +2665,175 @@ public sealed class NativeLinkerTests
                     if (array[0,0].Read() != 42) return 1;
                 }
                 if (State.Trace != 231) return 2;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_StableBaseLayoutPreservesAddressesArraysAndValueAbi(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Base { public int Value; }
+            struct Middle : Base { public int More; }
+            interface IFoo { int Foo(); }
+            interface IBar { int Bar(); }
+            interface IBaz { int Baz(); }
+            struct Derived : Middle, IFoo, IBar, IBaz
+            {
+                public int Last;
+                public int Foo() { return Value; }
+                public int Bar() { return More; }
+                public int Baz() { return Last; }
+            }
+            struct Padded { public long Wide; public byte Small; }
+            struct PaddedChild : Padded { public byte Tail; }
+            struct Empty { }
+            struct EmptyChild : Empty, IFoo { public int Foo() { return 42; } }
+            Base RoundTrip(Base value) { value.Value += 1; return value; }
+            Derived Make() { return Derived { 10, 20, 12 }; }
+            Base* Upcast(Derived* value) { return value; }
+            int ViaReference(Base& value) { value.Value += 1; return value.Value; }
+            int Main()
+            {
+                if (cast<int>(sizeof(Base)) != 4 || cast<int>(alignof(Base)) != 4 || cast<int>(offsetof(Base, Value)) != 0) return 1;
+                if (cast<int>(sizeof(Middle)) != 8 || cast<int>(alignof(Middle)) != 4 || cast<int>(offsetof(Middle, More)) != 4) return 2;
+                if (cast<int>(offsetof(Derived, Value)) != 0 || cast<int>(offsetof(Derived, More)) != 4) return 3;
+                Derived value = Make();
+                Base* basePointer = Upcast(&value);
+                Middle* middlePointer = &value;
+                if (&basePointer->Value != &value.Value || &basePointer->Value != &middlePointer->Value) return 4;
+                basePointer->Value = 41;
+                Base& reference = value;
+                if (&reference != basePointer || ViaReference(reference) != 42 || value.Value != 42) return 5;
+                IFoo foo = value;
+                IBar bar = value;
+                IBaz baz = value;
+                if (foo.Foo() != 42 || bar.Bar() != 20 || baz.Baz() != 12) return 6;
+                if (Make().Value != 10 || Make().More != 20 || Make().Last != 12) return 7;
+                Base original = Base { 41 };
+                Base copy = RoundTrip(original);
+                if (original.Value != 41 || copy.Value != 42) return 8;
+                Base[] heap = new Base[2];
+                Base[] stack = Base[2];
+                heap[0].Value = 10;
+                heap[1].Value = 20;
+                stack[0].Value = 11;
+                stack[1].Value = 21;
+                Base* first = &heap[0];
+                Base* stackFirst = &stack[0];
+                if (&first[1] != &heap[1] || first[1].Value != 20 || &stackFirst[1] != &stack[1]) return 9;
+                if (heap[0].Value != 10 || stack[0].Value != 11 || stack[1].Value != 21) return 10;
+                free(heap);
+                PaddedChild padded = PaddedChild { cast<long>(9), cast<byte>(7), cast<byte>(5) };
+                Padded* paddedBase = &padded;
+                if (offsetof(PaddedChild, Tail) != sizeof(Padded)) return 11;
+                *paddedBase = Padded { cast<long>(1), cast<byte>(2) };
+                if (cast<int>(padded.Tail) != 5 || cast<int>(padded.Wide) != 1 || cast<int>(padded.Small) != 2) return 12;
+                EmptyChild empty = EmptyChild();
+                Empty* emptyBase = &empty;
+                IFoo emptyView = empty;
+                Empty& emptyReference = empty;
+                if (emptyBase != &emptyReference || emptyView.Foo() != 42) return 13;
+                return copy.Value;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_DispatchesAtNonzeroOffsetAcrossAllStorageAndLifecyclePaths(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Trace; }
+            struct Prefix { public long Guard = cast<long>(123); public byte Tag = cast<byte>(7); }
+            interface IValue
+            {
+                int Read();
+                int Current { get; set; }
+                int this[int index] { get; set; }
+            }
+            struct Base : Prefix, IValue
+            {
+                public int Value = 10;
+                public virtual int Read() { return Value; }
+                public virtual int Current { get { return Value; } set { Value = value; } }
+                public virtual int this[int index] { get { return Value; } set { Value = value; } }
+                public virtual ~Base() { State.Trace = State.Trace * 10 + 1; }
+            }
+            struct Derived : Base
+            {
+                public int Extra = 2;
+                public override int Read() { return Value + Extra; }
+                public override int Current { get { return Value + Extra; } set { Value = value + Extra; } }
+                public override int this[int index] { get { return Value + index; } set { Value = value + index; } }
+                public ~Derived() { State.Trace = State.Trace * 10 + 2; }
+            }
+            struct Leaf : Derived { }
+            struct Nested { public Leaf Value; }
+            struct Globals { public static Nested Value; }
+            struct Constructed : Base
+            {
+                public Constructed(int value) { Value = value; }
+                public override int Read() { return Value + 1; }
+            }
+            struct ConstructedLeaf : Constructed { public ConstructedLeaf(int value) : base(value) { } }
+            interface IPlain { int Read(); }
+            struct Plain : Prefix, IPlain { public int Read() { return 1; } }
+            struct PlainDerived : Plain { public int Read() { return 42; } }
+            int ViaReference(Base& value) { IValue view = value; return view.Read(); }
+            int Main()
+            {
+                if (offsetof(Base, Value) < sizeof(Prefix) + sizeof(nint)) return 1;
+                Leaf leaf = Leaf();
+                Base* pointer = &leaf;
+                Prefix* prefix = pointer;
+                if (&prefix->Guard != &leaf.Guard || cast<int>(prefix->Guard) != 123 || cast<int>(prefix->Tag) != 7) return 2;
+                IValue view = *pointer;
+                IValue& reference = leaf;
+                pointer->Current = 20;
+                if (leaf.Value != 22 || view.Current != 24 || ViaReference(leaf) != 24) return 3;
+                view.Current += 1;
+                if (leaf.Value != 27 || reference.Read() != 29) return 4;
+                leaf[2] = 30;
+                view[3] += 1;
+                if (leaf.Value != 39 || pointer->Read() != 41 || view[1] != 40) return 5;
+                if (cast<int>(Leaf().Guard) != 123 || Leaf().Read() != 12) return 6;
+                IValue global = Globals.Value.Value;
+                if (global.Read() != 0) return 7;
+                Nested nested = Nested();
+                IValue nestedView = nested.Value;
+                if (nestedView.Read() != 0) return 8;
+                // Nested fields are zero-defaulted without running their initializers.
+                // Dispatch metadata nevertheless belongs to each nested runtime object.
+                Leaf[] heap = new Leaf[2];
+                Base* second = &heap[1];
+                IValue arrayView = *second;
+                if (arrayView.Read() != 12 || cast<int>(heap[1].Guard) != 123) return 9;
+                State.Trace = 0;
+                free(heap);
+                if (State.Trace != 2121) return 10;
+                State.Trace = 0;
+                { Leaf[] stack = Leaf[1]; IValue stackView = stack[0]; if (stackView.Read() != 12) return 11; }
+                if (State.Trace != 21) return 12;
+                ConstructedLeaf* constructed = new ConstructedLeaf(41);
+                Base* constructedBase = constructed;
+                IValue constructedView = *constructedBase;
+                if (constructedBase->Read() != 42 || constructedView.Read() != 42 || cast<int>(constructedBase->Guard) != 123) return 13;
+                free(constructed);
+                Base* allocated = new Leaf();
+                IValue allocatedView = *allocated;
+                if (allocatedView.Read() != 12) return 14;
+                State.Trace = 0;
+                free(allocated);
+                if (State.Trace != 21) return 15;
+                PlainDerived plain = PlainDerived();
+                Plain* plainBase = &plain;
+                IPlain plainView = *plainBase;
+                if (plainView.Read() != 42) return 16;
                 return 42;
             }
             """, optimization));

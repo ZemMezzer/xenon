@@ -8,6 +8,23 @@ namespace Xenon.Compiler.Tests.Semantics;
 
 public sealed class SemanticAnalyzerTests
 {
+    [Theory]
+    [InlineData("Base copy = derived;")]
+    [InlineData("Derived* downcast = basePointer;")]
+    [InlineData("Derived* downcast = cast<Derived*>(basePointer);")]
+    [InlineData("IFoo view = *basePointer;")]
+    public void Analyzer_StableLayoutDoesNotIntroduceSlicingDowncastsOrDescendantOnlyContracts(string statement)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Base { public int Value; }
+            interface IFoo { int Foo(); }
+            struct Derived : Base, IFoo { public int Foo() { return 42; } }
+            void Test() { Derived derived = Derived(); Base* basePointer = &derived;
+            """ + statement + " }");
+        Assert.True(compilation.HasErrors);
+    }
+
     [Fact]
     public void Analyzer_BuildsStructuralNamespacesAcrossFiles()
     {
