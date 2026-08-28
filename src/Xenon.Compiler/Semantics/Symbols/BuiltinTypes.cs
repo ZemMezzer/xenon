@@ -1,14 +1,9 @@
-using System.Collections.Concurrent;
 using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
 
 public static class BuiltinTypes
 {
-    private static readonly ConcurrentDictionary<(TypeSymbol Element, bool IsReadonly), PointerTypeSymbol> PointerTypes = new();
-    private static readonly ConcurrentDictionary<(TypeSymbol Element, bool IsReadonly), ReferenceTypeSymbol> ReferenceTypes = new();
-    private static readonly ConcurrentDictionary<(TypeSymbol Element, int Rank), ArrayTypeSymbol> ArrayTypes = new();
-
     public static PrimitiveTypeSymbol Void { get; } = new("void");
     public static PrimitiveTypeSymbol Bool { get; } = new("bool");
     public static PrimitiveTypeSymbol Byte { get; } = new("byte", true, false, 8);
@@ -29,18 +24,6 @@ public static class BuiltinTypes
     internal static TypeSymbol Error { get; } = new SpecialTypeSymbol("<error>");
 
     internal static TypeSymbol Null { get; } = new SpecialTypeSymbol("<null>");
-
-    public static PointerTypeSymbol PointerTo(TypeSymbol elementType, bool isReadonly = false) =>
-        PointerTypes.GetOrAdd((elementType, isReadonly), key => new PointerTypeSymbol(key.Element, key.IsReadonly));
-
-    public static ReferenceTypeSymbol ReferenceTo(TypeSymbol elementType, bool isReadonly = false) =>
-        ReferenceTypes.GetOrAdd((elementType, isReadonly), key => new ReferenceTypeSymbol(key.Element, key.IsReadonly));
-
-    public static ArrayTypeSymbol ArrayOf(TypeSymbol elementType, int rank = 1)
-    {
-        ArgumentOutOfRangeException.ThrowIfLessThan(rank, 1);
-        return ArrayTypes.GetOrAdd((elementType, rank), static key => new ArrayTypeSymbol(key.Element, key.Rank));
-    }
 
     internal static TypeSymbol? FromSyntaxKind(SyntaxKind kind) => kind switch
     {

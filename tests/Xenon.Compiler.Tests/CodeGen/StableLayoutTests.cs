@@ -52,7 +52,7 @@ public sealed class StableLayoutTests
             {
                 Compilation compilation = Bind(target, sources);
                 Assert.Equal(expected, Measurements(compilation));
-                StructTypeSymbol[] types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToArray();
+                StructTypeSymbol[] types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToArray();
                 foreach (string name in new[] { "Scalar", "Base", "Middle" })
                 {
                     StructTypeSymbol type = Assert.Single(types, type => type.Name == name);
@@ -79,7 +79,7 @@ public sealed class StableLayoutTests
             struct Root { public long Guard; public byte Tag; }
             enum Measurements { RootSize = cast<int>(sizeof(Root)), PolyValue = cast<int>(offsetof(Poly, Value)), LeafValue = cast<int>(offsetof(Leaf, Value)) }
             """);
-        StructTypeSymbol[] types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToArray();
+        StructTypeSymbol[] types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToArray();
         StructTypeSymbol root = Assert.Single(types, type => type.Name == "Root");
         StructTypeSymbol poly = Assert.Single(types, type => type.Name == "Poly");
         StructTypeSymbol leaf = Assert.Single(types, type => type.Name == "Leaf");

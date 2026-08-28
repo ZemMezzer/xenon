@@ -2,10 +2,13 @@ namespace Xenon.Compiler.Semantics.Symbols;
 
 public abstract class TypeSymbol : Symbol
 {
-    protected TypeSymbol(string name)
-        : base(name, SymbolKind.Type)
+    protected TypeSymbol(string name, Symbol? containingSymbol = null)
+        : base(name, SymbolKind.Type, containingSymbol)
     {
     }
+
+    public virtual string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) => Name;
+    public override string ToString() => ToDisplayString();
 }
 
 public sealed class PrimitiveTypeSymbol : TypeSymbol
@@ -35,8 +38,11 @@ public sealed class PrimitiveTypeSymbol : TypeSymbol
 
 public sealed class PointerTypeSymbol : TypeSymbol
 {
+    public override string Name => ToDisplayString();
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) => TypeDisplay.Pointer(this, format);
+
     internal PointerTypeSymbol(TypeSymbol elementType, bool isReadonly)
-        : base($"{(isReadonly ? "readonly " : string.Empty)}{elementType.Name}*")
+        : base(string.Empty)
     {
         ElementType = elementType;
         IsReadonly = isReadonly;
@@ -49,8 +55,11 @@ public sealed class PointerTypeSymbol : TypeSymbol
 
 public sealed class ReferenceTypeSymbol : TypeSymbol
 {
+    public override string Name => ToDisplayString();
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) => TypeDisplay.Reference(this, format);
+
     internal ReferenceTypeSymbol(TypeSymbol elementType, bool isReadonly)
-        : base($"{(isReadonly ? "readonly " : string.Empty)}{elementType.Name}&")
+        : base(string.Empty)
     {
         ElementType = elementType;
         IsReadonly = isReadonly;
@@ -64,8 +73,11 @@ public sealed class ReferenceTypeSymbol : TypeSymbol
 
 public sealed class ArrayTypeSymbol : TypeSymbol
 {
+    public override string Name => ToDisplayString();
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) => TypeDisplay.Array(this, format);
+
     internal ArrayTypeSymbol(TypeSymbol elementType, int rank)
-        : base(FormatName(elementType, rank))
+        : base(string.Empty)
     {
         ElementType = elementType;
         Rank = rank;
@@ -74,12 +86,6 @@ public sealed class ArrayTypeSymbol : TypeSymbol
     public TypeSymbol ElementType { get; }
     public int Rank { get; }
 
-    private static string FormatName(TypeSymbol element, int rank)
-    {
-        string suffix = $"[{new string(',', rank - 1)}]";
-        int bracket = element.Name.IndexOf('[');
-        return bracket < 0 ? element.Name + suffix : element.Name.Insert(bracket, suffix);
-    }
 }
 
 internal sealed class SpecialTypeSymbol : TypeSymbol

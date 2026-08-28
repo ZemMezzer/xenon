@@ -15,11 +15,10 @@ public sealed class FunctionSymbol : Symbol
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
         FunctionDeclarationSyntax declaration)
-        : base(name, SymbolKind.Function)
+        : base(name, SymbolKind.Function, containingNamespace)
     {
-        ContainingNamespace = containingNamespace;
         ReturnType = returnType;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
         FunctionKind = FunctionKind.Ordinary;
@@ -32,13 +31,11 @@ public sealed class FunctionSymbol : Symbol
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
         InterfaceMethodDeclarationSyntax declaration)
-        : base(name, SymbolKind.Function)
+        : base(name, SymbolKind.Function, containingInterface)
     {
         FunctionKind = FunctionKind.Method;
-        ContainingInterface = containingInterface;
-        ContainingNamespace = containingInterface.ContainingNamespace;
         ReturnType = returnType;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = Accessibility.Public;
         IsAbstract = true;
@@ -51,14 +48,11 @@ public sealed class FunctionSymbol : Symbol
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
         PropertyAccessorDeclarationSyntax declaration)
-        : base(name, SymbolKind.Function)
+        : base(name, SymbolKind.Function, containingProperty)
     {
         FunctionKind = FunctionKind.Method;
-        ContainingInterface = containingProperty.ContainingInterface;
-        ContainingInterfaceProperty = containingProperty;
-        ContainingNamespace = containingProperty.ContainingInterface.ContainingNamespace;
         ReturnType = returnType;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = Accessibility.Public;
         IsAbstract = true;
@@ -71,14 +65,11 @@ public sealed class FunctionSymbol : Symbol
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
         PropertyAccessorDeclarationSyntax declaration)
-        : base(name, SymbolKind.Function)
+        : base(name, SymbolKind.Function, containingIndexer)
     {
         FunctionKind = FunctionKind.Method;
-        ContainingInterface = containingIndexer.ContainingInterface;
-        ContainingInterfaceIndexer = containingIndexer;
-        ContainingNamespace = containingIndexer.ContainingInterface.ContainingNamespace;
         ReturnType = returnType;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = Accessibility.Public;
         IsAbstract = true;
@@ -87,17 +78,15 @@ public sealed class FunctionSymbol : Symbol
 
     internal FunctionSymbol(
         string name,
-        StructTypeSymbol containingType,
+        DeclaredTypeSymbol containingType,
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
         MethodDeclarationSyntax declaration)
-        : base(name, SymbolKind.Function)
+        : base(name, SymbolKind.Function, containingType)
     {
         FunctionKind = FunctionKind.Method;
-        ContainingType = containingType;
-        ContainingNamespace = containingType.ContainingNamespace;
         ReturnType = returnType;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
         IsStatic = declaration.IsStatic;
@@ -113,15 +102,12 @@ public sealed class FunctionSymbol : Symbol
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
         PropertyAccessorDeclarationSyntax declaration)
-        : base(name, SymbolKind.Function)
+        : base(name, SymbolKind.Function, containingProperty)
     {
         PropertyDeclarationSyntax property = containingProperty.Declaration;
         FunctionKind = FunctionKind.Method;
-        ContainingType = containingProperty.ContainingType;
-        ContainingProperty = containingProperty;
-        ContainingNamespace = containingProperty.ContainingType.ContainingNamespace;
         ReturnType = returnType;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = property.IsPublic ? Accessibility.Public : Accessibility.Private;
         IsStatic = property.IsStatic;
@@ -137,15 +123,12 @@ public sealed class FunctionSymbol : Symbol
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
         PropertyAccessorDeclarationSyntax declaration)
-        : base(name, SymbolKind.Function)
+        : base(name, SymbolKind.Function, containingIndexer)
     {
         IndexerDeclarationSyntax indexer = containingIndexer.Declaration;
         FunctionKind = FunctionKind.Method;
-        ContainingType = containingIndexer.ContainingType;
-        ContainingIndexer = containingIndexer;
-        ContainingNamespace = containingIndexer.ContainingType.ContainingNamespace;
         ReturnType = returnType;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = indexer.IsPublic ? Accessibility.Public : Accessibility.Private;
         IsStatic = indexer.IsStatic;
@@ -157,7 +140,7 @@ public sealed class FunctionSymbol : Symbol
 
     internal FunctionSymbol(
         FunctionKind functionKind,
-        StructTypeSymbol containingType,
+        DeclaredTypeSymbol containingType,
         ImmutableArray<ParameterSymbol> parameters,
         SyntaxNode declaration,
         Accessibility accessibility)
@@ -167,7 +150,7 @@ public sealed class FunctionSymbol : Symbol
             FunctionKind.InstanceInitializer => "__init_fields",
             FunctionKind.Destructor => $"~{containingType.Name}",
             _ => throw new ArgumentOutOfRangeException(nameof(functionKind)),
-        }, SymbolKind.Function)
+        }, SymbolKind.Function, containingType)
     {
         if (functionKind is FunctionKind.Ordinary or FunctionKind.Method)
         {
@@ -175,30 +158,29 @@ public sealed class FunctionSymbol : Symbol
         }
 
         FunctionKind = functionKind;
-        ContainingType = containingType;
-        ContainingNamespace = containingType.ContainingNamespace;
         ReturnType = BuiltinTypes.Void;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = accessibility;
         IsVirtual = declaration is DestructorDeclarationSyntax { IsVirtual: true };
         IsOverride = declaration is DestructorDeclarationSyntax { IsOverride: true };
     }
 
-    public NamespaceSymbol ContainingNamespace { get; }
+    public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
 
-    public StructTypeSymbol? ContainingType { get; }
-    public InterfaceTypeSymbol? ContainingInterface { get; }
-    public PropertySymbol? ContainingProperty { get; }
-    public InterfacePropertySymbol? ContainingInterfaceProperty { get; }
-    public IndexerSymbol? ContainingIndexer { get; }
-    public InterfaceIndexerSymbol? ContainingInterfaceIndexer { get; }
+    public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
+    public StructTypeSymbol? ContainingStruct => ContainingType as StructTypeSymbol;
+    public InterfaceTypeSymbol? ContainingInterface => ContainingType as InterfaceTypeSymbol;
+    public PropertySymbol? ContainingProperty => ContainingSymbol as PropertySymbol;
+    public InterfacePropertySymbol? ContainingInterfaceProperty => ContainingSymbol as InterfacePropertySymbol;
+    public IndexerSymbol? ContainingIndexer => ContainingSymbol as IndexerSymbol;
+    public InterfaceIndexerSymbol? ContainingInterfaceIndexer => ContainingSymbol as InterfaceIndexerSymbol;
 
     public string FullName => FunctionKind switch
     {
-        FunctionKind.Method when ContainingType is not null => IsReadonly
-            ? $"{ContainingType.FullName}.{Name}.__readonly"
-            : $"{ContainingType.FullName}.{Name}",
+        FunctionKind.Method when ContainingInterface is null => IsReadonly
+            ? $"{ContainingType!.FullName}.{Name}.__readonly"
+            : $"{ContainingType!.FullName}.{Name}",
         FunctionKind.Method => $"{ContainingInterface!.FullName}.{Name}",
         FunctionKind.Constructor => ConstructorOverloadCount == 1 ? $"{ContainingType!.FullName}.__ctor" : $"{ContainingType!.FullName}.__ctor.{ConstructorOverload}",
         FunctionKind.InstanceInitializer => $"{ContainingType!.FullName}.__init_fields",
@@ -220,7 +202,7 @@ public sealed class FunctionSymbol : Symbol
 
     public bool IsPublic => Accessibility == Accessibility.Public;
 
-    public bool HasImplicitThis => ContainingType is not null && !IsStatic;
+    public bool HasImplicitThis => ContainingType is not null && ContainingInterface is null && !IsStatic;
 
     public bool IsStatic { get; }
     public bool IsVirtual { get; }
@@ -249,18 +231,20 @@ public sealed class FunctionSymbol : Symbol
         IsStatic == candidate.IsStatic &&
         IsReadonly == candidate.IsReadonly &&
         Parameters.Length == candidate.Parameters.Length &&
-        Parameters.Zip(candidate.Parameters).All(pair => ReferenceEquals(pair.First.Type, pair.Second.Type));
+        Parameters.Zip(candidate.Parameters).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second.Type));
 
     public bool Overrides(FunctionSymbol candidate) =>
-        HasSameSignature(candidate) && ReferenceEquals(ReturnType, candidate.ReturnType);
+        HasSameSignature(candidate) && TypeIdentity.AreSame(ReturnType, candidate.ReturnType);
 
     internal SyntaxNode Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Declaration is TypeDeclarationSyntax ? [] : [new(Declaration)];
 }
 
 public abstract class VariableSymbol : Symbol
 {
-    protected VariableSymbol(string name, SymbolKind kind, TypeSymbol type, bool isReadonly = false)
-        : base(name, kind)
+    protected VariableSymbol(string name, SymbolKind kind, TypeSymbol type, Symbol? containingSymbol, bool isReadonly = false)
+        : base(name, kind, containingSymbol)
     {
         Type = type;
         IsReadonly = isReadonly;
@@ -272,21 +256,34 @@ public abstract class VariableSymbol : Symbol
 
 public sealed class ParameterSymbol : VariableSymbol
 {
-    internal ParameterSymbol(string name, TypeSymbol type, int ordinal, bool isReadonly = false)
-        : base(name, SymbolKind.Parameter, type, isReadonly)
+    internal ParameterSymbol(string name, TypeSymbol type, int ordinal, bool isReadonly = false, Symbol? containingSymbol = null, ParameterSyntax? declaration = null)
+        : base(name, SymbolKind.Parameter, type, containingSymbol, isReadonly)
     {
         Ordinal = ordinal;
+        Declaration = declaration;
     }
 
     public int Ordinal { get; }
+    internal ParameterSyntax? Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Declaration is null ? [] : [new(Declaration)];
+
+    // Each declaration owns its own parameters, including indexers and their accessors.
+    internal static ImmutableArray<ParameterSymbol> Own(ImmutableArray<ParameterSymbol> parameters, Symbol owner) =>
+        parameters.Select(parameter => new ParameterSymbol(parameter.Name, parameter.Type, parameter.Ordinal, parameter.IsReadonly, owner, parameter.Declaration)).ToImmutableArray();
 }
 
 public sealed class LocalVariableSymbol : VariableSymbol
 {
-    internal LocalVariableSymbol(string name, TypeSymbol type, bool isReadonly = false)
-        : base(name, SymbolKind.LocalVariable, type, isReadonly)
+    internal LocalVariableSymbol(string name, TypeSymbol type, FunctionSymbol containingFunction, bool isReadonly = false, VariableDeclarationStatementSyntax? declaration = null)
+        : base(name, SymbolKind.LocalVariable, type, containingFunction, isReadonly)
     {
+        Declaration = declaration;
     }
+
+    internal VariableDeclarationStatementSyntax? Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Declaration is null ? [] : [new(Declaration)];
 
     public ArrayStorageKind ArrayStorage { get; internal set; }
     public FunctionSymbol? Destructor { get; internal set; }

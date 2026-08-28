@@ -19,7 +19,7 @@ public static class NativeSymbolNames
         PrimitiveTypeSymbol { IsInteger: true } integer =>
             (integer.BitWidth ?? layout?.GetIntegerBitWidth(integer)) is int width ? $"i{width}" : null,
         InterfaceTypeSymbol => "{ptr,ptr}",
-        _ => TypeIdentity.Get(type),
+        _ => TypeSignature.Get(type),
     };
 
     public static string Get(FunctionSymbol function)

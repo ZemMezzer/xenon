@@ -14,10 +14,10 @@ internal sealed class LlvmTypeLayout(NativeTargetMachine target) : ITargetTypeLa
     public int GetIntegerBitWidth(PrimitiveTypeSymbol type)
     {
         if (type.BitWidth is int width) return width;
-        if (ReferenceEquals(type, BuiltinTypes.CLong) || ReferenceEquals(type, BuiltinTypes.CULong))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.CLong) || TypeIdentity.AreSame(type, BuiltinTypes.CULong))
             return target.Triple.Contains("windows", StringComparison.OrdinalIgnoreCase) || target.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase)
                 ? 32 : target.PointerBitWidth;
-        if (ReferenceEquals(type, BuiltinTypes.NInt) || ReferenceEquals(type, BuiltinTypes.NUInt)) return target.PointerBitWidth;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.NInt) || TypeIdentity.AreSame(type, BuiltinTypes.NUInt)) return target.PointerBitWidth;
         throw new LlvmCodeGenerationException($"'{type.Name}' is not an integer type.");
     }
 
@@ -33,9 +33,9 @@ internal sealed class LlvmTypeLayout(NativeTargetMachine target) : ITargetTypeLa
         if (type is EnumTypeSymbol enumeration) return MapType(enumeration.UnderlyingType);
         if (type is PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol)
             return LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-        if (ReferenceEquals(type, BuiltinTypes.Bool)) return _context.Int1Type;
-        if (ReferenceEquals(type, BuiltinTypes.Float)) return _context.FloatType;
-        if (ReferenceEquals(type, BuiltinTypes.Double)) return _context.DoubleType;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Bool)) return _context.Int1Type;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Float)) return _context.FloatType;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Double)) return _context.DoubleType;
         if (type is PrimitiveTypeSymbol { IsInteger: true } integer)
             return GetIntegerBitWidth(integer) switch
             {

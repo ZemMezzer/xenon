@@ -7,7 +7,9 @@ public abstract record SyntaxNode
 
 public abstract record MemberDeclarationSyntax : SyntaxNode;
 
-public abstract record StructMemberDeclarationSyntax : SyntaxNode;
+public abstract record TypeDeclarationSyntax(SyntaxToken IdentifierToken) : MemberDeclarationSyntax;
+
+public abstract record TypeMemberDeclarationSyntax : SyntaxNode;
 
 public abstract record StatementSyntax : SyntaxNode;
 

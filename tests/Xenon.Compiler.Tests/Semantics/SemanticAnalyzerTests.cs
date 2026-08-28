@@ -565,7 +565,7 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(compilation.Diagnostics);
         NamespaceSymbol example = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
-        StructTypeSymbol vector = Assert.Single(example.Types);
+        StructTypeSymbol vector = Assert.Single(example.Structs);
         Assert.Equal("Example.Vector2", vector.FullName);
         Assert.Equal(["X", "Y"], vector.Fields.Select(field => field.Name).ToArray());
 
@@ -717,7 +717,7 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(compilation.Diagnostics);
         NamespaceSymbol example = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
-        StructTypeSymbol vector = Assert.Single(example.Types);
+        StructTypeSymbol vector = Assert.Single(example.Structs);
         Assert.NotNull(vector.Constructor);
         Assert.NotNull(vector.Destructor);
 
@@ -752,7 +752,7 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(compilation.Diagnostics);
         NamespaceSymbol example = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
-        StructTypeSymbol pair = Assert.Single(example.Types);
+        StructTypeSymbol pair = Assert.Single(example.Structs);
         Assert.False(pair.Fields[0].IsPublic);
         Assert.True(pair.Fields[1].IsPublic);
         FunctionSymbol hidden = Assert.Single(example.Functions.Where(function => function.Name == "Hidden"));
@@ -1276,7 +1276,7 @@ public sealed class SemanticAnalyzerTests
         Assert.Empty(compilation.Diagnostics);
 
         StructTypeSymbol counter = Assert.Single(
-            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs);
         Assert.Equal(3, counter.Methods.Length);
         Assert.True(counter.FindMethod("Add")!.IsPublic);
         Assert.False(counter.FindMethod("AddCore")!.IsPublic);
@@ -1498,7 +1498,7 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(compilation.Diagnostics);
         StructTypeSymbol enemy = compilation.SemanticModel.GlobalNamespace
-            .Namespaces.Single().Types.Single(type => type.Name == "Enemy");
+            .Namespaces.Single().Structs.Single(type => type.Name == "Enemy");
         Assert.Equal("Entity", enemy.BaseType!.Name);
         Assert.Equal(2, enemy.AllInstanceFields.Length);
         Assert.Single(enemy.Interfaces);
@@ -1531,7 +1531,7 @@ public sealed class SemanticAnalyzerTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        StructTypeSymbol enemy = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Types.Single(type => type.Name == "Enemy");
+        StructTypeSymbol enemy = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Structs.Single(type => type.Name == "Enemy");
         Assert.Equal(2, enemy.Constructors.Length);
     }
 
@@ -1616,7 +1616,7 @@ public sealed class SemanticAnalyzerTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        StructTypeSymbol limits = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Types.Single();
+        StructTypeSymbol limits = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Structs.Single();
         Assert.Equal(1024, Assert.Single(limits.StaticFields).ConstantValue);
     }
 
@@ -1829,7 +1829,7 @@ public sealed class SemanticAnalyzerTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        StructTypeSymbol type = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Types.Single();
+        StructTypeSymbol type = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Structs.Single();
         Assert.Equal(true, type.StaticFields.Single(field => field.Name == "Less").ConstantValue);
         Assert.Equal(-1, type.StaticFields.Single(field => field.Name == "Divide").ConstantValue);
         Assert.Equal(-1, type.StaticFields.Single(field => field.Name == "Remainder").ConstantValue);
@@ -2206,7 +2206,7 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(compilation.Diagnostics);
         StructTypeSymbol container = Assert.Single(
-            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs);
         Assert.Equal(2, container.Methods.Length);
         Assert.Contains(container.Methods, method => !method.IsReadonly && method.FullName == "Example.Container.Get");
         Assert.Contains(container.Methods, method => method.IsReadonly && method.FullName == "Example.Container.Get.__readonly");
@@ -2243,7 +2243,7 @@ public sealed class SemanticAnalyzerTests
         Compilation compilation = CreateCompilation(declaration);
         Assert.Empty(compilation.Diagnostics);
         var method = Assert.Single(Assert.Single(
-            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types).Methods);
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs).Methods);
         Assert.Equal(methodReadonly, method.IsReadonly);
         Assert.Equal(pointeeReadonly, Assert.IsType<PointerTypeSymbol>(method.ReturnType).IsReadonly);
 
@@ -2991,7 +2991,7 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(compilation.Diagnostics);
         StructTypeSymbol player = Assert.Single(
-            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs);
         PropertySymbol property = Assert.Single(player.Properties);
         Assert.Single(player.AllInstanceFields);
         Assert.NotNull(property.Getter);
@@ -3110,7 +3110,7 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(compilation.Diagnostics);
         StructTypeSymbol values = Assert.Single(
-            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+            Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs);
         Assert.Equal(2, values.Indexers.Length);
     }
 
@@ -3365,7 +3365,7 @@ public sealed class SemanticAnalyzerTests
             }
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
-        var holder = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types);
+        var holder = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs);
         Assert.False(holder.Fields[0].IsReadonly);
         Assert.True(Assert.IsType<PointerTypeSymbol>(holder.Fields[0].Type).IsReadonly);
         Assert.True(holder.Fields[1].IsReadonly);
@@ -3694,7 +3694,7 @@ public sealed class SemanticAnalyzerTests
         Compilation compilation = CreateCompilation("namespace Example; abstract struct Base { " + baseMember +
             " } struct Derived : Base { " + derivedMember + " }");
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("must be declared 'override'", StringComparison.Ordinal));
-        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "Derived"));
+        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Derived"));
         Assert.All(derived.Methods, method => Assert.Null(method.VTableSlot));
         if (derived.Destructor is { } destructor) Assert.Null(destructor.VTableSlot);
         Assert.Equal<FunctionSymbol>(derived.BaseType!.VirtualMethods, derived.VirtualMethods);
@@ -3727,7 +3727,7 @@ public sealed class SemanticAnalyzerTests
         Compilation compilation = CreateCompilation("namespace Example; struct Base { " + baseMember +
             " } struct Derived : Base { " + derivedMember + " }");
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("does not override", StringComparison.Ordinal));
-        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "Derived"));
+        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Derived"));
         Assert.All(derived.Methods, method => Assert.Null(method.VTableSlot));
         if (derived.Destructor is { } destructor) Assert.Null(destructor.VTableSlot);
         Assert.Equal<FunctionSymbol>(derived.BaseType!.VirtualMethods, derived.VirtualMethods);
@@ -3746,7 +3746,7 @@ public sealed class SemanticAnalyzerTests
         {
             Compilation valid = CreateCompilation(order);
             Assert.False(valid.HasErrors, string.Join(Environment.NewLine, valid.Diagnostics));
-            StructTypeSymbol derived = Assert.Single(Assert.Single(valid.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "D"));
+            StructTypeSymbol derived = Assert.Single(Assert.Single(valid.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "D"));
             Assert.False(derived.IsAbstract);
             Assert.All(derived.VirtualMethods, method => { Assert.False(method.IsAbstract); Assert.Same(derived, method.ContainingType); });
         }
@@ -3782,7 +3782,7 @@ public sealed class SemanticAnalyzerTests
             struct E : D {}
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
-        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToDictionary(type => type.Name);
         Assert.Null(types["B"].Methods[0].VTableSlot);
         Assert.Null(types["C"].Methods[0].VTableSlot);
         Assert.Same(types["A"].Methods[0], Assert.Single(types["C"].VirtualMethods));
@@ -3813,7 +3813,7 @@ public sealed class SemanticAnalyzerTests
             struct D : C {}
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
-        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToDictionary(type => type.Name);
         Assert.Null(types["B"].Destructor);
         Assert.Null(types["D"].Destructor);
         Assert.Same(types["A"].Destructor, Assert.Single(types["B"].VirtualMethods));
@@ -3826,7 +3826,7 @@ public sealed class SemanticAnalyzerTests
     {
         Compilation compilation = CreateCompilation("namespace Example; struct A { public virtual void M() {} } struct B : A { private override void M() {} }");
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("accessibility", StringComparison.Ordinal));
-        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "B"));
+        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "B"));
         Assert.Null(Assert.Single(derived.Methods).VTableSlot);
         Assert.Same(derived.BaseType!.Methods[0], Assert.Single(derived.VirtualMethods));
     }
@@ -3840,7 +3840,7 @@ public sealed class SemanticAnalyzerTests
     {
         Compilation compilation = CreateCompilation("namespace Example; struct A { " + member + " }");
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("does not override", StringComparison.Ordinal));
-        Assert.Empty(Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types).VirtualMethods);
+        Assert.Empty(Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs).VirtualMethods);
     }
 
     [Fact]
@@ -3855,7 +3855,7 @@ public sealed class SemanticAnalyzerTests
             struct E : D {}
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
-        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToDictionary(type => type.Name);
         Assert.Equal(2, types["E"].VirtualMethods.Length);
         Assert.Same(types["C"].Methods[0], types["E"].VirtualMethods[0]);
         Assert.Same(types["B"].Methods[0], types["E"].VirtualMethods[1]);
@@ -3872,7 +3872,7 @@ public sealed class SemanticAnalyzerTests
         Compilation compilation = CreateCompilation("namespace Example; struct Base { public virtual ~Base() {} } " +
             "struct Derived : Base { " + access + " override ~Derived() {} }");
         Assert.Equal(rejected, compilation.HasErrors);
-        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToDictionary(type => type.Name);
         FunctionSymbol destructor = types["Derived"].Destructor!;
         if (rejected)
         {
@@ -3903,7 +3903,7 @@ public sealed class SemanticAnalyzerTests
             struct Leaf : Middle {
             """ + leaf + " }");
         Assert.Equal(rejected, compilation.HasErrors);
-        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToDictionary(type => type.Name);
         Assert.Null(types["Middle"].Destructor);
         FunctionSymbol expected = !rejected && types["Leaf"].Destructor is { } own ? own : types["Derived"].Destructor!;
         Assert.Same(expected, Assert.Single(types["Leaf"].VirtualMethods));
@@ -3934,7 +3934,7 @@ public sealed class SemanticAnalyzerTests
             Compilation compilation = CreateCompilation("namespace Example; struct Base { public virtual " + member +
                 " } struct Derived : Base { " + access + " override " + member + " }");
             Assert.Equal(access == "private", compilation.HasErrors);
-            var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+            var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.ToDictionary(type => type.Name);
             Assert.All(types["Derived"].VirtualMethods, method => Assert.Same(types[access == "private" ? "Base" : "Derived"], method.ContainingType));
         }
     }

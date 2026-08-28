@@ -171,7 +171,7 @@ public sealed class LlvmIrGenerator
 
     private void DeclareVirtualTables(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Types.Where(type => type.HasVirtualDispatch))
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.HasVirtualDispatch))
         {
             LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)type.VirtualMethods.Length + 1);
@@ -191,7 +191,7 @@ public sealed class LlvmIrGenerator
 
     private void DeclareInterfaceTables(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Types)
+        foreach (StructTypeSymbol type in @namespace.Structs)
         {
             var tables = new Dictionary<InterfaceTypeSymbol, LlvmVTable>();
             foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces)
@@ -227,7 +227,7 @@ public sealed class LlvmIrGenerator
 
     private void DeclareStaticFields(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Types)
+        foreach (StructTypeSymbol type in @namespace.Structs)
         {
             foreach (FieldSymbol field in type.StaticFields)
             {
@@ -247,7 +247,7 @@ public sealed class LlvmIrGenerator
         LLVMTypeRef llvmType = MapType(type);
         if (value is null)
             return DefaultValue(type, MapType, _virtualTables);
-        if (ReferenceEquals(type, BuiltinTypes.Bool))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Bool))
             return LLVMValueRef.CreateConstInt(llvmType, value is true ? 1UL : 0UL, false);
         if (type is PrimitiveTypeSymbol { IsInteger: true })
             return LLVMValueRef.CreateConstInt(llvmType, GetIntegerConstantBits(value), false);
@@ -280,7 +280,7 @@ public sealed class LlvmIrGenerator
 
     private static void CollectStructTypes(NamespaceSymbol @namespace, ICollection<StructTypeSymbol> types)
     {
-        foreach (StructTypeSymbol type in @namespace.Types)
+        foreach (StructTypeSymbol type in @namespace.Structs)
         {
             types.Add(type);
         }
@@ -298,7 +298,7 @@ public sealed class LlvmIrGenerator
             DeclareFunction(function);
         }
 
-        foreach (StructTypeSymbol type in @namespace.Types)
+        foreach (StructTypeSymbol type in @namespace.Structs)
         {
             foreach (FunctionSymbol method in type.Methods)
             {
@@ -416,7 +416,7 @@ public sealed class LlvmIrGenerator
         }
 
         FunctionSymbol entryPoint = candidates[0].Symbol;
-        if (!ReferenceEquals(entryPoint.ReturnType, BuiltinTypes.Int) || !entryPoint.Parameters.IsEmpty)
+        if (!TypeIdentity.AreSame(entryPoint.ReturnType, BuiltinTypes.Int) || !entryPoint.Parameters.IsEmpty)
         {
             throw new LlvmCodeGenerationException(
                 $"Entry point '{entryPoint.FullName}' must have signature 'int Main()'.");
@@ -444,53 +444,53 @@ public sealed class LlvmIrGenerator
 
     private LLVMTypeRef MapType(TypeSymbol type)
     {
-        if (ReferenceEquals(type, BuiltinTypes.Void))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Void))
         {
             return _context.VoidType;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.Bool))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Bool))
         {
             return _context.Int1Type;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.Byte) || ReferenceEquals(type, BuiltinTypes.SByte))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Byte) || TypeIdentity.AreSame(type, BuiltinTypes.SByte))
         {
             return _context.Int8Type;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.Short) || ReferenceEquals(type, BuiltinTypes.UShort))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Short) || TypeIdentity.AreSame(type, BuiltinTypes.UShort))
         {
             return _context.Int16Type;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.Int) || ReferenceEquals(type, BuiltinTypes.UInt))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Int) || TypeIdentity.AreSame(type, BuiltinTypes.UInt))
         {
             return _context.Int32Type;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.Long) || ReferenceEquals(type, BuiltinTypes.ULong))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Long) || TypeIdentity.AreSame(type, BuiltinTypes.ULong))
         {
             return _context.Int64Type;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.NInt) || ReferenceEquals(type, BuiltinTypes.NUInt))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.NInt) || TypeIdentity.AreSame(type, BuiltinTypes.NUInt))
         {
             return MapTargetInteger(type, GetPointerBitWidth());
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.CLong) || ReferenceEquals(type, BuiltinTypes.CULong))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.CLong) || TypeIdentity.AreSame(type, BuiltinTypes.CULong))
         {
             int bitWidth = IsWindowsTarget() ? 32 : GetPointerBitWidth();
             return MapTargetInteger(type, bitWidth);
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.Float))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Float))
         {
             return _context.FloatType;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.Double))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Double))
         {
             return _context.DoubleType;
         }
@@ -569,12 +569,12 @@ public sealed class LlvmIrGenerator
             return bitWidth;
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.NInt) || ReferenceEquals(type, BuiltinTypes.NUInt))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.NInt) || TypeIdentity.AreSame(type, BuiltinTypes.NUInt))
         {
             return GetPointerBitWidth();
         }
 
-        if (ReferenceEquals(type, BuiltinTypes.CLong) || ReferenceEquals(type, BuiltinTypes.CULong))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.CLong) || TypeIdentity.AreSame(type, BuiltinTypes.CULong))
         {
             return IsWindowsTarget() ? 32 : GetPointerBitWidth();
         }
@@ -758,7 +758,7 @@ public sealed class LlvmIrGenerator
             AllocateLocals(body);
             EmitBlock(body);
 
-            if (!_terminated && ReferenceEquals(_function.ReturnType, BuiltinTypes.Void))
+            if (!_terminated && TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void))
             {
                 if (_exitCleanup is not null) EmitExpression(_exitCleanup);
                 _builder.BuildRetVoid();
@@ -1213,7 +1213,7 @@ public sealed class LlvmIrGenerator
 
             LLVMTypeRef type = _mapType(expression.Type);
 
-            if (ReferenceEquals(expression.Type, BuiltinTypes.Bool))
+            if (TypeIdentity.AreSame(expression.Type, BuiltinTypes.Bool))
             {
                 return LLVMValueRef.CreateConstInt(type, expression.Value is true ? 1UL : 0UL, false);
             }
@@ -1596,9 +1596,9 @@ public sealed class LlvmIrGenerator
             return value;
         }
 
-        private LLVMValueRef ExtractBaseValue(LLVMValueRef value, StructTypeSymbol type, StructTypeSymbol baseType)
+        private LLVMValueRef ExtractBaseValue(LLVMValueRef value, StructTypeSymbol type, DeclaredTypeSymbol baseType)
         {
-            while (!ReferenceEquals(type, baseType))
+            while (!TypeIdentity.AreSame(type, baseType))
             {
                 value = _builder.BuildExtractValue(value, 0, "base.value");
                 type = type.BaseType ?? throw new LlvmCodeGenerationException("Invalid base subobject.");
@@ -1607,9 +1607,9 @@ public sealed class LlvmIrGenerator
         }
 
         private LLVMValueRef InsertSubobjectElement(LLVMValueRef value, StructTypeSymbol type,
-            StructTypeSymbol owner, LLVMValueRef element, uint index, string name)
+            DeclaredTypeSymbol owner, LLVMValueRef element, uint index, string name)
         {
-            if (ReferenceEquals(type, owner))
+            if (TypeIdentity.AreSame(type, owner))
                 return _builder.BuildInsertValue(value, element, index, name);
             LLVMValueRef baseValue = _builder.BuildExtractValue(value, 0, "base.value");
             baseValue = InsertSubobjectElement(baseValue, type.BaseType!, owner, element, index, name);
@@ -1795,7 +1795,7 @@ public sealed class LlvmIrGenerator
                 return _builder.BuildTrunc(value, sizeType, "array.length.trunc");
             }
 
-            bool signed = sourceType is PrimitiveTypeSymbol { IsSigned: true } || ReferenceEquals(sourceType, BuiltinTypes.NInt) || ReferenceEquals(sourceType, BuiltinTypes.CLong);
+            bool signed = sourceType is PrimitiveTypeSymbol { IsSigned: true } || TypeIdentity.AreSame(sourceType, BuiltinTypes.NInt) || TypeIdentity.AreSame(sourceType, BuiltinTypes.CLong);
             return signed
                 ? _builder.BuildSExt(value, sizeType, "array.length.sext")
                 : _builder.BuildZExt(value, sizeType, "array.length.zext");
@@ -1889,7 +1889,7 @@ public sealed class LlvmIrGenerator
 
         private void EmitVirtualDestructor(FunctionSymbol destructor, LLVMValueRef address, LlvmVTable vtable, int slot)
         {
-            StructTypeSymbol staticType = destructor.ContainingType!;
+            StructTypeSymbol staticType = destructor.ContainingStruct!;
             LLVMValueRef vtablePointer = EmitRuntimeDispatch(staticType, address);
             LLVMValueRef functionAddress = _builder.BuildGEP2(vtable.Type, vtablePointer,
                 new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)slot + 1, false) },
@@ -1958,7 +1958,7 @@ public sealed class LlvmIrGenerator
         private LLVMValueRef EmitCast(BoundCastExpression expression)
         {
             LLVMValueRef value = EmitExpression(expression.Expression);
-            if (ReferenceEquals(expression.Expression.Type, expression.TargetType))
+            if (TypeIdentity.AreSame(expression.Expression.Type, expression.TargetType))
                 return value;
 
             LLVMTypeRef target = _mapType(expression.TargetType);
@@ -1993,7 +1993,7 @@ public sealed class LlvmIrGenerator
                 double upper = Math.ScaleB(1.0, signed ? width - 1 : width);
                 double minimum = signed ? -upper : 0;
                 double lower = minimum - 1;
-                if (ReferenceEquals(expression.Expression.Type, BuiltinTypes.Float)) lower = (float)lower;
+                if (TypeIdentity.AreSame(expression.Expression.Type, BuiltinTypes.Float)) lower = (float)lower;
                 // Truncation permits fractions immediately below the minimum.
                 // At large widths min-1 rounds to min: use an inclusive bound then.
                 LLVMValueRef aboveMinimum = _builder.BuildFCmp(lower < minimum ? LLVMRealPredicate.LLVMRealOGT : LLVMRealPredicate.LLVMRealOGE,
@@ -2060,7 +2060,7 @@ public sealed class LlvmIrGenerator
             var arguments = new LLVMValueRef[expression.Arguments.Length + 1];
             arguments[0] = data;
             for (int index = 0; index < expression.Arguments.Length; index++) arguments[index + 1] = EmitExpression(expression.Arguments[index]);
-            return _builder.BuildCall2(signature, function, arguments, ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "interface.call");
+            return _builder.BuildCall2(signature, function, arguments, TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "interface.call");
         }
 
         private LLVMValueRef EmitInterfacePropertySet(BoundInterfacePropertySetExpression expression)
@@ -2182,7 +2182,7 @@ public sealed class LlvmIrGenerator
             LLVMValueRef receiver = EmitInstanceReceiverAddress(
                 expression.Receiver,
                 expression.IsPointerAccess,
-                expression.Getter.ContainingType!,
+                expression.Getter.ContainingStruct!,
                 expression.Getter.Name);
             LLVMValueRef[] instanceArguments = expression.Arguments.Select(EmitExpression).ToArray();
             LLVMValueRef instanceCurrent = EmitInstanceAccessorCall(
@@ -2356,7 +2356,7 @@ public sealed class LlvmIrGenerator
                 arguments[index + 1] = EmitExpression(expression.Arguments[index]);
             }
 
-            string name = ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "method.call";
+            string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "method.call";
             return _builder.BuildCall2(function.Type, function.Value, arguments, name);
         }
 
@@ -2367,7 +2367,7 @@ public sealed class LlvmIrGenerator
             LLVMValueRef receiver = EmitInstanceReceiverAddress(
                 expression.Receiver,
                 expression.IsPointerAccess,
-                setter.ContainingType!,
+                setter.ContainingStruct!,
                 expression.Property.Name);
             LLVMValueRef value = EmitExpression(expression.Value);
 
@@ -2407,7 +2407,7 @@ public sealed class LlvmIrGenerator
             LLVMValueRef receiver = EmitInstanceReceiverAddress(
                 expression.Receiver,
                 isPointerAccess: false,
-                setter.ContainingType!,
+                setter.ContainingStruct!,
                 "Item");
             var arguments = new LLVMValueRef[expression.Arguments.Length + 2];
             arguments[0] = receiver;
@@ -2463,7 +2463,7 @@ public sealed class LlvmIrGenerator
             arguments[0] = receiver;
             for (int index = 0; index < expression.Arguments.Length; index++)
                 arguments[index + 1] = EmitExpression(expression.Arguments[index]);
-            return _builder.BuildCall2(signature.Type, target, arguments, ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "virtual.call");
+            return _builder.BuildCall2(signature.Type, target, arguments, TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "virtual.call");
         }
 
         private LLVMValueRef EmitMethodReceiverAddress(BoundMethodCallExpression expression)
@@ -2471,7 +2471,7 @@ public sealed class LlvmIrGenerator
             return EmitInstanceReceiverAddress(
                 expression.Receiver,
                 expression.IsPointerAccess,
-                expression.Method.ContainingType!,
+                expression.Method.ContainingStruct!,
                 expression.Method.Name);
         }
 
@@ -2498,7 +2498,7 @@ public sealed class LlvmIrGenerator
         {
             LlvmFunction function = _functions[expression.Function];
             LLVMValueRef[] arguments = expression.Arguments.Select(EmitExpression).ToArray();
-            string name = ReferenceEquals(expression.Type, BuiltinTypes.Void) ? string.Empty : "call";
+            string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "call";
             return _builder.BuildCall2(function.Type, function.Value, arguments, name);
         }
 

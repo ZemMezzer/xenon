@@ -3,7 +3,7 @@ using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
 
-public sealed class InterfaceTypeSymbol : TypeSymbol
+public sealed class InterfaceTypeSymbol : DeclaredTypeSymbol
 {
     private ImmutableArray<FunctionSymbol> _methods = [];
     private ImmutableArray<InterfacePropertySymbol> _properties = [];
@@ -11,20 +11,21 @@ public sealed class InterfaceTypeSymbol : TypeSymbol
     private Dictionary<FunctionSymbol, int> _methodSlots = [];
 
     internal InterfaceTypeSymbol(string name, NamespaceSymbol containingNamespace, InterfaceDeclarationSyntax declaration)
-        : base(name)
+        : base(name, containingNamespace)
     {
-        ContainingNamespace = containingNamespace;
         Declaration = declaration;
     }
 
-    public NamespaceSymbol ContainingNamespace { get; }
-    public string FullName => $"{ContainingNamespace.FullName}.{Name}";
+    public override string DeclarationKind => "interface";
+    public override IEnumerable<Symbol> GetMembers() => Methods.Cast<Symbol>().Concat(Properties).Concat(Indexers);
+    public override IEnumerable<Symbol> LookupMembers(string name) =>
+        SelfAndBaseInterfaces.SelectMany(type => type.GetMembers()).Where(member => member.Name == name).Distinct();
     public ImmutableArray<InterfaceTypeSymbol> BaseInterfaces { get; private set; } = [];
     public ImmutableArray<FunctionSymbol> Methods => _methods;
     public ImmutableArray<InterfacePropertySymbol> Properties => _properties;
     public ImmutableArray<InterfaceIndexerSymbol> Indexers => _indexers;
     public int DispatchId { get; private set; }
-    internal InterfaceDeclarationSyntax Declaration { get; }
+    public override InterfaceDeclarationSyntax Declaration { get; }
 
     internal void SetBaseInterfaces(ImmutableArray<InterfaceTypeSymbol> interfaces) => BaseInterfaces = interfaces;
     internal void SetMethods(ImmutableArray<FunctionSymbol> methods) => _methods = methods;
@@ -56,7 +57,7 @@ public sealed class InterfaceTypeSymbol : TypeSymbol
         SelfAndBaseInterfaces.SelectMany(type => type.Methods)
             .Where(method => method.Name == name)
             .OrderBy(method => method.FullName, StringComparer.Ordinal)
-            .DistinctBy(TypeIdentity.Method);
+            .DistinctBy(TypeSignature.Method);
 
     public FunctionSymbol? FindMethod(string name)
     {
@@ -73,10 +74,10 @@ public sealed class InterfaceTypeSymbol : TypeSymbol
     public IEnumerable<InterfaceIndexerSymbol> AllIndexers =>
         SelfAndBaseInterfaces.SelectMany(type => type.Indexers)
             .OrderBy(indexer => indexer.ContainingInterface.FullName, StringComparer.Ordinal)
-            .DistinctBy(indexer => TypeIdentity.Parameters(indexer.Parameters));
+            .DistinctBy(indexer => TypeSignature.Parameters(indexer.Parameters));
 
     public bool IsOrInherits(InterfaceTypeSymbol target) =>
-        ReferenceEquals(this, target) || BaseInterfaces.Any(@interface => @interface.IsOrInherits(target));
+        TypeIdentity.AreSame(this, target) || BaseInterfaces.Any(@interface => @interface.IsOrInherits(target));
 
     public IEnumerable<InterfaceTypeSymbol> SelfAndBaseInterfaces =>
         BaseInterfaces.SelectMany(@interface => @interface.SelfAndBaseInterfaces).Append(this).Distinct();
@@ -89,20 +90,20 @@ public sealed class InterfaceIndexerSymbol : Symbol
         TypeSymbol type,
         ImmutableArray<ParameterSymbol> parameters,
         InterfaceIndexerDeclarationSyntax declaration)
-        : base("this", SymbolKind.Property)
+        : base("this", SymbolKind.Property, containingInterface)
     {
-        ContainingInterface = containingInterface;
         Type = type;
-        Parameters = parameters;
+        Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
     }
 
-    public InterfaceTypeSymbol ContainingInterface { get; }
+    public InterfaceTypeSymbol ContainingInterface => GetContainingSymbol<InterfaceTypeSymbol>()!;
     public TypeSymbol Type { get; }
     public ImmutableArray<ParameterSymbol> Parameters { get; }
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
     internal InterfaceIndexerDeclarationSyntax Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
     {
@@ -121,18 +122,18 @@ public sealed class InterfacePropertySymbol : Symbol
         InterfaceTypeSymbol containingInterface,
         TypeSymbol type,
         InterfacePropertyDeclarationSyntax declaration)
-        : base(name, SymbolKind.Property)
+        : base(name, SymbolKind.Property, containingInterface)
     {
-        ContainingInterface = containingInterface;
         Type = type;
         Declaration = declaration;
     }
 
-    public InterfaceTypeSymbol ContainingInterface { get; }
+    public InterfaceTypeSymbol ContainingInterface => GetContainingSymbol<InterfaceTypeSymbol>()!;
     public TypeSymbol Type { get; }
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
     internal InterfacePropertyDeclarationSyntax Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
     {
