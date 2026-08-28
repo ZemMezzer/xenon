@@ -65,9 +65,14 @@ internal sealed class SemanticAnalyzer
         DeclareStructIndexers();
         DeclareStructMethods();
         DeclareStructLifecycleFunctions();
+        foreach (StructTypeSymbol type in _structSymbols.Values)
+            if (type.Destructor is null && type.BaseType?.FindDestructor() is { IsPublic: false } inheritedDestructor)
+                _diagnostics.Report(type.Declaration.IdentifierToken.Location,
+                    $"destructor '{inheritedDestructor.ContainingType!.Name}' is private");
         BuildVirtualMethodTables();
         ValidateMethodOverridesAndInterfaces();
         DeclareFunctions();
+        ValidateAbstractValueStorage();
         BindInstanceFieldInitializers();
         ValidateNativeSymbols();
 
@@ -556,6 +561,9 @@ internal sealed class SemanticAnalyzer
                     return null;
                 bool comparison = binary.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken or
                     SyntaxKind.LessToken or SyntaxKind.LessOrEqualsToken or SyntaxKind.GreaterToken or SyntaxKind.GreaterOrEqualsToken;
+                if (binary.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken &&
+                    !TypeFacts.CanCompareEquality(left.Type, right.Type))
+                    return null;
                 bool logical = binary.OperatorToken.Kind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken;
                 bool arithmetic = binary.OperatorToken.Kind is SyntaxKind.PlusToken or SyntaxKind.MinusToken or SyntaxKind.StarToken or SyntaxKind.SlashToken or SyntaxKind.PercentToken;
                 bool bitwise = binary.OperatorToken.Kind is SyntaxKind.AmpersandToken or SyntaxKind.PipeToken or SyntaxKind.CaretToken or SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken;
@@ -789,19 +797,28 @@ internal sealed class SemanticAnalyzer
                 converted = Convert.ToDouble(value);
                 return true;
             }
-            if (targetType is not PrimitiveTypeSymbol { IsInteger: true })
+            if (targetType is not PrimitiveTypeSymbol { IsInteger: true } integerType)
             {
                 converted = null;
                 return false;
             }
 
+            if (value is float or double)
+            {
+                double number = Convert.ToDouble(value);
+                if (!double.IsFinite(number)) { converted = null; return false; }
+                BigInteger truncated = new(Math.Truncate(number));
+                int width = integerType.BitWidth!.Value;
+                BigInteger minimum = integerType.IsSigned ? -(BigInteger.One << (width - 1)) : BigInteger.Zero;
+                BigInteger maximum = (BigInteger.One << (integerType.IsSigned ? width - 1 : width)) - 1;
+                if (truncated < minimum || truncated > maximum) { converted = null; return false; }
+                value = integerType.IsSigned ? (object)(long)truncated : (ulong)truncated;
+            }
             ulong bits = value switch
             {
                 int integer => unchecked((ulong)(long)integer),
                 long integer => unchecked((ulong)integer),
                 ulong integer => integer,
-                float number => unchecked((ulong)(long)Math.Truncate(number)),
-                double number => unchecked((ulong)(long)Math.Truncate(number)),
                 _ => throw new InvalidCastException(),
             };
             converted = targetType.Name switch
@@ -1317,6 +1334,10 @@ internal sealed class SemanticAnalyzer
     {
         foreach (StructTypeSymbol type in _structSymbols.Values)
         {
+            foreach (FieldSymbol field in type.StaticFields)
+                if (field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type))
+                    _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+                        $"static field '{field.Name}' contains a reference and requires explicit initialization");
             foreach (FieldSymbol field in type.Fields)
             {
                 if (ContainsStructByValue(field.Type, type, []))
@@ -1327,6 +1348,23 @@ internal sealed class SemanticAnalyzer
                 }
             }
         }
+    }
+
+    private void ValidateAbstractValueStorage()
+    {
+        foreach (StructTypeSymbol type in _structSymbols.Values)
+        foreach (FieldSymbol field in type.Fields.Concat(type.StaticFields))
+            if (field.Type is StructTypeSymbol { IsAbstract: true } abstractType)
+                _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+                    $"abstract struct '{abstractType.Name}' cannot be stored in field '{field.Name}'");
+        var signatures = _functionBodies.Select(entry => (entry.Symbol, Location: entry.Body.OpenBraceToken.Location))
+            .Concat(_functionSymbols.Select(entry => (entry.Value, entry.Key.IdentifierToken.Location)))
+            .Concat(_structSymbols.Values.SelectMany(type => type.Methods.Select(method => (method, type.Declaration.IdentifierToken.Location))))
+            .Concat(_interfaceSymbols.SelectMany(entry => entry.Value.AllMethods.Select(method => (method, entry.Key.IdentifierToken.Location))));
+        foreach (var (symbol, location) in signatures.DistinctBy(entry => entry.Item1))
+            if (symbol.ReturnType is StructTypeSymbol { IsAbstract: true } ||
+                symbol.Parameters.Any(parameter => parameter.Type is StructTypeSymbol { IsAbstract: true }))
+                _diagnostics.Report(location, "abstract structs cannot be passed or returned by value");
     }
 
     private static bool ContainsStructByValue(
@@ -1592,15 +1630,18 @@ internal sealed class SemanticAnalyzer
     {
         foreach (StructTypeSymbol type in _structSymbols.Values)
         {
+            if (type.Destructor is { IsOverride: true } destructor && type.BaseType?.FindDestructor()?.VTableSlot is null)
+                _diagnostics.Report(((DestructorDeclarationSyntax)destructor.Declaration).OverrideKeyword!.Location,
+                    $"destructor '{type.Name}' does not override a virtual base destructor");
             foreach (FunctionSymbol method in type.Methods)
             {
                 FunctionSymbol? inherited = type.BaseType?.FindMethod(method.Name, method.IsReadonly);
                 if (method.IsOverride)
                 {
-                    if (inherited is null || (!inherited.IsVirtual && !inherited.IsAbstract) || !method.Overrides(inherited))
+                    if (inherited is null || inherited.VTableSlot is null || !method.Overrides(inherited))
                         _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, $"method '{method.Name}' does not override a compatible virtual or abstract base method");
                 }
-                else if (inherited is not null && (inherited.IsVirtual || inherited.IsAbstract))
+                else if (inherited?.VTableSlot is not null)
                     _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, $"method '{method.Name}' hides an inherited virtual method; use 'override'");
 
                 if (method.IsStatic && (method.IsVirtual || method.IsOverride || method.IsAbstract))

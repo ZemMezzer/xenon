@@ -6,12 +6,17 @@ namespace Xenon.Compiler.Semantics;
 internal sealed partial class ReadonlyEffectAnalyzer
 {
     private readonly Stack<List<Cleanup>> _cleanupScopes = [];
+    private readonly Dictionary<object, (List<Cleanup> Scope, BoundVariableExpression Site)> _scalarOwners = new(ReferenceEqualityComparer.Instance);
     private int _loopDepth;
 
     private sealed class MemoryState : Dictionary<object, HashSet<object>>
     {
         public MemoryState() : base(ReferenceEqualityComparer.Instance) { }
         public HashSet<object> Allocations { get; } = new(ReferenceEqualityComparer.Instance);
+        public HashSet<object> DefiniteAllocations { get; } = new(ReferenceEqualityComparer.Instance);
+        // A null order means paths disagree about construction order. Keep
+        // this in flow state: visiting one branch must not order another one.
+        public Dictionary<List<Cleanup>, List<object>?> CleanupOrders { get; } = new(ReferenceEqualityComparer.Instance);
         // Empty sets mean unknown runtime type. Missing entries are storage not
         // yet initialized on this flow path (important at loop/branch joins).
         public Dictionary<object, HashSet<StructTypeSymbol>> ReceiverTypes { get; } = new(ReferenceEqualityComparer.Instance);
@@ -20,6 +25,8 @@ internal sealed partial class ReadonlyEffectAnalyzer
             var copy = new MemoryState();
             foreach (var entry in this) copy.Add(entry.Key, new(entry.Value, ReferenceEqualityComparer.Instance));
             copy.Allocations.UnionWith(Allocations);
+            copy.DefiniteAllocations.UnionWith(DefiniteAllocations);
+            foreach (var entry in CleanupOrders) copy.CleanupOrders.Add(entry.Key, entry.Value is { } order ? new(order) : null);
             foreach (var entry in ReceiverTypes) copy.ReceiverTypes.Add(entry.Key, new(entry.Value));
             return copy;
         }
@@ -27,7 +34,7 @@ internal sealed partial class ReadonlyEffectAnalyzer
 
     private sealed record Flow(MemoryState? Next = null, MemoryState? Break = null,
         MemoryState? Continue = null, MemoryState? Return = null);
-    private sealed record Cleanup(object Root, FunctionSymbol Destructor, BoundExpression Site);
+    private sealed record Cleanup(object Root, FunctionSymbol Destructor, BoundExpression Site, bool IsArray = true);
 
     private static MemoryState? Join(params MemoryState?[] states)
     {
@@ -44,6 +51,14 @@ internal sealed partial class ReadonlyEffectAnalyzer
                 else if (receiverTypes.Count != 0) receiverTypes.UnionWith(entry.Value);
             }
             result.Allocations.UnionWith(state.Allocations);
+            result.DefiniteAllocations.IntersectWith(state.DefiniteAllocations);
+            foreach (var entry in state.CleanupOrders)
+            {
+                if (!result.CleanupOrders.TryGetValue(entry.Key, out var order))
+                    result.CleanupOrders.Add(entry.Key, entry.Value is { } incoming ? new(incoming) : null);
+                else
+                    result.CleanupOrders[entry.Key] = MergeCleanupOrder(order, entry.Value);
+            }
             foreach (var entry in state)
             {
                 if (!result.TryGetValue(entry.Key, out var values)) result.Add(entry.Key, values = []);
@@ -55,10 +70,31 @@ internal sealed partial class ReadonlyEffectAnalyzer
 
     private static bool SameState(MemoryState left, MemoryState right) =>
         left.Allocations.SetEquals(right.Allocations) &&
+        left.DefiniteAllocations.SetEquals(right.DefiniteAllocations) &&
+        left.CleanupOrders.Count == right.CleanupOrders.Count &&
+        left.CleanupOrders.All(entry => right.CleanupOrders.TryGetValue(entry.Key, out var order) &&
+            (entry.Value is null ? order is null : order is not null && entry.Value.SequenceEqual(order))) &&
         left.ReceiverTypes.Count == right.ReceiverTypes.Count &&
         left.ReceiverTypes.All(entry => right.ReceiverTypes.TryGetValue(entry.Key, out var types) && entry.Value.SetEquals(types)) &&
         left.All(entry => right.TryGetValue(entry.Key, out var values) ? entry.Value.SetEquals(values) : entry.Value.Count == 0) &&
         right.All(entry => left.TryGetValue(entry.Key, out var values) ? entry.Value.SetEquals(values) : entry.Value.Count == 0);
+
+    private static List<object>? MergeCleanupOrder(List<object>? left, List<object>? right)
+    {
+        if (left is null || right is null) return null;
+        // A conditional registration may omit entries without changing the
+        // relative order. Allocation sets separately track those skipped paths.
+        if (IsSubsequence(left, right)) return new(right);
+        return IsSubsequence(right, left) ? left : null;
+
+        static bool IsSubsequence(List<object> shorter, List<object> longer)
+        {
+            int index = 0;
+            foreach (object root in longer)
+                if (index < shorter.Count && ReferenceEquals(shorter[index], root)) index++;
+            return index == shorter.Count;
+        }
+    }
 
     private static Flow JoinFlow(Flow left, Flow right) => new(
         Join(left.Next, right.Next), Join(left.Break, right.Break),
@@ -79,9 +115,18 @@ internal sealed partial class ReadonlyEffectAnalyzer
                         result = JoinFlow(result with { Next = null }, Visit(child));
                     }
                     return result;
-                });
+                }, block.ExitCleanup);
             case BoundVariableDeclarationStatement declaration:
+                if (declaration.Variable.Destructor is not null)
+                {
+                    object root = Root(declaration.Variable);
+                    BoundVariableExpression site = _scalarOwners.TryGetValue(root, out var previous) ? previous.Site : new(declaration.Variable);
+                    _scalarOwners[root] = (_cleanupScopes.Peek(), site);
+                    _memory.Allocations.Remove(root);
+                    _memory.DefiniteAllocations.Remove(root);
+                }
                 StoreValue([Root(declaration.Variable)], declaration.Initializer is { } initializer ? Evaluate(initializer) : [], declaration.Variable.Type);
+                if (declaration.Initializer is not null) RegisterScalarCleanup(declaration.Variable);
                 return new(_memory);
             case BoundExpressionStatement expression:
                 Evaluate(expression.Expression);
@@ -179,27 +224,91 @@ internal sealed partial class ReadonlyEffectAnalyzer
     private static bool? BooleanConstant(BoundExpression expression) =>
         expression is BoundLiteralExpression { Value: bool value } ? value : null;
 
-    private Flow InScope(Func<Flow> visit)
+    private Flow InScope(Func<Flow> visit, BoundExpression? exitCleanup = null)
     {
         var cleanups = new List<Cleanup>();
+        _memory.CleanupOrders.Add(cleanups, []);
         _cleanupScopes.Push(cleanups);
         Flow flow;
         try { flow = visit(); }
         finally { _cleanupScopes.Pop(); }
-        return new(Clean(flow.Next), Clean(flow.Break), Clean(flow.Continue), Clean(flow.Return));
+        var result = new Flow(Clean(flow.Next), Clean(flow.Break), Clean(flow.Continue), Clean(flow.Return));
+        // A non-returning body has no exit state to clean, but its scope identity
+        // must not escape into a caller's recursive effect fixed point.
+        _memory.CleanupOrders.Remove(cleanups);
+        return result;
 
         MemoryState? Clean(MemoryState? state)
         {
             if (state is null) return null;
             _memory = state.Copy();
-            for (int index = cleanups.Count - 1; index >= 0; index--)
+            if (_memory.CleanupOrders[cleanups] is { } order)
             {
-                Cleanup cleanup = cleanups[index];
-                if (!_memory.Allocations.Remove(cleanup.Root)) continue;
-                DestroyElements(cleanup.Destructor, [cleanup.Root], cleanup.Site);
+                for (int index = order.Count - 1; index >= 0; index--)
+                {
+                    Cleanup cleanup = cleanups.Single(item => ReferenceEquals(item.Root, order[index]));
+                    if (!_memory.Allocations.Remove(cleanup.Root)) continue;
+                    MemoryState? skipped = _memory.DefiniteAllocations.Remove(cleanup.Root) ? null : _memory.Copy();
+                    Destroy(cleanup);
+                    _memory = Join(skipped, _memory)!;
+                }
             }
+            else
+            {
+                Cleanup[] possible = cleanups.Where(cleanup => _memory.Allocations.Contains(cleanup.Root)).ToArray();
+                foreach (Cleanup cleanup in possible)
+                {
+                    _memory.Allocations.Remove(cleanup.Root);
+                    _memory.DefiniteAllocations.Remove(cleanup.Root);
+                }
+                // Conflicting orders must not let one destructor erase an
+                // origin another can still observe. Close over all possible
+                // effects without enumerating branch/order permutations.
+                MemoryState head = _memory.Copy();
+                while (true)
+                {
+                    MemoryState previous = head.Copy();
+                    foreach (Cleanup cleanup in possible)
+                    {
+                        _memory = head.Copy();
+                        Destroy(cleanup);
+                        _memory = Join(head, _memory)!;
+                        head = _memory;
+                    }
+                    if (SameState(previous, head)) break;
+                }
+            }
+            _memory.CleanupOrders.Remove(cleanups);
+            if (exitCleanup is not null) Evaluate(exitCleanup);
             return _memory;
         }
+    }
+
+    private void Destroy(Cleanup cleanup)
+    {
+        if (cleanup.IsArray) DestroyElements(cleanup.Destructor, [cleanup.Root], cleanup.Site);
+        else ContextualCall(cleanup.Destructor, Array.Empty<HashSet<object>>(), [cleanup.Root], cleanup.Site);
+    }
+
+    private void RegisterCleanup(List<Cleanup> scope, Cleanup cleanup)
+    {
+        if (!scope.Any(item => ReferenceEquals(item.Root, cleanup.Root))) scope.Add(cleanup);
+        if (_memory.CleanupOrders[scope] is { } order)
+        {
+            if (!_memory.Allocations.Contains(cleanup.Root)) order.Add(cleanup.Root);
+            else if (cleanup.IsArray || !_memory.DefiniteAllocations.Contains(cleanup.Root))
+                _memory.CleanupOrders[scope] = null;
+        }
+        _memory.Allocations.Add(cleanup.Root);
+        _memory.DefiniteAllocations.Add(cleanup.Root);
+    }
+
+    private void RegisterScalarCleanup(LocalVariableSymbol local)
+    {
+        if (local.Destructor is not { } destructor) return;
+        object root = Root(local);
+        var owner = _scalarOwners[root];
+        RegisterCleanup(owner.Scope, new(root, destructor, owner.Site, IsArray: false));
     }
 
     private void DestroyElements(FunctionSymbol destructor, HashSet<object> receiver, BoundExpression site)
@@ -286,7 +395,13 @@ internal sealed partial class ReadonlyEffectAnalyzer
         // Reuse the ancestor context instead of constructing an infinite call
         // tree. Re-evaluate its body until both recursive inputs and effects
         // converge; fields and by-value argument shapes remain independent.
-        frame.Input = Join(frame.Input, _memory)!;
+        MemoryState recursiveInput = _memory.Copy();
+        // Current activation scopes are not caller scopes of the ancestor.
+        // Carrying their identities into its next iteration would grow the
+        // recursive state forever and incorrectly share local lifetimes.
+        foreach (var scope in recursiveInput.CleanupOrders.Keys.ToArray())
+            if (!frame.Input.CleanupOrders.ContainsKey(scope)) recursiveInput.CleanupOrders.Remove(scope);
+        frame.Input = Join(frame.Input, recursiveInput)!;
         foreach (RecursiveFrame active in _activeCalls.Values)
         {
             active.Context.IsRecursive = true;

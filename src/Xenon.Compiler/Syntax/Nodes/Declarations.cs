@@ -264,6 +264,8 @@ public sealed record DestructorDeclarationSyntax(
     SyntaxToken CloseParenthesisToken,
     BlockStatementSyntax Body) : StructMemberDeclarationSyntax
 {
+    public SyntaxToken? OverrideKeyword { get; init; }
+    public bool IsOverride => OverrideKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.DestructorDeclaration;
 
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;

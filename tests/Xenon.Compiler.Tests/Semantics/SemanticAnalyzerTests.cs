@@ -700,7 +700,7 @@ public sealed class SemanticAnalyzerTests
                     Z = z;
                 }
 
-                ~Vector3()
+                public ~Vector3()
                 {
                     X = 0;
                 }
@@ -3418,6 +3418,264 @@ public sealed class SemanticAnalyzerTests
     {
         Compilation compilation = CreateCompilation("namespace Example; void M(bool flag) { " + body + " }");
         Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains(message, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("bool r = c && ((value = 10) == 10); return value;")]
+    [InlineData("bool r = c || ((value = 10) == 10); return value;")]
+    [InlineData("bool r = c && (c || ((value = 10) == 10)); return value;")]
+    [InlineData("if (c && ((value = 10) == 10)) {} return value;")]
+    [InlineData("if (c || ((value = 10) == 10)) return value; return 0;")]
+    [InlineData("bool r = false && ((value = 10) == 10); return value;")]
+    [InlineData("bool r = true || ((value = 10) == 10); return value;")]
+    public void Analyzer_ShortCircuitDoesNotGuaranteeRhsAssignment(string body)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; int M(bool c) { int value; " + body + " }");
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("used before it is initialized", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("bool r = ((value = 1) == 1) && ((value = 2) == 2); return value;")]
+    [InlineData("bool r = true && ((value = 2) == 2); return value;")]
+    [InlineData("bool r = false || ((value = 2) == 2); return value;")]
+    [InlineData("if (c && ((value = 10) == 10)) return value; return 0;")]
+    [InlineData("if (c || ((value = 10) == 10)) return 0; else return value;")]
+    [InlineData("if ((c && ((value = 10) == 10)) && value == 10) return value; return 0;")]
+    public void Analyzer_ShortCircuitPreservesGuaranteedAndBranchAssignments(string body)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; int M(bool c) { int value; " + body + " }");
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Theory]
+    [InlineData("&&")]
+    [InlineData("||")]
+    public void Analyzer_ShortCircuitRetainsStackArrayAndHiddenPointerOrigins(string op)
+    {
+        Compilation array = CreateCompilation($$"""
+            namespace Example;
+            void M(bool c) { int[] a = int[1]; bool r = c {{op}} ((a = new int[1]).Length == 1); free(a); }
+            """);
+        Assert.Contains(array.Diagnostics, d => d.Message.Contains("stack array cannot be freed", StringComparison.Ordinal));
+        Compilation pointer = CreateCompilation($$"""
+            namespace Example;
+            struct State { public static int* Hidden; }
+            void readonly M(bool c) { int value = 0; int* p = State.Hidden; bool r = c {{op}} ((p = &value) != null); *p = 42; }
+            """);
+        Assert.True(pointer.HasErrors);
+        Assert.Contains(pointer.Diagnostics, d => d.Message.Contains("hidden", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("struct Data { public int X; } bool M(Data a, Data b) { return a == b; }")]
+    [InlineData("struct Data { public int X; } bool M(Data a, Data b) { return a != b; }")]
+    [InlineData("interface I {} bool M(I a, I b) { return a == b; }")]
+    [InlineData("void F() {} bool M() { return F() != F(); }")]
+    [InlineData("bool M(int* a, float* b) { return a == b; }")]
+    [InlineData("bool M(int[] a, int[] b) { return a == b; }")]
+    public void Analyzer_RejectsUnsupportedEquality(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("binary operator", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("struct R { private ~R() {} } void M(R* p) { free(p); }")]
+    [InlineData("struct R { private ~R() {} } void M() { R[] p = new R[1]; free(p); }")]
+    [InlineData("struct R { private ~R() {} } void M() { R[] p = R[1]; }")]
+    [InlineData("struct R { private ~R() {} } struct D : R { public ~D() {} }")]
+    [InlineData("struct R { private ~R() {} } struct D : R {}")]
+    public void Analyzer_EnforcesDestructorAccessibility(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("destructor 'R' is private", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("struct H { public int& Value; } void M() { H h = H(); }")]
+    [InlineData("struct H { public readonly int& Value; } void M() { H* h = new H(); }")]
+    [InlineData("struct H { public int& Value; } struct Outer { public H Inner; } void M() { Outer h = Outer(); }")]
+    [InlineData("struct H { public int& Value; } struct D : H {}")]
+    [InlineData("void M() { int&[] values = new int&[10]; }")]
+    [InlineData("void M() { readonly int&[] values = new readonly int&[10]; }")]
+    [InlineData("struct H { public int& Value; public H(int& v, bool c) { if (c) Value = v; } }")]
+    [InlineData("struct H { public int& Value; public H(int& v, bool c) { if (c) return; Value = v; } }")]
+    [InlineData("struct H { public int& Value; public H(int& v) {} } void M() { H[] h = new H[1]; }")]
+    [InlineData("struct H { public int& Value; public H(int& v) { int x = Value; Value = v; } }")]
+    [InlineData("struct H { public int& Value; public H(int& v) { Read(); Value = v; } public int Read() { return Value; } }")]
+    [InlineData("struct H { public int& Value; public H(int& v) { H* escaped = this; Value = v; } }")]
+    [InlineData("struct H { public int& Value = Value; }")]
+    [InlineData("struct H { public int& Value; } struct State { public static H Empty; }")]
+    public void Analyzer_RejectsUnboundReferenceStorage(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.True(compilation.HasErrors, source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("reference", StringComparison.Ordinal) || d.Message.Contains("before it is initialized", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("struct H { public int& Value; public H(int& v) { Value = v; } }")]
+    [InlineData("struct H { public readonly int& Value; public H(int& v) { this.Value = v; } }")]
+    [InlineData("struct H { public int& Value; public H(int& v, bool c) { if (c) Value = v; else Value = v; } }")]
+    [InlineData("struct H { public int& Value; public H(int& v) { Value = v; } } struct D : H { public D(int& v) : base(v) {} }")]
+    [InlineData("struct H { public int& Value; } void M(int& v) { H h = H { v }; }")]
+    [InlineData("struct H { public int Value; public int& Ref = Value; } void M() { H h = H(); }")]
+    public void Analyzer_AcceptsExplicitReferenceInitialization(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Theory]
+    [InlineData("void M() { A a; }")]
+    [InlineData("void M() { A a = A(); }")]
+    [InlineData("struct H { public A Value; } void M() { H h = H(); }")]
+    [InlineData("struct H { public A Value; } struct Outer { public H Inner; }")]
+    [InlineData("struct H { public A Value; } struct D : H {}")]
+    [InlineData("void M() { A[] a = new A[1]; }")]
+    [InlineData("extern A Get();")]
+    [InlineData("interface I { void Set(A value); }")]
+    public void Analyzer_RejectsAbstractValueStorage(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct A { public abstract int Read(); } " + source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("abstract", StringComparison.Ordinal));
+    }
+
+    public static IEnumerable<object[]> InvalidFloatingConstants()
+    {
+        foreach (string type in new[] { "sbyte", "byte", "short", "ushort", "int", "uint", "long", "ulong", "nint", "nuint", "clong", "culong" })
+        foreach (string suffix in new[] { "", "f" })
+        foreach (string expression in new[] { $"0.0{suffix} / 0.0{suffix}", $"1.0{suffix} / 0.0{suffix}", $"-1.0{suffix} / 0.0{suffix}", $"1.0e30{suffix}", $"-1.0e30{suffix}" })
+            yield return new object[] { type, expression };
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidFloatingConstants))]
+    public void Analyzer_RejectsInvalidFloatingConstants(string type, string expression)
+    {
+        Compilation compilation = CreateCompilation($"namespace Example; const {type} Value = cast<{type}>({expression});");
+        if (!compilation.HasErrors)
+            compilation = Xenon.CodeGen.LLVM.LlvmIrGenerator.BindForTarget(compilation, Xenon.CodeGen.LLVM.LlvmTargetOptions.CreateHost());
+        Assert.True(compilation.HasErrors, type + ": " + expression);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("compile-time", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_AccountsForBaseDestructorEffectsOnEarlyReturn()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct State { public static int Value; }
+            struct Base { public ~Base() { State.Value += 1; } }
+            struct Derived : Base { public ~Derived() { return; } }
+            void readonly M() { Derived* p = new Derived(); free(p); }
+            """);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("hidden", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("int*", false)]
+    [InlineData("readonly int*", true)]
+    [InlineData("int* readonly", false)]
+    [InlineData("readonly int* readonly", true)]
+    public void Analyzer_FreeUsesPointeeReadonlyIndependentlyOfFunctionReadonly(string pointerType, bool rejected)
+    {
+        foreach (string effect in new[] { "", "readonly " })
+        {
+            Compilation compilation = CreateCompilation($"namespace Example; void {effect}Destroy({pointerType} p) {{ free(p); }}");
+            Assert.Equal(rejected, compilation.HasErrors);
+            if (rejected) Assert.Contains(compilation.Diagnostics, d => d.Message == "cannot free memory through a readonly pointer");
+        }
+    }
+
+    [Theory]
+    [InlineData("struct A { public ~A() {} } struct B : A { public override ~B() {} }")]
+    [InlineData("struct A { public override ~A() {} }")]
+    public void Analyzer_RejectsDestructorOverrideWithoutVirtualBase(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("does not override a virtual base destructor", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("void M() { R value = R(); }")]
+    [InlineData("void M() { R value; value = R(); }")]
+    public void Analyzer_ChecksScalarCleanupDestructorAccessibility(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct R { private ~R() {} } " + source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("destructor 'R' is private", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("R value = R { &State.Value };")]
+    [InlineData("{ R value = R { &State.Value }; return; }")]
+    [InlineData("while (flag) { R value = R { &State.Value }; break; }")]
+    [InlineData("while (flag) { R value = R { &State.Value }; continue; }")]
+    [InlineData("R value; if (flag) value = R { &State.Value };")]
+    public void Analyzer_TracksImplicitScalarDestructorEffects(string body)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct State { public static int Value; } struct R { public int* P; public ~R() { *P = 42; } } void readonly M(bool flag) { " + body + " }");
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("hidden", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("void readonly M() { int local = 0; int* p = State.Hidden; *p = (p = &local)[0]; }")]
+    [InlineData("int* readonly M() { int local = 0; int* p = State.Hidden; p += (p = &local)[0]; return p; }")]
+    public void Analyzer_AssignmentCapturesTargetAndOldValueBeforeRhs(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct State { public static int* Hidden; } " + source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("hidden", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_AssignmentDoesNotReevaluateTargetAfterRhs()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct State { public static int* Hidden; }
+            void readonly M() { int* value = null; int** slot = &value; *slot = *(slot = &State.Hidden); }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        Compilation invalid = CreateCompilation("namespace Example; void M(int[] a) { int i; a[i] = (i = 0); }");
+        Assert.Contains(invalid.Diagnostics, d => d.Message.Contains("used before it is initialized", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("if (flag) { w = Write { &p }; c = Clear { &p }; } else { c = Clear { &p }; w = Write { &p }; }", true)]
+    [InlineData("w = Write { &p }; c = Clear { &p };", false)]
+    [InlineData("c = Clear { &p }; w = Write { &p };", true)]
+    [InlineData("w = Write { &p }; if (flag) c = Clear { &p };", true)]
+    [InlineData("if (flag) { w = Write { &p }; c = Clear { &p }; } else { w = Write { &p }; c = Clear { &p }; }", false)]
+    [InlineData("", false)]
+    public void Analyzer_TracksActualScalarConstructionOrder(string initialization, bool rejected)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct State { public static int* Hidden; }
+            struct Clear { public int** Slot; public ~Clear() { *Slot = null; } }
+            struct Write { public int** Slot; public ~Write() { **Slot = 42; } }
+            void readonly M(bool flag) {
+                int* p = State.Hidden;
+                Write w; Clear c;
+            """ + initialization + " }");
+        Assert.Equal(rejected, compilation.HasErrors);
+        if (rejected) Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("hidden", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("*P += 1;")]
+    [InlineData("while (true) {}")]
+    public void Analyzer_ConvergesWithScalarCleanupInRecursiveCalls(string destructorBody)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct R { public int* P; public ~R() {
+            """ + destructorBody + """
+            } }
+            struct Runner { public void Run(int* p, int n) { R local = R { p }; if (n > 0) Run(p, n - 1); } }
+            void readonly M(int* p) { Runner runner = Runner(); runner.Run(p, 2); }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(
