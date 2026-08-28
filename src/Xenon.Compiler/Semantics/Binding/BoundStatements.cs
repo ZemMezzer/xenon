@@ -46,6 +46,8 @@ public static class BoundControlFlow
 public sealed record BoundBlockStatement(
     ImmutableArray<BoundStatement> Statements) : BoundStatement
 {
+    // Function-level finalization, after local scope cleanup on every exit.
+    public BoundExpression? ExitCleanup { get; init; }
     public override BoundKind Kind => BoundKind.BlockStatement;
 }
 

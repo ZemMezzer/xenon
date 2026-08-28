@@ -734,5 +734,60 @@ public sealed class ParserTests
         Assert.Contains(tree.Diagnostics, item => item.Message == diagnostic);
     }
 
+    [Theory]
+    [InlineData("static A() {}")]
+    [InlineData("virtual A() {}")]
+    [InlineData("readonly A() {}")]
+    [InlineData("abstract A() {}")]
+    [InlineData("override A() {}")]
+    [InlineData("virtual int field;")]
+    [InlineData("abstract int field;")]
+    [InlineData("override int field;")]
+    [InlineData("static ~A() {}")]
+    [InlineData("readonly ~A() {}")]
+    [InlineData("abstract ~A() {}")]
+    [InlineData("public private int field;")]
+    [InlineData("public public int field;")]
+    [InlineData("static static int field;")]
+    [InlineData("readonly readonly int field;")]
+    [InlineData("virtual virtual void M() {}")]
+    [InlineData("virtual override abstract void M();")]
+    [InlineData("static virtual int Value { get { return 0; } }")]
+    [InlineData("virtual override int this[int i] { get { return i; } }")]
+    [InlineData("int* readonly Value { get { return null; } }")]
+    [InlineData("readonly int Value { set {} }")]
+    [InlineData("readonly int this[int i] { set {} }")]
+    [InlineData("int this[int i] { public get { return i; } }")]
+    public void Parser_RejectsDiscardedDuplicateAndConflictingMemberModifiers(string member)
+    {
+        SyntaxTree tree = Parse("namespace Example; struct A { " + member + " }");
+        Assert.NotEmpty(tree.Diagnostics);
+        Assert.Contains(tree.Diagnostics, d => d.Message.Contains("modifier", StringComparison.Ordinal) ||
+            d.Message.Contains("static members", StringComparison.Ordinal) || d.Message.Contains("readonly pointer binding", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Parser_PreservesDestructorOverrideAndRejectsUnsupportedInterfaceModifiers()
+    {
+        SyntaxTree tree = Parse("namespace Example; struct A { public override ~A() {} }");
+        Assert.Empty(tree.Diagnostics);
+        var destructor = Assert.Single(Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]).Members.OfType<DestructorDeclarationSyntax>());
+        Assert.True(destructor.IsOverride);
+        Assert.Equal(SyntaxKind.OverrideKeyword, destructor.OverrideKeyword!.Kind);
+        SyntaxTree invalid = Parse("namespace Example; interface I { static void M(); }");
+        Assert.Contains(invalid.Diagnostics, d => d.Message.Contains("not allowed on a interface member", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("readonly int Value { set; }")]
+    [InlineData("readonly int this[int i] { set; }")]
+    [InlineData("int Value { public get; }")]
+    [InlineData("int this[int i] { virtual get; }")]
+    public void Parser_RejectsIgnoredInterfaceAccessorModifiers(string member)
+    {
+        SyntaxTree tree = Parse("namespace Example; interface I { " + member + " }");
+        Assert.Contains(tree.Diagnostics, d => d.Message.Contains("modifier", StringComparison.Ordinal));
+    }
+
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));
 }

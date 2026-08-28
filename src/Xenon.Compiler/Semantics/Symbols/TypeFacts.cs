@@ -2,10 +2,30 @@ namespace Xenon.Compiler.Semantics.Symbols;
 
 internal static class TypeFacts
 {
+    // Raw aggregate storage does not invoke nested constructors/initializers.
+    public static bool ContainsReferenceStorage(TypeSymbol type) => ContainsReferenceStorage(type, []);
+
+    private static bool ContainsReferenceStorage(TypeSymbol type, HashSet<StructTypeSymbol> visited) =>
+        type is ReferenceTypeSymbol || type is StructTypeSymbol structure && visited.Add(structure) &&
+        structure.AllInstanceFields.Any(field => ContainsReferenceStorage(field.Type, visited));
+
     public static bool IsNumeric(TypeSymbol type) =>
         type is PrimitiveTypeSymbol { IsInteger: true } or PrimitiveTypeSymbol { IsFloatingPoint: true };
 
     public static bool IsInteger(TypeSymbol type) => type is PrimitiveTypeSymbol { IsInteger: true };
+
+    public static bool CanCompareEquality(TypeSymbol left, TypeSymbol right)
+    {
+        if (ReferenceEquals(left, right) && (IsNumeric(left) || left is EnumTypeSymbol || ReferenceEquals(left, BuiltinTypes.Bool)))
+            return true;
+        if (left is PointerTypeSymbol && ReferenceEquals(right, BuiltinTypes.Null) ||
+            right is PointerTypeSymbol && ReferenceEquals(left, BuiltinTypes.Null))
+            return true;
+        if (left is not PointerTypeSymbol a || right is not PointerTypeSymbol b) return false;
+        return ReferenceEquals(a.ElementType, b.ElementType) ||
+            a.ElementType is StructTypeSymbol aStruct && b.ElementType is StructTypeSymbol bStruct &&
+            (GetInheritanceDistance(aStruct, bStruct) is not null || GetInheritanceDistance(bStruct, aStruct) is not null);
+    }
 
     public static bool CanExplicitlyCast(TypeSymbol target, TypeSymbol source) =>
         (IsNumeric(target) && IsNumeric(source)) ||

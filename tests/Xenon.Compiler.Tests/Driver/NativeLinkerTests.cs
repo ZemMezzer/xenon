@@ -22,6 +22,16 @@ public sealed class MacOsFactAttribute : FactAttribute
 
 public sealed class NativeLinkerTests
 {
+    static NativeLinkerTests()
+    {
+        // Trap tests must terminate unattended instead of waiting on Windows' crash UI.
+        // Child processes inherit the parent's error mode.
+        if (OperatingSystem.IsWindows()) SetErrorMode(0x0001 | 0x0002 | 0x8000);
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern uint SetErrorMode(uint mode);
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int AddDelegate(int left, int right);
 
@@ -2051,7 +2061,9 @@ public sealed class NativeLinkerTests
                 int output = 0;
                 Process(&output, &input);
                 if (State.Value != 7 || input != 38) return 1;
-                return output;
+                // Accessor + heap + two array elements + the scalar local.
+                if (output != 43) return 2;
+                return 42;
             }
             """, optimization));
     }
@@ -3099,6 +3111,384 @@ public sealed class NativeLinkerTests
             """, optimization));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_PreservesMostDerivedConstructionAndDestructionDispatch(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Log { public static int Calls; public static int Properties; public static int Interfaces; }
+            interface I { int Read(); }
+            struct A : I
+            {
+                public A() { Log.Calls = Log.Calls * 10 + Read(); Log.Properties = Value + (*this)[1]; I view = *this; Log.Interfaces = view.Read(); }
+                public virtual int Read() { return 1; }
+                public virtual int Value { get { return 10; } }
+                public virtual int this[int x] { get { return x + 10; } }
+                public virtual ~A() { Log.Calls = Log.Calls * 10 + Read(); I view = *this; Log.Interfaces = view.Read(); }
+            }
+            struct B : A
+            {
+                public B() { Log.Calls = Log.Calls * 10 + Read(); }
+                public override int Read() { return 2; }
+                public ~B() { Log.Calls = Log.Calls * 10 + Read(); }
+            }
+            struct C : B
+            {
+                public int Stage;
+                public C() { Stage = 4; Log.Calls = Log.Calls * 10 + Read(); }
+                public override int Read() { return Stage + 3; }
+                public override int Value { get { return Stage + 30; } }
+                public override int this[int x] { get { return Stage + x + 30; } }
+                public ~C() { Log.Calls = Log.Calls * 10 + Read(); Stage = 5; }
+            }
+            int Main()
+            {
+                C stack = C();
+                if (Log.Calls != 337 || Log.Properties != 61 || Log.Interfaces != 3 || stack.Stage != 4) return 1;
+                B& reference = stack; if (reference.Read() != 7) return 2;
+                Log.Calls = 0;
+                C* heap = new C(); A* pointer = heap;
+                if (Log.Calls != 337 || pointer->Read() != 7) return 3;
+                free(pointer);
+                if (Log.Calls != 337788 || Log.Interfaces != 8) return 4;
+                Log.Calls = 0;
+                A* direct = new A(); free(direct);
+                if (Log.Calls != 11 || Log.Properties != 21 || Log.Interfaces != 1) return 5;
+                Log.Calls = 0;
+                C[] array = new C[2]; free(array);
+                if (Log.Calls != 388388) return 6;
+                Log.Calls = 0;
+                { C[] local = C[2]; }
+                if (Log.Calls != 388388) return 7;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData("", 0)]
+    [InlineData("return;", 0)]
+    [InlineData("if (Mode == 1) return; return;", 3)]
+    [InlineData("if (Mode == 1) { if (Mode > 0) return; }", 3)]
+    [InlineData("while (Mode > 0) { return; }", 0)]
+    [InlineData("for (int i = 0; i < 2; i++) { if (Mode == 1) return; }", 3)]
+    public void Linker_FinalizesEveryDestructorExitAfterLocalCleanup(string exit, int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram($$"""
+            struct Log { public static int Value; }
+            struct Local { public ~Local() { Log.Value = Log.Value * 10 + 4; } }
+            struct A { public virtual ~A() { Log.Value = Log.Value * 10 + 1; } }
+            struct B : A { public ~B() { Log.Value = Log.Value * 10 + 2; return; } }
+            struct C : B
+            {
+                public int Mode;
+                public C(int mode) { Mode = mode; }
+                public ~C() { Local[] local = Local[1]; Log.Value = Log.Value * 10 + 3; {{exit}} }
+            }
+            int Main()
+            {
+                for (int mode = 0; mode < 2; mode++)
+                {
+                    Log.Value = 0; C* c = new C(mode); A* a = c; free(a);
+                    if (Log.Value != 3421) return 1;
+                }
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_BindsReferencesAndAllowsAbstractViewsAndPrivateSelfDestruction(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct H { public int& Value; public H(int& value) { Value = value; } }
+            struct D : H { public readonly int& Other; public D(int& v) : base(v) { this.Other = v; } }
+            struct Outer { public H Inner; public Outer(int& v) { Inner = H(v); } }
+            struct A { public abstract int Read(); }
+            struct C : A { public override int Read() { return 42; } }
+            struct Resource
+            {
+                public static int Count;
+                private ~Resource() { Resource.Count += 1; }
+                public static void Destroy(Resource* p) { free(p); }
+            }
+            int Main()
+            {
+                int value = 20; D d = D(value); d.Value = 21;
+                Outer outer = Outer(value); outer.Inner.Value = 42;
+                H positional = H { value };
+                if (value != 42 || d.Other != 42 || positional.Value != 42) return 1;
+                C c = C(); A& view = c; A* pointer = &c;
+                if (view.Read() != 42 || pointer->Read() != 42) return 2;
+                Resource* r = new Resource(); Resource.Destroy(r);
+                if (Resource.Count != 1) return 3;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_ShortCircuitKeepsConditionalAllocationAndCleanup(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Item { public static int Count; public ~Item() { Item.Count += 1; } }
+            bool Cleanup(Item* p) { free(p); return true; }
+            void Check(bool c)
+            {
+                bool a = c && (Item[1].Length == 1);
+                bool b = c || (Item[1].Length == 1);
+                Item* p = new Item();
+                bool freed = c && Cleanup(p);
+                if (!c) free(p);
+            }
+            int Main()
+            {
+                Check(false); Check(true);
+                if (Item.Count != 4) return 1;
+                int value; bool result = ((value = 1) == 1) && ((value = 2) == 2);
+                if (value != 2 || !result) return 2;
+                bool skipped = true || ((value = 10) == 10);
+                if (value != 2 || !skipped) return 3;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [MemberData(nameof(IntegerTypes))]
+    public void Linker_EqualitySupportsScalarAndReadonlyPointerViews(string type, int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram($$"""
+            enum E { A, B }
+            bool Compare({{type}} a, {{type}} b) { return a == b && !(a != b); }
+            int Main()
+            {
+                {{type}} value = cast<{{type}}>(42); {{type}}* p = &value;
+                readonly {{type}}* view = p; {{type}}* readonly binding = p;
+                if (!Compare(value, value) || Compare(value, cast<{{type}}>(0))) return 1;
+                if (p != view || view != p || binding != view || !(p == view) || p == null || null == p) return 2;
+                if (E.A == E.B || !(E.A != E.B) || !(true == true) || false != false) return 3;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    public static IEnumerable<object[]> FloatingCastTypes()
+    {
+        foreach (object[] row in IntegerTypes())
+        foreach (string sourceType in new[] { "float", "double" })
+            yield return new object[] { row[0], row[1], sourceType };
+    }
+
+    [Theory]
+    [MemberData(nameof(FloatingCastTypes))]
+    public void Linker_MatchesFloatingCastConstantAndRuntimeBoundaries(string type, int optimization, string sourceType)
+    {
+        bool signed = type is "sbyte" or "short" or "int" or "long" or "nint" or "clong";
+        int width = type switch { "sbyte" or "byte" => 8, "short" or "ushort" => 16, "int" or "uint" => 32,
+            "clong" or "culong" => OperatingSystem.IsWindows() ? 32 : IntPtr.Size * 8,
+            "nint" or "nuint" => IntPtr.Size * 8, _ => 64 };
+        double upper = Math.ScaleB(1, signed ? width - 1 : width);
+        double last = sourceType == "float" ? MathF.BitDecrement((float)upper) : Math.BitDecrement(upper);
+        double lower = signed ? -upper : 0;
+        double fractionalMinimum = sourceType == "float" ? (float)(lower - 0.75) : lower - 0.75;
+        string suffix = sourceType == "float" ? "f" : "";
+        string Literal(double value) => value.ToString("E17", System.Globalization.CultureInfo.InvariantCulture) + suffix;
+        Assert.Equal(42, RunIterationFourProgram($$"""
+            const {{type}} Minimum = cast<{{type}}>({{Literal(lower)}});
+            const {{type}} Last = cast<{{type}}>({{Literal(last)}});
+            const {{type}} Fraction = cast<{{type}}>(12.75{{suffix}});
+            const {{type}} Negative = cast<{{type}}>({{(signed ? "-12.75" : "-0.75")}}{{suffix}});
+            {{type}} Convert({{sourceType}} value) { return cast<{{type}}>(value); }
+            int Main()
+            {
+                if (Convert(0.0{{suffix}}) != cast<{{type}}>(0)) return 1;
+                if (Convert(12.75{{suffix}}) != Fraction || Fraction != cast<{{type}}>(12)) return 2;
+                if (Convert({{(signed ? "-12.75" : "-0.75")}}{{suffix}}) != Negative || Negative != cast<{{type}}>({{(signed ? "-12" : "0")}})) return 3;
+                if (Convert({{Literal(lower)}}) != Minimum || Convert({{Literal(last)}}) != Last) return 4;
+                if (Minimum != cast<{{type}}>({{new System.Numerics.BigInteger(lower)}}) || Last != cast<{{type}}>({{new System.Numerics.BigInteger(last)}})) return 5;
+                if (Convert({{Literal(fractionalMinimum)}}) != Minimum) return 6;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    public static IEnumerable<object[]> InvalidFloatingCasts()
+    {
+        foreach (object[] row in FloatingCastTypes())
+        {
+            string type = (string)row[0], source = (string)row[2];
+            bool signed = type is "sbyte" or "short" or "int" or "long" or "nint" or "clong";
+            foreach (string value in new[] { "0.0 / 0.0", "1.0 / 0.0", "-1.0 / 0.0",
+                $"cast<double>(cast<ulong>(1) << (cast<int>(sizeof({type})) * 8 - {(signed ? 1 : 0)} - 1)) * 2.0",
+                signed ? "-1.0e30" : "-1.0" })
+                yield return new object[] { type, row[1], source, value };
+            int width = type switch { "sbyte" or "byte" => 8, "short" or "ushort" => 16, "int" or "uint" => 32,
+                "clong" or "culong" => OperatingSystem.IsWindows() ? 32 : IntPtr.Size * 8,
+                "nint" or "nuint" => IntPtr.Size * 8, _ => 64 };
+            double lower = signed ? -Math.ScaleB(1, width - 1) : 0;
+            double below = source == "float" ? MathF.BitDecrement((float)(lower - 1)) : Math.BitDecrement(lower - 1);
+            yield return new object[] { type, row[1], source, below.ToString("E17", System.Globalization.CultureInfo.InvariantCulture) };
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidFloatingCasts))]
+    public void Linker_TrapsInvalidFloatingCastsEvenWhenUnused(string type, int optimization, string sourceType, string value)
+    {
+        int exit = RunIterationFourProgram($$"""
+            {{type}} Convert({{sourceType}} value) { return cast<{{type}}>(value); }
+            int Main() { {{type}} unused = Convert(cast<{{sourceType}}>({{value}})); return 42; }
+            """, optimization);
+        Assert.NotEqual(42, exit);
+        Assert.NotEqual(0, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_TrapsPrematureVirtualAccessToAnUnboundReference(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Base { public Base() { Read(); } public virtual int Read() { return 0; } }
+            struct Derived : Base
+            {
+                public int& Value;
+                public Derived(int& value) { Value = value; }
+                public override int Read() { return Value; }
+            }
+            int Main() { int value = 42; Derived d = Derived(value); return 42; }
+            """, optimization);
+        Assert.NotEqual(42, exit);
+        Assert.NotEqual(0, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_AssignmentEvaluatesTargetsThenRhsExactlyOnce(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Log { public static int Trace; }
+            interface I { int Value { get; set; } int this[int index] { get; set; } }
+            struct Cell : I
+            {
+                public int Field;
+                public int Value { get { Log.Trace = Log.Trace * 10 + 4; return Field; } set { Log.Trace = Log.Trace * 10 + 3; Field = value; } }
+                public int this[int index] { get { Log.Trace = Log.Trace * 10 + 4; return Field; } set { Log.Trace = Log.Trace * 10 + 3; Field = value; } }
+            }
+            Cell* Target(Cell* p) { Log.Trace = Log.Trace * 10 + 1; return p; }
+            I& View(I& value) { Log.Trace = Log.Trace * 10 + 1; return value; }
+            int Index() { Log.Trace = Log.Trace * 10 + 1; return 0; }
+            int Rhs() { Log.Trace = Log.Trace * 10 + 2; return 7; }
+            int Main()
+            {
+                int[] a = new int[1]; int[,] grid = new int[1,1];
+                int i; a[(i = 0)] = i; if (a[0] != 0) return 1;
+                Log.Trace = 0; a[Index()] = Rhs(); if (Log.Trace != 12 || a[0] != 7) return 2;
+                Log.Trace = 0; grid[Index(),Index()] = Rhs(); if (Log.Trace != 112 || grid[0,0] != 7) return 3;
+                Cell c = Cell();
+                Log.Trace = 0; Target(&c)->Field = Rhs(); if (Log.Trace != 12 || c.Field != 7) return 4;
+                Log.Trace = 0; (*Target(&c)).Field = Rhs(); if (Log.Trace != 12) return 5;
+                Log.Trace = 0; Target(&c)->Value = Rhs(); if (Log.Trace != 123) return 6;
+                Log.Trace = 0; (*Target(&c))[Index()] = Rhs(); if (Log.Trace != 1123) return 7;
+                Log.Trace = 0; Target(&c)->Value += Rhs(); if (Log.Trace != 1423 || c.Field != 14) return 8;
+                I view = c;
+                Log.Trace = 0; View(view)[Index()] = Rhs(); if (Log.Trace != 1123) return 9;
+                Log.Trace = 0; View(view)[Index()] += Rhs(); if (Log.Trace != 11423 || c.Field != 14) return 10;
+                int x = 1; x += (x = 10); if (x != 11) return 11;
+                Log.Trace = 0; a[Index()] = grid[Index(),Index()] = Rhs(); if (Log.Trace != 1112) return 12;
+                Log.Trace = 0; int old = a[Index()]++; if (Log.Trace != 1 || old != 7 || a[0] != 8) return 13;
+                free(a); free(grid); return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_ScalarAndArrayCleanupUseOneReverseConstructionOrder(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Log { public static int Trace; public static int Constructed; }
+            struct R { public int Id; public R(int id) { Id = id; Log.Constructed += 1; } public ~R() { Log.Trace = Log.Trace * 10 + Id; } }
+            struct Plain { public int Value; }
+            struct A { public virtual ~A() { Log.Trace = Log.Trace * 10 + 1; } }
+            struct B : A { public override ~B() { Log.Trace = Log.Trace * 10 + 2; } }
+            struct C : B { public override ~C() { Log.Trace = Log.Trace * 10 + 3; } }
+            int Capture() { R value = R(1); return Log.Trace; }
+            int Main()
+            {
+                if (Capture() != 0 || Log.Trace != 1) return 1;
+                Log.Trace = 0; { R a = R(1); R b = R(2); } if (Log.Trace != 21) return 2;
+                Log.Trace = 0;
+                { R a = R(1); { R b = R(2); } if (Log.Trace != 2) return 3; }
+                if (Log.Trace != 21) return 4;
+                Log.Trace = 0;
+                { R a = R(1); R[] b = R[2]; b[0].Id = 2; b[1].Id = 3; R c = R(4); Plain p = Plain(); }
+                if (Log.Trace != 4321) return 5;
+                Log.Trace = 0; { C value = C(); } if (Log.Trace != 321) return 6;
+                Log.Trace = 0; { R neverConstructed; } if (Log.Trace != 0) return 7;
+                if (Log.Constructed != 7) return 8;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_ScalarCleanupCoversReturnBreakContinueAndDeferredConstruction(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Log { public static int Trace; }
+            struct R { public int Id; public R(int id) { Id = id; } public ~R() { Log.Trace = Log.Trace * 10 + Id; } }
+            void Early(bool condition) { R a = R(1); { R b = R(2); if (condition) return; } }
+            void Conditional(bool condition) { R a; if (condition) a = R(1); }
+            void Ordered(bool condition) { R a; R b; if (condition) { a = R(1); b = R(2); } else { b = R(2); a = R(1); } }
+            int Main()
+            {
+                Early(true); if (Log.Trace != 21) return 1;
+                Log.Trace = 0; Early(false); if (Log.Trace != 21) return 2;
+                Log.Trace = 0;
+                for (int i = 0; i < 3; i++) { R value = R(i + 1); if (i == 0) continue; break; }
+                if (Log.Trace != 12) return 3;
+                Log.Trace = 0;
+                { R a; { a = R(1); R b = R(2); } if (Log.Trace != 2) return 4; R c = R(3); }
+                if (Log.Trace != 231) return 5;
+                Log.Trace = 0; Conditional(false); if (Log.Trace != 0) return 6;
+                Conditional(true); if (Log.Trace != 1) return 7;
+                Log.Trace = 0; { R a; a = R(1); a = R(2); } if (Log.Trace != 2) return 8;
+                Log.Trace = 0; Ordered(true); if (Log.Trace != 21) return 9;
+                Log.Trace = 0; Ordered(false); if (Log.Trace != 12) return 10;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_BindingReadonlyAllowsFreeAndPrivateScalarCleanupInsideOwnType(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct R
+            {
+                public static int Count;
+                private ~R() { R.Count += 1; }
+                public static void Run() { R local = R(); }
+            }
+            struct Item { public int Value; }
+            void readonly Destroy(Item* readonly pointer) { free(pointer); }
+            int Main() { R.Run(); if (R.Count != 1) return 1; Item* readonly p = new Item(); Destroy(p); return 42; }
+            """, optimization));
+    }
+
     private static int RunIterationFourProgram(string source, int optimization)
     {
         Compilation compilation = Compilation.Create(SourceText.From("namespace IterationFour; " + source, "iteration4.xe"));
@@ -3122,7 +3512,22 @@ public sealed class NativeLinkerTests
         }
         finally
         {
-            Directory.Delete(directory, recursive: true);
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    private static void DeleteIterationDirectory(string directory)
+    {
+        // Windows can briefly retain the executable after an intentional trap.
+        // Retry only transient cleanup failures; a persistent error still fails.
+        for (int attempt = 0; ; attempt++)
+        {
+            try { Directory.Delete(directory, recursive: true); return; }
+            catch (Exception error) when (OperatingSystem.IsWindows() && attempt < 5 &&
+                error is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(50 * (attempt + 1));
+            }
         }
     }
 

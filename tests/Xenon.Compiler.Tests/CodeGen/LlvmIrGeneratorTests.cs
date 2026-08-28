@@ -361,7 +361,7 @@ public sealed class LlvmIrGeneratorTests
                     Value = value;
                 }
 
-                ~Box()
+                public ~Box()
                 {
                     Value = 0;
                 }
@@ -959,7 +959,7 @@ public sealed class LlvmIrGeneratorTests
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
-            struct Entity { ~Entity() { } }
+            struct Entity { public ~Entity() { } }
             struct Enemy : Entity { }
 
             int Main()
@@ -1452,16 +1452,20 @@ public sealed class LlvmIrGeneratorTests
     [InlineData("x86_64-pc-windows-msvc")]
     [InlineData("x86_64-unknown-linux-gnu")]
     [InlineData("aarch64-unknown-linux-gnu")]
-    public void Generator_VerifiesScopedStackArrayCleanupForTarget(string triple)
+    public void Generator_VerifiesScopedScalarAndArrayCleanupForTarget(string triple)
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
             struct Item { public nint Id; public ~Item() { Id = cast<nint>(0); } }
             int Test(int n)
             {
+                Item first = Item();
+                Item deferred;
                 Item[,] outer = Item[n,2];
                 for (int i = 0; i < n; i++)
                 {
+                    deferred = Item();
+                    Item local = Item();
                     Item[,,] inner = Item[1,2,3];
                     switch (i) { case 0: continue; case 1: break; default: return inner.Length; }
                     if (n == 2) break;
@@ -1474,8 +1478,54 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("call ptr @llvm.stacksave.p0", ir, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.stackrestore.p0", ir, StringComparison.Ordinal);
         Assert.Contains("stack.destroy.element", ir, StringComparison.Ordinal);
+        Assert.Contains("local.cleanup.node", ir, StringComparison.Ordinal);
+        Assert.Contains("local.constructed", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("call void @free", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("call ptr @malloc", ir, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", 32, 32)]
+    [InlineData("x86_64-pc-windows-msvc", 64, 32)]
+    [InlineData("x86_64-unknown-linux-gnu", 64, 64)]
+    public void Generator_UsesCheckedFloatingCastBoundariesForEveryTargetWidth(string triple, int nativeWidth, int cLongWidth)
+    {
+        var target = new LlvmTargetOptions(triple);
+        foreach (string type in new[] { "sbyte", "byte", "short", "ushort", "int", "uint", "long", "ulong", "nint", "nuint", "clong", "culong" })
+        foreach (string sourceType in new[] { "float", "double" })
+        {
+            bool signed = type is "sbyte" or "short" or "int" or "long" or "nint" or "clong";
+            int width = type switch { "sbyte" or "byte" => 8, "short" or "ushort" => 16, "int" or "uint" => 32,
+                "nint" or "nuint" => nativeWidth, "clong" or "culong" => cLongWidth, _ => 64 };
+            double upper = Math.ScaleB(1, signed ? width - 1 : width), lower = signed ? -upper : 0;
+            double last = sourceType == "float" ? MathF.BitDecrement((float)upper) : Math.BitDecrement(upper);
+            double below = sourceType == "float" ? MathF.BitDecrement((float)(lower - 1)) : Math.BitDecrement(lower - 1);
+            string Literal(double number) => number.ToString("E17", System.Globalization.CultureInfo.InvariantCulture) + (sourceType == "float" ? "f" : "");
+            foreach (double invalid in new[] { upper, below })
+            {
+                Compilation bad = CreateCompilation($"namespace Example; const {type} Bad = cast<{type}>({Literal(invalid)});");
+                if (!bad.HasErrors) bad = LlvmIrGenerator.BindForTarget(bad, target);
+                Assert.True(bad.HasErrors, $"{triple}: {sourceType} -> {type}, {invalid}");
+            }
+            string code = $$"""
+                namespace Example;
+                enum Values : {{(signed ? "long" : "ulong")}}
+                {
+                    Min = cast<{{(signed ? "long" : "ulong")}}>(cast<{{type}}>({{Literal(lower)}})),
+                    Last = cast<{{(signed ? "long" : "ulong")}}>(cast<{{type}}>({{Literal(last)}}))
+                }
+                {{type}} Convert({{sourceType}} value) { return cast<{{type}}>(value); }
+                """;
+            Compilation compilation = LlvmIrGenerator.BindForTarget(CreateCompilation(code), target);
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            var members = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Enums).Members;
+            Assert.Equal(new System.Numerics.BigInteger(lower), System.Numerics.BigInteger.Parse(members[0].Value!.ToString()!));
+            Assert.Equal(new System.Numerics.BigInteger(last), System.Numerics.BigInteger.Parse(members[1].Value!.ToString()!));
+            string ir = new LlvmIrGenerator().GenerateForTarget(compilation, target);
+            Assert.Contains("cast.range.valid", ir, StringComparison.Ordinal);
+            Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
+            Assert.Contains(signed ? "fptosi" : "fptoui", ir, StringComparison.Ordinal);
+        }
     }
 
     private static Compilation CreateCompilation(string source) =>

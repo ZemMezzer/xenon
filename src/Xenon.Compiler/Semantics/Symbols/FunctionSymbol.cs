@@ -6,6 +6,8 @@ namespace Xenon.Compiler.Semantics.Symbols;
 public sealed class FunctionSymbol : Symbol
 {
     public bool HasStackArrays { get; internal set; }
+    public bool HasScalarCleanup { get; internal set; }
+    public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
 
     internal FunctionSymbol(
         string name,
@@ -180,6 +182,7 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = accessibility;
         IsVirtual = declaration is DestructorDeclarationSyntax { IsVirtual: true };
+        IsOverride = declaration is DestructorDeclarationSyntax { IsOverride: true };
     }
 
     public NamespaceSymbol ContainingNamespace { get; }
@@ -278,5 +281,6 @@ public sealed class LocalVariableSymbol : VariableSymbol
     }
 
     public ArrayStorageKind ArrayStorage { get; internal set; }
+    public FunctionSymbol? Destructor { get; internal set; }
     internal Binding.BoundExpression? ConstantValue { get; set; }
 }

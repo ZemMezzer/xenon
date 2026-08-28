@@ -139,15 +139,18 @@ internal sealed class Parser
                 continue;
             }
             (SyntaxToken? accessModifier, SyntaxToken? @static, SyntaxToken? @virtual, SyntaxToken? @override, SyntaxToken? @abstract, SyntaxToken? @readonly) = ParseStructMemberModifiers();
+            SyntaxToken?[] modifiers = [accessModifier, @static, @virtual, @override, @abstract, @readonly];
 
             if (Current.Kind == SyntaxKind.TildeToken)
             {
-                members.Add(ParseDestructorDeclaration(accessModifier, @virtual));
+                ValidateMemberModifiers("destructor", modifiers, SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword, SyntaxKind.VirtualKeyword, SyntaxKind.OverrideKeyword);
+                members.Add(ParseDestructorDeclaration(accessModifier, @virtual, @override));
             }
             else if (Current.Kind == SyntaxKind.IdentifierToken &&
                      string.Equals(Current.Text, identifier.Text, StringComparison.Ordinal) &&
                      Peek(1).Kind == SyntaxKind.OpenParenthesisToken)
             {
+                ValidateMemberModifiers("constructor", modifiers, SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword);
                 members.Add(ParseConstructorDeclaration(accessModifier));
             }
             else
@@ -156,6 +159,7 @@ internal sealed class Parser
                 SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
                 if (Current.Kind == SyntaxKind.ThisKeyword)
                 {
+                    ValidateAccessorReturnBinding(type);
                     members.Add(ParseIndexerDeclaration(accessModifier, @static, @virtual, @override, @abstract, @readonly, type));
                     continue;
                 }
@@ -167,12 +171,16 @@ internal sealed class Parser
                 }
                 else if (Current.Kind == SyntaxKind.OpenBraceToken)
                 {
+                    ValidateAccessorReturnBinding(type);
                     members.Add(ParsePropertyDeclaration(accessModifier, @static, @virtual, @override, @abstract, @readonly, type, memberIdentifier));
                 }
                 else
                 {
+                    ValidateMemberModifiers("field", modifiers, SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.ReadonlyKeyword);
+                    if (@readonly is not null && type.ReadonlyKeyword is not null && type.PointerDepth == 0 && !type.IsReference)
+                        Diagnostics.Report(type.ReadonlyKeyword.Location, "duplicate readonly field modifier");
                     // On pointer fields a leading readonly qualifies the pointee.
-                    if (@readonly is not null && type.PointerDepth > 0 && type.ReadonlyKeyword is null)
+                    if (@readonly is not null && (type.PointerDepth > 0 || type.IsReference) && type.ReadonlyKeyword is null)
                     {
                         type = type with { ReadonlyKeyword = @readonly };
                         @readonly = null;
@@ -290,6 +298,7 @@ internal sealed class Parser
             }
         }
 
+        ValidateReadonlyAccessor(@readonly, accessors);
         return new PropertyDeclarationSyntax(
             accessModifier,
             @static,
@@ -322,6 +331,7 @@ internal sealed class Parser
         var accessors = ImmutableArray.CreateBuilder<PropertyAccessorDeclarationSyntax>();
         while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
         {
+            if (!ValidateAccessorKeyword()) continue;
             SyntaxToken keyword = Current.Kind is SyntaxKind.GetKeyword or SyntaxKind.SetKeyword
                 ? NextToken()
                 : MatchToken(SyntaxKind.GetKeyword);
@@ -330,6 +340,7 @@ internal sealed class Parser
             else
                 accessors.Add(new PropertyAccessorDeclarationSyntax(keyword, ParseBlockStatement(), null));
         }
+        ValidateReadonlyAccessor(@readonly, accessors);
         return new IndexerDeclarationSyntax(
             accessModifier,
             @static,
@@ -414,13 +425,13 @@ internal sealed class Parser
         var indexers = ImmutableArray.CreateBuilder<InterfaceIndexerDeclarationSyntax>();
         while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
         {
-            SyntaxToken? readonlyKeyword = Current.Kind == SyntaxKind.ReadonlyKeyword
-                ? NextToken()
-                : null;
+            var (access, @static, @virtual, @override, @abstract, readonlyKeyword) = ParseStructMemberModifiers();
+            ValidateMemberModifiers("interface member", [access, @static, @virtual, @override, @abstract, readonlyKeyword], SyntaxKind.ReadonlyKeyword);
             TypeSyntax returnType = ParseType();
             SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
             if (Current.Kind == SyntaxKind.ThisKeyword)
             {
+                ValidateAccessorReturnBinding(returnType);
                 SyntaxToken thisKeyword = NextToken();
                 SyntaxToken indexOpen = MatchToken(SyntaxKind.OpenBracketToken);
                 (ImmutableArray<ParameterSyntax> indexParameters, ImmutableArray<SyntaxToken> indexCommas) =
@@ -430,6 +441,7 @@ internal sealed class Parser
                 var indexAccessors = ImmutableArray.CreateBuilder<PropertyAccessorDeclarationSyntax>();
                 while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
                 {
+                    if (!ValidateAccessorKeyword()) continue;
                     SyntaxToken accessorKeyword = Current.Kind is SyntaxKind.GetKeyword or SyntaxKind.SetKeyword
                         ? NextToken()
                         : MatchToken(SyntaxKind.GetKeyword);
@@ -438,6 +450,7 @@ internal sealed class Parser
                         null,
                         MatchToken(SyntaxKind.SemicolonToken)));
                 }
+                ValidateReadonlyAccessor(readonlyKeyword, indexAccessors);
                 indexers.Add(new InterfaceIndexerDeclarationSyntax(
                     readonlyKeyword,
                     returnType,
@@ -463,16 +476,19 @@ internal sealed class Parser
             }
             else
             {
+                ValidateAccessorReturnBinding(returnType);
                 SyntaxToken propertyOpen = MatchToken(SyntaxKind.OpenBraceToken);
                 var accessors = ImmutableArray.CreateBuilder<PropertyAccessorDeclarationSyntax>();
                 while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
                 {
+                    if (!ValidateAccessorKeyword()) continue;
                     SyntaxToken accessorKeyword = Current.Kind is SyntaxKind.GetKeyword or SyntaxKind.SetKeyword
                         ? NextToken()
                         : MatchToken(SyntaxKind.GetKeyword);
                     SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
                     accessors.Add(new PropertyAccessorDeclarationSyntax(accessorKeyword, null, semicolon));
                 }
+                ValidateReadonlyAccessor(readonlyKeyword, accessors);
                 properties.Add(new InterfacePropertyDeclarationSyntax(
                     readonlyKeyword,
                     returnType,
@@ -493,6 +509,17 @@ internal sealed class Parser
             if (Current.Kind == SyntaxKind.ReadonlyKeyword && @readonly is not null)
                 break;
             SyntaxToken modifier = NextToken();
+            SyntaxToken? previous = modifier.Kind switch
+            {
+                SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword => access,
+                SyntaxKind.StaticKeyword => @static,
+                SyntaxKind.VirtualKeyword => @virtual,
+                SyntaxKind.OverrideKeyword => @override,
+                SyntaxKind.AbstractKeyword => @abstract,
+                _ => @readonly,
+            };
+            if (previous is not null)
+                Diagnostics.Report(modifier.Location, $"duplicate or conflicting modifier '{modifier.Text}'");
             switch (modifier.Kind)
             {
                 case SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword: access ??= modifier; break;
@@ -503,10 +530,42 @@ internal sealed class Parser
                 case SyntaxKind.ReadonlyKeyword: @readonly ??= modifier; break;
             }
         }
+        SyntaxToken[] dispatch = new[] { @virtual, @override, @abstract }.OfType<SyntaxToken>().ToArray();
+        foreach (SyntaxToken conflicting in dispatch.Skip(1))
+            Diagnostics.Report(conflicting.Location, "virtual, override and abstract modifiers are mutually exclusive");
+        if (@static is not null && dispatch.Length != 0)
+            Diagnostics.Report(dispatch[0].Location, "static members cannot be virtual, override or abstract");
         return (access, @static, @virtual, @override, @abstract, @readonly);
     }
 
-    private DestructorDeclarationSyntax ParseDestructorDeclaration(SyntaxToken? accessModifier, SyntaxToken? @virtual)
+    private void ValidateMemberModifiers(string declaration, SyntaxToken?[] modifiers, params SyntaxKind[] allowed)
+    {
+        foreach (SyntaxToken modifier in modifiers.OfType<SyntaxToken>())
+            if (!allowed.Contains(modifier.Kind))
+                Diagnostics.Report(modifier.Location, $"modifier '{modifier.Text}' is not allowed on a {declaration}");
+    }
+
+    private void ValidateAccessorReturnBinding(TypeSyntax type)
+    {
+        if (type.PointerReadonlyKeyword is { } modifier)
+            Diagnostics.Report(modifier.Location, "return types cannot have a readonly pointer binding");
+    }
+
+    private void ValidateReadonlyAccessor(SyntaxToken? modifier, IEnumerable<PropertyAccessorDeclarationSyntax> accessors)
+    {
+        if (modifier is not null && !accessors.Any(accessor => accessor.IsGetter))
+            Diagnostics.Report(modifier.Location, "readonly accessor modifier requires a getter");
+    }
+
+    private bool ValidateAccessorKeyword()
+    {
+        if (Current.Kind is SyntaxKind.GetKeyword or SyntaxKind.SetKeyword) return true;
+        Diagnostics.Report(Current.Location, "expected 'get' or 'set' accessor; accessor modifiers are not supported");
+        NextToken();
+        return false;
+    }
+
+    private DestructorDeclarationSyntax ParseDestructorDeclaration(SyntaxToken? accessModifier, SyntaxToken? @virtual, SyntaxToken? @override)
     {
         SyntaxToken tilde = MatchToken(SyntaxKind.TildeToken);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
@@ -520,7 +579,7 @@ internal sealed class Parser
             identifier,
             openParenthesis,
             closeParenthesis,
-            body);
+            body) { OverrideKeyword = @override };
     }
 
     private NamespaceDeclarationSyntax ParseNamespaceDeclaration()

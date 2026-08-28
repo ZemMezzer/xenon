@@ -134,18 +134,20 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             }
             case BoundAssignmentExpression assignment:
             {
-                // Match lowering: evaluate the RHS before the target address.
-                HashSet<object> value = Capture(Evaluate(assignment.Expression), assignment.Expression.Type, assignment);
                 HashSet<object> target = Address(assignment.Target);
+                HashSet<object> current = assignment.OperatorKind == SyntaxKind.EqualsToken ? [] : Read(target, assignment.Target.Type);
+                HashSet<object> value = Capture(Evaluate(assignment.Expression), assignment.Expression.Type, assignment);
                 if (assignment.OperatorKind != SyntaxKind.EqualsToken)
                 {
-                    value.UnionWith(Read(target, assignment.Target.Type));
+                    value.UnionWith(current);
                     if (assignment.Target.Type is PointerTypeSymbol) value = Uncertain(value);
                 }
                 CheckWrite(target, assignment);
                 if (target.Contains(_external) && ExposesWritableAccess(assignment.Target.Type) && HasHiddenAccess(value, assignment.Target.Type))
                     Report(assignment, "cannot store a mutable capability obtained from hidden state through an output parameter");
                 StoreValue(target, value, assignment.Target.Type);
+                if (assignment.Target is BoundVariableExpression { Variable: LocalVariableSymbol local })
+                    RegisterScalarCleanup(local);
                 return value;
             }
             case BoundIndexExpression index:
@@ -209,9 +211,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     if (allocation.Storage == ArrayStorageKind.Stack && element.FindDestructor() is { } destructor)
                     {
                         object root = Root(allocation);
-                        _memory.Allocations.Add(root);
-                        if (_cleanupScopes.TryPeek(out var cleanups) && !cleanups.Any(item => ReferenceEquals(item.Root, root)))
-                            cleanups.Add(new(root, destructor, allocation));
+                        if (_cleanupScopes.TryPeek(out var cleanups))
+                            RegisterCleanup(cleanups, new(root, destructor, allocation));
                     }
                 }
                 InitializeArrayElements(allocation);
@@ -220,8 +221,6 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             {
                 HashSet<object> pointer = Evaluate(free.Pointer);
                 CheckWrite(pointer, free);
-                if (free.Pointer.Type is PointerTypeSymbol { IsReadonly: true })
-                    Report(free, "cannot free memory through a readonly pointer");
                 if (free.Destructor is { } destructor)
                 {
                     if (free.Pointer.Type is ArrayTypeSymbol) DestroyElements(destructor, pointer, free);
