@@ -55,6 +55,15 @@ public sealed class StructTypeSymbol : TypeSymbol
 
     public bool HasVirtualDispatch { get; private set; }
 
+    // A descendant may introduce dispatch, but must never change its ancestors' ABI.
+    public bool IntroducesVirtualDispatch => HasVirtualDispatch && BaseType?.HasVirtualDispatch != true;
+
+    public StructTypeSymbol? DispatchStorageOwner => !HasVirtualDispatch ? null
+        : IntroducesVirtualDispatch ? this : BaseType!.DispatchStorageOwner;
+
+    // The complete base subobject (including tail padding) occupies element zero.
+    public int DeclaredFieldStart => (BaseType is null ? 0 : 1) + (IntroducesVirtualDispatch ? 1 : 0);
+
     public bool IsAbstract => _virtualMethods.Any(method => method.IsAbstract);
 
     internal StructDeclarationSyntax Declaration { get; }
@@ -356,6 +365,8 @@ public sealed class FieldSymbol : Symbol
 
     public TypeSymbol Type { get; }
 
+    // Instance-field index within ContainingType's own physical representation,
+    // not an index into a descendant's flattened AllInstanceFields collection.
     public int Ordinal { get; }
 
     public Accessibility Accessibility { get; }

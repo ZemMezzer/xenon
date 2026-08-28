@@ -23,7 +23,10 @@ internal sealed class LlvmTypeLayout(NativeTargetMachine target) : ITargetTypeLa
 
     public ulong GetSize(TypeSymbol type) => target.TargetData.ABISizeOfType(MapType(type));
     public uint GetAlignment(TypeSymbol type) => target.TargetData.ABIAlignmentOfType(MapType(type));
-    public ulong GetFieldOffset(StructTypeSymbol type, FieldSymbol field) => target.TargetData.OffsetOfElement(MapType(type), (uint)field.Ordinal);
+    // All ancestor subobjects start at zero, so an inherited field keeps its
+    // declaring type's offset even when queried through a descendant.
+    public ulong GetFieldOffset(StructTypeSymbol type, FieldSymbol field) =>
+        target.TargetData.OffsetOfElement(MapType(field.ContainingType), (uint)field.Ordinal);
 
     private LLVMTypeRef MapType(TypeSymbol type)
     {
@@ -52,9 +55,7 @@ internal sealed class LlvmTypeLayout(NativeTargetMachine target) : ITargetTypeLa
             if (_structures.TryGetValue(structure, out LLVMTypeRef existing)) return existing;
             if (!_building.Add(structure)) throw new LlvmCodeGenerationException($"Recursive layout for '{structure.FullName}'.");
             LLVMTypeRef result = _context.CreateNamedStruct(structure.FullName);
-            LLVMTypeRef[] fields = structure.HasVirtualDispatch
-                ? [LLVMTypeRef.CreatePointer(_context.Int8Type, 0), .. structure.AllInstanceFields.Select(field => MapType(field.Type))]
-                : structure.AllInstanceFields.Select(field => MapType(field.Type)).ToArray();
+            LLVMTypeRef[] fields = LlvmStructLayout.Elements(structure, MapType, LLVMTypeRef.CreatePointer(_context.Int8Type, 0));
             result.StructSetBody(fields, false);
             _building.Remove(structure);
             _structures.Add(structure, result);

@@ -519,7 +519,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "base-ctor");
 
-        Assert.Contains("%Example.Enemy = type { i32, i32 }", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("%Example.Enemy = type { %Example.Entity, i32 }", llvmIr, StringComparison.Ordinal);
         Assert.Contains("call void @Example.Entity.__ctor", llvmIr, StringComparison.Ordinal);
     }
 
