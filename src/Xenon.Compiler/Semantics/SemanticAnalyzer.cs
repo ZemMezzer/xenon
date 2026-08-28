@@ -70,7 +70,7 @@ internal sealed class SemanticAnalyzer
                 _diagnostics.Report(type.Declaration.IdentifierToken.Location,
                     $"destructor '{inheritedDestructor.ContainingType!.Name}' is private");
         BuildVirtualMethodTables();
-        ValidateMethodOverridesAndInterfaces();
+        ValidateInterfaceImplementations();
         DeclareFunctions();
         ValidateAbstractValueStorage();
         BindInstanceFieldInitializers();
@@ -1290,7 +1290,7 @@ internal sealed class SemanticAnalyzer
             BuildVirtualMethodTable(type, built);
     }
 
-    private static void BuildVirtualMethodTable(StructTypeSymbol type, HashSet<StructTypeSymbol> built)
+    private void BuildVirtualMethodTable(StructTypeSymbol type, HashSet<StructTypeSymbol> built)
     {
         if (!built.Add(type))
             return;
@@ -1298,10 +1298,29 @@ internal sealed class SemanticAnalyzer
             BuildVirtualMethodTable(type.BaseType, built);
 
         var slots = type.BaseType?.VirtualMethods.ToBuilder() ?? ImmutableArray.CreateBuilder<FunctionSymbol>();
+        var invalidAccessors = new HashSet<FunctionSymbol>();
+        foreach (PropertySymbol property in type.Properties)
+        {
+            PropertySymbol? inherited = type.BaseType?.FindProperty(property.Name);
+            ValidateAccessorOverride($"property '{type.FullName}.{property.Name}'", property.Declaration.IdentifierToken.Location,
+                property.Declaration.IsOverride, property.Getter, property.Setter, inherited?.Getter, inherited?.Setter, invalidAccessors);
+        }
+        foreach (IndexerSymbol indexer in type.Indexers)
+        {
+            IndexerSymbol? inherited = type.BaseType?.AllIndexers.FirstOrDefault(candidate => HaveSameParameterTypes(indexer.Parameters, candidate.Parameters));
+            ValidateAccessorOverride($"indexer '{type.FullName}.this[{string.Join(", ", indexer.Parameters.Select(parameter => parameter.Type.Name))}]'",
+                indexer.Declaration.ThisKeyword.Location, indexer.Declaration.IsOverride,
+                indexer.Getter, indexer.Setter, inherited?.Getter, inherited?.Setter, invalidAccessors);
+        }
         foreach (FunctionSymbol method in type.Methods)
         {
-            FunctionSymbol? inherited = type.BaseType?.FindMethod(method.Name, method.IsReadonly);
-            if (method.IsOverride && inherited?.VTableSlot is int slot)
+            // Search inherited slots by member kind and the complete signature,
+            // not the first declaration with this name in an intermediate type.
+            FunctionSymbol? inherited = type.BaseType?.VirtualMethods.FirstOrDefault(method.HasSameSignature);
+            if (invalidAccessors.Contains(method)) continue;
+            if (method.ContainingProperty is null && method.ContainingIndexer is null && !ValidateMethodOverride(method, inherited)) continue;
+            if (method.IsStatic) continue;
+            if (method.IsOverride && inherited?.VTableSlot is int slot && method.Overrides(inherited))
             {
                 method.SetVTableSlot(slot);
                 slots[slot] = method;
@@ -1315,8 +1334,15 @@ internal sealed class SemanticAnalyzer
 
         if (type.Destructor is FunctionSymbol destructor)
         {
-            int? inheritedSlot = type.BaseType?.FindDestructor()?.VTableSlot;
-            if (inheritedSlot is int slot)
+            FunctionSymbol? inheritedDestructor = type.BaseType?.FindDestructor();
+            int? inheritedSlot = inheritedDestructor?.VTableSlot;
+            if (destructor.IsOverride && inheritedSlot is null)
+                _diagnostics.Report(MemberLocation(destructor), $"destructor '{type.Name}' does not override a virtual base destructor");
+            else if (!destructor.IsOverride && inheritedSlot is not null)
+                _diagnostics.Report(MemberLocation(destructor), $"destructor '{type.FullName}' overrides an inherited virtual destructor and must be declared 'override'");
+            else if (destructor.IsOverride && inheritedDestructor is not null && !HasCompatibleOverrideAccessibility(destructor, inheritedDestructor))
+                _diagnostics.Report(MemberLocation(destructor), "an override cannot reduce the accessibility of its inherited member");
+            else if (destructor.IsOverride && inheritedSlot is int slot)
             {
                 destructor.SetVTableSlot(slot);
                 slots[slot] = destructor;
@@ -1328,7 +1354,75 @@ internal sealed class SemanticAnalyzer
             }
         }
         type.SetVirtualMethods(slots.ToImmutable());
+        if (!type.IsAbstract)
+        {
+            foreach (FunctionSymbol member in type.VirtualMethods.Where(method => method.IsAbstract)
+                .DistinctBy(method => (object?)method.ContainingProperty ?? method.ContainingIndexer ?? (object)method))
+                _diagnostics.Report(type.Declaration.IdentifierToken.Location,
+                    $"concrete struct '{type.FullName}' does not implement abstract member '{MemberName(member)}'; implement it or declare the struct 'abstract'");
+        }
     }
+
+    private bool ValidateMethodOverride(FunctionSymbol method, FunctionSymbol? inherited)
+    {
+        if (method.IsStatic && (method.IsVirtual || method.IsOverride || method.IsAbstract))
+        {
+            _diagnostics.Report(MemberLocation(method), "static methods cannot be virtual, override, or abstract");
+            return false;
+        }
+        if (method.IsOverride && (inherited is null || !method.Overrides(inherited)))
+        {
+            _diagnostics.Report(MemberLocation(method), $"method '{MemberName(method)}' does not override a compatible virtual or abstract base method");
+            return false;
+        }
+        if (!method.IsOverride && inherited is not null)
+        {
+            _diagnostics.Report(MemberLocation(method), $"method '{MemberName(method)}' overrides inherited member '{MemberName(inherited)}' and must be declared 'override'");
+            return false;
+        }
+        if (method.IsOverride && inherited is not null && !HasCompatibleOverrideAccessibility(method, inherited))
+        {
+            _diagnostics.Report(MemberLocation(method), "an override cannot reduce the accessibility of its inherited member");
+            return false;
+        }
+        return true;
+    }
+
+    private void ValidateAccessorOverride(string name, TextLocation location, bool isOverride,
+        FunctionSymbol? getter, FunctionSymbol? setter, FunctionSymbol? baseGetter, FunctionSymbol? baseSetter,
+        HashSet<FunctionSymbol> invalid)
+    {
+        bool inheritedVirtual = baseGetter?.VTableSlot is not null || baseSetter?.VTableSlot is not null;
+        string? diagnostic = !isOverride && inheritedVirtual
+            ? $"{name} overrides an inherited virtual or abstract member and must be declared 'override'"
+            : isOverride && (!inheritedVirtual || !Compatible(getter, baseGetter) || !Compatible(setter, baseSetter))
+                ? $"{name} does not override a compatible virtual or abstract base member; type, readonly qualifier and getter/setter contract must match"
+                : null;
+        if (diagnostic is null) return;
+        _diagnostics.Report(location, diagnostic);
+        if (getter is not null) invalid.Add(getter);
+        if (setter is not null) invalid.Add(setter);
+
+        static bool Compatible(FunctionSymbol? accessor, FunctionSymbol? inherited) => accessor is null
+            ? inherited is null
+            : inherited?.VTableSlot is not null && accessor.Overrides(inherited) && HasCompatibleOverrideAccessibility(accessor, inherited);
+    }
+
+    private static bool HasCompatibleOverrideAccessibility(FunctionSymbol member, FunctionSymbol inherited) =>
+        !inherited.IsPublic || member.IsPublic;
+
+    private static TextLocation MemberLocation(FunctionSymbol method) => method.Declaration switch
+    {
+        MethodDeclarationSyntax syntax => syntax.IdentifierToken.Location,
+        DestructorDeclarationSyntax syntax => (syntax.OverrideKeyword ?? syntax.IdentifierToken).Location,
+        _ => method.ContainingType!.Declaration.IdentifierToken.Location,
+    };
+
+    private static string MemberName(FunctionSymbol method) => method.ContainingProperty is { } property
+        ? $"{property.ContainingType.FullName}.{property.Name}"
+        : method.ContainingIndexer is { } indexer
+            ? $"{indexer.ContainingType.FullName}.this[{string.Join(", ", indexer.Parameters.Select(parameter => parameter.Type.Name))}]"
+            : $"{method.ContainingType!.FullName}.{method.Name}({string.Join(", ", method.Parameters.Select(parameter => parameter.Type.Name))})";
 
     private void ValidateStructLayouts()
     {
@@ -1626,30 +1720,10 @@ internal sealed class SemanticAnalyzer
         first.Parameters.Length == second.Parameters.Length &&
         first.Parameters.Zip(second.Parameters).All(pair => ReferenceEquals(pair.First.Type, pair.Second.Type));
 
-    private void ValidateMethodOverridesAndInterfaces()
+    private void ValidateInterfaceImplementations()
     {
         foreach (StructTypeSymbol type in _structSymbols.Values)
         {
-            if (type.Destructor is { IsOverride: true } destructor && type.BaseType?.FindDestructor()?.VTableSlot is null)
-                _diagnostics.Report(((DestructorDeclarationSyntax)destructor.Declaration).OverrideKeyword!.Location,
-                    $"destructor '{type.Name}' does not override a virtual base destructor");
-            foreach (FunctionSymbol method in type.Methods)
-            {
-                FunctionSymbol? inherited = type.BaseType?.FindMethod(method.Name, method.IsReadonly);
-                if (method.IsOverride)
-                {
-                    if (inherited is null || inherited.VTableSlot is null || !method.Overrides(inherited))
-                        _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, $"method '{method.Name}' does not override a compatible virtual or abstract base method");
-                }
-                else if (inherited?.VTableSlot is not null)
-                    _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, $"method '{method.Name}' hides an inherited virtual method; use 'override'");
-
-                if (method.IsStatic && (method.IsVirtual || method.IsOverride || method.IsAbstract))
-                    _diagnostics.Report(method.Declaration is MethodDeclarationSyntax syntax ? syntax.IdentifierToken.Location : type.Declaration.IdentifierToken.Location, "static methods cannot be virtual, override, or abstract");
-                if (method.IsAbstract && method.Declaration is MethodDeclarationSyntax { Body: not null } abstractSyntax)
-                    _diagnostics.Report(abstractSyntax.IdentifierToken.Location, "abstract methods cannot have a body");
-            }
-
             foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces)
             {
                 foreach (FunctionSymbol required in @interface.AllMethods)

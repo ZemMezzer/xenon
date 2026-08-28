@@ -239,12 +239,20 @@ public sealed class FunctionSymbol : Symbol
         ConstructorOverloadCount = count;
     }
 
-    public bool Overrides(FunctionSymbol candidate) =>
+    public bool HasSameSignature(FunctionSymbol candidate) =>
+        FunctionKind == candidate.FunctionKind &&
+        (ContainingProperty is not null || ContainingInterfaceProperty is not null) ==
+            (candidate.ContainingProperty is not null || candidate.ContainingInterfaceProperty is not null) &&
+        (ContainingIndexer is not null || ContainingInterfaceIndexer is not null) ==
+            (candidate.ContainingIndexer is not null || candidate.ContainingInterfaceIndexer is not null) &&
         string.Equals(Name, candidate.Name, StringComparison.Ordinal) &&
+        IsStatic == candidate.IsStatic &&
         IsReadonly == candidate.IsReadonly &&
-        ReferenceEquals(ReturnType, candidate.ReturnType) &&
         Parameters.Length == candidate.Parameters.Length &&
         Parameters.Zip(candidate.Parameters).All(pair => ReferenceEquals(pair.First.Type, pair.Second.Type));
+
+    public bool Overrides(FunctionSymbol candidate) =>
+        HasSameSignature(candidate) && ReferenceEquals(ReturnType, candidate.ReturnType);
 
     internal SyntaxNode Declaration { get; }
 }

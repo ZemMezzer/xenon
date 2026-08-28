@@ -659,7 +659,7 @@ public sealed class LlvmIrGeneratorTests
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
-            struct Entity
+            abstract struct Entity
             {
                 public abstract int Score();
             }
@@ -687,7 +687,7 @@ public sealed class LlvmIrGeneratorTests
         Compilation privateAbstract = CreateCompilation("""
             namespace Example;
 
-            struct Entity
+            abstract struct Entity
             {
                 abstract void Update();
             }
@@ -930,7 +930,7 @@ public sealed class LlvmIrGeneratorTests
 
             struct Enemy : Entity
             {
-                public ~Enemy() { }
+                public override ~Enemy() { }
             }
 
             int Main()
@@ -984,7 +984,7 @@ public sealed class LlvmIrGeneratorTests
 
             struct Base { public virtual ~Base() { } }
             struct Middle : Base { }
-            struct Derived : Middle { public ~Derived() { } }
+            struct Derived : Middle { public override ~Derived() { } }
 
             int Main()
             {

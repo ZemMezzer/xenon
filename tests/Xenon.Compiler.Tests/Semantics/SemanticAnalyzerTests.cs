@@ -2317,7 +2317,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("export readonly int Get() { return 0; }")]
     [InlineData("struct Value { public static readonly int Get() { return 0; } }")]
     [InlineData("struct Value { public virtual readonly int Get() { return 0; } }")]
-    [InlineData("struct Value { public abstract readonly int Get(); }")]
+    [InlineData("abstract struct Value { public abstract readonly int Get(); }")]
     [InlineData("interface IValue { readonly int Get(); }")]
     [InlineData("interface IValue { readonly int readonly Get(); }")]
     public void Analyzer_RejectsReadonlyByValueReturnsAcrossCallableKinds(string declaration)
@@ -3537,7 +3537,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("interface I { void Set(A value); }")]
     public void Analyzer_RejectsAbstractValueStorage(string source)
     {
-        Compilation compilation = CreateCompilation("namespace Example; struct A { public abstract int Read(); } " + source);
+        Compilation compilation = CreateCompilation("namespace Example; abstract struct A { public abstract int Read(); } " + source);
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("abstract", StringComparison.Ordinal));
     }
 
@@ -3676,6 +3676,289 @@ public sealed class SemanticAnalyzerTests
             void readonly M(int* p) { Runner runner = Runner(); runner.Run(p, 2); }
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Theory]
+    [InlineData("public virtual void M(int x) {}", "public void M(int x) {}")]
+    [InlineData("public virtual void M(int x) {}", "public virtual void M(int x) {}")]
+    [InlineData("public abstract void M(int x);", "public void M(int x) {}")]
+    [InlineData("public virtual int readonly M() { return 1; }", "public int readonly M() { return 2; }")]
+    [InlineData("public virtual int Value { get { return 1; } set {} }", "public int Value { get { return 2; } set {} }")]
+    [InlineData("public abstract int Value { get; }", "public int Value { get { return 2; } }")]
+    [InlineData("public virtual int this[int x] { get { return x; } }", "public int this[int x] { get { return x; } }")]
+    [InlineData("public abstract int this[int x] { get; set; }", "public int this[int x] { get { return x; } set {} }")]
+    [InlineData("public virtual ~Base() {}", "public ~Derived() {}")]
+    [InlineData("public virtual ~Base() {}", "public virtual ~Derived() {}")]
+    public void Analyzer_RequiresExplicitOverrideAndDoesNotInstallInvalidSlots(string baseMember, string derivedMember)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; abstract struct Base { " + baseMember +
+            " } struct Derived : Base { " + derivedMember + " }");
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("must be declared 'override'", StringComparison.Ordinal));
+        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "Derived"));
+        Assert.All(derived.Methods, method => Assert.Null(method.VTableSlot));
+        if (derived.Destructor is { } destructor) Assert.Null(destructor.VTableSlot);
+        Assert.Equal<FunctionSymbol>(derived.BaseType!.VirtualMethods, derived.VirtualMethods);
+    }
+
+    [Theory]
+    [InlineData("public void M(int x) {}", "public override void M(int x) {}")]
+    [InlineData("", "public override void M() {}")]
+    [InlineData("public virtual int M() { return 0; }", "public override float M() { return 0.0f; }")]
+    [InlineData("public virtual void M(int x) {}", "public override void M(float x) {}")]
+    [InlineData("public virtual void M(int x) {}", "public override void M() {}")]
+    [InlineData("public virtual void M(int* x) {}", "public override void M(readonly int* x) {}")]
+    [InlineData("public virtual void M(int& x) {}", "public override void M(readonly int& x) {}")]
+    [InlineData("public virtual void M(int[] x) {}", "public override void M(int[,] x) {}")]
+    [InlineData("public virtual void M() {}", "public override void readonly M() {}")]
+    [InlineData("public virtual int Value { get { return 0; } }", "public override int get_Value() { return 1; }")]
+    [InlineData("public virtual int get_Value() { return 0; }", "public override int Value { get { return 1; } }")]
+    [InlineData("public int Value { get { return 0; } }", "public override int Value { get { return 1; } }")]
+    [InlineData("public virtual int Value { get { return 0; } set {} }", "public override int Value { get { return 1; } }")]
+    [InlineData("public virtual int Value { get { return 0; } }", "public override int Value { get { return 1; } set {} }")]
+    [InlineData("public virtual readonly int Value { get { return 0; } }", "public override int Value { get { return 1; } }")]
+    [InlineData("public virtual int Value { get { return 0; } }", "public override float Value { get { return 1.0f; } }")]
+    [InlineData("public int this[int x] { get { return x; } }", "public override int this[int x] { get { return x; } }")]
+    [InlineData("public virtual int this[int x] { get { return x; } }", "public override int this[float x] { get { return 1; } }")]
+    [InlineData("public virtual int this[int x] { get { return x; } set {} }", "public override int this[int x] { get { return x; } }")]
+    [InlineData("public ~Base() {}", "public override ~Derived() {}")]
+    [InlineData("", "public override ~Derived() {}")]
+    public void Analyzer_RejectsIncompatibleOverrideWithoutReplacingBaseSlot(string baseMember, string derivedMember)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct Base { " + baseMember +
+            " } struct Derived : Base { " + derivedMember + " }");
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("does not override", StringComparison.Ordinal));
+        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "Derived"));
+        Assert.All(derived.Methods, method => Assert.Null(method.VTableSlot));
+        if (derived.Destructor is { } destructor) Assert.Null(destructor.VTableSlot);
+        Assert.Equal<FunctionSymbol>(derived.BaseType!.VirtualMethods, derived.VirtualMethods);
+    }
+
+    [Theory]
+    [InlineData("public abstract void M();", "public override void M() {}")]
+    [InlineData("public abstract int Value { get; set; }", "public override int Value { get { return 42; } set {} }")]
+    [InlineData("public abstract int this[int x] { get; set; }", "public override int this[int x] { get { return x; } set {} }")]
+    public void Analyzer_RequiresConcreteCompletionAcrossTheWholeInheritanceChain(string declaration, string implementation)
+    {
+        string[] sources = ["namespace Example; abstract struct A { " + declaration + " }",
+            "namespace Example; abstract struct B : A {} abstract struct C : B {}",
+            "namespace Example; struct D : C { " + implementation + " }"];
+        foreach (string[] order in new[] { sources, sources.Reverse().ToArray() })
+        {
+            Compilation valid = CreateCompilation(order);
+            Assert.False(valid.HasErrors, string.Join(Environment.NewLine, valid.Diagnostics));
+            StructTypeSymbol derived = Assert.Single(Assert.Single(valid.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "D"));
+            Assert.False(derived.IsAbstract);
+            Assert.All(derived.VirtualMethods, method => { Assert.False(method.IsAbstract); Assert.Same(derived, method.ContainingType); });
+        }
+        Compilation invalid = CreateCompilation(sources[0], sources[1], "namespace Example; struct D : C {}");
+        var diagnostic = Assert.Single(invalid.Diagnostics.Where(d => d.Message.Contains("does not implement abstract member", StringComparison.Ordinal)));
+        Assert.Contains("Example.D", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("Example.A", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("struct A { public abstract void M(); }")]
+    [InlineData("abstract struct A {} void M() { A value; }")]
+    [InlineData("abstract struct A {} void M() { A value = A(); }")]
+    [InlineData("abstract struct A {} void M() { A* value = new A(); }")]
+    [InlineData("abstract struct A {} struct B { public A Value; }")]
+    [InlineData("abstract struct A {} void M(A value) {}")]
+    [InlineData("abstract struct A {} void M() { A[] values = A[1]; }")]
+    public void Analyzer_UsesDeclaredAbstractnessInsteadOfInferringItFromSlots(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("abstract", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_InheritedOverloadsAndStaticMembersDoNotReplaceVirtualSlots()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct A { public virtual int M(int x) { return x; } }
+            struct B : A { public int M(float x) { return 1; } }
+            struct C : B { public static int M(int x) { return 2; } }
+            struct D : C { public override int M(int x) { return 3; } }
+            struct E : D {}
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        Assert.Null(types["B"].Methods[0].VTableSlot);
+        Assert.Null(types["C"].Methods[0].VTableSlot);
+        Assert.Same(types["A"].Methods[0], Assert.Single(types["C"].VirtualMethods));
+        Assert.Same(types["D"].Methods[0], Assert.Single(types["E"].VirtualMethods));
+    }
+
+    [Theory]
+    [InlineData("", "", false)]
+    [InlineData("public virtual void M() {}", "", true)]
+    [InlineData("public virtual void M() {}", "override ", false)]
+    [InlineData("", "override ", true)]
+    public void Analyzer_SeparatesInterfaceImplementationFromStructOverride(string baseMember, string modifier, bool rejected)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; interface I { void M(); } struct Base { " + baseMember +
+            " } struct Derived : Base, I { public " + modifier + "void M() {} }");
+        Assert.Equal(rejected, compilation.HasErrors);
+        if (rejected) Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("override", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_PreservesInheritedDestructorSlotWhenNoDestructorIsDeclared()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct A { public virtual ~A() {} }
+            struct B : A {}
+            struct C : B { public override ~C() {} }
+            struct D : C {}
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        Assert.Null(types["B"].Destructor);
+        Assert.Null(types["D"].Destructor);
+        Assert.Same(types["A"].Destructor, Assert.Single(types["B"].VirtualMethods));
+        Assert.Same(types["C"].Destructor, Assert.Single(types["D"].VirtualMethods));
+        Assert.True(types["C"].Destructor!.IsOverride);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsReducedOverrideAccessibilityBeforeAssigningSlots()
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct A { public virtual void M() {} } struct B : A { private override void M() {} }");
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("accessibility", StringComparison.Ordinal));
+        StructTypeSymbol derived = Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.Where(type => type.Name == "B"));
+        Assert.Null(Assert.Single(derived.Methods).VTableSlot);
+        Assert.Same(derived.BaseType!.Methods[0], Assert.Single(derived.VirtualMethods));
+    }
+
+    [Theory]
+    [InlineData("public override void M() {}")]
+    [InlineData("public override int Value { get { return 1; } }")]
+    [InlineData("public override int this[int i] { get { return i; } }")]
+    [InlineData("public override ~A() {}")]
+    public void Analyzer_RejectsOverrideOnRootStructs(string member)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct A { " + member + " }");
+        Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("does not override", StringComparison.Ordinal));
+        Assert.Empty(Assert.Single(Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types).VirtualMethods);
+    }
+
+    [Fact]
+    public void Analyzer_DistinguishesInheritedVirtualOverloadsByTheirFullSignature()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct A { public virtual int M(int x) { return x; } }
+            struct B : A { public virtual int M(float x) { return 1; } }
+            struct C : B { public override int M(int x) { return 2; } }
+            abstract struct D : C {}
+            struct E : D {}
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        Assert.Equal(2, types["E"].VirtualMethods.Length);
+        Assert.Same(types["C"].Methods[0], types["E"].VirtualMethods[0]);
+        Assert.Same(types["B"].Methods[0], types["E"].VirtualMethods[1]);
+        Assert.True(types["D"].IsAbstract);
+        Assert.False(types["E"].IsAbstract);
+    }
+
+    [Theory]
+    [InlineData("public", false)]
+    [InlineData("private", true)]
+    [InlineData("", true)]
+    public void Analyzer_ValidatesDestructorOverrideAccessibilityBeforeReplacingItsSlot(string access, bool rejected)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct Base { public virtual ~Base() {} } " +
+            "struct Derived : Base { " + access + " override ~Derived() {} }");
+        Assert.Equal(rejected, compilation.HasErrors);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        FunctionSymbol destructor = types["Derived"].Destructor!;
+        if (rejected)
+        {
+            var diagnostic = Assert.Single(compilation.Diagnostics);
+            Assert.Equal("an override cannot reduce the accessibility of its inherited member", diagnostic.Message);
+            Assert.Equal("override", diagnostic.Location.Source.GetText(diagnostic.Location.Span));
+            Assert.Null(destructor.VTableSlot);
+            Assert.Same(types["Base"].Destructor, Assert.Single(types["Derived"].VirtualMethods));
+        }
+        else
+        {
+            Assert.Equal(types["Base"].Destructor!.VTableSlot, destructor.VTableSlot);
+            Assert.Same(destructor, Assert.Single(types["Derived"].VirtualMethods));
+        }
+    }
+
+    [Theory]
+    [InlineData("public override ~Leaf() {}", false)]
+    [InlineData("private override ~Leaf() {}", true)]
+    [InlineData("", false)]
+    public void Analyzer_ChecksDestructorOverrideAccessThroughIntermediateTypes(string leaf, bool rejected)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Base { public virtual ~Base() {} }
+            struct Derived : Base { public override ~Derived() {} }
+            struct Middle : Derived {}
+            struct Leaf : Middle {
+            """ + leaf + " }");
+        Assert.Equal(rejected, compilation.HasErrors);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+        Assert.Null(types["Middle"].Destructor);
+        FunctionSymbol expected = !rejected && types["Leaf"].Destructor is { } own ? own : types["Derived"].Destructor!;
+        Assert.Same(expected, Assert.Single(types["Leaf"].VirtualMethods));
+        if (rejected) Assert.Contains(compilation.Diagnostics, d => d.Message == "an override cannot reduce the accessibility of its inherited member");
+    }
+
+    [Theory]
+    [InlineData("public")]
+    [InlineData("private")]
+    public void Analyzer_KeepsPrivateBaseDestructorAccessSeparateFromOverrideVisibility(string access)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; struct Base { private virtual ~Base() {} } " +
+            "struct Derived : Base { " + access + " override ~Derived() {} }");
+        // Private -> private/public is not narrowing, but the generated base
+        // destructor call is still inaccessible outside Base in Xenon.
+        Assert.Equal("destructor 'Base' is private", Assert.Single(compilation.Diagnostics).Message);
+        Assert.DoesNotContain(compilation.Diagnostics, d => d.Message.Contains("reduce the accessibility", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("void M() {}")]
+    [InlineData("int Value { get { return 0; } set {} }")]
+    [InlineData("int this[int i] { get { return i; } set {} }")]
+    public void Analyzer_KeepsOtherOverrideAccessibilityRulesUnchanged(string member)
+    {
+        foreach (string access in new[] { "public", "private" })
+        {
+            Compilation compilation = CreateCompilation("namespace Example; struct Base { public virtual " + member +
+                " } struct Derived : Base { " + access + " override " + member + " }");
+            Assert.Equal(access == "private", compilation.HasErrors);
+            var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Types.ToDictionary(type => type.Name);
+            Assert.All(types["Derived"].VirtualMethods, method => Assert.Same(types[access == "private" ? "Base" : "Derived"], method.ContainingType));
+        }
+    }
+
+    [Theory]
+    [InlineData("Resource* resource = Resource.Create(); Resource.Destroy(resource);", false)]
+    [InlineData("Resource* resource = Resource.Create(); free(resource);", true)]
+    [InlineData("Resource resource = Resource();", true)]
+    [InlineData("Resource[] resources = Resource[1];", true)]
+    public void Analyzer_PrivateDestructorAllowsTypeOwnedReleaseButNotExternalCleanup(string body, bool rejected)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource
+            {
+                private virtual ~Resource() {}
+                public static Resource* Create() { return new Resource(); }
+                public static void Destroy(Resource* resource) { free(resource); }
+                public static void UseLocal() { Resource resource = Resource(); }
+            }
+            void Main() {
+            """ + body + " }");
+        Assert.Equal(rejected, compilation.HasErrors);
+        if (rejected) Assert.Contains(compilation.Diagnostics, d => d.Message == "destructor 'Resource' is private");
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(
