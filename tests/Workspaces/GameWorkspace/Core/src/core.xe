@@ -1,0 +1,2 @@
+namespace Core;
+public int Value() { return 41; }

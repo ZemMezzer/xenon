@@ -1,0 +1,6 @@
+[project]
+name = "Core"
+type = "static-library"
+
+[source]
+root = "src"

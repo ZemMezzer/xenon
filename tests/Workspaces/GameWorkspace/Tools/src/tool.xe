@@ -1,0 +1,2 @@
+namespace Tools;
+public int Inspect() { return 0; }

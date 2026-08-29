@@ -25,7 +25,7 @@ public static class XenonProjectLoader
     public static XenonProject Resolve(string inputPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
-        string fullPath = Path.GetFullPath(inputPath);
+        string fullPath = ProjectPath.Normalize(inputPath);
 
         if (Directory.Exists(fullPath))
         {
@@ -54,7 +54,7 @@ public static class XenonProjectLoader
 
     public static XenonProject LoadDirectory(string directoryPath)
     {
-        string directory = Path.GetFullPath(directoryPath);
+        string directory = ProjectPath.Normalize(directoryPath);
         if (!Directory.Exists(directory))
         {
             throw new ProjectSystemException($"project directory '{directoryPath}' does not exist");
@@ -62,7 +62,7 @@ public static class XenonProjectLoader
 
         string[] projectFiles = EnumerateFiles(directory, SearchOption.TopDirectoryOnly)
             .Where(path => string.Equals(Path.GetExtension(path), ".xeproj", StringComparison.OrdinalIgnoreCase))
-            .Order(StringComparer.Ordinal)
+            .Order(ProjectPath.Comparer)
             .ToArray();
 
         return projectFiles.Length switch
@@ -76,7 +76,7 @@ public static class XenonProjectLoader
 
     public static XenonProject LoadProjectFile(string projectFilePath)
     {
-        string fullPath = Path.GetFullPath(projectFilePath);
+        string fullPath = ProjectPath.Normalize(projectFilePath);
         if (!File.Exists(fullPath))
         {
             throw new ProjectSystemException($"project file '{projectFilePath}' does not exist");
@@ -126,7 +126,7 @@ public static class XenonProjectLoader
         string? version = GetOptionalString(settings, "project.version", fullPath);
         string sourceRootText = GetOptionalString(settings, "source.root", fullPath) ?? "src";
         string rootDirectory = Path.GetDirectoryName(fullPath)!;
-        string sourceRoot = Path.GetFullPath(sourceRootText, rootDirectory);
+        string sourceRoot = ProjectPath.Normalize(sourceRootText, rootDirectory);
         if (!Directory.Exists(sourceRoot))
         {
             throw new ProjectSystemException(
@@ -154,12 +154,12 @@ public static class XenonProjectLoader
                 settings,
                 "native.library-paths",
                 fullPath)
-            .Select(path => Path.GetFullPath(path, rootDirectory))
+            .Select(path => ProjectPath.Normalize(path, rootDirectory))
             .ToImmutableArray();
         ImmutableArray<string> projectReferences = GetOptionalStringArray(
                 settings, "references.projects", fullPath)
-            .Select(path => Path.GetFullPath(path, rootDirectory))
-            .Order(StringComparer.Ordinal)
+            .Select(path => ProjectPath.Normalize(path, rootDirectory))
+            .Order(ProjectPath.Comparer)
             .ToImmutableArray();
 
         return new XenonProject(
@@ -218,7 +218,7 @@ public static class XenonProjectLoader
     private static ImmutableArray<string> DiscoverSources(string sourceRoot) =>
         EnumerateFiles(sourceRoot, SearchOption.AllDirectories)
             .Where(path => string.Equals(Path.GetExtension(path), ".xe", StringComparison.OrdinalIgnoreCase))
-            .Order(StringComparer.Ordinal)
+            .Order(ProjectPath.Comparer)
             .ToImmutableArray();
 
     private static IEnumerable<string> EnumerateFiles(string directory, SearchOption searchOption)

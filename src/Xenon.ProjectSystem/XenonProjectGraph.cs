@@ -25,14 +25,14 @@ public sealed class XenonProjectGraph
     public ImmutableArray<XenonProject> GetDirectDependencies(XenonProject project)
     {
         ArgumentNullException.ThrowIfNull(project);
-        var byId = Projects.ToDictionary(item => item.Identity, StringComparer.OrdinalIgnoreCase);
+        var byId = Projects.ToDictionary(item => item.Identity, ProjectPath.Comparer);
         return _dependencies.GetValueOrDefault(project.Identity, [])
             .Select(identity => byId[identity]).ToImmutableArray();
     }
 
     public ImmutableArray<XenonProject> GetTransitiveDependencies(XenonProject project)
     {
-        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(ProjectPath.Comparer);
         var result = ImmutableArray.CreateBuilder<XenonProject>();
         void Visit(XenonProject current)
         {
@@ -53,16 +53,20 @@ public sealed class XenonProjectGraph
 
     public static XenonProjectGraph Load(string inputPath)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
+        if (File.Exists(inputPath) && string.Equals(Path.GetExtension(inputPath), ".xws",
+            StringComparison.OrdinalIgnoreCase))
+            return XenonWorkspaceLoader.Load(inputPath).Graph;
         XenonProject root = XenonProjectLoader.Resolve(inputPath);
-        var projects = new Dictionary<string, XenonProject>(StringComparer.OrdinalIgnoreCase)
+        var projects = new Dictionary<string, XenonProject>(ProjectPath.Comparer)
         {
             [root.Identity] = root,
         };
-        var discovered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var discovered = new HashSet<string>(ProjectPath.Comparer);
         void Discover(XenonProject project)
         {
             if (!discovered.Add(project.Identity)) return;
-            foreach (string referencePath in project.ProjectReferences.Order(StringComparer.Ordinal))
+            foreach (string referencePath in project.ProjectReferences.Order(ProjectPath.Comparer))
             {
                 if (!File.Exists(referencePath))
                     throw new ProjectSystemException(
@@ -82,7 +86,7 @@ public sealed class XenonProjectGraph
     {
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(projects);
-        var byId = new Dictionary<string, XenonProject>(StringComparer.OrdinalIgnoreCase);
+        var byId = new Dictionary<string, XenonProject>(ProjectPath.Comparer);
         foreach (XenonProject project in projects.Append(root))
         {
             ArgumentNullException.ThrowIfNull(project);
@@ -97,23 +101,23 @@ public sealed class XenonProjectGraph
             else byId.Add(project.Identity, project);
         }
         var visiting = new List<string>();
-        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(ProjectPath.Comparer);
         var order = ImmutableArray.CreateBuilder<XenonProject>();
         var dependencies = ImmutableDictionary.CreateBuilder<string, ImmutableArray<string>>(
-            StringComparer.OrdinalIgnoreCase);
+            ProjectPath.Comparer);
         void Visit(XenonProject project)
         {
             int cycleStart = visiting.FindIndex(identity =>
-                string.Equals(identity, project.Identity, StringComparison.OrdinalIgnoreCase));
+                string.Equals(identity, project.Identity, ProjectPath.Comparison));
             if (cycleStart >= 0)
                 throw new ProjectSystemException($"project reference cycle detected: {string.Join(" -> ", visiting.Skip(cycleStart).Append(project.Identity))}");
             if (!visited.Add(project.Identity)) return;
             visiting.Add(project.Identity);
             var direct = ImmutableArray.CreateBuilder<string>();
-            if (project.ProjectReferences.Distinct(StringComparer.OrdinalIgnoreCase).Count() !=
+            if (project.ProjectReferences.Distinct(ProjectPath.Comparer).Count() !=
                 project.ProjectReferences.Length)
                 throw new ProjectSystemException($"project '{project.Name}' contains duplicate project references");
-            foreach (string identity in project.ProjectReferences.Order(StringComparer.OrdinalIgnoreCase))
+            foreach (string identity in project.ProjectReferences.Order(ProjectPath.Comparer))
             {
                 if (!byId.TryGetValue(identity, out XenonProject? dependency))
                     throw new ProjectSystemException($"project '{project.Name}' references missing project '{identity}'");
@@ -128,9 +132,13 @@ public sealed class XenonProjectGraph
             order.Add(project);
         }
         Visit(root);
+        // Workspace manifests may include additional, independent tooling projects.
+        foreach (XenonProject project in byId.Values.OrderBy(item => item.Identity,
+            ProjectPath.Comparer))
+            Visit(project);
         EnsureUniqueProjectNames(byId.Values);
         return new XenonProjectGraph(root,
-            byId.Values.OrderBy(project => project.Identity, StringComparer.OrdinalIgnoreCase).ToImmutableArray(),
+            byId.Values.OrderBy(project => project.Identity, ProjectPath.Comparer).ToImmutableArray(),
             order.ToImmutable(), dependencies.ToImmutable());
     }
 

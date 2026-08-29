@@ -35,6 +35,21 @@ public readonly record struct ReceiverInfo(
     bool IsReadonly,
     bool IsWritable);
 
+/// <summary>The tooling-relevant role of one successfully resolved source reference.</summary>
+public enum ResolvedReferenceKind
+{
+    Reference,
+    Type,
+    Call,
+    Member,
+}
+
+/// <summary>A source occurrence that the semantic snapshot resolved to an exact symbol.</summary>
+public readonly record struct ResolvedSymbolReference(
+    Symbol Symbol,
+    Xenon.Compiler.Text.TextLocation Location,
+    ResolvedReferenceKind Kind);
+
 public enum MemberAccessKind
 {
     Instance,
