@@ -1,3 +1,4 @@
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 
@@ -102,6 +103,7 @@ internal sealed partial class ReadonlyEffectAnalyzer
 
     private Flow Visit(BoundStatement statement)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         switch (statement)
         {
             case BoundBlockStatement block:
@@ -138,7 +140,8 @@ internal sealed partial class ReadonlyEffectAnalyzer
                     _context.Returned.UnionWith(origins);
                     _context.ReturnSite ??= value;
                     if (ReferenceEquals(_context, _rootContext) && HasHiddenAccess(origins, function.ReturnType))
-                        Report(value, "cannot return a mutable capability obtained from hidden state");
+                        Report(value, "cannot return a mutable capability obtained from hidden state",
+                            DiagnosticIds.MutableCapabilityReturn);
                 }
                 return new(Return: _memory);
             case BoundBreakStatement:

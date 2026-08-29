@@ -88,10 +88,12 @@ public sealed class ArrayTypeSymbol : TypeSymbol
 
 }
 
+public sealed class ErrorTypeSymbol : TypeSymbol
+{
+    internal ErrorTypeSymbol() : base("<error>") { }
+}
+
 internal sealed class SpecialTypeSymbol : TypeSymbol
 {
-    public SpecialTypeSymbol(string name)
-        : base(name)
-    {
-    }
+    public SpecialTypeSymbol(string name) : base(name) { }
 }

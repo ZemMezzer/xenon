@@ -8,6 +8,8 @@ public sealed record SwitchStatementSyntax(
     ImmutableArray<SwitchSectionSyntax> Sections) : StatementSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.SwitchStatement;
+    public SyntaxToken? OpenBraceToken { get; init; }
+    public SyntaxToken? CloseBraceToken { get; init; }
 }
 
 public sealed record SwitchSectionSyntax(

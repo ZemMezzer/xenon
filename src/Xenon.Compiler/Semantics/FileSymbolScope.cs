@@ -14,12 +14,15 @@ internal sealed class FileSymbolScope
 {
     private readonly List<NamespaceSymbol> _importedNamespaces = [];
     private readonly Dictionary<string, UsingAliasTarget> _aliases = new(StringComparer.Ordinal);
+    private readonly List<AliasSymbol> _aliasSymbols = [];
 
-    public FileSymbolScope(NamespaceSymbol globalNamespace, NamespaceSymbol containingNamespace, TypeFactory typeFactory)
+    public FileSymbolScope(NamespaceSymbol globalNamespace, NamespaceSymbol containingNamespace, TypeFactory typeFactory,
+        SemanticInfoStore? semanticInfo = null)
     {
         GlobalNamespace = globalNamespace;
         TypeFactory = typeFactory;
         ContainingNamespace = containingNamespace;
+        SemanticInfo = semanticInfo;
     }
 
     public NamespaceSymbol GlobalNamespace { get; }
@@ -27,6 +30,20 @@ internal sealed class FileSymbolScope
     public TypeFactory TypeFactory { get; }
 
     public NamespaceSymbol ContainingNamespace { get; }
+
+    internal SemanticInfoStore? SemanticInfo { get; }
+
+    internal IEnumerable<NamespaceSymbol> ImportedNamespaces => _importedNamespaces;
+
+    internal IEnumerable<Symbol> GetFileSymbols() =>
+        ContainingNamespace.Namespaces.Cast<Symbol>()
+            .Concat(ContainingNamespace.Types)
+            .Concat(ContainingNamespace.Functions)
+            .Concat(ContainingNamespace.Constants)
+            .Concat(_importedNamespaces.SelectMany(ns => ns.Namespaces.Cast<Symbol>()
+                .Concat(ns.Types).Concat(ns.Functions.Where(function => function.IsPublic)).Concat(ns.Constants)))
+            .Concat(_aliasSymbols)
+            .Distinct();
 
     public void BindUsings(ImmutableArray<UsingDirectiveSyntax> directives, DiagnosticBag diagnostics)
     {
@@ -49,7 +66,8 @@ internal sealed class FileSymbolScope
                         directive.NameParts[0].Location,
                         typeTarget is not null
                             ? $"using directive '{directive.Name}' names a type; use an alias such as 'using Name = {directive.Name};'"
-                            : $"unknown namespace '{directive.Name}'");
+                            : $"unknown namespace '{directive.Name}'",
+                        typeTarget is not null ? DiagnosticIds.UsingDirectiveTargetsType : DiagnosticIds.UnknownNamespace);
                     continue;
                 }
 
@@ -66,7 +84,8 @@ internal sealed class FileSymbolScope
             {
                 diagnostics.Report(
                     directive.AliasToken.Location,
-                    $"using alias '{alias}' is already declared in this file");
+                    $"using alias '{alias}' is already declared in this file",
+                    DiagnosticIds.DuplicateDeclaration);
                 continue;
             }
 
@@ -74,7 +93,8 @@ internal sealed class FileSymbolScope
             {
                 diagnostics.Report(
                     directive.NameParts[0].Location,
-                    $"unknown namespace or type '{directive.Name}'");
+                    $"unknown namespace or type '{directive.Name}'",
+                    DiagnosticIds.UnknownNamespaceOrType);
                 continue;
             }
 
@@ -82,11 +102,15 @@ internal sealed class FileSymbolScope
             {
                 diagnostics.Report(
                     directive.NameParts[0].Location,
-                    $"using alias target '{directive.Name}' is ambiguous between a namespace and a type");
+                    $"using alias target '{directive.Name}' is ambiguous between a namespace and a type",
+                    DiagnosticIds.AmbiguousName);
                 continue;
             }
 
             _aliases.Add(alias, new UsingAliasTarget(namespaceTarget, typeTarget));
+            Symbol target = (Symbol?)typeTarget ?? namespaceTarget!;
+            _aliasSymbols.Add(new AliasSymbol(alias, target, directive));
+            SemanticInfo?.Declarations[directive] = _aliasSymbols[^1];
         }
     }
 
@@ -118,7 +142,8 @@ internal sealed class FileSymbolScope
         {
             diagnostics.Report(
                 location,
-                $"type name '{name}' is ambiguous between {FormatTypeCandidates(matches)}");
+                $"type name '{name}' is ambiguous between {FormatTypeCandidates(matches)}",
+                DiagnosticIds.AmbiguousName);
             return BuiltinTypes.Error;
         }
 
@@ -168,7 +193,8 @@ internal sealed class FileSymbolScope
         {
             diagnostics.Report(
                 location,
-                $"function name '{name}' is ambiguous between {FormatFunctionCandidates(publicMatches)}");
+                $"function name '{name}' is ambiguous between {FormatFunctionCandidates(publicMatches)}",
+                DiagnosticIds.AmbiguousName);
             diagnosticReported = true;
             return null;
         }
@@ -179,14 +205,16 @@ internal sealed class FileSymbolScope
             FunctionSymbol inaccessible = privateMatches[0];
             diagnostics.Report(
                 location,
-                $"function '{inaccessible.Name}' is private in namespace '{inaccessible.ContainingNamespace.FullName}'");
+                $"function '{inaccessible.Name}' is private in namespace '{inaccessible.ContainingNamespace.FullName}'",
+                DiagnosticIds.InaccessibleSymbol);
             diagnosticReported = true;
         }
         else if (privateMatches.Count > 1)
         {
             diagnostics.Report(
                 location,
-                $"function name '{name}' refers only to private functions in imported namespaces");
+                $"function name '{name}' refers only to private functions in imported namespaces",
+                DiagnosticIds.InaccessibleSymbol);
             diagnosticReported = true;
         }
 
@@ -207,7 +235,8 @@ internal sealed class FileSymbolScope
         if (matches.Length == 1)
             return matches[0];
         if (matches.Length > 1)
-            diagnostics.Report(location, $"constant name '{name}' is ambiguous between imported namespaces");
+            diagnostics.Report(location, $"constant name '{name}' is ambiguous between imported namespaces",
+                DiagnosticIds.AmbiguousName);
         return null;
     }
 
@@ -255,7 +284,8 @@ internal sealed class FileSymbolScope
         {
             diagnostics.Report(
                 location,
-                $"function '{function.Name}' is private in namespace '{containingNamespace!.FullName}'");
+                $"function '{function.Name}' is private in namespace '{containingNamespace!.FullName}'",
+                DiagnosticIds.InaccessibleSymbol);
             diagnosticReported = true;
             return null;
         }

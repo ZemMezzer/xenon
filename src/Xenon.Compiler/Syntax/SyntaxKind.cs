@@ -164,4 +164,5 @@ public enum SyntaxKind
     ParenthesizedExpression,
     TypeLayoutExpression,
     CastExpression,
+    MissingExpression,
 }

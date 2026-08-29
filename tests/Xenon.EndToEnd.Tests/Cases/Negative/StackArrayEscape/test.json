@@ -3,5 +3,5 @@
   "profiles": ["debug"],
   "compileOnly": true,
   "expectedBuildSuccess": false,
-  "expectedDiagnostics": [{ "message": "stack array cannot escape its allocation scope through this assignment" }]
+  "expectedDiagnostics": [{ "id": "XE2207", "message": "stack array cannot escape its allocation scope through this assignment" }]
 }

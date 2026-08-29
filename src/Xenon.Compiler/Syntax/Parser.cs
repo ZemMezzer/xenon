@@ -35,7 +35,8 @@ internal sealed class Parser
 
             if (Current.Kind == SyntaxKind.UsingKeyword)
             {
-                Diagnostics.Report(Current.Location, "using directives must appear before the namespace declaration");
+                Diagnostics.Report(Current.Location, "using directives must appear before the namespace declaration",
+                    DiagnosticIds.UsingDirectiveOrder);
                 ParseUsingDirective();
             }
             else
@@ -128,7 +129,8 @@ internal sealed class Parser
         while (Current.Kind == SyntaxKind.AbstractKeyword)
         {
             SyntaxToken modifier = NextToken();
-            if (abstractKeyword is not null) Diagnostics.Report(modifier.Location, "duplicate abstract struct modifier");
+            if (abstractKeyword is not null) Diagnostics.Report(modifier.Location, "duplicate abstract struct modifier",
+                DiagnosticIds.DuplicateModifier);
             abstractKeyword ??= modifier;
         }
         SyntaxToken structKeyword = MatchToken(SyntaxKind.StructKeyword);
@@ -185,7 +187,8 @@ internal sealed class Parser
                 {
                     ValidateMemberModifiers("field", modifiers, SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.ReadonlyKeyword);
                     if (@readonly is not null && type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null && !type.Contains<PointerTypeSyntax>() && !type.Contains<ReferenceTypeSyntax>())
-                        Diagnostics.Report(type.GetQualifier(SyntaxKind.ReadonlyKeyword)!.Location, "duplicate readonly field modifier");
+                        Diagnostics.Report(type.GetQualifier(SyntaxKind.ReadonlyKeyword)!.Location, "duplicate readonly field modifier",
+                            DiagnosticIds.DuplicateModifier);
                     // On pointer fields a leading readonly qualifies the pointee.
                     if (@readonly is not null && (type.Contains<PointerTypeSyntax>() || type.Contains<ReferenceTypeSyntax>()) && type.GetQualifier(SyntaxKind.ReadonlyKeyword) is null)
                     {
@@ -290,7 +293,8 @@ internal sealed class Parser
             }
             else
             {
-                Diagnostics.Report(Current.Location, "expected 'get' or 'set' property accessor");
+                Diagnostics.Report(Current.Location, "expected 'get' or 'set' property accessor",
+                    DiagnosticIds.ExpectedAccessor);
                 NextToken();
                 continue;
             }
@@ -526,7 +530,8 @@ internal sealed class Parser
                 _ => @readonly,
             };
             if (previous is not null)
-                Diagnostics.Report(modifier.Location, $"duplicate or conflicting modifier '{modifier.Text}'");
+                Diagnostics.Report(modifier.Location, $"duplicate or conflicting modifier '{modifier.Text}'",
+                    DiagnosticIds.DuplicateModifier);
             switch (modifier.Kind)
             {
                 case SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword: access ??= modifier; break;
@@ -539,9 +544,11 @@ internal sealed class Parser
         }
         SyntaxToken[] dispatch = new[] { @virtual, @override, @abstract }.OfType<SyntaxToken>().ToArray();
         foreach (SyntaxToken conflicting in dispatch.Skip(1))
-            Diagnostics.Report(conflicting.Location, "virtual, override and abstract modifiers are mutually exclusive");
+            Diagnostics.Report(conflicting.Location, "virtual, override and abstract modifiers are mutually exclusive",
+                DiagnosticIds.ConflictingDispatchModifiers);
         if (@static is not null && dispatch.Length != 0)
-            Diagnostics.Report(dispatch[0].Location, "static members cannot be virtual, override or abstract");
+            Diagnostics.Report(dispatch[0].Location, "static members cannot be virtual, override or abstract",
+                DiagnosticIds.StaticDispatchModifierNotAllowed);
         return (access, @static, @virtual, @override, @abstract, @readonly);
     }
 
@@ -549,25 +556,29 @@ internal sealed class Parser
     {
         foreach (SyntaxToken modifier in modifiers.OfType<SyntaxToken>())
             if (!allowed.Contains(modifier.Kind))
-                Diagnostics.Report(modifier.Location, $"modifier '{modifier.Text}' is not allowed on a {declaration}");
+                Diagnostics.Report(modifier.Location, $"modifier '{modifier.Text}' is not allowed on a {declaration}",
+                    DiagnosticIds.ModifierNotAllowed);
     }
 
     private void ValidateAccessorReturnBinding(TypeSyntax type)
     {
         if (type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is { } modifier)
-            Diagnostics.Report(modifier.Location, "return types cannot have a readonly pointer binding");
+            Diagnostics.Report(modifier.Location, "return types cannot have a readonly pointer binding",
+                DiagnosticIds.ReadonlyReturnBindingNotAllowed);
     }
 
     private void ValidateReadonlyAccessor(SyntaxToken? modifier, IEnumerable<PropertyAccessorDeclarationSyntax> accessors)
     {
         if (modifier is not null && !accessors.Any(accessor => accessor.IsGetter))
-            Diagnostics.Report(modifier.Location, "readonly accessor modifier requires a getter");
+            Diagnostics.Report(modifier.Location, "readonly accessor modifier requires a getter",
+                DiagnosticIds.ReadonlyAccessorRequiresGetter);
     }
 
     private bool ValidateAccessorKeyword()
     {
         if (Current.Kind is SyntaxKind.GetKeyword or SyntaxKind.SetKeyword) return true;
-        Diagnostics.Report(Current.Location, "expected 'get' or 'set' accessor; accessor modifiers are not supported");
+        Diagnostics.Report(Current.Location, "expected 'get' or 'set' accessor; accessor modifiers are not supported",
+            DiagnosticIds.AccessorModifiersNotSupported);
         NextToken();
         return false;
     }
@@ -666,7 +677,8 @@ internal sealed class Parser
         if (leadingReadonly is not null)
         {
             if (type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null)
-                Diagnostics.Report(type.GetQualifier(SyntaxKind.ReadonlyKeyword)!.Location, "duplicate readonly return type qualifier");
+                Diagnostics.Report(type.GetQualifier(SyntaxKind.ReadonlyKeyword)!.Location, "duplicate readonly return type qualifier",
+                    DiagnosticIds.DuplicateModifier);
             type = new QualifiedTypeSyntax(type, leadingReadonly);
         }
 
@@ -675,9 +687,11 @@ internal sealed class Parser
             // ParseType also serves variables. Only their '*' suffix can qualify
             // a binding; immediately before a method name it qualifies the method.
             if (type.Contains<ReferenceTypeSyntax>() || type.Contains<ArrayTypeSyntax>())
-                Diagnostics.Report(pointerReadonly.Location, "return types cannot have a readonly pointer binding");
+                Diagnostics.Report(pointerReadonly.Location, "return types cannot have a readonly pointer binding",
+                    DiagnosticIds.ReadonlyReturnBindingNotAllowed);
             else if (methodReadonly is not null)
-                Diagnostics.Report(methodReadonly.Location, "duplicate readonly method qualifier");
+                Diagnostics.Report(methodReadonly.Location, "duplicate readonly method qualifier",
+                    DiagnosticIds.DuplicateModifier);
             else
                 methodReadonly = pointerReadonly;
             type = type.WithoutQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix);
@@ -761,7 +775,8 @@ internal sealed class Parser
             if (Current.Kind != SyntaxKind.CloseBracketToken)
             {
                 Diagnostics.Report(Current.Location,
-                    "fixed-size array type syntax is not supported; use 'T[]' and initialize it with 'T[n]' or 'new T[n]'");
+                    "fixed-size array type syntax is not supported; use 'T[]' and initialize it with 'T[n]' or 'new T[n]'",
+                    DiagnosticIds.FixedSizeArrayTypeNotSupported);
                 while (Current.Kind is not (SyntaxKind.CloseBracketToken or SyntaxKind.EndOfFileToken or
                        SyntaxKind.SemicolonToken or SyntaxKind.CloseBraceToken or SyntaxKind.CloseParenthesisToken))
                     NextToken();
@@ -885,7 +900,7 @@ internal sealed class Parser
         MatchToken(SyntaxKind.OpenParenthesisToken);
         ExpressionSyntax expression = ParseExpression();
         MatchToken(SyntaxKind.CloseParenthesisToken);
-        MatchToken(SyntaxKind.OpenBraceToken);
+        SyntaxToken openBrace = MatchToken(SyntaxKind.OpenBraceToken);
         var sections = ImmutableArray.CreateBuilder<SwitchSectionSyntax>();
         while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
         {
@@ -903,8 +918,12 @@ internal sealed class Parser
             sections.Add(new SwitchSectionSyntax(label, value, statements.ToImmutable()));
             if (_position == start) NextToken();
         }
-        MatchToken(SyntaxKind.CloseBraceToken);
-        return new SwitchStatementSyntax(keyword, expression, sections.ToImmutable());
+        SyntaxToken closeBrace = MatchToken(SyntaxKind.CloseBraceToken);
+        return new SwitchStatementSyntax(keyword, expression, sections.ToImmutable())
+        {
+            OpenBraceToken = openBrace,
+            CloseBraceToken = closeBrace,
+        };
     }
 
     private ReturnStatementSyntax ParseReturnStatement()
@@ -1162,6 +1181,18 @@ internal sealed class Parser
 
     private ExpressionSyntax ParsePrimaryExpression()
     {
+        if (Current.Kind is SyntaxKind.EndOfFileToken or SyntaxKind.SemicolonToken or
+            SyntaxKind.CloseParenthesisToken or SyntaxKind.CloseBracketToken or SyntaxKind.CloseBraceToken or
+            SyntaxKind.CommaToken)
+        {
+            Diagnostics.ReportUnexpectedToken(Current.Location, Current.Kind, SyntaxKind.IdentifierToken);
+            return new MissingExpressionSyntax(new SyntaxToken(
+                SyntaxKind.IdentifierToken,
+                new TextLocation(Current.Location.Source, new TextSpan(Current.Location.Span.Start, 0)),
+                string.Empty,
+                IsMissing: true));
+        }
+
         if (Current.Kind == SyntaxKind.CastKeyword)
         {
             SyntaxToken keyword = NextToken();
@@ -1303,7 +1334,7 @@ internal sealed class Parser
             new TextLocation(unexpected.Location.Source, new TextSpan(unexpected.Location.Span.Start, 0)),
             string.Empty,
             IsMissing: true);
-        return new NameExpressionSyntax(missing);
+        return new MissingExpressionSyntax(missing);
     }
 
     private TypeSyntax ParseAllocationElementSuffixes(TypeSyntax type) =>

@@ -14,6 +14,8 @@ internal sealed class FunctionBodyBinder
     private readonly FileSymbolScope _fileScope;
     private readonly DiagnosticBag _diagnostics;
     private readonly ConstantEvaluationContext _constants;
+    private readonly SemanticInfoStore _semanticInfo;
+    private readonly CancellationToken _cancellationToken;
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
     internal IReadOnlyDictionary<BoundExpression, TextLocation> ExpressionLocations => _expressionLocations;
     private readonly HashSet<LocalVariableSymbol> _definitelyAssigned = [];
@@ -57,12 +59,15 @@ internal sealed class FunctionBodyBinder
         return (current, current);
     }
 
-    public FunctionBodyBinder(FunctionSymbol function, FileSymbolScope fileScope, DiagnosticBag diagnostics, ConstantEvaluationContext constants)
+    public FunctionBodyBinder(FunctionSymbol function, FileSymbolScope fileScope, DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants, SemanticInfoStore semanticInfo, CancellationToken cancellationToken = default)
     {
         _function = function;
         _fileScope = fileScope;
         _diagnostics = diagnostics;
         _constants = constants;
+        _semanticInfo = semanticInfo;
+        _cancellationToken = cancellationToken;
         if (function.FunctionKind == FunctionKind.InstanceInitializer && function.ContainingType is StructTypeSymbol initializedType)
             foreach (FieldSymbol field in initializedType.Fields.Where(field => TypeFacts.ContainsReferenceStorage(field.Type)))
                 _requiredFields.Add(field, new LocalVariableSymbol(field.Name, field.Type, _function, false));
@@ -75,6 +80,7 @@ internal sealed class FunctionBodyBinder
 
     public BoundBlockStatement BindBody(BlockStatementSyntax body)
     {
+        _cancellationToken.ThrowIfCancellationRequested();
         if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingType is StructTypeSymbol owner)
         {
             foreach (FieldSymbol field in owner.Fields.Where(field => field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type)))
@@ -104,7 +110,8 @@ internal sealed class FunctionBodyBinder
             {
                 if (!baseConstructor.IsPublic)
                 {
-                    _diagnostics.Report(syntax?.BaseKeyword?.Location ?? location, $"constructor '{baseType.Name}' is private");
+                    _diagnostics.Report(syntax?.BaseKeyword?.Location ?? location, $"constructor '{baseType.Name}' is private",
+                        DiagnosticIds.InaccessibleSymbol);
                 }
                 arguments = ValidateFunctionArguments(baseConstructor, arguments, baseArguments, location);
                 baseConstructorCall = new BoundExpressionStatement(new BoundBaseLifecycleCallExpression(baseConstructor, arguments));
@@ -116,11 +123,13 @@ internal sealed class FunctionBodyBinder
             ConstructorDeclarationSyntax? syntax = _function.Declaration as ConstructorDeclarationSyntax;
             if (syntax is not null && !syntax.BaseArguments.IsEmpty)
             {
-                _diagnostics.Report(syntax.BaseKeyword?.Location ?? syntax.IdentifierToken.Location, $"base struct '{baseWithoutConstructor.Name}' does not declare a constructor");
+                _diagnostics.Report(syntax.BaseKeyword?.Location ?? syntax.IdentifierToken.Location, $"base struct '{baseWithoutConstructor.Name}' does not declare a constructor",
+                    DiagnosticIds.MissingConstructor);
             }
         }
 
         BoundBlockStatement boundBody = BindBlockStatement(body, createScope: false);
+        RecordScope(body, _scope);
         if (!AlwaysReturns(boundBody)) ValidateRequiredFields(body.CloseBraceToken.Location);
         if (_function.FunctionKind == FunctionKind.Constructor &&
             _function.ContainingType is StructTypeSymbol constructedType)
@@ -149,7 +158,8 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(
                 body.CloseBraceToken.Location,
-                $"not all code paths in function '{_function.Name}' return a value");
+                $"not all code paths in function '{_function.Name}' return a value",
+                DiagnosticIds.MissingReturn);
         }
 
         return boundBody;
@@ -162,11 +172,13 @@ internal sealed class FunctionBodyBinder
             return null;
 
         BoundExpression initializer = ContextualizeConversion(BindExpression(syntax), field.Type);
+        SetConvertedType(syntax, initializer.Type);
         if (!TypeFacts.CanAssign(field.Type, initializer.Type))
             ReportCannotConvert(GetLocation(syntax), initializer.Type, field.Type);
 
         if (field.Type is ArrayTypeSymbol && GetArrayStorage(initializer) == ArrayStorageKind.Stack)
-            _diagnostics.Report(GetLocation(syntax), "stack array cannot escape through this assignment");
+            _diagnostics.Report(GetLocation(syntax), "stack array cannot escape through this assignment",
+                DiagnosticIds.StackArrayEscape);
 
         if (_requiredFields.TryGetValue(field, out var required)) _definitelyAssigned.Add(required);
 
@@ -215,8 +227,11 @@ internal sealed class FunctionBodyBinder
         var statements = ImmutableArray.CreateBuilder<BoundStatement>();
         foreach (StatementSyntax statement in syntax.Statements)
         {
+            _cancellationToken.ThrowIfCancellationRequested();
             statements.Add(BindStatement(statement));
         }
+
+        RecordScope(syntax, _scope);
 
         if (previous is not null)
         {
@@ -318,6 +333,13 @@ internal sealed class FunctionBodyBinder
 
         RestoreDefinitelyAssigned(afterCondition);
         RestoreArrayState(MergeArrayState(arraysAfterCondition, CloneArrayState()));
+        (int forEnd, bool includeForEnd) = GetStatementEnd(syntax.Body);
+        RecordScope(
+            syntax.ForKeyword.Location.Source,
+            TextSpan.FromBounds(syntax.ForKeyword.Location.Span.Start,
+                Math.Max(syntax.ForKeyword.Location.Span.Start, forEnd)),
+            _scope,
+            includeForEnd);
         _scope = previous;
         return new BoundForStatement(initializer, condition, increment, body);
     }
@@ -326,7 +348,8 @@ internal sealed class FunctionBodyBinder
     {
         BoundExpression expression = BindExpression(syntax.Expression);
         if (!TypeFacts.IsInteger(expression.Type) && expression.Type is not EnumTypeSymbol && !TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
-            _diagnostics.Report(syntax.SwitchKeyword.Location, "switch operand must be an integer or enum");
+            _diagnostics.Report(syntax.SwitchKeyword.Location, "switch operand must be an integer or enum",
+                DiagnosticIds.InvalidSwitchOperand);
         var values = new HashSet<System.Numerics.BigInteger>();
         bool hasDefault = false;
         var sections = ImmutableArray.CreateBuilder<BoundSwitchSection>();
@@ -336,15 +359,17 @@ internal sealed class FunctionBodyBinder
         var arrayExits = new List<Dictionary<LocalVariableSymbol, ArrayState>>();
         _switchExits.Push((_loopDepth, exits, arrayExits));
         _switchDepth++;
-        foreach (SwitchSectionSyntax section in syntax.Sections)
+        for (int sectionIndex = 0; sectionIndex < syntax.Sections.Length; sectionIndex++)
         {
+            SwitchSectionSyntax section = syntax.Sections[sectionIndex];
             _definitelyAssigned.Clear();
             _definitelyAssigned.UnionWith(assignedBefore);
             RestoreArrayState(arraysBefore);
             BoundExpression? value = null;
             if (section.Value is null)
             {
-                if (hasDefault) _diagnostics.Report(section.Label.Location, "duplicate default label");
+                if (hasDefault) _diagnostics.Report(section.Label.Location, "duplicate default label",
+                    DiagnosticIds.DuplicateSwitchLabel);
                 hasDefault = true;
             }
             else
@@ -353,28 +378,44 @@ internal sealed class FunctionBodyBinder
                 ConstantFoldStatus status = _constants.Fold(boundValue, out object? constant);
                 if (status == ConstantFoldStatus.Invalid ||
                     !(TypeFacts.IsInteger(boundValue.Type) || boundValue.Type is EnumTypeSymbol))
-                    _diagnostics.Report(section.Label.Location, "case value must be an integer or enum compile-time constant");
+                    _diagnostics.Report(section.Label.Location, "case value must be an integer or enum compile-time constant",
+                        DiagnosticIds.SwitchCaseConstantRequired);
                 else if (!TypeIdentity.AreSame(expression.Type, boundValue.Type) &&
                          !(expression.Type is PrimitiveTypeSymbol { IsInteger: true } integer && TypeFacts.IsInteger(boundValue.Type) &&
                            (status == ConstantFoldStatus.TargetDependent || SemanticAnalyzer.FitsInteger(SemanticAnalyzer.ToInteger(constant), integer, _constants.TargetLayout))))
-                    _diagnostics.Report(section.Label.Location, "case value is not compatible with the switch operand type");
+                    _diagnostics.Report(section.Label.Location, "case value is not compatible with the switch operand type",
+                        DiagnosticIds.SwitchCaseTypeMismatch);
                 else if (status == ConstantFoldStatus.TargetDependent)
                     value = boundValue;
                 else
                 {
                     var number = SemanticAnalyzer.ToInteger(constant);
                     if (expression.Type is PrimitiveTypeSymbol { IsInteger: true } operandType && !SemanticAnalyzer.FitsInteger(number, operandType, _constants.TargetLayout))
-                        _diagnostics.Report(section.Label.Location, "case value is not compatible with the switch operand type");
-                    if (!values.Add(number)) _diagnostics.Report(section.Label.Location, "duplicate case value");
+                        _diagnostics.Report(section.Label.Location, "case value is not compatible with the switch operand type",
+                            DiagnosticIds.SwitchCaseTypeMismatch);
+                    if (!values.Add(number)) _diagnostics.Report(section.Label.Location, "duplicate case value",
+                        DiagnosticIds.DuplicateSwitchLabel);
                     value = new BoundLiteralExpression(constant, expression.Type);
                 }
             }
             BoundScope previous = _scope;
             _scope = new BoundScope(previous);
             var body = new BoundBlockStatement(section.Statements.Select(BindStatement).ToImmutableArray());
+            int sectionEnd = sectionIndex + 1 < syntax.Sections.Length
+                ? syntax.Sections[sectionIndex + 1].Label.Location.Span.Start
+                : syntax.CloseBraceToken?.Location.Span.Start ??
+                  (section.Statements.IsEmpty ? section.Label.Location.Span.End : GetStatementEnd(section.Statements[^1]).End);
+            bool includeSectionEnd = sectionIndex == syntax.Sections.Length - 1 && syntax.CloseBraceToken?.IsMissing == true;
+            RecordScope(
+                section.Label.Location.Source,
+                TextSpan.FromBounds(section.Label.Location.Span.Start,
+                    Math.Max(section.Label.Location.Span.Start, sectionEnd)),
+                _scope,
+                includeSectionEnd);
             _scope = previous;
             if (!body.Statements.IsEmpty && !TerminatesCase(body))
-                _diagnostics.Report(section.Label.Location, "implicit fallthrough is not allowed; terminate the case with break, return, or continue");
+                _diagnostics.Report(section.Label.Location, "implicit fallthrough is not allowed; terminate the case with break, return, or continue",
+                    DiagnosticIds.SwitchFallthrough);
             sections.Add(new BoundSwitchSection(value, body));
         }
         _switchDepth--;
@@ -393,7 +434,8 @@ internal sealed class FunctionBodyBinder
         _definitelyAssigned.UnionWith(assignedBefore);
         RestoreArrayState(arrayExits.Count == 0 ? arraysBefore : arrayExits.Aggregate(MergeArrayState));
         if (sections.Count > 0 && sections[^1].Body.Statements.IsEmpty)
-            _diagnostics.Report(syntax.Sections[^1].Label.Location, "final case requires an explicitly terminated body");
+            _diagnostics.Report(syntax.Sections[^1].Label.Location, "final case requires an explicitly terminated body",
+                DiagnosticIds.FinalSwitchCaseRequiresTermination);
         return new BoundSwitchStatement(expression, sections.ToImmutable());
     }
 
@@ -408,7 +450,8 @@ internal sealed class FunctionBodyBinder
         }
         if (_loopDepth == 0 && _switchDepth == 0)
         {
-            _diagnostics.Report(syntax.BreakKeyword.Location, "'break' can only be used inside a loop or switch");
+            _diagnostics.Report(syntax.BreakKeyword.Location, "'break' can only be used inside a loop or switch",
+                DiagnosticIds.BreakOutsideLoopOrSwitch);
         }
 
         return new BoundBreakStatement();
@@ -418,7 +461,8 @@ internal sealed class FunctionBodyBinder
     {
         if (_loopDepth == 0)
         {
-            _diagnostics.Report(syntax.ContinueKeyword.Location, "'continue' can only be used inside a loop");
+            _diagnostics.Report(syntax.ContinueKeyword.Location, "'continue' can only be used inside a loop",
+                DiagnosticIds.ContinueOutsideLoop);
         }
 
         return new BoundContinueStatement();
@@ -443,7 +487,8 @@ internal sealed class FunctionBodyBinder
         BoundExpression condition = BindExpression(syntax);
         if (!TypeIdentity.AreSame(condition.Type, BuiltinTypes.Bool) && !TypeIdentity.AreSame(condition.Type, BuiltinTypes.Error))
         {
-            _diagnostics.Report(GetLocation(syntax), $"condition must have type 'bool', but has type '{condition.Type.ToDisplayString()}'");
+            _diagnostics.Report(GetLocation(syntax), $"condition must have type 'bool', but has type '{condition.Type.ToDisplayString()}'",
+                DiagnosticIds.InvalidCondition);
         }
 
         return condition;
@@ -454,13 +499,16 @@ internal sealed class FunctionBodyBinder
         bool isConstant = syntax.Type.GetQualifier(SyntaxKind.ConstKeyword) is not null && !syntax.Type.Contains<PointerTypeSyntax>() && !syntax.Type.Contains<ReferenceTypeSyntax>();
         TypeSymbol type = TypeResolver.Resolve(isConstant ? syntax.Type.WithoutQualifier(SyntaxKind.ConstKeyword) : syntax.Type, _fileScope, _diagnostics);
         if (type is StructTypeSymbol { IsAbstract: true } abstractType)
-            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{abstractType.Name}' cannot be instantiated");
+            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{abstractType.Name}' cannot be instantiated",
+                DiagnosticIds.AbstractInstantiation);
         if (TypeIdentity.AreSame(type, BuiltinTypes.Void))
         {
-            _diagnostics.Report(syntax.Type.NameToken.Location, "local variable type cannot be 'void'");
+            _diagnostics.Report(syntax.Type.NameToken.Location, "local variable type cannot be 'void'",
+                DiagnosticIds.InvalidLocalType);
         }
 
         var variable = new LocalVariableSymbol(syntax.IdentifierToken.Text, type, _function, isConstant || syntax.Type.IsBindingReadonly(), syntax);
+        _semanticInfo.Declarations[syntax] = variable;
         if (type is StructTypeSymbol structure && structure.FindDestructor() is { } destructor)
         {
             variable.Destructor = destructor;
@@ -471,23 +519,29 @@ internal sealed class FunctionBodyBinder
         bool declared = _scope.TryDeclare(variable);
         if (!declared)
         {
+            VariableSymbol? previousVariable = _scope.LookupCurrent(variable.Name);
             _diagnostics.Report(
                 syntax.IdentifierToken.Location,
-                $"variable '{variable.Name}' is already declared in this scope");
+                $"variable '{variable.Name}' is already declared in this scope",
+                DiagnosticIds.DuplicateDeclaration,
+                previousVariable?.Locations.Select(location => new RelatedDiagnosticLocation(location, "previous declaration")));
         }
 
         BoundExpression? initializer = syntax.Initializer is null ? null : BindExpression(syntax.Initializer);
         if (type is ReferenceTypeSymbol && initializer is null)
         {
-            _diagnostics.Report(syntax.IdentifierToken.Location, "reference variables must be initialized");
+            _diagnostics.Report(syntax.IdentifierToken.Location, "reference variables must be initialized",
+                DiagnosticIds.ReferenceRequiresInitializer);
         }
         else if (syntax.Type.IsBindingReadonly() && initializer is null)
         {
-            _diagnostics.Report(syntax.IdentifierToken.Location, "readonly local variables must be initialized");
+            _diagnostics.Report(syntax.IdentifierToken.Location, "readonly local variables must be initialized",
+                DiagnosticIds.ReadonlyRequiresInitializer);
         }
         if (initializer is not null)
         {
             initializer = ContextualizeConversion(initializer, type);
+            SetConvertedType(syntax.Initializer!, initializer.Type);
         }
 
         if (isConstant)
@@ -497,7 +551,8 @@ internal sealed class FunctionBodyBinder
             object? constantValue = null;
             ConstantFoldStatus status = initializer is null ? ConstantFoldStatus.Invalid : _constants.Fold(initializer, out constantValue);
             if (status == ConstantFoldStatus.Invalid)
-                _diagnostics.Report(syntax.IdentifierToken.Location, "const local requires a compile-time constant initializer");
+                _diagnostics.Report(syntax.IdentifierToken.Location, "const local requires a compile-time constant initializer",
+                    DiagnosticIds.ConstantValueRequired);
             else if (status == ConstantFoldStatus.TargetDependent)
                 variable.ConstantValue = initializer;
             else
@@ -530,18 +585,21 @@ internal sealed class FunctionBodyBinder
         if (expression is not null)
         {
             expression = ContextualizeConversion(expression, _function.ReturnType);
+            SetConvertedType(syntax.Expression!, expression.Type);
         }
 
         if (TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void))
         {
             if (expression is not null)
             {
-                _diagnostics.Report(GetLocation(syntax.Expression!), "a void function cannot return a value");
+                _diagnostics.Report(GetLocation(syntax.Expression!), "a void function cannot return a value",
+                    DiagnosticIds.ReturnValueFromVoid);
             }
         }
         else if (expression is null)
         {
-            _diagnostics.Report(syntax.ReturnKeyword.Location, $"function '{_function.Name}' must return a value of type '{_function.ReturnType.ToDisplayString()}'");
+            _diagnostics.Report(syntax.ReturnKeyword.Location, $"function '{_function.Name}' must return a value of type '{_function.ReturnType.ToDisplayString()}'",
+                DiagnosticIds.MissingReturnValue);
         }
         else if (!TypeFacts.CanAssign(_function.ReturnType, expression.Type))
         {
@@ -550,7 +608,8 @@ internal sealed class FunctionBodyBinder
 
         if (expression is not null && GetArrayStorage(expression) == ArrayStorageKind.Stack)
         {
-            _diagnostics.Report(GetLocation(syntax.Expression!), "stack array cannot be returned from a function");
+            _diagnostics.Report(GetLocation(syntax.Expression!), "stack array cannot be returned from a function",
+                DiagnosticIds.StackArrayReturn);
         }
 
         ValidateRequiredFields(syntax.ReturnKeyword.Location);
@@ -559,8 +618,10 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindExpression(ExpressionSyntax syntax)
     {
+        _cancellationToken.ThrowIfCancellationRequested();
         BoundExpression expression = syntax switch
         {
+            MissingExpressionSyntax => new BoundErrorExpression(),
             LiteralExpressionSyntax literal => BindLiteralExpression(literal),
             NameExpressionSyntax name => BindNameExpression(name),
             ThisExpressionSyntax @this => BindThisExpression(@this),
@@ -580,14 +641,40 @@ internal sealed class FunctionBodyBinder
             CastExpressionSyntax cast => BindCastExpression(cast),
             _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
         };
+        _semanticInfo.Types[syntax] = new TypeInfo(expression.Type, expression.Type);
+        if (GetReferencedSymbol(expression) is { } referenced)
+        {
+            if (!_semanticInfo.Symbols.ContainsKey(syntax))
+                SetSelectedSymbolPreservingCandidates(syntax, referenced);
+            if (syntax is CallExpressionSyntax call)
+            {
+                if (!_semanticInfo.Symbols.ContainsKey(call.Target))
+                    SetSelectedSymbolPreservingCandidates(call.Target, referenced);
+                if (_semanticInfo.Symbols.TryGetValue(call.Target, out SymbolInfo targetInfo))
+                    _semanticInfo.Symbols[syntax] = targetInfo;
+            }
+        }
+        else if (syntax is CallExpressionSyntax failedCall &&
+                 _semanticInfo.Symbols.TryGetValue(failedCall.Target, out SymbolInfo failedTargetInfo))
+            _semanticInfo.Symbols[syntax] = failedTargetInfo;
+        else if (syntax is MissingExpressionSyntax || expression is BoundErrorExpression)
+            _semanticInfo.Symbols.TryAdd(syntax, new SymbolInfo(null, [],
+                syntax is MissingExpressionSyntax ? CandidateReason.Incomplete : CandidateReason.NotFound));
         _expressionLocations[expression] = GetLocation(syntax);
         if (expression is BoundThisExpression && !ReferenceEquals(syntax, _fieldReceiverSyntax))
             ValidateRequiredFields(GetLocation(syntax));
         if (!ReferenceEquals(syntax, _initializationTarget) && expression is BoundMemberAccessExpression { Receiver: BoundThisExpression } fieldRead &&
             _requiredFields.TryGetValue(fieldRead.Field, out var required) && !_definitelyAssigned.Contains(required))
-            _diagnostics.Report(GetLocation(syntax), $"field '{fieldRead.Field.Name}' is used before it is initialized");
+            _diagnostics.Report(GetLocation(syntax), $"field '{fieldRead.Field.Name}' is used before it is initialized",
+                DiagnosticIds.DefiniteAssignment);
         BoundExpression result = DereferenceReference(expression);
         _expressionLocations[result] = GetLocation(syntax);
+        _semanticInfo.Receivers[syntax] = new ReceiverInfo(
+            result.Type,
+            IsStatic: false,
+            IsReadonly: result.Type is PointerTypeSymbol { IsReadonly: true } or ReferenceTypeSymbol { IsReadonly: true } ||
+                IsAddressable(result) && !IsWritable(result),
+            IsWritable: IsWritable(result));
         return result;
     }
 
@@ -600,12 +687,14 @@ internal sealed class FunctionBodyBinder
     {
         if (_function.ContainingType is not { } containingType || _function.IsStatic)
         {
-            _diagnostics.Report(syntax.ThisKeyword.Location, "'this' is available only in instance members");
+            _diagnostics.Report(syntax.ThisKeyword.Location, "'this' is available only in instance members",
+                DiagnosticIds.ThisOutsideInstanceMember);
             return new BoundErrorExpression();
         }
         if (_bindingBaseConstructorArguments)
         {
-            _diagnostics.Report(syntax.ThisKeyword.Location, "the derived object cannot be used in base constructor arguments");
+            _diagnostics.Report(syntax.ThisKeyword.Location, "the derived object cannot be used in base constructor arguments",
+                DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
             return new BoundErrorExpression();
         }
         return new BoundThisExpression(containingType, _fileScope.TypeFactory.PointerTo(containingType, isReadonly: _function.IsReadonly));
@@ -638,6 +727,7 @@ internal sealed class FunctionBodyBinder
         VariableSymbol? variable = _scope.Lookup(syntax.IdentifierToken.Text);
         if (variable is not null)
         {
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(variable);
             if (variable is LocalVariableSymbol { ConstantValue: not null } localConstant) return localConstant.ConstantValue;
             if (requireDefinitelyAssigned &&
                 variable is LocalVariableSymbol local &&
@@ -645,7 +735,8 @@ internal sealed class FunctionBodyBinder
             {
                 _diagnostics.Report(
                     syntax.IdentifierToken.Location,
-                    $"local variable '{local.Name}' is used before it is initialized");
+                    $"local variable '{local.Name}' is used before it is initialized",
+                    DiagnosticIds.DefiniteAssignment);
             }
 
             return new BoundVariableExpression(variable);
@@ -655,26 +746,33 @@ internal sealed class FunctionBodyBinder
         {
             ConstantSymbol? associatedConstant = containingType.FindMember<ConstantSymbol>(syntax.IdentifierToken.Text);
             if (associatedConstant?.HasValue == true)
+            {
+                _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(associatedConstant);
                 return associatedConstant.BoundValue!;
+            }
             if (associatedConstant is not null)
                 return new BoundErrorExpression();
 
             FieldSymbol? field = containingType.FindInstanceField(syntax.IdentifierToken.Text);
             if (field is not null)
             {
+                _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(field);
                 if (_bindingBaseConstructorArguments)
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments",
+                        DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
                     return new BoundErrorExpression();
                 }
                 if (!field.IsPublic && !TypeIdentity.AreSame(containingType, field.ContainingType))
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'",
+                        DiagnosticIds.InaccessibleSymbol);
                     return new BoundErrorExpression();
                 }
                 if (_function.IsStatic)
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"static method '{_function.Name}' cannot access instance field '{field.Name}' without an explicit instance");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"static method '{_function.Name}' cannot access instance field '{field.Name}' without an explicit instance",
+                        DiagnosticIds.StaticContextInstanceFieldAccess);
                     return new BoundErrorExpression();
                 }
                 PointerTypeSymbol thisType = _fileScope.TypeFactory.PointerTo(containingType, isReadonly: _function.IsReadonly);
@@ -688,14 +786,17 @@ internal sealed class FunctionBodyBinder
             PropertySymbol? property = containingType.FindMember<PropertySymbol>(syntax.IdentifierToken.Text);
             if (property is not null)
             {
+                _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(property);
                 if (_bindingBaseConstructorArguments)
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments",
+                        DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
                     return new BoundErrorExpression();
                 }
                 if (_function.IsStatic)
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"static method '{_function.Name}' cannot access instance property '{property.Name}' without an explicit instance");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"static method '{_function.Name}' cannot access instance property '{property.Name}' without an explicit instance",
+                        DiagnosticIds.StaticContextInstancePropertyAccess);
                     return new BoundErrorExpression();
                 }
 
@@ -714,11 +815,15 @@ internal sealed class FunctionBodyBinder
             syntax.IdentifierToken.Location,
             _diagnostics);
         if (constant?.HasValue == true)
+        {
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(constant);
             return constant.BoundValue!;
+        }
         if (constant is not null)
             return new BoundErrorExpression();
 
-        _diagnostics.Report(syntax.IdentifierToken.Location, $"unknown identifier '{syntax.IdentifierToken.Text}'");
+        _diagnostics.Report(syntax.IdentifierToken.Location, $"unknown identifier '{syntax.IdentifierToken.Text}'",
+            DiagnosticIds.UnknownIdentifier);
         return new BoundErrorExpression();
     }
 
@@ -758,7 +863,8 @@ internal sealed class FunctionBodyBinder
             {
                 _diagnostics.Report(
                     operatorToken.Location,
-                    $"unary operator '{operatorToken.Text}' is not defined for type '{operand.Type.ToDisplayString()}'");
+                    $"unary operator '{operatorToken.Text}' is not defined for type '{operand.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidOperatorOperands);
             }
 
             return new BoundErrorExpression();
@@ -816,7 +922,8 @@ internal sealed class FunctionBodyBinder
             {
                 _diagnostics.Report(
                     syntax.OperatorToken.Location,
-                    $"binary operator '{syntax.OperatorToken.Text}' is not defined for types '{left.Type.ToDisplayString()}' and '{right.Type.ToDisplayString()}'");
+                    $"binary operator '{syntax.OperatorToken.Text}' is not defined for types '{left.Type.ToDisplayString()}' and '{right.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidOperatorOperands);
             }
 
             return new BoundErrorExpression();
@@ -841,16 +948,19 @@ internal sealed class FunctionBodyBinder
         if (operation is SyntaxKind.LessLessToken or SyntaxKind.GreaterGreaterToken)
         {
             if (count < 0 || width is int bits && count >= bits)
-                _diagnostics.Report(location, "invalid integer shift: count must be nonnegative and less than the operand bit width");
+                _diagnostics.Report(location, "invalid integer shift: count must be nonnegative and less than the operand bit width",
+                    DiagnosticIds.InvalidShift);
         }
         else if (operation is SyntaxKind.SlashToken or SyntaxKind.PercentToken)
         {
             if (count == 0)
-                _diagnostics.Report(location, "invalid integer division or remainder by zero");
+                _diagnostics.Report(location, "invalid integer division or remainder by zero",
+                    DiagnosticIds.DivisionByZero);
             else if (integer.IsSigned && width is int bits && count == -1 &&
                      _constants.TryFold(left, out object? leftValue) &&
                      SemanticAnalyzer.ToInteger(leftValue) == -(BigInteger.One << (bits - 1)))
-                _diagnostics.Report(location, "invalid integer division or remainder: signed minimum with -1");
+                _diagnostics.Report(location, "invalid integer division or remainder: signed minimum with -1",
+                    DiagnosticIds.SignedDivisionOverflow);
         }
     }
 
@@ -885,13 +995,15 @@ internal sealed class FunctionBodyBinder
         if (isSimpleAssignment)
         {
             expression = ContextualizeConversion(expression, target.Type);
+            SetConvertedType(syntax.Expression, expression.Type);
         }
 
         if (!IsWritable(target))
         {
             if (!TypeIdentity.AreSame(target.Type, BuiltinTypes.Error))
             {
-                _diagnostics.Report(GetLocation(syntax.Target), "left side of assignment must be writable");
+                _diagnostics.Report(GetLocation(syntax.Target), "left side of assignment must be writable",
+                    DiagnosticIds.InvalidAssignmentTarget);
             }
 
             return new BoundErrorExpression();
@@ -913,7 +1025,8 @@ internal sealed class FunctionBodyBinder
             {
                 _diagnostics.Report(
                     syntax.OperatorToken.Location,
-                    $"operator '{syntax.OperatorToken.Text}' is not defined for types '{target.Type.ToDisplayString()}' and '{expression.Type.ToDisplayString()}'");
+                    $"operator '{syntax.OperatorToken.Text}' is not defined for types '{target.Type.ToDisplayString()}' and '{expression.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidOperatorOperands);
             }
         }
 
@@ -926,7 +1039,8 @@ internal sealed class FunctionBodyBinder
             }
             else if (storage == ArrayStorageKind.Stack)
             {
-                _diagnostics.Report(GetLocation(syntax.Expression), "stack array cannot escape through this assignment");
+                _diagnostics.Report(GetLocation(syntax.Expression), "stack array cannot escape through this assignment",
+                    DiagnosticIds.StackArrayEscape);
             }
         }
 
@@ -951,6 +1065,31 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindMemberAccessExpression(MemberAccessExpressionSyntax syntax)
     {
+        if (syntax.MemberToken.IsMissing)
+        {
+            bool recordedStaticReceiver = false;
+            if (syntax.OperatorToken.Kind == SyntaxKind.DotToken &&
+                TryGetDottedName(syntax.Receiver, out ImmutableArray<SyntaxToken> receiverParts) &&
+                receiverParts.Length > 0 &&
+                _scope.Lookup(receiverParts[0].Text) is null &&
+                _function.ContainingType?.FindInstanceField(receiverParts[0].Text) is null)
+            {
+                string[] receiverName = receiverParts.Select(part => part.Text).ToArray();
+                TypeSymbol? receiverType = _fileScope.ResolveQualifiedType(receiverName);
+                if (receiverType is null && receiverParts.Length == 1)
+                    receiverType = _fileScope.ResolveType(receiverParts[0].Text, receiverParts[0].Location,
+                        new DiagnosticBag());
+                if (receiverType is not null)
+                {
+                    RecordStaticReceiver(syntax.Receiver, receiverType);
+                    recordedStaticReceiver = true;
+                }
+            }
+            if (!recordedStaticReceiver)
+                _ = BindFieldReceiver(syntax.Receiver);
+            _semanticInfo.Symbols[syntax] = new SymbolInfo(null, [], CandidateReason.Incomplete);
+            return new BoundErrorExpression();
+        }
         if (syntax.OperatorToken.Kind == SyntaxKind.DotToken && TryGetDottedName(syntax, out ImmutableArray<SyntaxToken> qualifiedName) && qualifiedName.Length >= 2)
         {
             string[] typeParts = qualifiedName.Take(qualifiedName.Length - 1).Select(token => token.Text).ToArray();
@@ -960,15 +1099,25 @@ internal sealed class FunctionBodyBinder
             if (resolved is EnumTypeSymbol enumeration)
             {
                 ConstantSymbol? member = enumeration.FindMember(qualifiedName[^1].Text);
-                if (member?.BoundValue is BoundExpression value) return value;
-                _diagnostics.Report(syntax.MemberToken.Location, $"enum '{enumeration.Name}' has no valid member '{syntax.MemberToken.Text}'");
+                if (member?.BoundValue is BoundExpression value)
+                {
+                    RecordStaticReceiver(syntax.Receiver, enumeration);
+                    _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(member);
+                    return value;
+                }
+                _diagnostics.Report(syntax.MemberToken.Location, $"enum '{enumeration.Name}' has no valid member '{syntax.MemberToken.Text}'",
+                    DiagnosticIds.UnknownEnumMember);
                 return new BoundErrorExpression();
             }
             if (resolved is DeclaredTypeSymbol staticType)
             {
                 ConstantSymbol? constant = staticType.FindMember<ConstantSymbol>(qualifiedName[^1].Text);
                 if (constant?.HasValue == true)
+                {
+                    RecordStaticReceiver(syntax.Receiver, staticType);
+                    RecordSymbolAndType(syntax, constant, constant.Type);
                     return constant.BoundValue!;
+                }
                 if (constant is not null)
                     return new BoundErrorExpression();
 
@@ -977,17 +1126,24 @@ internal sealed class FunctionBodyBinder
                 {
                     if (!staticField.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, staticField.ContainingType))
                     {
-                        _diagnostics.Report(qualifiedName[^1].Location, $"static field '{staticField.Name}' is private in struct '{staticField.ContainingType.Name}'");
+                        _diagnostics.Report(qualifiedName[^1].Location, $"static field '{staticField.Name}' is private in struct '{staticField.ContainingType.Name}'",
+                            DiagnosticIds.InaccessibleSymbol);
                         return new BoundErrorExpression();
                     }
+                    RecordStaticReceiver(syntax.Receiver, staticType);
                     return new BoundStaticFieldExpression(staticField);
                 }
             }
         }
 
         BoundExpression receiver = BindFieldReceiver(syntax.Receiver);
-        if (receiver.Type is ArrayTypeSymbol && syntax.OperatorToken.Kind == SyntaxKind.DotToken && syntax.MemberToken.Text is "Length" or "Rank")
+        if (receiver.Type is ArrayTypeSymbol array && syntax.OperatorToken.Kind == SyntaxKind.DotToken && syntax.MemberToken.Text is "Length" or "Rank")
+        {
+            SyntheticMemberSymbol member = _semanticInfo.GetArrayMembers(array)
+                .Single(candidate => candidate.Name == syntax.MemberToken.Text);
+            RecordSymbolAndType(syntax, member, member.Type);
             return new BoundArrayMetadataExpression(receiver, syntax.MemberToken.Text);
+        }
         bool pointerAccess = syntax.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
         InterfaceTypeSymbol? interfaceType = pointerAccess
             ? (receiver.Type as PointerTypeSymbol)?.ElementType as InterfaceTypeSymbol
@@ -999,17 +1155,21 @@ internal sealed class FunctionBodyBinder
             {
                 _diagnostics.Report(
                     syntax.MemberToken.Location,
-                    $"interface '{interfaceType.Name}' does not contain property '{syntax.MemberToken.Text}'");
+                    $"interface '{interfaceType.Name}' does not contain property '{syntax.MemberToken.Text}'",
+                    DiagnosticIds.MissingInterfaceProperty);
                 return new BoundErrorExpression();
             }
+            RecordSymbolAndType(syntax, interfaceProperty, interfaceProperty.Type);
             if (interfaceProperty.Getter is not FunctionSymbol getter)
             {
-                _diagnostics.Report(syntax.MemberToken.Location, $"property '{interfaceProperty.Name}' does not declare a getter");
+                _diagnostics.Report(syntax.MemberToken.Location, $"property '{interfaceProperty.Name}' does not declare a getter",
+                    DiagnosticIds.MissingAccessor);
                 return new BoundErrorExpression();
             }
             if (IsReadonlyReceiver(receiver, pointerAccess) && !getter.IsReadonly)
             {
-                _diagnostics.Report(syntax.MemberToken.Location, $"property '{interfaceProperty.Name}' cannot be read through a readonly interface receiver because its getter is mutable");
+                _diagnostics.Report(syntax.MemberToken.Location, $"property '{interfaceProperty.Name}' cannot be read through a readonly interface receiver because its getter is mutable",
+                    DiagnosticIds.MutableGetterOnReadonlyReceiver);
                 return new BoundErrorExpression();
             }
             return new BoundInterfaceMethodCallExpression(receiver, interfaceType, getter, [], pointerAccess);
@@ -1026,7 +1186,8 @@ internal sealed class FunctionBodyBinder
                 string expected = pointerAccess ? "pointer to struct" : "struct";
                 _diagnostics.Report(
                     syntax.OperatorToken.Location,
-                    $"operator '{syntax.OperatorToken.Text}' requires a {expected}, but has type '{receiver.Type.ToDisplayString()}'");
+                    $"operator '{syntax.OperatorToken.Text}' requires a {expected}, but has type '{receiver.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidMemberReceiver);
             }
 
             return new BoundErrorExpression();
@@ -1036,6 +1197,7 @@ internal sealed class FunctionBodyBinder
         PropertySymbol? property = structType.FindMember<PropertySymbol>(syntax.MemberToken.Text);
         if (property is not null)
         {
+            RecordSymbolAndType(syntax, property, property.Type);
             bool receiverIsReadonly =
                 (pointerAccess && receiver.Type is PointerTypeSymbol { IsReadonly: true }) ||
                 (!pointerAccess && IsAddressable(receiver) && !IsWritable(receiver));
@@ -1051,7 +1213,8 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(
                 syntax.MemberToken.Location,
-                $"struct '{structType.Name}' does not contain field '{syntax.MemberToken.Text}'");
+                $"struct '{structType.Name}' does not contain field '{syntax.MemberToken.Text}'",
+                DiagnosticIds.MissingStructField);
             return new BoundErrorExpression();
         }
 
@@ -1059,7 +1222,8 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(
                 syntax.MemberToken.Location,
-                $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'");
+                $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'",
+                DiagnosticIds.InaccessibleSymbol);
         }
 
         return new BoundMemberAccessExpression(receiver, field, pointerAccess);
@@ -1094,10 +1258,13 @@ internal sealed class FunctionBodyBinder
                 InterfacePropertySymbol? interfaceProperty = interfaceType.FindProperty(member.MemberToken.Text);
                 if (interfaceProperty is null)
                     return null;
+                RecordSymbolAndType(syntax.Target, interfaceProperty, interfaceProperty.Type);
+                _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(interfaceProperty);
                 location = member.MemberToken.Location;
                 if (interfaceProperty.Setter is not FunctionSymbol interfaceSetter)
                 {
-                    _diagnostics.Report(location, $"property '{interfaceProperty.Name}' does not declare a setter");
+                    _diagnostics.Report(location, $"property '{interfaceProperty.Name}' does not declare a setter",
+                        DiagnosticIds.MissingAccessor);
                     return new BoundErrorExpression();
                 }
                 bool interfaceReceiverIsReadonly =
@@ -1105,7 +1272,8 @@ internal sealed class FunctionBodyBinder
                     (!pointerAccess && (!IsAddressable(receiver) || !IsWritable(receiver)));
                 if (interfaceReceiverIsReadonly)
                 {
-                    _diagnostics.Report(location, $"property '{interfaceProperty.Name}' cannot be assigned through a readonly receiver");
+                    _diagnostics.Report(location, $"property '{interfaceProperty.Name}' cannot be assigned through a readonly receiver",
+                        DiagnosticIds.WriteThroughReadonlyReceiver);
                     return new BoundErrorExpression();
                 }
 
@@ -1113,7 +1281,8 @@ internal sealed class FunctionBodyBinder
                 {
                     if (interfaceProperty.Getter is not FunctionSymbol interfaceGetter)
                     {
-                        _diagnostics.Report(location, $"property '{interfaceProperty.Name}' does not declare a getter");
+                        _diagnostics.Report(location, $"property '{interfaceProperty.Name}' does not declare a getter",
+                            DiagnosticIds.MissingAccessor);
                         return new BoundErrorExpression();
                     }
 
@@ -1147,6 +1316,8 @@ internal sealed class FunctionBodyBinder
                 : receiver.Type as DeclaredTypeSymbol;
             if (structType is null || (property = structType.FindMember<PropertySymbol>(member.MemberToken.Text)) is null)
                 return null;
+            RecordSymbolAndType(syntax.Target, property, property.Type);
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(property);
             location = member.MemberToken.Location;
         }
         else if (syntax.Target is NameExpressionSyntax name && _function.ContainingType is { } containingType)
@@ -1156,6 +1327,8 @@ internal sealed class FunctionBodyBinder
             property = containingType.FindMember<PropertySymbol>(name.IdentifierToken.Text);
             if (property is null)
                 return null;
+            RecordSymbolAndType(syntax.Target, property, property.Type);
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(property);
             pointerAccess = true;
             receiver = new BoundThisExpression(
                 containingType,
@@ -1169,20 +1342,24 @@ internal sealed class FunctionBodyBinder
 
         if (_bindingBaseConstructorArguments)
         {
-            _diagnostics.Report(location, "the derived object cannot be used in base constructor arguments");
+            _diagnostics.Report(location, "the derived object cannot be used in base constructor arguments",
+                DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
             return new BoundErrorExpression();
         }
         if (_function.IsStatic && syntax.Target is NameExpressionSyntax)
         {
-            _diagnostics.Report(location, $"static method '{_function.Name}' cannot access instance property '{property.Name}' without an explicit instance");
+            _diagnostics.Report(location, $"static method '{_function.Name}' cannot access instance property '{property.Name}' without an explicit instance",
+                DiagnosticIds.StaticContextInstancePropertyAccess);
             return new BoundErrorExpression();
         }
         if (receiver is BoundThisExpression) ValidateRequiredFields(location);
         if (!property.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, property.ContainingType))
-            _diagnostics.Report(location, $"property '{property.Name}' is private in struct '{property.ContainingType.Name}'");
+            _diagnostics.Report(location, $"property '{property.Name}' is private in struct '{property.ContainingType.Name}'",
+                DiagnosticIds.InaccessibleSymbol);
         if (property.Setter is not FunctionSymbol setter)
         {
-            _diagnostics.Report(location, $"property '{property.Name}' does not declare a setter");
+            _diagnostics.Report(location, $"property '{property.Name}' does not declare a setter",
+                DiagnosticIds.MissingAccessor);
             return new BoundErrorExpression();
         }
 
@@ -1191,7 +1368,8 @@ internal sealed class FunctionBodyBinder
             (!pointerAccess && (!IsAddressable(receiver) || !IsWritable(receiver)));
         if (receiverIsReadonly)
         {
-            _diagnostics.Report(location, $"property '{property.Name}' cannot be assigned through a readonly receiver");
+            _diagnostics.Report(location, $"property '{property.Name}' cannot be assigned through a readonly receiver",
+                DiagnosticIds.WriteThroughReadonlyReceiver);
             return new BoundErrorExpression();
         }
 
@@ -1199,7 +1377,8 @@ internal sealed class FunctionBodyBinder
         {
             if (property.Getter is not FunctionSymbol getter)
             {
-                _diagnostics.Report(location, $"property '{property.Name}' does not declare a getter");
+                _diagnostics.Report(location, $"property '{property.Name}' does not declare a getter",
+                    DiagnosticIds.MissingAccessor);
                 return new BoundErrorExpression();
             }
 
@@ -1232,15 +1411,18 @@ internal sealed class FunctionBodyBinder
     {
         if (receiver is BoundThisExpression) ValidateRequiredFields(location);
         if (!property.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, property.ContainingType))
-            _diagnostics.Report(location, $"property '{property.Name}' is private in struct '{property.ContainingType.Name}'");
+            _diagnostics.Report(location, $"property '{property.Name}' is private in struct '{property.ContainingType.Name}'",
+                DiagnosticIds.InaccessibleSymbol);
         if (property.Getter is not FunctionSymbol getter)
         {
-            _diagnostics.Report(location, $"property '{property.Name}' does not declare a getter");
+            _diagnostics.Report(location, $"property '{property.Name}' does not declare a getter",
+                DiagnosticIds.MissingAccessor);
             return new BoundErrorExpression();
         }
         if (receiverIsReadonly && !getter.IsReadonly)
         {
-            _diagnostics.Report(location, $"property '{property.Name}' cannot be read through a readonly receiver because its getter is mutable");
+            _diagnostics.Report(location, $"property '{property.Name}' cannot be read through a readonly receiver because its getter is mutable",
+                DiagnosticIds.MutableGetterOnReadonlyReceiver);
             return new BoundErrorExpression();
         }
 
@@ -1252,7 +1434,8 @@ internal sealed class FunctionBodyBinder
         TypeSymbol type = TypeResolver.Resolve(syntax.Type, _fileScope, _diagnostics);
         if (TypeIdentity.AreSame(type, BuiltinTypes.Void) || TypeIdentity.AreSame(type, BuiltinTypes.Error))
         {
-            if (TypeIdentity.AreSame(type, BuiltinTypes.Void)) _diagnostics.Report(syntax.Keyword.Location, "layout intrinsic requires a non-void type");
+            if (TypeIdentity.AreSame(type, BuiltinTypes.Void)) _diagnostics.Report(syntax.Keyword.Location, "layout intrinsic requires a non-void type",
+                DiagnosticIds.LayoutRequiresNonVoidType);
             return new BoundErrorExpression();
         }
         if (syntax.Keyword.Kind != SyntaxKind.OffsetOfKeyword)
@@ -1260,13 +1443,15 @@ internal sealed class FunctionBodyBinder
 
         if (type is not StructTypeSymbol structType)
         {
-            _diagnostics.Report(syntax.Type.NameToken.Location, "offsetof requires a struct type");
+            _diagnostics.Report(syntax.Type.NameToken.Location, "offsetof requires a struct type",
+                DiagnosticIds.OffsetOfRequiresStructType);
             return new BoundErrorExpression();
         }
         FieldSymbol? field = structType.FindField(syntax.FieldToken!.Text);
         if (field is null)
         {
-            _diagnostics.Report(syntax.FieldToken.Location, $"struct '{structType.Name}' does not contain field '{syntax.FieldToken.Text}'");
+            _diagnostics.Report(syntax.FieldToken.Location, $"struct '{structType.Name}' does not contain field '{syntax.FieldToken.Text}'",
+                DiagnosticIds.OffsetOfUnknownField);
             return new BoundErrorExpression();
         }
         return new BoundTypeLayoutExpression(syntax.Keyword.Kind, type, field);
@@ -1279,7 +1464,8 @@ internal sealed class FunctionBodyBinder
         if (!TypeFacts.CanExplicitlyCast(targetType, expression.Type))
         {
             if (!TypeIdentity.AreSame(targetType, BuiltinTypes.Error) && !TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
-                _diagnostics.Report(syntax.CastKeyword.Location, $"cast from '{expression.Type.ToDisplayString()}' to '{targetType.Name}' is not a valid primitive cast");
+                _diagnostics.Report(syntax.CastKeyword.Location, $"cast from '{expression.Type.ToDisplayString()}' to '{targetType.Name}' is not a valid primitive cast",
+                    DiagnosticIds.InvalidCast);
             return new BoundErrorExpression();
         }
         return new BoundCastExpression(expression, targetType);
@@ -1306,14 +1492,21 @@ internal sealed class FunctionBodyBinder
                     (!receiverIsReadonly || candidate.Getter.IsReadonly)),
                 arguments,
                 syntax.OpenBracketToken.Location,
-                structType.Name);
+                structType.Name,
+                syntax);
             if (indexer is null)
                 return new BoundErrorExpression();
+            RecordSymbolAndType(syntax, indexer, indexer.Type);
             if (!indexer.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, indexer.ContainingType))
-                _diagnostics.Report(syntax.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'");
+            {
+                RecordCandidates(syntax, null, [indexer], CandidateReason.Inaccessible);
+                _diagnostics.Report(syntax.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'",
+                    DiagnosticIds.InaccessibleSymbol);
+            }
             if (indexer.Getter is not FunctionSymbol getter)
             {
-                _diagnostics.Report(syntax.OpenBracketToken.Location, "indexer does not declare a getter");
+                _diagnostics.Report(syntax.OpenBracketToken.Location, "indexer does not declare a getter",
+                    DiagnosticIds.MissingAccessor);
                 return new BoundErrorExpression();
             }
             arguments = ValidateFunctionArguments(getter, arguments, syntax.Arguments, syntax.OpenBracketToken.Location);
@@ -1329,9 +1522,11 @@ internal sealed class FunctionBodyBinder
                     (!receiverIsReadonly || candidate.Getter.IsReadonly)),
                 arguments,
                 syntax.OpenBracketToken.Location,
-                interfaceType.Name);
+                interfaceType.Name,
+                syntax);
             if (indexer is null)
                 return new BoundErrorExpression();
+            RecordSymbolAndType(syntax, indexer, indexer.Type);
             FunctionSymbol getter = indexer.Getter!;
             arguments = ValidateFunctionArguments(getter, arguments, syntax.Arguments, syntax.OpenBracketToken.Location);
             return new BoundInterfaceMethodCallExpression(receiver, interfaceType, getter, arguments, IsPointerAccess: false);
@@ -1340,7 +1535,8 @@ internal sealed class FunctionBodyBinder
         int requiredRank = receiver.Type is ArrayTypeSymbol rankedArray ? rankedArray.Rank : 1;
         if (arguments.Length != requiredRank)
         {
-            _diagnostics.Report(syntax.OpenBracketToken.Location, $"array or pointer indexing requires {requiredRank} index value(s)");
+            _diagnostics.Report(syntax.OpenBracketToken.Location, $"array or pointer indexing requires {requiredRank} index value(s)",
+                DiagnosticIds.IndexArityMismatch);
             return new BoundErrorExpression();
         }
         BoundExpression index = arguments[0];
@@ -1348,7 +1544,8 @@ internal sealed class FunctionBodyBinder
         foreach (BoundExpression argument in arguments)
         {
             if (!TypeFacts.IsInteger(argument.Type) && !TypeIdentity.AreSame(argument.Type, BuiltinTypes.Error))
-                _diagnostics.Report(GetLocation(syntax.Index), $"array index must be an integer, but has type '{argument.Type.ToDisplayString()}'");
+                _diagnostics.Report(GetLocation(syntax.Index), $"array index must be an integer, but has type '{argument.Type.ToDisplayString()}'",
+                    DiagnosticIds.IndexMustBeInteger);
         }
 
         TypeSymbol? elementType = receiver.Type switch
@@ -1362,7 +1559,8 @@ internal sealed class FunctionBodyBinder
         {
             if (!TypeIdentity.AreSame(receiver.Type, BuiltinTypes.Error))
             {
-                _diagnostics.Report(syntax.OpenBracketToken.Location, $"type '{receiver.Type.ToDisplayString()}' cannot be indexed");
+                _diagnostics.Report(syntax.OpenBracketToken.Location, $"type '{receiver.Type.ToDisplayString()}' cannot be indexed",
+                    DiagnosticIds.TypeNotIndexable);
             }
 
             return new BoundErrorExpression();
@@ -1370,7 +1568,8 @@ internal sealed class FunctionBodyBinder
 
         if (TypeIdentity.AreSame(elementType, BuiltinTypes.Void))
         {
-            _diagnostics.Report(syntax.OpenBracketToken.Location, "cannot index a void pointer");
+            _diagnostics.Report(syntax.OpenBracketToken.Location, "cannot index a void pointer",
+                DiagnosticIds.VoidPointerIndex);
             return new BoundErrorExpression();
         }
         return new BoundIndexExpression(receiver, index, elementType) { Indices = arguments };
@@ -1392,14 +1591,22 @@ internal sealed class FunctionBodyBinder
                     candidate.Setter is not null && (isSimpleAssignment || candidate.Getter is not null)),
                 indices,
                 target.OpenBracketToken.Location,
-                structType.Name);
+                structType.Name,
+                target);
             if (indexer is null)
                 return new BoundErrorExpression();
+            RecordSymbolAndType(target, indexer, indexer.Type);
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(indexer);
             if (!indexer.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, indexer.ContainingType))
-                _diagnostics.Report(target.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'");
+            {
+                RecordCandidates(target, null, [indexer], CandidateReason.Inaccessible);
+                _diagnostics.Report(target.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'",
+                    DiagnosticIds.InaccessibleSymbol);
+            }
             if (!IsAddressable(receiver) || !IsWritable(receiver))
             {
-                _diagnostics.Report(target.OpenBracketToken.Location, "indexer cannot be assigned through a readonly receiver");
+                _diagnostics.Report(target.OpenBracketToken.Location, "indexer cannot be assigned through a readonly receiver",
+                    DiagnosticIds.WriteThroughReadonlyReceiver);
                 return new BoundErrorExpression();
             }
             FunctionSymbol setter = indexer.Setter!;
@@ -1432,12 +1639,16 @@ internal sealed class FunctionBodyBinder
                 candidate.Setter is not null && (isSimpleAssignment || candidate.Getter is not null)),
             indices,
             target.OpenBracketToken.Location,
-            interfaceType.Name);
+            interfaceType.Name,
+            target);
         if (interfaceIndexer is null)
             return new BoundErrorExpression();
+        RecordSymbolAndType(target, interfaceIndexer, interfaceIndexer.Type);
+        _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(interfaceIndexer);
         if (!IsAddressable(receiver) || !IsWritable(receiver))
         {
-            _diagnostics.Report(target.OpenBracketToken.Location, "indexer cannot be assigned through a readonly receiver");
+            _diagnostics.Report(target.OpenBracketToken.Location, "indexer cannot be assigned through a readonly receiver",
+                DiagnosticIds.WriteThroughReadonlyReceiver);
             return new BoundErrorExpression();
         }
         FunctionSymbol interfaceSetter = interfaceIndexer.Setter!;
@@ -1493,7 +1704,8 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(
                 syntax.OperatorToken.Location,
-                $"operator '{syntax.OperatorToken.Text}' is not defined for types '{getter.ReturnType.ToDisplayString()}' and '{value.Type.ToDisplayString()}'");
+                $"operator '{syntax.OperatorToken.Text}' is not defined for types '{getter.ReturnType.ToDisplayString()}' and '{value.Type.ToDisplayString()}'",
+                DiagnosticIds.InvalidOperatorOperands);
         }
 
         return new BoundCompoundAccessorAssignmentExpression(
@@ -1554,7 +1766,8 @@ internal sealed class FunctionBodyBinder
         {
             if (!TypeIdentity.AreSame(resolvedType, BuiltinTypes.Error))
             {
-                _diagnostics.Report(syntax.Type.NameToken.Location, $"type '{syntax.Type.Name}' is not a struct");
+                _diagnostics.Report(syntax.Type.NameToken.Location, $"type '{syntax.Type.Name}' is not a struct",
+                    DiagnosticIds.TypeIsNotStruct);
             }
 
             return new BoundErrorExpression();
@@ -1562,7 +1775,8 @@ internal sealed class FunctionBodyBinder
 
         if (structType.IsAbstract)
         {
-            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
+                DiagnosticIds.AbstractInstantiation);
         }
 
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
@@ -1590,13 +1804,15 @@ internal sealed class FunctionBodyBinder
             if (elementType is StructTypeSymbol structure)
                 ValidateDestructorAccess(structure.FindDestructor(), allocationLocation);
             if (elementType is ArrayTypeSymbol)
-                _diagnostics.Report(elementLocation, "stack arrays cannot contain array elements");
+                _diagnostics.Report(elementLocation, "stack arrays cannot contain array elements",
+                    DiagnosticIds.NestedStackArrayElement);
         }
 
         var dimensions = dimensionSyntax.Select(BindExpression).ToImmutableArray();
         if (dimensions.IsEmpty)
         {
-            _diagnostics.Report(allocationLocation, "array allocation requires at least one dimension");
+            _diagnostics.Report(allocationLocation, "array allocation requires at least one dimension",
+                DiagnosticIds.ArrayDimensionRequired);
             return new BoundErrorExpression();
         }
         for (int i = 0; i < dimensions.Length; i++) ValidateArrayLength(dimensions[i], dimensionSyntax[i]);
@@ -1611,7 +1827,8 @@ internal sealed class FunctionBodyBinder
                 constantDimensions = false;
         }
         if (constantDimensions && totalLength > int.MaxValue)
-            _diagnostics.Report(allocationLocation, "total array length exceeds int.MaxValue");
+            _diagnostics.Report(allocationLocation, "total array length exceeds int.MaxValue",
+                DiagnosticIds.TotalArrayLengthOverflow);
 
         ArrayTypeSymbol arrayType = _fileScope.TypeFactory.ArrayOf(elementType, dimensions.Length);
         return new BoundArrayCreationExpression(elementType, dimensions[0], arrayType, storage) { Dimensions = dimensions };
@@ -1620,21 +1837,27 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindCallExpression(CallExpressionSyntax syntax)
     {
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        bool incomplete = syntax.CloseParenthesisToken.IsMissing;
+        int completedArgumentCount = GetCompletedArgumentCount(syntax.Arguments, incomplete);
 
         if (syntax.Target is MemberAccessExpressionSyntax memberTarget)
         {
-            if (TryBindStaticMethodCall(memberTarget, arguments, syntax.Arguments) is BoundExpression staticCall)
+            if (TryBindStaticMethodCall(memberTarget, arguments, syntax.Arguments, syntax) is BoundExpression staticCall)
                 return staticCall;
             BoundExpression? qualifiedCall = TryBindQualifiedCallExpression(
                 memberTarget,
                 arguments,
-                syntax.Arguments);
-            return qualifiedCall ?? BindMethodCallExpression(memberTarget, arguments, syntax.Arguments);
+                syntax.Arguments,
+                syntax);
+            return qualifiedCall ?? BindMethodCallExpression(memberTarget, arguments, syntax.Arguments, syntax);
         }
 
         if (syntax.Target is not NameExpressionSyntax name)
         {
-            _diagnostics.Report(GetLocation(syntax.Target), "call target must be a function, method, or struct name");
+            RecordCandidates(syntax, null, [], CandidateReason.NotInvocable);
+            RecordCandidates(syntax.Target, null, [], CandidateReason.NotInvocable);
+            _diagnostics.Report(GetLocation(syntax.Target), "call target must be a function, method, or struct name",
+                DiagnosticIds.InvalidCallTarget);
             return new BoundErrorExpression();
         }
 
@@ -1646,34 +1869,48 @@ internal sealed class FunctionBodyBinder
         {
             if (structType.IsAbstract)
             {
-                _diagnostics.Report(name.IdentifierToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+                _diagnostics.Report(name.IdentifierToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
+                    DiagnosticIds.AbstractInstantiation);
                 return new BoundErrorExpression();
             }
-            if (structType.Constructors.IsEmpty && arguments.IsEmpty)
+            if (structType.Constructors.IsEmpty && completedArgumentCount == 0)
             {
+                RecordCandidates(syntax.Target, structType, [], incomplete ? CandidateReason.Incomplete : CandidateReason.None);
                 ValidateDefaultInitialization(structType, name.IdentifierToken.Location);
                 return new BoundStructConstructionExpression(structType, []) { IsDefaultInitialization = true };
             }
-            FunctionSymbol? constructor = ResolveConstructor(structType, arguments, syntax.Arguments, name.IdentifierToken.Location);
+            FunctionSymbol? constructor = ResolveConstructor(structType, arguments, syntax.Arguments,
+                name.IdentifierToken.Location, out CandidateReason constructorReason,
+                incomplete ? completedArgumentCount : null);
+            RecordCandidates(syntax.Target, constructor, structType.Constructors, constructorReason);
             if (constructor is null)
             {
-                _diagnostics.Report(
-                    name.IdentifierToken.Location,
-                    $"struct '{structType.Name}' does not declare a constructor; use '{structType.Name} {{ ... }}' for positional construction");
+                if (constructorReason == CandidateReason.Incomplete)
+                    return new BoundErrorExpression();
+                if (structType.Constructors.IsEmpty)
+                    _diagnostics.Report(
+                        name.IdentifierToken.Location,
+                        $"struct '{structType.Name}' does not declare a constructor; use '{structType.Name} {{ ... }}' for positional construction",
+                        DiagnosticIds.MissingConstructor);
                 return new BoundErrorExpression();
             }
 
             if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structType))
             {
-                _diagnostics.Report(name.IdentifierToken.Location, $"constructor '{structType.Name}' is private");
+                RecordCandidates(syntax.Target, null, structType.Constructors, CandidateReason.Inaccessible);
+                _diagnostics.Report(name.IdentifierToken.Location, $"constructor '{structType.Name}' is private",
+                    DiagnosticIds.InaccessibleSymbol);
             }
 
-            arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, name.IdentifierToken.Location);
+            arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, name.IdentifierToken.Location,
+                incomplete ? completedArgumentCount : null);
             return new BoundConstructorCallExpression(structType, constructor, arguments);
         }
 
         if (_function.ContainingType is { } containingType)
         {
+            FunctionSymbol[] methodCandidates = containingType.LookupMethods(name.IdentifierToken.Text)
+                .Where(candidate => !candidate.IsStatic).ToArray();
             FunctionSymbol? method = FindInstanceMethod(containingType,
                 name.IdentifierToken.Text,
                 receiverIsReadonly: _function.IsReadonly);
@@ -1681,32 +1918,42 @@ internal sealed class FunctionBodyBinder
                 _function.IsReadonly &&
                 containingType.FindMember<FunctionSymbol>(name.IdentifierToken.Text) is { IsStatic: false } mutableMethod)
             {
-                _diagnostics.Report(name.IdentifierToken.Location, $"readonly method '{_function.Name}' cannot call mutable method '{mutableMethod.Name}' through 'this'");
+                RecordCandidates(syntax.Target, null, [mutableMethod], CandidateReason.Inaccessible);
+                _diagnostics.Report(name.IdentifierToken.Location, $"readonly method '{_function.Name}' cannot call mutable method '{mutableMethod.Name}' through 'this'",
+                    DiagnosticIds.MutableMethodOnReadonlyReceiver);
                 return new BoundErrorExpression();
             }
             if (method is not null)
             {
+                CandidateReason methodReason = GetCallCandidateReason(method, arguments, incomplete, completedArgumentCount);
+                RecordCandidates(syntax.Target, method, methodCandidates, methodReason);
                 if (_bindingBaseConstructorArguments)
                 {
-                    _diagnostics.Report(name.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments");
+                    _diagnostics.Report(name.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments",
+                        DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
                     return new BoundErrorExpression();
                 }
                 if (!method.IsPublic && !TypeIdentity.AreSame(containingType, method.ContainingType))
                 {
-                    _diagnostics.Report(name.IdentifierToken.Location, $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'");
+                    RecordCandidates(syntax.Target, null, methodCandidates, CandidateReason.Inaccessible);
+                    _diagnostics.Report(name.IdentifierToken.Location, $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
+                        DiagnosticIds.InaccessibleSymbol);
                     return new BoundErrorExpression();
                 }
                 if (_function.IsStatic)
                 {
-                    _diagnostics.Report(name.IdentifierToken.Location, $"static method '{_function.Name}' cannot call instance method '{method.Name}' without an explicit instance");
+                    _diagnostics.Report(name.IdentifierToken.Location, $"static method '{_function.Name}' cannot call instance method '{method.Name}' without an explicit instance",
+                        DiagnosticIds.StaticContextInstanceMethodCall);
                     return new BoundErrorExpression();
                 }
                 if (method.IsStatic)
                 {
-                    _diagnostics.Report(name.IdentifierToken.Location, $"static method '{method.Name}' must be accessed through type '{containingType.Name}'");
+                    _diagnostics.Report(name.IdentifierToken.Location, $"static method '{method.Name}' must be accessed through type '{containingType.Name}'",
+                        DiagnosticIds.StaticMethodRequiresTypeReceiver);
                     return new BoundErrorExpression();
                 }
-                arguments = ValidateFunctionArguments(method, arguments, syntax.Arguments, name.IdentifierToken.Location);
+                arguments = ValidateFunctionArguments(method, arguments, syntax.Arguments, name.IdentifierToken.Location,
+                    incomplete ? completedArgumentCount : null);
                 ValidateRequiredFields(name.IdentifierToken.Location);
                 PointerTypeSymbol thisType = _fileScope.TypeFactory.PointerTo(containingType, isReadonly: _function.IsReadonly);
                 return new BoundMethodCallExpression(
@@ -1726,17 +1973,22 @@ internal sealed class FunctionBodyBinder
         {
             if (!functionResolutionDiagnostic)
             {
-                _diagnostics.Report(name.IdentifierToken.Location, $"unknown function '{name.IdentifierToken.Text}'");
+                _diagnostics.Report(name.IdentifierToken.Location, $"unknown function '{name.IdentifierToken.Text}'",
+                    DiagnosticIds.UnknownFunction);
             }
 
             return new BoundErrorExpression();
         }
 
-        arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location);
+        CandidateReason functionReason = GetCallCandidateReason(function, arguments, incomplete, completedArgumentCount);
+        RecordCandidates(syntax.Target, function, [function], functionReason);
+        arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location,
+            incomplete ? completedArgumentCount : null);
         return new BoundCallExpression(function, arguments);
     }
 
-    private BoundExpression? TryBindStaticMethodCall(MemberAccessExpressionSyntax target, ImmutableArray<BoundExpression> arguments, ImmutableArray<ExpressionSyntax> argumentSyntax)
+    private BoundExpression? TryBindStaticMethodCall(MemberAccessExpressionSyntax target, ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax, CallExpressionSyntax callSyntax)
     {
         if (!TryGetDottedName(target, out ImmutableArray<SyntaxToken> parts) || parts.Length < 2)
             return null;
@@ -1749,19 +2001,28 @@ internal sealed class FunctionBodyBinder
         FunctionSymbol? method = structType.FindMember<FunctionSymbol>(parts[^1].Text);
         if (method is null || !method.IsStatic)
             return null;
+        bool incomplete = callSyntax.CloseParenthesisToken.IsMissing;
+        int completedArgumentCount = GetCompletedArgumentCount(argumentSyntax, incomplete);
+        RecordStaticReceiver(target.Receiver, structType);
+        RecordCandidates(target, method, [method],
+            GetCallCandidateReason(method, arguments, incomplete, completedArgumentCount));
         if (!method.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, method.ContainingType))
         {
-            _diagnostics.Report(parts[^1].Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'");
+            RecordCandidates(target, null, [method], CandidateReason.Inaccessible);
+            _diagnostics.Report(parts[^1].Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
+                DiagnosticIds.InaccessibleSymbol);
             return new BoundErrorExpression();
         }
-        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, parts[^1].Location);
+        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, parts[^1].Location,
+            incomplete ? completedArgumentCount : null);
         return new BoundCallExpression(method, arguments);
     }
 
     private BoundExpression? TryBindQualifiedCallExpression(
         MemberAccessExpressionSyntax target,
         ImmutableArray<BoundExpression> arguments,
-        ImmutableArray<ExpressionSyntax> argumentSyntax)
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        CallExpressionSyntax callSyntax)
     {
         if (!TryGetDottedName(target, out ImmutableArray<SyntaxToken> nameParts))
         {
@@ -1785,34 +2046,47 @@ internal sealed class FunctionBodyBinder
         }
 
         string[] parts = nameParts.Select(part => part.Text).ToArray();
+        bool incomplete = callSyntax.CloseParenthesisToken.IsMissing;
+        int completedArgumentCount = GetCompletedArgumentCount(argumentSyntax, incomplete);
         StructTypeSymbol? structType = _fileScope.ResolveQualifiedType(parts) as StructTypeSymbol;
         if (structType is not null)
         {
             if (structType.IsAbstract)
             {
-                _diagnostics.Report(target.MemberToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+                _diagnostics.Report(target.MemberToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
+                    DiagnosticIds.AbstractInstantiation);
                 return new BoundErrorExpression();
             }
-            if (structType.Constructors.IsEmpty && arguments.IsEmpty)
+            if (structType.Constructors.IsEmpty && completedArgumentCount == 0)
             {
                 ValidateDefaultInitialization(structType, target.MemberToken.Location);
                 return new BoundStructConstructionExpression(structType, []) { IsDefaultInitialization = true };
             }
-            FunctionSymbol? constructor = ResolveConstructor(structType, arguments, argumentSyntax, target.MemberToken.Location);
+            FunctionSymbol? constructor = ResolveConstructor(structType, arguments, argumentSyntax,
+                target.MemberToken.Location, out CandidateReason constructorReason,
+                incomplete ? completedArgumentCount : null);
+            RecordCandidates(target, constructor, structType.Constructors, constructorReason);
             if (constructor is null)
             {
-                _diagnostics.Report(
-                    target.MemberToken.Location,
-                    $"struct '{structType.Name}' does not declare a constructor; use '{structType.Name} {{ ... }}' for positional construction");
+                if (constructorReason == CandidateReason.Incomplete)
+                    return new BoundErrorExpression();
+                if (structType.Constructors.IsEmpty)
+                    _diagnostics.Report(
+                        target.MemberToken.Location,
+                        $"struct '{structType.Name}' does not declare a constructor; use '{structType.Name} {{ ... }}' for positional construction",
+                        DiagnosticIds.MissingConstructor);
                 return new BoundErrorExpression();
             }
 
             if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structType))
             {
-                _diagnostics.Report(target.MemberToken.Location, $"constructor '{structType.Name}' is private");
+                RecordCandidates(target, null, structType.Constructors, CandidateReason.Inaccessible);
+                _diagnostics.Report(target.MemberToken.Location, $"constructor '{structType.Name}' is private",
+                    DiagnosticIds.InaccessibleSymbol);
             }
 
-            arguments = ValidateFunctionArguments(constructor, arguments, argumentSyntax, target.MemberToken.Location);
+            arguments = ValidateFunctionArguments(constructor, arguments, argumentSyntax, target.MemberToken.Location,
+                incomplete ? completedArgumentCount : null);
             return new BoundConstructorCallExpression(structType, constructor, arguments);
         }
 
@@ -1823,7 +2097,10 @@ internal sealed class FunctionBodyBinder
             out bool resolutionDiagnostic);
         if (function is not null)
         {
-            arguments = ValidateFunctionArguments(function, arguments, argumentSyntax, target.MemberToken.Location);
+            RecordCandidates(target, function, [function],
+                GetCallCandidateReason(function, arguments, incomplete, completedArgumentCount));
+            arguments = ValidateFunctionArguments(function, arguments, argumentSyntax, target.MemberToken.Location,
+                incomplete ? completedArgumentCount : null);
             return new BoundCallExpression(function, arguments);
         }
 
@@ -1831,7 +2108,8 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(
                 target.MemberToken.Location,
-                $"unknown function or struct '{string.Join('.', parts)}'");
+                $"unknown function or struct '{string.Join('.', parts)}'",
+                DiagnosticIds.UnknownQualifiedCallable);
         }
 
         return new BoundErrorExpression();
@@ -1877,19 +2155,36 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindMethodCallExpression(
         MemberAccessExpressionSyntax target,
         ImmutableArray<BoundExpression> arguments,
-        ImmutableArray<ExpressionSyntax> argumentSyntax)
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        CallExpressionSyntax callSyntax)
     {
         BoundExpression receiver = BindExpression(target.Receiver);
+        bool incomplete = callSyntax.CloseParenthesisToken.IsMissing;
+        int completedArgumentCount = GetCompletedArgumentCount(argumentSyntax, incomplete);
         if (receiver.Type is ArrayTypeSymbol array && target.OperatorToken.Kind == SyntaxKind.DotToken && target.MemberToken.Text == "GetLength")
         {
-            if (arguments.Length != 1 || !TypeIdentity.AreSame(arguments[0].Type, BuiltinTypes.Int))
+            SyntheticMemberSymbol member = _semanticInfo.GetArrayMembers(array)
+                .Single(candidate => candidate.Name == "GetLength");
+            CandidateReason reason = incomplete
+                ? completedArgumentCount > member.Parameters.Length ? CandidateReason.WrongArity
+                    : completedArgumentCount == 1 && !TypeIdentity.AreSame(arguments[0].Type, BuiltinTypes.Int)
+                        ? CandidateReason.NotInvocable
+                        : CandidateReason.Incomplete
+                : arguments.Length != member.Parameters.Length ? CandidateReason.WrongArity
+                : !TypeIdentity.AreSame(arguments[0].Type, BuiltinTypes.Int) ? CandidateReason.NotInvocable
+                : CandidateReason.None;
+            RecordCandidates(target, member, [member], reason);
+            if ((!incomplete && arguments.Length != 1) || completedArgumentCount > 1 ||
+                completedArgumentCount == 1 && !TypeIdentity.AreSame(arguments[0].Type, BuiltinTypes.Int))
             {
-                _diagnostics.Report(target.MemberToken.Location, "GetLength requires one int dimension argument");
+                _diagnostics.Report(target.MemberToken.Location, "GetLength requires one int dimension argument",
+                    DiagnosticIds.InvalidGetLengthArguments);
                 return new BoundErrorExpression();
             }
-            if (_constants.TryFold(arguments[0], out object? dimension) &&
+            if (completedArgumentCount == 1 && _constants.TryFold(arguments[0], out object? dimension) &&
                 (SemanticAnalyzer.ToInteger(dimension) < 0 || SemanticAnalyzer.ToInteger(dimension) >= array.Rank))
-                _diagnostics.Report(target.MemberToken.Location, $"GetLength dimension must be between 0 and {array.Rank - 1}");
+                _diagnostics.Report(target.MemberToken.Location, $"GetLength dimension must be between 0 and {array.Rank - 1}",
+                    DiagnosticIds.GetLengthDimensionOutOfRange);
             return new BoundArrayMetadataExpression(receiver, "GetLength", arguments[0]);
         }
         bool pointerAccess = target.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
@@ -1899,17 +2194,20 @@ internal sealed class FunctionBodyBinder
         if (interfaceType is not null)
         {
             FunctionSymbol? interfaceMethod = ResolveInterfaceMethod(interfaceType, target.MemberToken.Text, arguments,
-                IsReadonlyReceiver(receiver, pointerAccess), target.MemberToken.Location);
+                IsReadonlyReceiver(receiver, pointerAccess), target.MemberToken.Location, target,
+                incomplete ? completedArgumentCount : null);
             if (interfaceMethod is null)
             {
                 return new BoundErrorExpression();
             }
             if (IsReadonlyReceiver(receiver, pointerAccess) && !interfaceMethod.IsReadonly)
             {
-                _diagnostics.Report(target.MemberToken.Location, $"mutable interface method '{interfaceMethod.Name}' cannot be called on a readonly '{interfaceType.Name}' receiver");
+                _diagnostics.Report(target.MemberToken.Location, $"mutable interface method '{interfaceMethod.Name}' cannot be called on a readonly '{interfaceType.Name}' receiver",
+                    DiagnosticIds.MutableMethodOnReadonlyReceiver);
                 return new BoundErrorExpression();
             }
-            arguments = ValidateFunctionArguments(interfaceMethod, arguments, argumentSyntax, target.MemberToken.Location);
+            arguments = ValidateFunctionArguments(interfaceMethod, arguments, argumentSyntax, target.MemberToken.Location,
+                incomplete ? completedArgumentCount : null);
             return new BoundInterfaceMethodCallExpression(receiver, interfaceType, interfaceMethod, arguments, pointerAccess);
         }
         DeclaredTypeSymbol? structType = pointerAccess
@@ -1923,7 +2221,8 @@ internal sealed class FunctionBodyBinder
                 string expected = pointerAccess ? "pointer to struct" : "struct";
                 _diagnostics.Report(
                     target.OperatorToken.Location,
-                    $"operator '{target.OperatorToken.Text}' requires a {expected}, but has type '{receiver.Type.ToDisplayString()}'");
+                    $"operator '{target.OperatorToken.Text}' requires a {expected}, but has type '{receiver.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidMemberReceiver);
             }
 
             return new BoundErrorExpression();
@@ -1933,6 +2232,8 @@ internal sealed class FunctionBodyBinder
             (pointerAccess && receiver.Type is PointerTypeSymbol { IsReadonly: true }) ||
             (!pointerAccess && IsAddressable(receiver) && !IsWritable(receiver));
 
+        FunctionSymbol[] methodCandidates = structType.LookupMethods(target.MemberToken.Text)
+            .Where(candidate => !candidate.IsStatic).ToArray();
         FunctionSymbol? method = FindInstanceMethod(structType, target.MemberToken.Text, hasReadonlyReceiver || _function.IsReadonly);
         // Prefer a readonly overload in readonly code, but retain a mutable
         // candidate so the effect checker can report a disallowed call.
@@ -1941,33 +2242,46 @@ internal sealed class FunctionBodyBinder
         if (method is null)
         {
             FunctionSymbol? namedMethod = structType.FindMember<FunctionSymbol>(target.MemberToken.Text);
+            RecordCandidates(target, null, methodCandidates,
+                namedMethod is not null && (hasReadonlyReceiver || !namedMethod.IsPublic)
+                    ? CandidateReason.Inaccessible
+                    : namedMethod?.IsStatic == true ? CandidateReason.NotInvocable : CandidateReason.NotFound);
             if (namedMethod?.IsStatic == true)
             {
-                _diagnostics.Report(target.MemberToken.Location, $"static method '{namedMethod.Name}' must be accessed through type '{structType.Name}'");
+                _diagnostics.Report(target.MemberToken.Location, $"static method '{namedMethod.Name}' must be accessed through type '{structType.Name}'",
+                    DiagnosticIds.StaticMethodRequiresTypeReceiver);
             }
             else if (hasReadonlyReceiver && namedMethod is not null)
             {
                 _diagnostics.Report(
                     target.MemberToken.Location,
-                    $"mutable method '{namedMethod.Name}' cannot be called on a readonly '{structType.Name}' receiver");
+                    $"mutable method '{namedMethod.Name}' cannot be called on a readonly '{structType.Name}' receiver",
+                    DiagnosticIds.MutableMethodOnReadonlyReceiver);
             }
             else
             {
                 _diagnostics.Report(
                     target.MemberToken.Location,
-                    $"struct '{structType.Name}' does not contain method '{target.MemberToken.Text}'");
+                    $"struct '{structType.Name}' does not contain method '{target.MemberToken.Text}'",
+                    DiagnosticIds.MissingStructMethod);
             }
             return new BoundErrorExpression();
         }
 
+        RecordCandidates(target, method, methodCandidates,
+            GetCallCandidateReason(method, arguments, incomplete, completedArgumentCount));
+
         if (!method.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, method.ContainingType))
         {
+            RecordCandidates(target, null, methodCandidates, CandidateReason.Inaccessible);
             _diagnostics.Report(
                 target.MemberToken.Location,
-                $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'");
+                $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
+                DiagnosticIds.InaccessibleSymbol);
         }
 
-        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, target.MemberToken.Location);
+        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, target.MemberToken.Location,
+            incomplete ? completedArgumentCount : null);
         return new BoundMethodCallExpression(receiver, method, arguments, pointerAccess);
     }
 
@@ -1992,7 +2306,8 @@ internal sealed class FunctionBodyBinder
         {
             if (!TypeIdentity.AreSame(type, BuiltinTypes.Error))
             {
-                _diagnostics.Report(syntax.Type.NameToken.Location, $"'new' requires a struct type or array element type, but has type '{type.Name}'");
+                _diagnostics.Report(syntax.Type.NameToken.Location, $"'new' requires a struct type or array element type, but has type '{type.Name}'",
+                    DiagnosticIds.NewRequiresStructType);
             }
 
             return new BoundErrorExpression();
@@ -2000,13 +2315,18 @@ internal sealed class FunctionBodyBinder
 
         if (structType.IsAbstract)
         {
-            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated");
+            _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
+                DiagnosticIds.AbstractInstantiation);
         }
 
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        bool incomplete = syntax.CloseDelimiterToken.IsMissing;
+        int completedArgumentCount = GetCompletedArgumentCount(syntax.Arguments, incomplete);
         FunctionSymbol? constructor = null;
-        if (!syntax.IsPositionalInitialization && structType.Constructors.IsEmpty && arguments.IsEmpty)
+        if (!syntax.IsPositionalInitialization && structType.Constructors.IsEmpty && completedArgumentCount == 0)
         {
+            RecordCandidates(syntax, structType, [], syntax.CloseDelimiterToken.IsMissing
+                ? CandidateReason.Incomplete : CandidateReason.None);
             ValidateDefaultInitialization(structType, syntax.Type.NameToken.Location);
             return new BoundNewExpression(structType, null, [], true, _fileScope.TypeFactory.PointerTo(structType))
                 { IsDefaultInitialization = true };
@@ -2017,21 +2337,31 @@ internal sealed class FunctionBodyBinder
         }
         else
         {
-            constructor = ResolveConstructor(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
+            constructor = ResolveConstructor(structType, arguments, syntax.Arguments,
+                syntax.NewKeyword.Location, out CandidateReason constructorReason,
+                incomplete ? completedArgumentCount : null);
+            RecordCandidates(syntax, constructor, structType.Constructors, constructorReason);
             if (constructor is null)
             {
-                _diagnostics.Report(
-                    syntax.Type.NameToken.Location,
-                    $"struct '{structType.Name}' does not declare a constructor; use 'new {structType.Name} {{ ... }}' for positional construction");
+                if (constructorReason == CandidateReason.Incomplete)
+                    return new BoundErrorExpression();
+                if (structType.Constructors.IsEmpty)
+                    _diagnostics.Report(
+                        syntax.Type.NameToken.Location,
+                        $"struct '{structType.Name}' does not declare a constructor; use 'new {structType.Name} {{ ... }}' for positional construction",
+                        DiagnosticIds.MissingConstructor);
                 return new BoundErrorExpression();
             }
 
             if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structType))
             {
-                _diagnostics.Report(syntax.Type.NameToken.Location, $"constructor '{structType.Name}' is private");
+                RecordCandidates(syntax, null, structType.Constructors, CandidateReason.Inaccessible);
+                _diagnostics.Report(syntax.Type.NameToken.Location, $"constructor '{structType.Name}' is private",
+                    DiagnosticIds.InaccessibleSymbol);
             }
 
-            arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, syntax.NewKeyword.Location);
+            arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, syntax.NewKeyword.Location,
+                incomplete ? completedArgumentCount : null);
         }
 
         PointerTypeSymbol pointerType = _fileScope.TypeFactory.PointerTo(structType);
@@ -2045,7 +2375,8 @@ internal sealed class FunctionBodyBinder
             pointer = ContextualizeNull(pointer, _fileScope.TypeFactory.PointerTo(BuiltinTypes.Void));
         if (GetArrayStorage(pointer) == ArrayStorageKind.Stack)
         {
-            _diagnostics.Report(syntax.FreeKeyword.Location, "stack array cannot be freed");
+            _diagnostics.Report(syntax.FreeKeyword.Location, "stack array cannot be freed",
+                DiagnosticIds.StackArrayFree);
             return new BoundErrorExpression();
         }
 
@@ -2053,7 +2384,8 @@ internal sealed class FunctionBodyBinder
         if (pointer.Type is PointerTypeSymbol pointerType)
         {
             if (pointerType.IsReadonly)
-                _diagnostics.Report(syntax.FreeKeyword.Location, "cannot free memory through a readonly pointer");
+                _diagnostics.Report(syntax.FreeKeyword.Location, "cannot free memory through a readonly pointer",
+                    DiagnosticIds.FreeThroughReadonlyPointer);
             if (pointerType.ElementType is StructTypeSymbol structType)
             {
                 destructor = structType.FindDestructor();
@@ -2067,7 +2399,8 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(
                 syntax.FreeKeyword.Location,
-                $"'free' requires a heap pointer or heap array, but has type '{pointer.Type.ToDisplayString()}'");
+                $"'free' requires a heap pointer or heap array, but has type '{pointer.Type.ToDisplayString()}'",
+                DiagnosticIds.InvalidFreeOperand);
             return new BoundErrorExpression();
         }
 
@@ -2078,7 +2411,8 @@ internal sealed class FunctionBodyBinder
     private void ValidateDestructorAccess(FunctionSymbol? destructor, TextLocation location)
     {
         if (destructor is { IsPublic: false } && !TypeIdentity.AreSame(_function.ContainingType, destructor.ContainingType))
-            _diagnostics.Report(location, $"destructor '{destructor.ContainingType!.Name}' is private");
+            _diagnostics.Report(location, $"destructor '{destructor.ContainingType!.Name}' is private",
+                DiagnosticIds.InaccessibleSymbol);
     }
 
     private ImmutableArray<BoundExpression> ValidatePositionalArguments(
@@ -2094,7 +2428,8 @@ internal sealed class FunctionBodyBinder
         {
             _diagnostics.Report(
                 location,
-                $"struct '{structType.Name}' expects {fields.Length} positional value(s), but {arguments.Length} were provided");
+                $"struct '{structType.Name}' expects {fields.Length} positional value(s), but {arguments.Length} were provided",
+                DiagnosticIds.PositionalValueCountMismatch);
         }
 
         var convertedArguments = arguments.ToBuilder();
@@ -2105,19 +2440,22 @@ internal sealed class FunctionBodyBinder
             TypeSymbol fieldType = field.Type;
             BoundExpression argument = ContextualizeConversion(arguments[index], fieldType);
             convertedArguments[index] = argument;
+            SetConvertedType(argumentSyntax[index], argument.Type);
 
             if (!field.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, field.ContainingType))
             {
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
-                    $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'");
+                    $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'",
+                    DiagnosticIds.InaccessibleSymbol);
             }
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
-                    "stack array cannot be stored inside a positional struct value");
+                    "stack array cannot be stored inside a positional struct value",
+                    DiagnosticIds.StackArrayStoredInAggregate);
             }
 
             if (!TypeFacts.CanAssign(fieldType, argument.Type))
@@ -2129,30 +2467,65 @@ internal sealed class FunctionBodyBinder
         return convertedArguments.ToImmutable();
     }
 
+    private static int GetCompletedArgumentCount(
+        ImmutableArray<ExpressionSyntax> arguments,
+        bool incomplete)
+    {
+        if (!incomplete) return arguments.Length;
+        int count = arguments.Length;
+        while (count > 0 && arguments[count - 1] is MissingExpressionSyntax) count--;
+        return count;
+    }
+
+    private CandidateReason GetCallCandidateReason(
+        FunctionSymbol function,
+        ImmutableArray<BoundExpression> arguments,
+        bool incomplete,
+        int completedArgumentCount)
+    {
+        if (!incomplete)
+            return function.Parameters.Length == arguments.Length
+                ? CandidateReason.None
+                : CandidateReason.WrongArity;
+        if (completedArgumentCount > function.Parameters.Length)
+            return CandidateReason.WrongArity;
+        for (int index = 0; index < completedArgumentCount; index++)
+            if (GetArgumentConversionCost(function.Parameters[index].Type, arguments[index]) is null)
+                return CandidateReason.NotInvocable;
+        return CandidateReason.Incomplete;
+    }
+
     private ImmutableArray<BoundExpression> ValidateFunctionArguments(
         FunctionSymbol function,
         ImmutableArray<BoundExpression> arguments,
         ImmutableArray<ExpressionSyntax> argumentSyntax,
-        TextLocation location)
+        TextLocation location,
+        int? completedArgumentCount = null)
     {
-        if (arguments.Length != function.Parameters.Length)
+        int suppliedCount = completedArgumentCount ?? arguments.Length;
+        bool incomplete = completedArgumentCount.HasValue;
+        if ((!incomplete && suppliedCount != function.Parameters.Length) ||
+            incomplete && suppliedCount > function.Parameters.Length)
         {
             _diagnostics.Report(
                 location,
-                $"function '{function.Name}' expects {function.Parameters.Length} argument(s), but {arguments.Length} were provided");
+                $"function '{function.Name}' expects {function.Parameters.Length} argument(s), but {suppliedCount} were provided",
+                DiagnosticIds.WrongArity);
         }
 
         var convertedArguments = arguments.ToBuilder();
-        int count = Math.Min(arguments.Length, function.Parameters.Length);
+        int count = Math.Min(suppliedCount, function.Parameters.Length);
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
             BoundExpression argument = ContextualizeConversion(arguments[index], parameterType);
             convertedArguments[index] = argument;
+            SetConvertedType(argumentSyntax[index], argument.Type);
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
-                _diagnostics.Report(GetLocation(argumentSyntax[index]), "stack array cannot be passed to another function");
+                _diagnostics.Report(GetLocation(argumentSyntax[index]), "stack array cannot be passed to another function",
+                    DiagnosticIds.StackArrayPassedAsArgument);
             }
 
             if (!TypeFacts.CanAssign(parameterType, argument.Type))
@@ -2165,29 +2538,68 @@ internal sealed class FunctionBodyBinder
     }
 
     private FunctionSymbol? ResolveInterfaceMethod(InterfaceTypeSymbol type, string name,
-        ImmutableArray<BoundExpression> arguments, bool readonlyReceiver, TextLocation location)
+        ImmutableArray<BoundExpression> arguments, bool readonlyReceiver, TextLocation location, SyntaxNode syntax,
+        int? completedArgumentCount = null)
     {
         FunctionSymbol[] candidates = type.FindMethods(name).ToArray();
         if (candidates.Length == 0)
         {
-            _diagnostics.Report(location, $"interface '{type.Name}' does not contain method '{name}'");
+            RecordCandidates(syntax, null, [], CandidateReason.NotFound);
+            _diagnostics.Report(location, $"interface '{type.Name}' does not contain method '{name}'",
+                DiagnosticIds.MissingInterfaceMethod);
             return null;
         }
+        int suppliedCount = completedArgumentCount ?? arguments.Length;
+        bool incomplete = completedArgumentCount.HasValue;
         // Preserve the established argument/readonly diagnostics for a single candidate.
-        if (candidates.Length == 1) return candidates[0];
-        var matches = candidates.Where(candidate => candidate.Parameters.Length == arguments.Length &&
+        if (candidates.Length == 1)
+        {
+            CandidateReason singleReason = readonlyReceiver && !candidates[0].IsReadonly
+                ? CandidateReason.Inaccessible
+                : incomplete
+                    ? GetCallCandidateReason(candidates[0], arguments, true, suppliedCount)
+                    : candidates[0].Parameters.Length != arguments.Length ? CandidateReason.WrongArity
+                    : CandidateReason.None;
+            RecordCandidates(syntax, singleReason == CandidateReason.Inaccessible ? null : candidates[0], candidates, singleReason);
+            return candidates[0];
+        }
+        var matches = candidates.Where(candidate =>
+                (incomplete ? candidate.Parameters.Length >= suppliedCount : candidate.Parameters.Length == arguments.Length) &&
                 (!readonlyReceiver || candidate.IsReadonly))
-            .Select(candidate => (Method: candidate, Costs: candidate.Parameters.Zip(arguments)
+            .Select(candidate => (Method: candidate, Costs: candidate.Parameters.Take(suppliedCount).Zip(arguments.Take(suppliedCount))
                 .Select(pair => GetArgumentConversionCost(pair.First.Type, pair.Second)).ToArray()))
             .Where(candidate => candidate.Costs.All(cost => cost.HasValue))
             .Select(candidate => (candidate.Method, Costs: candidate.Costs.Select(cost => cost!.Value).ToArray())).ToArray();
         FunctionSymbol[] best = matches.Where(candidate => !matches.Any(other =>
                 !ReferenceEquals(other.Method, candidate.Method) && IsBetterConversionSequence(other.Costs, candidate.Costs)))
             .Select(candidate => candidate.Method).ToArray();
-        if (best.Length == 1) return best[0];
+        if (best.Length == 1)
+        {
+            RecordCandidates(syntax, best[0], candidates,
+                incomplete ? CandidateReason.Incomplete : CandidateReason.None);
+            return best[0];
+        }
+        if (incomplete && best.Length > 1)
+        {
+            RecordCandidates(syntax, null, candidates, CandidateReason.Incomplete);
+            return null;
+        }
+        CandidateReason reason = best.Length == 0
+            ? candidates.All(candidate => incomplete
+                ? candidate.Parameters.Length < suppliedCount
+                : candidate.Parameters.Length != arguments.Length)
+                ? CandidateReason.WrongArity : CandidateReason.NotInvocable
+            : CandidateReason.Ambiguous;
+        RecordCandidates(syntax, null, candidates, reason);
         _diagnostics.Report(location, best.Length == 0
             ? $"no interface method '{type.Name}.{name}' matches the provided arguments"
-            : $"interface method call '{type.Name}.{name}' is ambiguous");
+            : $"interface method call '{type.Name}.{name}' is ambiguous",
+            reason switch
+            {
+                CandidateReason.WrongArity => DiagnosticIds.WrongArity,
+                CandidateReason.Ambiguous => DiagnosticIds.AmbiguousCall,
+                _ => DiagnosticIds.NoMatchingCandidate,
+            });
         return null;
     }
 
@@ -2195,17 +2607,32 @@ internal sealed class FunctionBodyBinder
         StructTypeSymbol type,
         ImmutableArray<BoundExpression> arguments,
         ImmutableArray<ExpressionSyntax> argumentSyntax,
-        TextLocation location)
+        TextLocation location) => ResolveConstructor(type, arguments, argumentSyntax, location, out _);
+
+    private FunctionSymbol? ResolveConstructor(
+        StructTypeSymbol type,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        TextLocation location,
+        out CandidateReason reason,
+        int? completedArgumentCount = null)
     {
         if (type.Constructors.IsEmpty)
+        {
+            reason = CandidateReason.NotFound;
             return null;
+        }
 
+        int suppliedCount = completedArgumentCount ?? arguments.Length;
+        bool incomplete = completedArgumentCount.HasValue;
         var matches = type.Constructors
-            .Where(candidate => candidate.Parameters.Length == arguments.Length)
+            .Where(candidate => incomplete
+                ? candidate.Parameters.Length >= suppliedCount
+                : candidate.Parameters.Length == arguments.Length)
             .Select(candidate => new
             {
                 Constructor = candidate,
-                Costs = candidate.Parameters.Zip(arguments)
+                Costs = candidate.Parameters.Take(suppliedCount).Zip(arguments.Take(suppliedCount))
                     .Select(pair => GetArgumentConversionCost(pair.First.Type, pair.Second))
                     .ToArray(),
             })
@@ -2217,10 +2644,18 @@ internal sealed class FunctionBodyBinder
             })
             .ToArray();
         if (matches.Length == 1)
+        {
+            reason = incomplete ? CandidateReason.Incomplete : CandidateReason.None;
             return matches[0].Constructor;
+        }
         if (matches.Length == 0)
         {
-            _diagnostics.Report(location, $"no constructor of struct '{type.Name}' matches the provided arguments");
+            reason = type.Constructors.Any(candidate => incomplete
+                    ? candidate.Parameters.Length >= suppliedCount
+                    : candidate.Parameters.Length == arguments.Length)
+                ? CandidateReason.NotInvocable : CandidateReason.WrongArity;
+            _diagnostics.Report(location, $"no constructor of struct '{type.Name}' matches the provided arguments",
+                reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
             return null;
         }
 
@@ -2231,9 +2666,20 @@ internal sealed class FunctionBodyBinder
             .Select(candidate => candidate.Constructor)
             .ToArray();
         if (bestMatches.Length == 1)
+        {
+            reason = incomplete ? CandidateReason.Incomplete : CandidateReason.None;
             return bestMatches[0];
+        }
 
-        _diagnostics.Report(location, $"constructor call for struct '{type.Name}' is ambiguous");
+        if (incomplete)
+        {
+            reason = CandidateReason.Incomplete;
+            return null;
+        }
+
+        reason = CandidateReason.Ambiguous;
+        _diagnostics.Report(location, $"constructor call for struct '{type.Name}' is ambiguous",
+            DiagnosticIds.AmbiguousCall);
         return null;
     }
 
@@ -2241,25 +2687,29 @@ internal sealed class FunctionBodyBinder
         IEnumerable<IndexerSymbol> candidates,
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
-        string ownerName) =>
-        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName);
+        string ownerName,
+        SyntaxNode syntax) =>
+        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName, syntax);
 
     private InterfaceIndexerSymbol? ResolveIndexer(
         IEnumerable<InterfaceIndexerSymbol> candidates,
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
-        string ownerName) =>
-        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName);
+        string ownerName,
+        SyntaxNode syntax) =>
+        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName, syntax);
 
     private TIndexer? ResolveIndexerCore<TIndexer>(
         IEnumerable<TIndexer> candidates,
         Func<TIndexer, ImmutableArray<ParameterSymbol>> getParameters,
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
-        string ownerName)
-        where TIndexer : class
+        string ownerName,
+        SyntaxNode syntax)
+        where TIndexer : Symbol
     {
-        var matches = candidates
+        TIndexer[] candidateArray = candidates.ToArray();
+        var matches = candidateArray
             .Where(candidate => getParameters(candidate).Length == arguments.Length)
             .Select(candidate => new
             {
@@ -2276,10 +2726,18 @@ internal sealed class FunctionBodyBinder
             })
             .ToArray();
         if (matches.Length == 1)
+        {
+            RecordCandidates(syntax, matches[0].Indexer, candidateArray, CandidateReason.None);
             return matches[0].Indexer;
+        }
         if (matches.Length == 0)
         {
-            _diagnostics.Report(location, $"no indexer of type '{ownerName}' matches the provided arguments");
+            CandidateReason reason = candidateArray.Length == 0 ? CandidateReason.NotFound
+                : candidateArray.All(candidate => getParameters(candidate).Length != arguments.Length)
+                    ? CandidateReason.WrongArity : CandidateReason.NotInvocable;
+            RecordCandidates(syntax, null, candidateArray, reason);
+            _diagnostics.Report(location, $"no indexer of type '{ownerName}' matches the provided arguments",
+                reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
             return null;
         }
 
@@ -2290,9 +2748,14 @@ internal sealed class FunctionBodyBinder
             .Select(candidate => candidate.Indexer)
             .ToArray();
         if (bestMatches.Length == 1)
+        {
+            RecordCandidates(syntax, bestMatches[0], candidateArray, CandidateReason.None);
             return bestMatches[0];
+        }
 
-        _diagnostics.Report(location, $"indexer access on type '{ownerName}' is ambiguous");
+        RecordCandidates(syntax, null, candidateArray, CandidateReason.Ambiguous);
+        _diagnostics.Report(location, $"indexer access on type '{ownerName}' is ambiguous",
+            DiagnosticIds.AmbiguousCall);
         return null;
     }
 
@@ -2379,26 +2842,30 @@ internal sealed class FunctionBodyBinder
         ValidateDefaultInitialization(elementType, location);
         if (TypeIdentity.AreSame(elementType, BuiltinTypes.Void))
         {
-            _diagnostics.Report(location, "array element type cannot be 'void'");
+            _diagnostics.Report(location, "array element type cannot be 'void'",
+                DiagnosticIds.VoidArrayElementType);
         }
 
         if (elementType is StructTypeSymbol { IsAbstract: true } structType)
         {
             _diagnostics.Report(
                 location,
-                $"array element type '{structType.Name}' is abstract");
+                $"array element type '{structType.Name}' is abstract",
+                DiagnosticIds.AbstractArrayElementType);
         }
     }
 
     private void ValidateDefaultInitialization(TypeSymbol type, TextLocation location)
     {
         if (type is ReferenceTypeSymbol)
-            _diagnostics.Report(location, $"reference type '{type.Name}' cannot be default-initialized");
+            _diagnostics.Report(location, $"reference type '{type.Name}' cannot be default-initialized",
+                DiagnosticIds.ReferenceCannotDefaultInitialize);
         if (type is StructTypeSymbol structure)
         {
             foreach (FieldSymbol field in structure.AllInstanceFields)
                 if (field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type))
-                    _diagnostics.Report(location, $"field '{field.Name}' contains a reference and requires explicit initialization");
+                    _diagnostics.Report(location, $"field '{field.Name}' contains a reference and requires explicit initialization",
+                        DiagnosticIds.ReferenceFieldRequiresExplicitInitialization);
         }
     }
 
@@ -2406,7 +2873,8 @@ internal sealed class FunctionBodyBinder
     {
         foreach (var (field, state) in _requiredFields)
             if (!_definitelyAssigned.Contains(state))
-                _diagnostics.Report(location, $"field '{field.Name}' contains a reference and must be initialized before the object is used or its constructor exits");
+                _diagnostics.Report(location, $"field '{field.Name}' contains a reference and must be initialized before the object is used or its constructor exits",
+                    DiagnosticIds.ReferenceFieldNotInitialized);
     }
 
     private BoundExpression BindFieldReceiver(ExpressionSyntax syntax)
@@ -2421,19 +2889,23 @@ internal sealed class FunctionBodyBinder
     {
         if (TypeFacts.IsInteger(length.Type) && _constants.TryFold(length, out object? value) &&
             (SemanticAnalyzer.ToInteger(value) < 0 || SemanticAnalyzer.ToInteger(value) > int.MaxValue))
-            _diagnostics.Report(GetLocation(syntax), "array length must be between zero and int.MaxValue");
+            _diagnostics.Report(GetLocation(syntax), "array length must be between zero and int.MaxValue",
+                DiagnosticIds.ArrayLengthOutOfRange);
         if (!TypeFacts.IsInteger(length.Type) && !TypeIdentity.AreSame(length.Type, BuiltinTypes.Error))
         {
-            _diagnostics.Report(GetLocation(syntax), $"array length must be an integer, but has type '{length.Type.ToDisplayString()}'");
+            _diagnostics.Report(GetLocation(syntax), $"array length must be an integer, but has type '{length.Type.ToDisplayString()}'",
+                DiagnosticIds.ArrayLengthMustBeInteger);
         }
 
         if (length is BoundLiteralExpression { Value: int intValue } && intValue < 0)
         {
-            _diagnostics.Report(GetLocation(syntax), "array length cannot be negative");
+            _diagnostics.Report(GetLocation(syntax), "array length cannot be negative",
+                DiagnosticIds.ArrayLengthOutOfRange);
         }
         else if (length is BoundLiteralExpression { Value: long longValue } && longValue < 0)
         {
-            _diagnostics.Report(GetLocation(syntax), "array length cannot be negative");
+            _diagnostics.Report(GetLocation(syntax), "array length cannot be negative",
+                DiagnosticIds.ArrayLengthOutOfRange);
         }
     }
 
@@ -2466,7 +2938,8 @@ internal sealed class FunctionBodyBinder
         _stackArrayScopes[local] = origin;
         for (BoundScope? scope = _localScopes[local]; scope is not null; scope = scope.Parent)
             if (ReferenceEquals(scope, origin)) return;
-        _diagnostics.Report(location, "stack array cannot escape its allocation scope through this assignment");
+        _diagnostics.Report(location, "stack array cannot escape its allocation scope through this assignment",
+            DiagnosticIds.StackArrayEscape);
     }
 
     private readonly record struct ArrayState(ArrayStorageKind Storage, BoundScope? Scope);
@@ -2593,10 +3066,12 @@ internal sealed class FunctionBodyBinder
     };
 
     private void ReportCannotConvert(TextLocation location, TypeSymbol source, TypeSymbol destination) =>
-        _diagnostics.Report(location, $"cannot implicitly convert '{source.ToDisplayString()}' to '{destination.ToDisplayString()}'");
+        _diagnostics.Report(location, $"cannot implicitly convert '{source.ToDisplayString()}' to '{destination.ToDisplayString()}'",
+            DiagnosticIds.TypeMismatch);
 
     private static TextLocation GetLocation(ExpressionSyntax syntax) => syntax switch
     {
+        MissingExpressionSyntax missing => missing.MissingToken.Location,
         LiteralExpressionSyntax literal => literal.LiteralToken.Location,
         NameExpressionSyntax name => name.IdentifierToken.Location,
         ThisExpressionSyntax @this => @this.ThisKeyword.Location,
@@ -2615,6 +3090,87 @@ internal sealed class FunctionBodyBinder
         TypeLayoutExpressionSyntax layout => layout.Keyword.Location,
         CastExpressionSyntax cast => cast.CastKeyword.Location,
         _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
+    };
+
+    private void RecordScope(BlockStatementSyntax syntax, BoundScope scope)
+    {
+        int start = syntax.OpenBraceToken.Location.Span.Start;
+        int end = syntax.CloseBraceToken.Location.Span.End;
+        if (end < start) end = start;
+        _semanticInfo.Scopes.Add(new PositionScope(
+            syntax.OpenBraceToken.Location.Source,
+            TextSpan.FromBounds(start, end),
+            _function,
+            scope.Variables.ToArray(),
+            syntax.CloseBraceToken.IsMissing));
+    }
+
+    private void RecordScope(SourceText source, TextSpan span, BoundScope scope, bool includeEnd = false) =>
+        _semanticInfo.Scopes.Add(new PositionScope(source, span, _function, scope.Variables.ToArray(), includeEnd));
+
+    private static (int End, bool IncludeEnd) GetStatementEnd(StatementSyntax syntax) => syntax switch
+    {
+        BlockStatementSyntax block => (block.CloseBraceToken.Location.Span.End, block.CloseBraceToken.IsMissing),
+        VariableDeclarationStatementSyntax variable => (variable.SemicolonToken.Location.Span.End, variable.SemicolonToken.IsMissing),
+        ReturnStatementSyntax @return => (@return.SemicolonToken.Location.Span.End, @return.SemicolonToken.IsMissing),
+        ExpressionStatementSyntax expression => (expression.SemicolonToken.Location.Span.End, expression.SemicolonToken.IsMissing),
+        IfStatementSyntax @if when @if.ElseStatement is not null => GetStatementEnd(@if.ElseStatement),
+        IfStatementSyntax @if => GetStatementEnd(@if.ThenStatement),
+        WhileStatementSyntax @while => GetStatementEnd(@while.Body),
+        ForStatementSyntax @for => GetStatementEnd(@for.Body),
+        BreakStatementSyntax @break => (@break.SemicolonToken.Location.Span.End, @break.SemicolonToken.IsMissing),
+        ContinueStatementSyntax @continue => (@continue.SemicolonToken.Location.Span.End, @continue.SemicolonToken.IsMissing),
+        SwitchStatementSyntax @switch when @switch.CloseBraceToken is { } close => (close.Location.Span.End, close.IsMissing),
+        _ => throw new InvalidOperationException($"Unexpected statement syntax '{syntax.Kind}'."),
+    };
+
+    private void SetConvertedType(ExpressionSyntax syntax, TypeSymbol convertedType)
+    {
+        TypeInfo current = _semanticInfo.Types.GetValueOrDefault(syntax, new TypeInfo(convertedType, convertedType));
+        _semanticInfo.Types[syntax] = current with { ConvertedType = convertedType };
+    }
+
+    private void RecordSymbolAndType(SyntaxNode syntax, Symbol symbol, TypeSymbol type)
+    {
+        SetSelectedSymbolPreservingCandidates(syntax, symbol);
+        _semanticInfo.Types[syntax] = new TypeInfo(type, type);
+    }
+
+    private void RecordCandidates(SyntaxNode syntax, Symbol? selected, IEnumerable<Symbol> candidates, CandidateReason reason)
+    {
+        ImmutableArray<Symbol> candidateArray = candidates.Distinct().ToImmutableArray();
+        _semanticInfo.Symbols[syntax] = new SymbolInfo(selected, candidateArray, reason);
+    }
+
+    private void SetSelectedSymbolPreservingCandidates(SyntaxNode syntax, Symbol selected)
+    {
+        if (_semanticInfo.Symbols.TryGetValue(syntax, out SymbolInfo existing) && !existing.CandidateSymbols.IsEmpty)
+            _semanticInfo.Symbols[syntax] = existing with { Symbol = selected };
+        else
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(selected);
+    }
+
+    private void RecordStaticReceiver(ExpressionSyntax syntax, TypeSymbol type)
+    {
+        _semanticInfo.Types[syntax] = new TypeInfo(type, type);
+        _semanticInfo.Receivers[syntax] = new ReceiverInfo(type, IsStatic: true, IsReadonly: true, IsWritable: false);
+        _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(type);
+    }
+
+    private static Symbol? GetReferencedSymbol(BoundExpression expression) => expression switch
+    {
+        BoundVariableExpression variable => variable.Variable,
+        BoundMemberAccessExpression member => member.Field,
+        BoundStaticFieldExpression field => field.Field,
+        BoundCallExpression call => call.Function,
+        BoundMethodCallExpression call => call.Method,
+        BoundInterfaceMethodCallExpression call => call.Method,
+        BoundConstructorCallExpression call => call.Constructor,
+        BoundPropertySetExpression property => property.Property,
+        BoundInterfacePropertySetExpression property => property.Property,
+        BoundIndexerSetExpression indexer => indexer.Indexer,
+        BoundInterfaceIndexerSetExpression indexer => indexer.Indexer,
+        _ => null,
     };
 
     private static bool IsAddressable(BoundExpression expression) => expression switch

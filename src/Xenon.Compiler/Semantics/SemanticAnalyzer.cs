@@ -28,22 +28,28 @@ internal sealed class SemanticAnalyzer
     private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body, FileSymbolScope Scope)> _functionBodies = [];
     private readonly List<BoundFunction> _synthesizedFunctions = [];
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
+    private readonly SemanticInfoStore _semanticInfo = new();
+    private readonly CancellationToken _cancellationToken;
 
-    private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory, ITargetTypeLayout? targetLayout)
+    private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
+        ITargetTypeLayout? targetLayout, CancellationToken cancellationToken)
     {
         _syntaxTrees = syntaxTrees;
         _typeFactory = typeFactory;
         _constants = new ConstantEvaluationContext(targetLayout);
+        _cancellationToken = cancellationToken;
     }
 
-    public static SemanticModel Analyze(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory, ITargetTypeLayout? targetLayout = null)
+    public static SemanticModel Analyze(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
+        ITargetTypeLayout? targetLayout = null, CancellationToken cancellationToken = default)
     {
-        var analyzer = new SemanticAnalyzer(syntaxTrees, typeFactory, targetLayout);
+        var analyzer = new SemanticAnalyzer(syntaxTrees, typeFactory, targetLayout, cancellationToken);
         return analyzer.Analyze();
     }
 
     private SemanticModel Analyze()
     {
+        _cancellationToken.ThrowIfCancellationRequested();
         DeclareNamespaces();
         DeclareStructs();
         DeclareInterfaces();
@@ -70,7 +76,8 @@ internal sealed class SemanticAnalyzer
         foreach (StructTypeSymbol type in _structSymbols.Values)
             if (type.Destructor is null && type.BaseType?.FindDestructor() is { IsPublic: false } inheritedDestructor)
                 _diagnostics.Report(type.Declaration.IdentifierToken.Location,
-                    $"destructor '{inheritedDestructor.ContainingType!.Name}' is private");
+                    $"destructor '{inheritedDestructor.ContainingType!.Name}' is private",
+                    DiagnosticIds.InaccessibleSymbol);
         BuildVirtualMethodTables();
         ValidateInterfaceImplementations();
         DeclareFunctions();
@@ -81,7 +88,8 @@ internal sealed class SemanticAnalyzer
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
         {
-            var binder = new FunctionBodyBinder(symbol, scope, _diagnostics, _constants);
+            _cancellationToken.ThrowIfCancellationRequested();
+            var binder = new FunctionBodyBinder(symbol, scope, _diagnostics, _constants, _semanticInfo, _cancellationToken);
             functions.Add(new BoundFunction(symbol, binder.BindBody(body)));
             foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
         }
@@ -93,12 +101,15 @@ internal sealed class SemanticAnalyzer
         ImmutableArray<StructTypeSymbol> types = [.. _structSymbols.Values];
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, _) in _functionBodies)
         {
+            _cancellationToken.ThrowIfCancellationRequested();
             if (symbol.IsReadonly)
                 new ReadonlyEffectAnalyzer(symbol, _diagnostics, _expressionLocations,
-                    body.OpenBraceToken.Location, bodies, types).Analyze(bodies[symbol]);
+                    body.OpenBraceToken.Location, bodies, types, _cancellationToken).Analyze(bodies[symbol]);
         }
 
-        return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), [.. _diagnostics], _constants.RequiresTargetLayout);
+        RecordDeclarations(_globalNamespace);
+        return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), [.. _diagnostics],
+            _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
     }
 
     private void BindInstanceFieldInitializers()
@@ -119,7 +130,9 @@ internal sealed class SemanticAnalyzer
                 initializer,
                 _structScopes[declaration],
                 _diagnostics,
-                _constants);
+                _constants,
+                _semanticInfo,
+                _cancellationToken);
 
             foreach (FieldSymbol field in type.Fields)
             {
@@ -138,6 +151,7 @@ internal sealed class SemanticAnalyzer
     {
         foreach (SyntaxTree tree in _syntaxTrees)
         {
+            _cancellationToken.ThrowIfCancellationRequested();
             NamespaceSymbol current = _globalNamespace;
             NamespaceDeclarationSyntax declaration = tree.Root.Namespace;
             for (int index = 0; index < declaration.NameParts.Length; index++)
@@ -147,6 +161,7 @@ internal sealed class SemanticAnalyzer
             }
 
             _treeNamespaces.Add(tree, current);
+            _semanticInfo.Declarations[tree.Root.Namespace] = current;
         }
     }
 
@@ -160,13 +175,22 @@ internal sealed class SemanticAnalyzer
                 var type = new StructTypeSymbol(declaration.IdentifierToken.Text, @namespace, declaration);
                 if (!@namespace.TryDeclareType(type))
                 {
+                    DeclaredTypeSymbol? previous = @namespace.FindAnyType(type.Name);
                     _diagnostics.Report(
                         declaration.IdentifierToken.Location,
-                        $"type '{@namespace.FullName}.{type.Name}' is already declared");
+                        $"type '{@namespace.FullName}.{type.Name}' is already declared",
+                        DiagnosticIds.DuplicateDeclaration,
+                        previous?.Locations.Select(location => new RelatedDiagnosticLocation(location, "previous declaration")));
                     continue;
                 }
 
                 _structSymbols.Add(declaration, type);
+                _semanticInfo.TypeRegions.Add(new TypeRegion(
+                    declaration.OpenBraceToken.Location.Source,
+                    TextSpan.FromBounds(declaration.OpenBraceToken.Location.Span.Start,
+                        Math.Max(declaration.OpenBraceToken.Location.Span.Start, declaration.CloseBraceToken.Location.Span.End)),
+                    type,
+                    declaration.CloseBraceToken.IsMissing));
             }
         }
     }
@@ -178,7 +202,8 @@ internal sealed class SemanticAnalyzer
         {
             var type = new EnumTypeSymbol(declaration.IdentifierToken.Text, _treeNamespaces[tree], declaration);
             if (!type.ContainingNamespace.TryDeclareType(type))
-                _diagnostics.Report(declaration.IdentifierToken.Location, $"type '{type.FullName}' is already declared");
+                _diagnostics.Report(declaration.IdentifierToken.Location, $"type '{type.FullName}' is already declared",
+                    DiagnosticIds.DuplicateDeclaration);
             else
                 _enums.Add(declaration, (type, tree));
         }
@@ -192,7 +217,8 @@ internal sealed class SemanticAnalyzer
             if (underlying is PrimitiveTypeSymbol { IsInteger: true } integer)
                 type.UnderlyingType = integer;
             else
-                _diagnostics.Report(syntax.IdentifierToken.Location, "enum underlying type must be an integer type");
+                _diagnostics.Report(syntax.IdentifierToken.Location, "enum underlying type must be an integer type",
+                    DiagnosticIds.InvalidEnumUnderlyingType);
             var members = ImmutableArray.CreateBuilder<ConstantSymbol>();
             var names = new HashSet<string>(StringComparer.Ordinal);
             ConstantSymbol? previous = null;
@@ -200,7 +226,8 @@ internal sealed class SemanticAnalyzer
             {
                 if (!names.Add(member.IdentifierToken.Text))
                 {
-                    _diagnostics.Report(member.IdentifierToken.Location, $"duplicate enum member '{member.IdentifierToken.Text}'");
+                    _diagnostics.Report(member.IdentifierToken.Location, $"duplicate enum member '{member.IdentifierToken.Text}'",
+                        DiagnosticIds.DuplicateEnumMember);
                     continue;
                 }
                 ExpressionSyntax initializer = member.Value ?? new LiteralExpressionSyntax(
@@ -229,7 +256,8 @@ internal sealed class SemanticAnalyzer
             BigInteger number = previous is null ? BigInteger.Zero : ToInteger(previous.Value) + 1;
             if (!FitsInteger(number, type.UnderlyingType, _constants.TargetLayout))
             {
-                _diagnostics.Report(member.IdentifierToken.Location, $"enum value is out of range for '{type.UnderlyingType.Name}'");
+                _diagnostics.Report(member.IdentifierToken.Location, $"enum value is out of range for '{type.UnderlyingType.Name}'",
+                    DiagnosticIds.EnumValueOutOfRange);
                 return false;
             }
             value = IntegerValue(number, type.UnderlyingType, _constants.TargetLayout);
@@ -239,7 +267,8 @@ internal sealed class SemanticAnalyzer
             BoundExpression? expression = BindConstantExpression(member.Initializer, member);
             if (expression is null || !(TypeFacts.IsInteger(expression.Type) || TypeIdentity.AreSame(expression.Type, type)))
             {
-                _diagnostics.Report(member.IdentifierToken.Location, "enum value must be an integer compile-time constant");
+                _diagnostics.Report(member.IdentifierToken.Location, "enum value must be an integer compile-time constant",
+                    DiagnosticIds.EnumConstantRequired);
                 return false;
             }
             ConstantFoldStatus status = _constants.Fold(expression, out value);
@@ -250,13 +279,15 @@ internal sealed class SemanticAnalyzer
             }
             if (status == ConstantFoldStatus.Invalid)
             {
-                _diagnostics.Report(member.IdentifierToken.Location, "enum value must be an integer compile-time constant with valid operations");
+                _diagnostics.Report(member.IdentifierToken.Location, "enum value must be an integer compile-time constant with valid operations",
+                    DiagnosticIds.InvalidConstantOperation);
                 return false;
             }
             BigInteger number = ToInteger(value);
             if (!FitsInteger(number, type.UnderlyingType, _constants.TargetLayout))
             {
-                _diagnostics.Report(member.IdentifierToken.Location, $"enum value is out of range for '{type.UnderlyingType.Name}'");
+                _diagnostics.Report(member.IdentifierToken.Location, $"enum value is out of range for '{type.UnderlyingType.Name}'",
+                    DiagnosticIds.EnumValueOutOfRange);
                 return false;
             }
             value = IntegerValue(number, type.UnderlyingType, _constants.TargetLayout);
@@ -300,10 +331,17 @@ internal sealed class SemanticAnalyzer
                 var type = new InterfaceTypeSymbol(declaration.IdentifierToken.Text, @namespace, declaration);
                 if (!@namespace.TryDeclareType(type))
                 {
-                    _diagnostics.Report(declaration.IdentifierToken.Location, $"type '{@namespace.FullName}.{type.Name}' is already declared");
+                    _diagnostics.Report(declaration.IdentifierToken.Location, $"type '{@namespace.FullName}.{type.Name}' is already declared",
+                        DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
                 _interfaceSymbols.Add(declaration, type);
+                _semanticInfo.TypeRegions.Add(new TypeRegion(
+                    declaration.OpenBraceToken.Location.Source,
+                    TextSpan.FromBounds(declaration.OpenBraceToken.Location.Span.Start,
+                        Math.Max(declaration.OpenBraceToken.Location.Span.Start, declaration.CloseBraceToken.Location.Span.End)),
+                    type,
+                    declaration.CloseBraceToken.IsMissing));
             }
         }
     }
@@ -312,9 +350,11 @@ internal sealed class SemanticAnalyzer
     {
         foreach (SyntaxTree tree in _syntaxTrees)
         {
-            var scope = new FileSymbolScope(_globalNamespace, _treeNamespaces[tree], _typeFactory);
+            _cancellationToken.ThrowIfCancellationRequested();
+            var scope = new FileSymbolScope(_globalNamespace, _treeNamespaces[tree], _typeFactory, _semanticInfo);
             scope.BindUsings(tree.Root.Usings, _diagnostics);
             _treeScopes.Add(tree, scope);
+            _semanticInfo.FileScopes[tree.Source] = scope;
 
             foreach (StructDeclarationSyntax declaration in tree.Root.Members.OfType<StructDeclarationSyntax>())
             {
@@ -342,14 +382,16 @@ internal sealed class SemanticAnalyzer
                     _diagnostics);
                 if (TypeIdentity.AreSame(fieldType, BuiltinTypes.Void))
                 {
-                    _diagnostics.Report(fieldSyntax.Type.NameToken.Location, "field type cannot be 'void'");
+                    _diagnostics.Report(fieldSyntax.Type.NameToken.Location, "field type cannot be 'void'",
+                        DiagnosticIds.VoidFieldType);
                 }
 
                 if (!names.Add(fieldSyntax.IdentifierToken.Text))
                 {
                     _diagnostics.Report(
                         fieldSyntax.IdentifierToken.Location,
-                        $"field '{fieldSyntax.IdentifierToken.Text}' is already declared in struct '{type.Name}'");
+                        $"field '{fieldSyntax.IdentifierToken.Text}' is already declared in struct '{type.Name}'",
+                        DiagnosticIds.DuplicateDeclaration);
                 }
 
                 var field = new FieldSymbol(
@@ -388,13 +430,19 @@ internal sealed class SemanticAnalyzer
             ConstantFoldStatus status = initializer is null ? ConstantFoldStatus.Invalid : _constants.Fold(initializer, out value);
             TypeSymbol constantType = initializer?.Type ?? BuiltinTypes.Error;
             if (status == ConstantFoldStatus.Invalid)
-                _diagnostics.Report(syntax.IdentifierToken.Location, "static field initializers must be compile-time constants");
+                _diagnostics.Report(syntax.IdentifierToken.Location, "static field initializers must be compile-time constants",
+                    DiagnosticIds.ConstantValueRequired);
             else if (TypeIdentity.AreSame(constantType, BuiltinTypes.Error) || !TypeFacts.CanAssign(field.Type, constantType))
-                _diagnostics.Report(syntax.IdentifierToken.Location, $"cannot implicitly convert '{constantType.Name}' to '{field.Type.ToDisplayString()}'");
+                _diagnostics.Report(syntax.IdentifierToken.Location, $"cannot implicitly convert '{constantType.Name}' to '{field.Type.ToDisplayString()}'",
+                    DiagnosticIds.TypeMismatch);
             else if (!IsSupportedStaticInitializer(field.Type, value))
-                _diagnostics.Report(syntax.IdentifierToken.Location, $"static field type '{field.Type.ToDisplayString()}' does not support this constant initializer");
+                _diagnostics.Report(syntax.IdentifierToken.Location, $"static field type '{field.Type.ToDisplayString()}' does not support this constant initializer",
+                    DiagnosticIds.StaticInitializerTypeUnsupported);
             else
+            {
+                SetConvertedType(syntax.Initializer!, field.Type);
                 field.SetConstantValue(value);
+            }
         }
     }
 
@@ -409,7 +457,8 @@ internal sealed class SemanticAnalyzer
                 TypeSymbol type = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
                 var constant = new ConstantSymbol(syntax.IdentifierToken.Text, type, @namespace, syntax.Initializer, syntax);
                 if (!@namespace.TryDeclareConstant(constant))
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"constant '{@namespace.FullName}.{constant.Name}' is already declared");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"constant '{@namespace.FullName}.{constant.Name}' is already declared",
+                        DiagnosticIds.DuplicateDeclaration);
                 else
                     _constantScopes.Add(constant, scope);
             }
@@ -424,7 +473,8 @@ internal sealed class SemanticAnalyzer
                 TypeSymbol constantType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
                 var constant = new ConstantSymbol(syntax.IdentifierToken.Text, constantType, type, syntax.Initializer, syntax);
                 if (constants.Any(existing => existing.Name == constant.Name))
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"constant '{constant.Name}' is already declared in struct '{type.Name}'");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"constant '{constant.Name}' is already declared in struct '{type.Name}'",
+                        DiagnosticIds.DuplicateDeclaration);
                 else
                 {
                     constants.Add(constant);
@@ -448,7 +498,8 @@ internal sealed class SemanticAnalyzer
             return true;
         if (!_evaluatingConstants.Add(constant))
         {
-            _diagnostics.Report(constant.IdentifierToken.Location, $"circular constant dependency involving '{constant.Name}'");
+            _diagnostics.Report(constant.IdentifierToken.Location, $"circular constant dependency involving '{constant.Name}'",
+                DiagnosticIds.ConstantCycle);
             return false;
         }
         try
@@ -458,7 +509,8 @@ internal sealed class SemanticAnalyzer
             BoundExpression? value = BindConstantExpression(constant.Initializer, constant);
             if (value is null)
             {
-                _diagnostics.Report(constant.IdentifierToken.Location, $"initializer of constant '{constant.Name}' is not a compile-time constant");
+                _diagnostics.Report(constant.IdentifierToken.Location, $"initializer of constant '{constant.Name}' is not a compile-time constant",
+                    DiagnosticIds.ConstantValueRequired);
                 return false;
             }
             if (!TypeFacts.CanAssign(constant.Type, value.Type))
@@ -467,17 +519,21 @@ internal sealed class SemanticAnalyzer
                     value = new BoundCastExpression(value, constant.Type);
                 else
                 {
-                    _diagnostics.Report(constant.IdentifierToken.Location, $"cannot implicitly convert '{value.Type.ToDisplayString()}' to '{constant.Type.ToDisplayString()}'");
+                    _diagnostics.Report(constant.IdentifierToken.Location, $"cannot implicitly convert '{value.Type.ToDisplayString()}' to '{constant.Type.ToDisplayString()}'",
+                        DiagnosticIds.TypeMismatch);
                     return false;
                 }
             }
+
+            SetConvertedType(constant.Initializer, value.Type);
 
             ConstantFoldStatus foldStatus = _constants.Fold(value, out object? foldedValue);
             if (foldStatus == ConstantFoldStatus.Invalid)
             {
                 _diagnostics.Report(
                     constant.IdentifierToken.Location,
-                    $"initializer of constant '{constant.Name}' contains an invalid compile-time operation");
+                    $"initializer of constant '{constant.Name}' contains an invalid compile-time operation",
+                    DiagnosticIds.InvalidConstantOperation);
                 return false;
             }
 
@@ -500,6 +556,14 @@ internal sealed class SemanticAnalyzer
 
     private BoundExpression? BindConstantExpression(ExpressionSyntax syntax, ConstantSymbol context)
     {
+        BoundExpression? expression = BindConstantExpressionCore(syntax, context);
+        TypeSymbol type = expression?.Type ?? BuiltinTypes.Error;
+        _semanticInfo.Types[syntax] = new TypeInfo(type, type);
+        return expression;
+    }
+
+    private BoundExpression? BindConstantExpressionCore(ExpressionSyntax syntax, ConstantSymbol context)
+    {
         switch (syntax)
         {
             case LiteralExpressionSyntax literal:
@@ -511,11 +575,14 @@ internal sealed class SemanticAnalyzer
                 ConstantSymbol? referenced = (_enumMembers.TryGetValue(context, out var enumContext) ? enumContext.Type.FindMember(name.IdentifierToken.Text) : null) ??
                     context.ContainingType?.FindMember<ConstantSymbol>(name.IdentifierToken.Text) ??
                     _constantScopes[context].ResolveConstant(name.IdentifierToken.Text, name.IdentifierToken.Location, _diagnostics);
-                return referenced is not null && EvaluateConstant(referenced) ? referenced.BoundValue : null;
+                if (referenced is null) return null;
+                _semanticInfo.Symbols[name] = SymbolInfo.FromSymbol(referenced);
+                return EvaluateConstant(referenced) ? referenced.BoundValue : null;
             }
             case MemberAccessExpressionSyntax member when member.Receiver is NameExpressionSyntax typeName &&
                 _constantScopes[context].ResolveType(typeName.IdentifierToken.Text, typeName.IdentifierToken.Location, _diagnostics) is DeclaredTypeSymbol structType &&
                 structType.FindMember<ConstantSymbol>(member.MemberToken.Text) is ConstantSymbol associated:
+                RecordStaticConstantReference(member, typeName, structType, associated);
                 return EvaluateConstant(associated) ? associated.BoundValue : null;
             case MemberAccessExpressionSyntax member:
             {
@@ -537,7 +604,16 @@ internal sealed class SemanticAnalyzer
                     StructTypeSymbol structure => structure.FindConstant(parts[^1].Text),
                     _ => null,
                 };
-                return referenced is not null && EvaluateConstant(referenced) ? referenced.BoundValue : null;
+                if (referenced is null) return null;
+                _semanticInfo.Symbols[member] = SymbolInfo.FromSymbol(referenced);
+                _semanticInfo.Types[member] = new TypeInfo(referenced.Type, referenced.Type);
+                if (resolved is TypeSymbol receiverType)
+                {
+                    _semanticInfo.Types[member.Receiver] = new TypeInfo(receiverType, receiverType);
+                    _semanticInfo.Receivers[member.Receiver] = new ReceiverInfo(receiverType, true, true, false);
+                    _semanticInfo.Symbols[member.Receiver] = SymbolInfo.FromSymbol(receiverType);
+                }
+                return EvaluateConstant(referenced) ? referenced.BoundValue : null;
             }
             case UnaryExpressionSyntax unary:
             {
@@ -602,6 +678,22 @@ internal sealed class SemanticAnalyzer
             default:
                 return null;
         }
+    }
+
+    private void RecordStaticConstantReference(MemberAccessExpressionSyntax member, ExpressionSyntax receiver,
+        TypeSymbol receiverType, ConstantSymbol constant)
+    {
+        _semanticInfo.Symbols[member] = SymbolInfo.FromSymbol(constant);
+        _semanticInfo.Types[member] = new TypeInfo(constant.Type, constant.Type);
+        _semanticInfo.Symbols[receiver] = SymbolInfo.FromSymbol(receiverType);
+        _semanticInfo.Types[receiver] = new TypeInfo(receiverType, receiverType);
+        _semanticInfo.Receivers[receiver] = new ReceiverInfo(receiverType, true, true, false);
+    }
+
+    private void SetConvertedType(ExpressionSyntax syntax, TypeSymbol convertedType)
+    {
+        TypeInfo current = _semanticInfo.Types.GetValueOrDefault(syntax, new TypeInfo(convertedType, convertedType));
+        _semanticInfo.Types[syntax] = current with { ConvertedType = convertedType };
     }
 
     internal static ConstantFoldStatus FoldConstantExpression(BoundExpression expression, out object? value, ITargetTypeLayout? targetLayout)
@@ -1064,16 +1156,19 @@ internal sealed class SemanticAnalyzer
                 if (resolved is StructTypeSymbol baseStruct)
                 {
                     if (type.BaseType is not null)
-                        _diagnostics.Report(baseSyntax.NameToken.Location, $"struct '{type.Name}' may inherit from at most one struct");
+                        _diagnostics.Report(baseSyntax.NameToken.Location, $"struct '{type.Name}' may inherit from at most one struct",
+                            DiagnosticIds.MultipleStructBaseTypes);
                     else if (TypeIdentity.AreSame(baseStruct, type))
-                        _diagnostics.Report(baseSyntax.NameToken.Location, $"struct '{type.Name}' cannot inherit from itself");
+                        _diagnostics.Report(baseSyntax.NameToken.Location, $"struct '{type.Name}' cannot inherit from itself",
+                            DiagnosticIds.SelfInheritance);
                     else
                         type.SetBaseType(baseStruct);
                 }
                 else if (resolved is InterfaceTypeSymbol @interface)
                     interfaces.Add(@interface);
                 else if (!TypeIdentity.AreSame(resolved, BuiltinTypes.Error))
-                    _diagnostics.Report(baseSyntax.NameToken.Location, $"'{baseSyntax.Name}' is not a struct or interface type");
+                    _diagnostics.Report(baseSyntax.NameToken.Location, $"'{baseSyntax.Name}' is not a struct or interface type",
+                        DiagnosticIds.InvalidBaseType);
             }
             type.SetInterfaces(interfaces.ToImmutable());
         }
@@ -1087,7 +1182,8 @@ internal sealed class SemanticAnalyzer
                 if (resolved is InterfaceTypeSymbol @interface && !TypeIdentity.AreSame(@interface, type))
                     bases.Add(@interface);
                 else if (!TypeIdentity.AreSame(resolved, BuiltinTypes.Error))
-                    _diagnostics.Report(baseSyntax.NameToken.Location, $"interface '{type.Name}' may inherit only from interfaces");
+                    _diagnostics.Report(baseSyntax.NameToken.Location, $"interface '{type.Name}' may inherit only from interfaces",
+                        DiagnosticIds.InterfaceBaseMustBeInterface);
             }
             type.SetBaseInterfaces(bases.ToImmutable());
         }
@@ -1102,7 +1198,8 @@ internal sealed class SemanticAnalyzer
                 FunctionSymbol first = group.First();
                 if (group.Any(method => !TypeIdentity.AreSame(method.ReturnType, first.ReturnType) || method.IsReadonly != first.IsReadonly))
                     _diagnostics.Report(type.Declaration.IdentifierToken.Location,
-                        $"interface '{type.Name}' inherits incompatible member '{first.Name}'");
+                        $"interface '{type.Name}' inherits incompatible member '{first.Name}'",
+                        DiagnosticIds.InheritedInterfaceMemberConflict);
             }
             foreach (var group in type.AllProperties.GroupBy(property => property.Name))
             {
@@ -1111,7 +1208,8 @@ internal sealed class SemanticAnalyzer
                     (property.Getter is null) != (first.Getter is null) || (property.Setter is null) != (first.Setter is null)) ||
                     type.SelfAndBaseInterfaces.SelectMany(parent => parent.Methods).Any(method => method.Name == first.Name))
                     _diagnostics.Report(type.Declaration.IdentifierToken.Location,
-                        $"interface '{type.Name}' inherits incompatible member '{first.Name}'");
+                        $"interface '{type.Name}' inherits incompatible member '{first.Name}'",
+                        DiagnosticIds.InheritedInterfaceMemberConflict);
             }
             foreach (var group in type.SelfAndBaseInterfaces.SelectMany(parent => parent.Indexers)
                 .GroupBy(indexer => TypeSignature.Parameters(indexer.Parameters)))
@@ -1120,7 +1218,8 @@ internal sealed class SemanticAnalyzer
                 if (group.Any(indexer => !TypeIdentity.AreSame(indexer.Type, first.Type) ||
                     (indexer.Getter is null) != (first.Getter is null) || (indexer.Setter is null) != (first.Setter is null)))
                     _diagnostics.Report(type.Declaration.IdentifierToken.Location,
-                        $"interface '{type.Name}' inherits incompatible indexers");
+                        $"interface '{type.Name}' inherits incompatible indexers",
+                        DiagnosticIds.InheritedInterfaceMemberConflict);
             }
         }
     }
@@ -1136,7 +1235,8 @@ internal sealed class SemanticAnalyzer
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(syntax.Parameters, scope);
                 if (methods.Any(m => m.Name == syntax.IdentifierToken.Text && HaveSameParameterTypes(m.Parameters, parameters)))
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface '{type.Name}' already declares method '{syntax.IdentifierToken.Text}'");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface '{type.Name}' already declares method '{syntax.IdentifierToken.Text}'",
+                        DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
                 methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, TypeResolver.ResolveReturnType(syntax.ReturnType, scope, _diagnostics), parameters, syntax));
@@ -1149,18 +1249,22 @@ internal sealed class SemanticAnalyzer
                 if (properties.Any(property => string.Equals(property.Name, syntax.IdentifierToken.Text, StringComparison.Ordinal)) ||
                     declaration.Methods.Any(method => string.Equals(method.IdentifierToken.Text, syntax.IdentifierToken.Text, StringComparison.Ordinal)))
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface '{type.Name}' already declares member '{syntax.IdentifierToken.Text}'");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface '{type.Name}' already declares member '{syntax.IdentifierToken.Text}'",
+                        DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
 
                 TypeSymbol propertyType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
                 var property = new InterfacePropertySymbol(syntax.IdentifierToken.Text, type, propertyType, syntax);
                 if (syntax.Accessors.Count(accessor => accessor.IsGetter) > 1)
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' declares more than one getter");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' declares more than one getter",
+                        DiagnosticIds.DuplicateGetter);
                 if (syntax.Accessors.Count(accessor => accessor.IsSetter) > 1)
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' declares more than one setter");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' declares more than one setter",
+                        DiagnosticIds.DuplicateSetter);
                 if (syntax.Getter is null && syntax.Setter is null)
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' must declare a getter or setter");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' must declare a getter or setter",
+                        DiagnosticIds.AccessorRequired);
 
                 FunctionSymbol? getter = syntax.Getter is null
                     ? null
@@ -1183,10 +1287,12 @@ internal sealed class SemanticAnalyzer
             {
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(syntax.Parameters, scope);
                 if (parameters.IsEmpty)
-                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter");
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter",
+                        DiagnosticIds.IndexerRequiresParameter);
                 if (indexers.Any(candidate => HaveSameParameterTypes(candidate.Parameters, parameters)))
                 {
-                    _diagnostics.Report(syntax.ThisKeyword.Location, $"interface '{type.Name}' already declares an indexer with the same parameter types");
+                    _diagnostics.Report(syntax.ThisKeyword.Location, $"interface '{type.Name}' already declares an indexer with the same parameter types",
+                        DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
                 TypeSymbol indexerType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
@@ -1203,7 +1309,8 @@ internal sealed class SemanticAnalyzer
                         [.. parameters, new ParameterSymbol("value", indexerType, parameters.Length)],
                         syntax.Setter);
                 if (getter is null && setter is null)
-                    _diagnostics.Report(syntax.ThisKeyword.Location, "an interface indexer must declare a getter or setter");
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an interface indexer must declare a getter or setter",
+                        DiagnosticIds.AccessorRequired);
                 indexer.SetAccessors(getter, setter);
                 indexers.Add(indexer);
             }
@@ -1217,7 +1324,8 @@ internal sealed class SemanticAnalyzer
         {
             if (type.BaseType is not null && ReachesStruct(type.BaseType, type, []))
             {
-                _diagnostics.Report(type.Declaration.IdentifierToken.Location, $"struct inheritance cycle involving '{type.Name}'");
+                _diagnostics.Report(type.Declaration.IdentifierToken.Location, $"struct inheritance cycle involving '{type.Name}'",
+                    DiagnosticIds.InheritanceCycle);
                 type.ClearBaseType();
             }
         }
@@ -1229,7 +1337,8 @@ internal sealed class SemanticAnalyzer
                 .ToImmutableArray();
             if (validBases.Length != type.BaseInterfaces.Length)
             {
-                _diagnostics.Report(type.Declaration.IdentifierToken.Location, $"interface inheritance cycle involving '{type.Name}'");
+                _diagnostics.Report(type.Declaration.IdentifierToken.Location, $"interface inheritance cycle involving '{type.Name}'",
+                    DiagnosticIds.InheritanceCycle);
                 type.SetBaseInterfaces(validBases);
             }
         }
@@ -1340,11 +1449,14 @@ internal sealed class SemanticAnalyzer
             FunctionSymbol? inheritedDestructor = type.BaseType?.FindDestructor();
             int? inheritedSlot = inheritedDestructor?.VTableSlot;
             if (destructor.IsOverride && inheritedSlot is null)
-                _diagnostics.Report(MemberLocation(destructor), $"destructor '{type.Name}' does not override a virtual base destructor");
+                _diagnostics.Report(MemberLocation(destructor), $"destructor '{type.Name}' does not override a virtual base destructor",
+                    DiagnosticIds.NoCompatibleOverrideTarget);
             else if (!destructor.IsOverride && inheritedSlot is not null)
-                _diagnostics.Report(MemberLocation(destructor), $"destructor '{type.FullName}' overrides an inherited virtual destructor and must be declared 'override'");
+                _diagnostics.Report(MemberLocation(destructor), $"destructor '{type.FullName}' overrides an inherited virtual destructor and must be declared 'override'",
+                    DiagnosticIds.MissingOverrideModifier);
             else if (destructor.IsOverride && inheritedDestructor is not null && !HasCompatibleOverrideAccessibility(destructor, inheritedDestructor))
-                _diagnostics.Report(MemberLocation(destructor), "an override cannot reduce the accessibility of its inherited member");
+                _diagnostics.Report(MemberLocation(destructor), "an override cannot reduce the accessibility of its inherited member",
+                    DiagnosticIds.OverrideAccessibilityReduction);
             else if (destructor.IsOverride && inheritedSlot is int slot)
             {
                 destructor.SetVTableSlot(slot);
@@ -1362,7 +1474,8 @@ internal sealed class SemanticAnalyzer
             foreach (FunctionSymbol member in type.VirtualMethods.Where(method => method.IsAbstract)
                 .DistinctBy(method => (object?)method.ContainingProperty ?? method.ContainingIndexer ?? (object)method))
                 _diagnostics.Report(type.Declaration.IdentifierToken.Location,
-                    $"concrete struct '{type.FullName}' does not implement abstract member '{MemberName(member)}'; implement it or declare the struct 'abstract'");
+                    $"concrete struct '{type.FullName}' does not implement abstract member '{MemberName(member)}'; implement it or declare the struct 'abstract'",
+                    DiagnosticIds.UnimplementedInterfaceMember);
         }
     }
 
@@ -1370,22 +1483,26 @@ internal sealed class SemanticAnalyzer
     {
         if (method.IsStatic && (method.IsVirtual || method.IsOverride || method.IsAbstract))
         {
-            _diagnostics.Report(MemberLocation(method), "static methods cannot be virtual, override, or abstract");
+            // The parser owns XE1007 for this invalid modifier combination. Keep
+            // rejecting the method here without duplicating the syntax diagnostic.
             return false;
         }
         if (method.IsOverride && (inherited is null || !method.Overrides(inherited)))
         {
-            _diagnostics.Report(MemberLocation(method), $"method '{MemberName(method)}' does not override a compatible virtual or abstract base method");
+            _diagnostics.Report(MemberLocation(method), $"method '{MemberName(method)}' does not override a compatible virtual or abstract base method",
+                DiagnosticIds.NoCompatibleOverrideTarget);
             return false;
         }
         if (!method.IsOverride && inherited is not null)
         {
-            _diagnostics.Report(MemberLocation(method), $"method '{MemberName(method)}' overrides inherited member '{MemberName(inherited)}' and must be declared 'override'");
+            _diagnostics.Report(MemberLocation(method), $"method '{MemberName(method)}' overrides inherited member '{MemberName(inherited)}' and must be declared 'override'",
+                DiagnosticIds.MissingOverrideModifier);
             return false;
         }
         if (method.IsOverride && inherited is not null && !HasCompatibleOverrideAccessibility(method, inherited))
         {
-            _diagnostics.Report(MemberLocation(method), "an override cannot reduce the accessibility of its inherited member");
+            _diagnostics.Report(MemberLocation(method), "an override cannot reduce the accessibility of its inherited member",
+                DiagnosticIds.OverrideAccessibilityReduction);
             return false;
         }
         return true;
@@ -1402,7 +1519,8 @@ internal sealed class SemanticAnalyzer
                 ? $"{name} does not override a compatible virtual or abstract base member; type, readonly qualifier and getter/setter contract must match"
                 : null;
         if (diagnostic is null) return;
-        _diagnostics.Report(location, diagnostic);
+        _diagnostics.Report(location, diagnostic,
+            isOverride ? DiagnosticIds.NoCompatibleOverrideTarget : DiagnosticIds.MissingOverrideModifier);
         if (getter is not null) invalid.Add(getter);
         if (setter is not null) invalid.Add(setter);
 
@@ -1432,14 +1550,16 @@ internal sealed class SemanticAnalyzer
             foreach (FieldSymbol field in type.StaticFields)
                 if (field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type))
                     _diagnostics.Report(field.Declaration.Type.NameToken.Location,
-                        $"static field '{field.Name}' contains a reference and requires explicit initialization");
+                        $"static field '{field.Name}' contains a reference and requires explicit initialization",
+                        DiagnosticIds.ReferenceRequiresInitializer);
             foreach (FieldSymbol field in type.Fields)
             {
                 if (ContainsStructByValue(field.Type, type, []))
                 {
                     _diagnostics.Report(
                         field.Declaration.Type.NameToken.Location,
-                        $"struct '{type.Name}' has a recursive by-value field '{field.Name}'; use a pointer or array handle instead");
+                        $"struct '{type.Name}' has a recursive by-value field '{field.Name}'; use a pointer or array handle instead",
+                        DiagnosticIds.RecursiveValueLayout);
                 }
             }
         }
@@ -1451,7 +1571,8 @@ internal sealed class SemanticAnalyzer
         foreach (FieldSymbol field in type.Fields.Concat(type.StaticFields))
             if (field.Type is StructTypeSymbol { IsAbstract: true } abstractType)
                 _diagnostics.Report(field.Declaration.Type.NameToken.Location,
-                    $"abstract struct '{abstractType.Name}' cannot be stored in field '{field.Name}'");
+                    $"abstract struct '{abstractType.Name}' cannot be stored in field '{field.Name}'",
+                    DiagnosticIds.AbstractValueStorage);
         var signatures = _functionBodies.Select(entry => (entry.Symbol, Location: entry.Body.OpenBraceToken.Location))
             .Concat(_functionSymbols.Select(entry => (entry.Value, entry.Key.IdentifierToken.Location)))
             .Concat(_structSymbols.Values.SelectMany(type => type.Methods.Select(method => (method, type.Declaration.IdentifierToken.Location))))
@@ -1459,7 +1580,8 @@ internal sealed class SemanticAnalyzer
         foreach (var (symbol, location) in signatures.DistinctBy(entry => entry.Item1))
             if (symbol.ReturnType is StructTypeSymbol { IsAbstract: true } ||
                 symbol.Parameters.Any(parameter => parameter.Type is StructTypeSymbol { IsAbstract: true }))
-                _diagnostics.Report(location, "abstract structs cannot be passed or returned by value");
+                _diagnostics.Report(location, "abstract structs cannot be passed or returned by value",
+                    DiagnosticIds.AbstractValueInSignature);
     }
 
     private static bool ContainsStructByValue(
@@ -1512,14 +1634,16 @@ internal sealed class SemanticAnalyzer
                 {
                     _diagnostics.Report(
                         methodSyntax.IdentifierToken.Location,
-                        $"struct '{type.Name}' already contains field '{methodSyntax.IdentifierToken.Text}'");
+                        $"struct '{type.Name}' already contains field '{methodSyntax.IdentifierToken.Text}'",
+                        DiagnosticIds.DuplicateDeclaration);
                 }
 
                 if (type.FindProperty(methodSyntax.IdentifierToken.Text) is not null)
                 {
                     _diagnostics.Report(
                         methodSyntax.IdentifierToken.Location,
-                        $"struct '{type.Name}' already contains property '{methodSyntax.IdentifierToken.Text}'");
+                        $"struct '{type.Name}' already contains property '{methodSyntax.IdentifierToken.Text}'",
+                        DiagnosticIds.DuplicateDeclaration);
                 }
 
                 TypeSymbol returnType = TypeResolver.ResolveReturnType(
@@ -1543,7 +1667,8 @@ internal sealed class SemanticAnalyzer
                 {
                     _diagnostics.Report(
                         methodSyntax.IdentifierToken.Location,
-                        $"method overloading is not supported yet; struct '{type.Name}' may declare only one method named '{method.Name}'");
+                        $"method overloading is not supported yet; struct '{type.Name}' may declare only one method named '{method.Name}'",
+                        DiagnosticIds.MethodOverloadingNotSupported);
                     continue;
                 }
 
@@ -1568,16 +1693,19 @@ internal sealed class SemanticAnalyzer
             {
                 if (properties.Any(property => string.Equals(property.Name, syntax.IdentifierToken.Text, StringComparison.Ordinal)))
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{syntax.IdentifierToken.Text}' is already declared in struct '{type.Name}'");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{syntax.IdentifierToken.Text}' is already declared in struct '{type.Name}'",
+                        DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
                 if (type.FindField(syntax.IdentifierToken.Text) is not null)
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"struct '{type.Name}' already contains field '{syntax.IdentifierToken.Text}'");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"struct '{type.Name}' already contains field '{syntax.IdentifierToken.Text}'",
+                        DiagnosticIds.DuplicateDeclaration);
                 }
                 if (syntax.IsStatic)
                 {
-                    _diagnostics.Report(syntax.IdentifierToken.Location, "static properties are not supported in this iteration");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, "static properties are not supported in this iteration",
+                        DiagnosticIds.StaticPropertyNotSupported);
                 }
 
                 TypeSymbol propertyType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
@@ -1591,11 +1719,14 @@ internal sealed class SemanticAnalyzer
                 PropertyAccessorDeclarationSyntax? getterSyntax = syntax.Getter;
                 PropertyAccessorDeclarationSyntax? setterSyntax = syntax.Setter;
                 if (syntax.Accessors.Count(accessor => accessor.IsGetter) > 1)
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' declares more than one getter");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' declares more than one getter",
+                        DiagnosticIds.DuplicateGetter);
                 if (syntax.Accessors.Count(accessor => accessor.IsSetter) > 1)
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' declares more than one setter");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' declares more than one setter",
+                        DiagnosticIds.DuplicateSetter);
                 if (getterSyntax is null && setterSyntax is null)
-                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' must declare a getter or setter");
+                    _diagnostics.Report(syntax.IdentifierToken.Location, $"property '{property.Name}' must declare a getter or setter",
+                        DiagnosticIds.AccessorRequired);
 
                 FunctionSymbol? getter = getterSyntax is null
                     ? null
@@ -1631,12 +1762,14 @@ internal sealed class SemanticAnalyzer
         if (accessorSyntax.Body is not null)
         {
             if (propertySyntax.IsAbstract)
-                _diagnostics.Report(accessorSyntax.KeywordToken.Location, "abstract property accessors cannot have a body");
+                _diagnostics.Report(accessorSyntax.KeywordToken.Location, "abstract property accessors cannot have a body",
+                    DiagnosticIds.AbstractAccessorHasBody);
             _functionBodies.Add((accessor, accessorSyntax.Body, scope));
         }
         else if (!propertySyntax.IsAbstract)
         {
-            _diagnostics.Report(accessorSyntax.KeywordToken.Location, "property accessor without a body must be abstract");
+            _diagnostics.Report(accessorSyntax.KeywordToken.Location, "property accessor without a body must be abstract",
+                DiagnosticIds.NonAbstractAccessorWithoutBody);
         }
     }
 
@@ -1650,14 +1783,17 @@ internal sealed class SemanticAnalyzer
             {
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(syntax.Parameters, scope);
                 if (parameters.IsEmpty)
-                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter");
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter",
+                        DiagnosticIds.IndexerRequiresParameter);
                 if (indexers.Any(candidate => HaveSameParameterTypes(candidate.Parameters, parameters)))
                 {
-                    _diagnostics.Report(syntax.ThisKeyword.Location, $"struct '{type.Name}' already declares an indexer with the same parameter types");
+                    _diagnostics.Report(syntax.ThisKeyword.Location, $"struct '{type.Name}' already declares an indexer with the same parameter types",
+                        DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
                 if (syntax.IsStatic)
-                    _diagnostics.Report(syntax.ThisKeyword.Location, "static indexers are not supported");
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "static indexers are not supported",
+                        DiagnosticIds.StaticIndexerNotSupported);
 
                 TypeSymbol indexerType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
                 var indexer = new IndexerSymbol(
@@ -1678,7 +1814,8 @@ internal sealed class SemanticAnalyzer
                         [.. parameters, new ParameterSymbol("value", indexerType, parameters.Length)],
                         syntax.Setter);
                 if (getter is null && setter is null)
-                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare a getter or setter");
+                    _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare a getter or setter",
+                        DiagnosticIds.AccessorRequired);
                 indexer.SetAccessors(getter, setter);
                 indexers.Add(indexer);
                 AddIndexerAccessorBody(getter, syntax.Getter, syntax, scope);
@@ -1699,12 +1836,14 @@ internal sealed class SemanticAnalyzer
         if (accessorSyntax.Body is not null)
         {
             if (indexerSyntax.IsAbstract)
-                _diagnostics.Report(accessorSyntax.KeywordToken.Location, "abstract indexer accessors cannot have a body");
+                _diagnostics.Report(accessorSyntax.KeywordToken.Location, "abstract indexer accessors cannot have a body",
+                    DiagnosticIds.AbstractAccessorHasBody);
             _functionBodies.Add((accessor, accessorSyntax.Body, scope));
         }
         else if (!indexerSyntax.IsAbstract)
         {
-            _diagnostics.Report(accessorSyntax.KeywordToken.Location, "indexer accessor without a body must be abstract");
+            _diagnostics.Report(accessorSyntax.KeywordToken.Location, "indexer accessor without a body must be abstract",
+                DiagnosticIds.NonAbstractAccessorWithoutBody);
         }
     }
 
@@ -1731,7 +1870,8 @@ internal sealed class SemanticAnalyzer
                 {
                     FunctionSymbol? implementation = type.FindInterfaceImplementation(required);
                     if (implementation is null || implementation.IsStatic || !implementation.IsPublic)
-                        _diagnostics.Report(type.Declaration.IdentifierToken.Location, $"struct '{type.Name}' does not implement interface method '{@interface.Name}.{required.Name}'");
+                        _diagnostics.Report(type.Declaration.IdentifierToken.Location, $"struct '{type.Name}' does not implement interface method '{@interface.Name}.{required.Name}'",
+                            DiagnosticIds.UnimplementedInterfaceMember);
                 }
             }
         }
@@ -1752,7 +1892,8 @@ internal sealed class SemanticAnalyzer
                     constructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
                 if (!signatures.Add(signature))
                 {
-                    _diagnostics.Report(constructor.Locations[0], $"constructor '{constructor.ToDisplayString(SymbolDisplayFormat.Diagnostic)}' is already declared");
+                    _diagnostics.Report(constructor.Locations[0], $"constructor '{constructor.ToDisplayString(SymbolDisplayFormat.Diagnostic)}' is already declared",
+                        DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
                 constructors.Add(constructor);
@@ -1778,7 +1919,8 @@ internal sealed class SemanticAnalyzer
                 {
                     _diagnostics.Report(
                         duplicate.TildeToken.Location,
-                        $"struct '{type.Name}' may declare only one destructor");
+                        $"struct '{type.Name}' may declare only one destructor",
+                        DiagnosticIds.DuplicateDestructor);
                 }
             }
 
@@ -1789,7 +1931,8 @@ internal sealed class SemanticAnalyzer
                 {
                     _diagnostics.Report(
                         destructorSyntax.IdentifierToken.Location,
-                        $"destructor name must match containing struct '{type.Name}'");
+                        $"destructor name must match containing struct '{type.Name}'",
+                        DiagnosticIds.DestructorNameMismatch);
                 }
 
                 var destructor = new FunctionSymbol(
@@ -1816,7 +1959,8 @@ internal sealed class SemanticAnalyzer
                 {
                     _diagnostics.Report(
                         declaration.IdentifierToken.Location,
-                        $"native symbol '{declaration.IdentifierToken.Text}' is reserved for Xenon memory operations");
+                        $"native symbol '{declaration.IdentifierToken.Text}' is reserved for Xenon memory operations",
+                        DiagnosticIds.ReservedNativeSymbol);
                 }
 
                 TypeSymbol returnType = TypeResolver.ResolveReturnType(declaration.ReturnType, scope, _diagnostics);
@@ -1832,9 +1976,12 @@ internal sealed class SemanticAnalyzer
 
                 if (!@namespace.TryDeclareFunction(function))
                 {
+                    FunctionSymbol? previous = @namespace.FindFunction(function.Name);
                     _diagnostics.Report(
                         declaration.IdentifierToken.Location,
-                        $"function '{@namespace.FullName}.{function.Name}' is already declared");
+                        $"function '{@namespace.FullName}.{function.Name}' is already declared",
+                        DiagnosticIds.DuplicateDeclaration,
+                        previous?.Locations.Select(location => new RelatedDiagnosticLocation(location, "previous declaration")));
                     continue;
                 }
 
@@ -1871,7 +2018,8 @@ internal sealed class SemanticAnalyzer
             TextLocation location = function.Declaration is FunctionDeclarationSyntax declaration
                 ? declaration.IdentifierToken.Location : function.ContainingType!.Declaration.IdentifierToken.Location;
             _diagnostics.Report(location,
-                $"native symbol '{name}' collides between '{previous.FullName}' and '{function.FullName}' with incompatible ABI or multiple definitions");
+                $"native symbol '{name}' collides between '{previous.FullName}' and '{function.FullName}' with incompatible ABI or multiple definitions",
+                DiagnosticIds.NativeSymbolCollision);
         }
     }
 
@@ -1888,14 +2036,16 @@ internal sealed class SemanticAnalyzer
         {
             _diagnostics.Report(
                 declaration.ReturnType.NameToken.Location,
-                $"external ABI does not yet support struct '{returnStruct.Name}' by value; use a pointer instead");
+                $"external ABI does not yet support struct '{returnStruct.Name}' by value; use a pointer instead",
+                DiagnosticIds.UnsupportedNativeStructByValue);
         }
 
         if (function.ReturnType is ArrayTypeSymbol)
         {
             _diagnostics.Report(
                 declaration.ReturnType.NameToken.Location,
-                "external ABI does not yet support Xenon array types directly; use a pointer and explicit length");
+                "external ABI does not yet support Xenon array types directly; use a pointer and explicit length",
+                DiagnosticIds.UnsupportedNativeArrayType);
         }
 
         for (int index = 0; index < function.Parameters.Length; index++)
@@ -1905,13 +2055,15 @@ internal sealed class SemanticAnalyzer
             {
                 _diagnostics.Report(
                     declaration.Parameters[index].Type.NameToken.Location,
-                    $"external ABI does not yet support struct '{parameterStruct.Name}' by value; use a pointer instead");
+                    $"external ABI does not yet support struct '{parameterStruct.Name}' by value; use a pointer instead",
+                    DiagnosticIds.UnsupportedNativeStructByValue);
             }
             else if (parameterType is ArrayTypeSymbol)
             {
                 _diagnostics.Report(
                     declaration.Parameters[index].Type.NameToken.Location,
-                    "external ABI does not yet support Xenon array types directly; use a pointer and explicit length");
+                    "external ABI does not yet support Xenon array types directly; use a pointer and explicit length",
+                    DiagnosticIds.UnsupportedNativeArrayType);
             }
         }
     }
@@ -1930,19 +2082,44 @@ internal sealed class SemanticAnalyzer
 
             if (TypeIdentity.AreSame(type, BuiltinTypes.Void))
             {
-                _diagnostics.Report(syntax.Type.NameToken.Location, "parameter type cannot be 'void'");
+                _diagnostics.Report(syntax.Type.NameToken.Location, "parameter type cannot be 'void'",
+                    DiagnosticIds.VoidParameterType);
             }
 
             if (!names.Add(syntax.IdentifierToken.Text))
             {
                 _diagnostics.Report(
                     syntax.IdentifierToken.Location,
-                    $"parameter '{syntax.IdentifierToken.Text}' is already declared");
+                    $"parameter '{syntax.IdentifierToken.Text}' is already declared",
+                    DiagnosticIds.DuplicateDeclaration);
             }
 
             parameters.Add(new ParameterSymbol(syntax.IdentifierToken.Text, type, index, syntax.Type.IsBindingReadonly(), declaration: syntax));
         }
 
         return parameters.ToImmutable();
+    }
+
+    private void RecordDeclarations(Symbol symbol)
+    {
+        _cancellationToken.ThrowIfCancellationRequested();
+        foreach (SyntaxReference reference in symbol.DeclaringSyntaxReferences)
+            _semanticInfo.Declarations.TryAdd(reference.Declaration, symbol);
+
+        IEnumerable<Symbol> children = symbol switch
+        {
+            NamespaceSymbol ns => ns.Namespaces.Cast<Symbol>().Concat(ns.Types).Concat(ns.Functions).Concat(ns.Constants),
+            DeclaredTypeSymbol type => type.GetMembers(),
+            FunctionSymbol function => function.Parameters,
+            PropertySymbol property => new[] { property.Getter, property.Setter }.OfType<Symbol>(),
+            IndexerSymbol indexer => indexer.Parameters.Cast<Symbol>()
+                .Concat(new[] { indexer.Getter, indexer.Setter }.OfType<Symbol>()),
+            InterfacePropertySymbol property => new[] { property.Getter, property.Setter }.OfType<Symbol>(),
+            InterfaceIndexerSymbol indexer => indexer.Parameters.Cast<Symbol>()
+                .Concat(new[] { indexer.Getter, indexer.Setter }.OfType<Symbol>()),
+            _ => [],
+        };
+        foreach (Symbol child in children)
+            RecordDeclarations(child);
     }
 }
