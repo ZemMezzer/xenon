@@ -70,6 +70,34 @@ public sealed class DocumentSnapshot
         return (snapshot, ClassifyChange(snapshot, sameText));
     }
 
+    internal (DocumentSnapshot Snapshot, DocumentChangeKind Kind) OpenEditorState(
+        string editorText, DocumentVersion version, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(editorText);
+        // A closed document starts a new editor-owned version stream. Repeated full-text
+        // updates while already open retain the normal monotonic version contract.
+        if (IsOpen) EnsureNewer(version);
+        SourceText overlay = EffectiveText.WithText(editorText);
+        bool sameText = overlay.Text == EffectiveText.Text && overlay.Path == EffectiveText.Path;
+        var snapshot = new DocumentSnapshot(Id, PhysicalPath, DiskText, overlay, version,
+            sameText ? SyntaxTree : null, cancellationToken, BackingVersion);
+        return (snapshot, ClassifyChange(snapshot, sameText));
+    }
+
+    internal (DocumentSnapshot Snapshot, DocumentChangeKind Kind) CloseEditorState(
+        DocumentVersion expectedVersion, CancellationToken cancellationToken = default)
+    {
+        if (expectedVersion != Version)
+            throw new StaleDocumentVersionException(Id, Version, expectedVersion);
+        if (!IsOpen) throw new InvalidOperationException($"Document '{Id}' is not open.");
+        SourceText disk = DiskText ??
+            throw new InvalidOperationException("An untitled document has no disk state to close to.");
+        bool sameText = disk.Text == EffectiveText.Text && disk.Path == EffectiveText.Path;
+        var snapshot = new DocumentSnapshot(Id, PhysicalPath, disk, null, Version,
+            sameText ? SyntaxTree : null, cancellationToken, BackingVersion);
+        return (snapshot, ClassifyChange(snapshot, sameText));
+    }
+
     internal (DocumentSnapshot Snapshot, DocumentChangeKind Kind) WithBackingState(
         SourceText? diskText, SourceText? overlayText,
         CancellationToken cancellationToken = default)

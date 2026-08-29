@@ -22,6 +22,8 @@ public sealed class SourceText
 
     public int Length => Text.Length;
 
+    public int LineCount => _lineStarts.Length;
+
     public char this[int index] => Text[index];
 
     public static SourceText From(string text, string path = "<memory>") =>
@@ -61,6 +63,13 @@ public sealed class SourceText
         }
 
         return Text[start..end];
+    }
+
+    public int GetLineStart(int line)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(line);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(line, _lineStarts.Length);
+        return _lineStarts[line];
     }
 
     private int FindLineIndex(int position)
