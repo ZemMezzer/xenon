@@ -1,0 +1,24 @@
+namespace ReadonlyEffects;
+extern int readonly abs(int value);
+int readonly Magnitude(int value) { return abs(value); }
+int readonly Square(int value) { return value * value; }
+void readonly Fill(int* output, readonly int* input) { *output = *input + Square(1); }
+void readonly Increment(int& value) { value++; }
+void readonly Store(int** destination, int* source) { *destination = source; }
+int* readonly Identity(int* value) { return value; }
+struct Reader
+{
+    public int Offset;
+    public void readonly Copy(int* output, readonly int* input) { Fill(output, input); *output += Offset; }
+    public static int readonly Read(readonly int* value) { return *value; }
+}
+int Main()
+{
+    int input = Magnitude(-40); int output = 0; int* pointer = &input;
+    Store(&pointer, &output);
+    Reader reader = Reader { 0 };
+    reader.Copy(Identity(pointer), &input);
+    Increment(output);
+    readonly int* readonly view = pointer;
+    return Reader.Read(view);
+}

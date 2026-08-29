@@ -1,0 +1,21 @@
+namespace VirtualCompound;
+struct Base
+{
+    public int Stored;
+    public virtual int Value { get { return Stored; } set { Stored = value; } }
+}
+struct Derived : Base
+{
+    public int Adjusted;
+    public override int Value { get { return Adjusted; } set { Adjusted = value; } }
+}
+struct Probe { public static int Calls; public static Base* Get(Base* value) { Probe.Calls += 1; return value; } }
+int Main()
+{
+    Derived derived = Derived { 0, 1 };
+    Base* view = &derived;
+    Probe.Get(view)->Value += 50;
+    view->Value -= 10;
+    if (Probe.Calls != 1) return 1;
+    return view->Value + Probe.Calls;
+}

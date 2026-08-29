@@ -1,0 +1,24 @@
+namespace ArrayEdgeShapes;
+struct Counter
+{
+    public static int Value;
+    public static int Next() { Counter.Value += 1; return Counter.Value; }
+}
+int[,] Create(int rows, int columns) { return new int[rows, columns]; }
+int Main()
+{
+    int[,,] empty = new int[2147483647,2147483647,0];
+    if (empty.Length != 0 || empty.Rank != 3 || empty.GetLength(1) != 2147483647) return 1;
+    free(empty);
+    int[,] values = Create(Counter.Next(), Counter.Next());
+    if (values.Length != 2 || Counter.Value != 2) return 2;
+    Counter.Value = -1;
+    values[Counter.Next(), Counter.Next()] = 42;
+    if (Counter.Value != 1 || values[0,1] != 42) return 3;
+    int[][,] matrices = new int[1][,]; matrices[0] = values;
+    int[,] alias = matrices[0]; free(matrices);
+    if (alias[0,1] != 42) return 4;
+    int[][] nested = new int[1][]; free(nested[0]); free(nested);
+    free(alias);
+    return 42;
+}

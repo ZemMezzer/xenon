@@ -1,0 +1,3 @@
+namespace NegativeReadonlyMutation;
+struct Entity { public int Value; }
+void Mutate(readonly Entity& entity) { entity.Value = 42; }

@@ -1,0 +1,18 @@
+namespace StructValueFlow;
+struct Base { public int Value; }
+struct Derived : Base { public int Extra; }
+Base Increment(Base value) { value.Value += 1; return value; }
+Derived Make() { return Derived { 20, 22 }; }
+int Read(Base value) { return value.Value; }
+int Main()
+{
+    Derived made = Make();
+    if (made.Value != 20 || made.Extra != 22) return 1;
+    Base original = Base { 41 };
+    Base copy = Increment(original);
+    if (original.Value != 41 || copy.Value != 42 || Read(copy) != 42) return 2;
+    Base[] values = Base[2]; values[0] = original; values[1] = copy;
+    Base* first = &values[0];
+    if (first[1].Value != 42 || &first[1] != &values[1]) return 3;
+    return copy.Value;
+}

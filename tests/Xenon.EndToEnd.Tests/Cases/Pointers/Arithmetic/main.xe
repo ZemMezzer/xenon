@@ -1,0 +1,34 @@
+namespace PointerArithmetic;
+struct Pair { public byte Tag; public long Value; }
+struct Cursor
+{
+    public static int Calls;
+    public static int* Data;
+    public static int** Address() { Cursor.Calls += 1; return &Cursor.Data; }
+    public int* Current { get { return Cursor.Data; } set { Cursor.Data = value; } }
+}
+int Main()
+{
+    int[] values = int[4];
+    values[0] = 10; values[1] = 20; values[2] = 42; values[3] = 30;
+    int* start = &values[0]; int* ptr = start;
+    int* old = ptr++;
+    if (old != start || *ptr != 20) return 1;
+    ptr += 2; ptr -= 1;
+    if (*ptr != 42 || ptr - start != cast<nint>(2)) return 2;
+    if (start - ptr != cast<nint>(-2)) return 3;
+    if (2 + start != ptr || ptr - 2 != start) return 4;
+    sbyte negative = cast<sbyte>(-1);
+    if (*(ptr + negative) != 20) return 5;
+    byte positive = cast<byte>(1);
+    if (*(positive + ptr) != 30) return 6;
+    if (--ptr != start + 1 || ptr-- != start + 1 || ptr != start) return 7;
+    Pair[] pairs = Pair[3]; Pair* first = &pairs[0]; Pair* last = first + 2;
+    if (last - first != cast<nint>(2) || last != &pairs[2]) return 8;
+    Cursor.Data = start;
+    int* prior = (*Cursor.Address())++;
+    if (Cursor.Calls != 1 || prior != start || Cursor.Data != start + 1) return 9;
+    Cursor cursor = Cursor(); cursor.Current += cast<sbyte>(1); cursor.Current -= 1;
+    if (Cursor.Data != start + 1) return 10;
+    return 42;
+}

@@ -1,0 +1,7 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [{ "message": "implicit fallthrough is not allowed; terminate the case with break, return, or continue" }]
+}

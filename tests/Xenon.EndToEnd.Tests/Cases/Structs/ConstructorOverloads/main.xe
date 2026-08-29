@@ -1,0 +1,24 @@
+namespace ConstructorOverloads;
+struct Box
+{
+    public int Value;
+    public Box(int value) { Value = value; }
+    public Box(float value) { Value = cast<int>(value) + 1; }
+}
+struct Base
+{
+    public int Value;
+    public Base(int value) { Value = value; }
+    public Base(float value) { Value = cast<int>(value) + 1; }
+}
+struct Derived : Base { public Derived(float value) : base(value) { } }
+struct DefaultBase { public int Value; public DefaultBase() { Value = 42; } }
+struct ImplicitDerived : DefaultBase { public int Extra; }
+int Main()
+{
+    Box exact = Box(42); Box alternate = Box(41.0f); Derived derived = Derived(41.0f);
+    if (exact.Value != 42 || alternate.Value != 42 || derived.Value != 42) return 1;
+    ImplicitDerived implicit = ImplicitDerived();
+    if (implicit.Value != 42 || implicit.Extra != 0) return 2;
+    return 42;
+}

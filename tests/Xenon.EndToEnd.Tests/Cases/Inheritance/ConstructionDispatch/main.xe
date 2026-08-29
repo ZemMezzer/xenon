@@ -1,0 +1,29 @@
+namespace ConstructionDispatch;
+struct Log { public static int Calls; }
+struct Base
+{
+    public Base() { Log.Calls = Log.Calls * 10 + Read(); }
+    public virtual int Read() { return 1; }
+    public virtual ~Base() { Log.Calls = Log.Calls * 10 + Read(); }
+}
+struct Middle : Base
+{
+    public Middle() { Log.Calls = Log.Calls * 10 + Read(); }
+    public override int Read() { return 2; }
+    public override ~Middle() { Log.Calls = Log.Calls * 10 + Read(); }
+}
+struct Derived : Middle
+{
+    public int Stage;
+    public Derived() { Stage = 4; Log.Calls = Log.Calls * 10 + Read(); }
+    public override int Read() { return Stage + 3; }
+    public override ~Derived() { Log.Calls = Log.Calls * 10 + Read(); Stage = 5; }
+}
+int Main()
+{
+    Derived* value = new Derived(); Base* view = value;
+    if (Log.Calls != 337 || view->Read() != 7) return 1;
+    Log.Calls = 0; free(view);
+    if (Log.Calls != 788) return 2;
+    return 42;
+}

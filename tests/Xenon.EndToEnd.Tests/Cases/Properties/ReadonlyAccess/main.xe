@@ -1,0 +1,17 @@
+namespace ReadonlyAccess;
+struct Counter
+{
+    int Stored;
+    public Counter(int value) { Stored = value; }
+    public readonly int Value { get { return Stored; } set { Stored = value; } }
+    public readonly int this[int offset] { get { return Stored + offset; } set { Stored = value - offset; } }
+}
+int Main()
+{
+    Counter counter = Counter(39);
+    counter.Value += 1;
+    counter[1] += 1;
+    readonly Counter& view = counter;
+    if (view.Value != 41 || view[1] != 42) return 1;
+    return view[1];
+}

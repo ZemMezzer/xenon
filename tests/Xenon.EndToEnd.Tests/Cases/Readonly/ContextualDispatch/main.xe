@@ -1,0 +1,29 @@
+namespace ReadonlyContextualDispatch;
+struct State { public static int Value = 7; }
+interface IReset { void Reset(); }
+struct Base : IReset
+{
+    public int Value;
+    public virtual void Reset() { Value = 10; }
+}
+struct Good : Base { public override void Reset() { Value = 20; } }
+struct Evil : Base { public override void Reset() { State.Value++; } }
+int readonly Run()
+{
+    Base value = Base(); Base& reference = value; reference.Reset();
+    if (value.Value != 10) return 1;
+    Good good = Good(); Base* pointer = &good; pointer->Reset();
+    if (good.Value != 20) return 2;
+    IReset direct = good; direct.Reset();
+    if (good.Value != 20) return 3;
+    Good derived = Good(); Base* basePointer = &derived; IReset baseView = *basePointer; baseView.Reset();
+    if (derived.Value != 20 || State.Value != 7) return 4;
+    return 42;
+}
+int Main()
+{
+    int result = Run();
+    Evil evil = Evil(); Base* pointer = &evil; IReset view = *pointer; view.Reset();
+    if (State.Value != 8) return 5;
+    return result;
+}

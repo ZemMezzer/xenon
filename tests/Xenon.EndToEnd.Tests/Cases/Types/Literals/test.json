@@ -1,0 +1,7 @@
+{
+  "input": ".",
+  "profiles": ["debug", "release"],
+  "run": true,
+  "expectedExitCode": 42,
+  "expectedStdout": "line 1\nline 2\t\"quoted\"\\\n"
+}

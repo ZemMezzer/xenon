@@ -1,0 +1,29 @@
+namespace AbstractAccessors;
+interface Root { int Read(); int Value { get; set; } int this[int x] { get; set; } }
+abstract struct A : Root
+{
+    public abstract int Read();
+    public abstract int Value { get; set; }
+    public abstract int this[int x] { get; set; }
+    public virtual ~A() { }
+}
+abstract struct B : A { }
+struct Concrete : B
+{
+    public int Number;
+    public override int Read() { return Number; }
+    public override int Value { get { return Number; } set { Number = value; } }
+    public override int this[int x] { get { return Number + x; } set { Number = value - x; } }
+    public override ~Concrete() { }
+}
+int Main()
+{
+    Concrete* concrete = new Concrete();
+    A* a = concrete; B& b = *concrete;
+    b.Value = 20;
+    b[2] = 44;
+    Root view = *a;
+    if (a->Read() != 42 || view.Value != 42 || view[0] != 42) return 1;
+    free(a);
+    return 42;
+}

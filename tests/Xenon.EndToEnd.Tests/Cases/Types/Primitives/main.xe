@@ -1,0 +1,20 @@
+namespace Primitives;
+int Main()
+{
+    sbyte a = cast<sbyte>(-2); byte b = cast<byte>(44);
+    short c = cast<short>(-2); ushort d = cast<ushort>(44);
+    int e = -2; uint f = cast<uint>(44);
+    long g = cast<long>(-2); ulong h = cast<ulong>(44);
+    nint i = cast<nint>(-2); nuint j = cast<nuint>(44);
+    clong k = cast<clong>(-2); culong l = cast<culong>(44);
+    if (cast<int>(a) + cast<int>(b) != 42 || cast<int>(c) + cast<int>(d) != 42) return 1;
+    if (e + cast<int>(f) != 42 || cast<int>(g + cast<long>(h)) != 42) return 2;
+    if (cast<int>(i + cast<nint>(j)) != 42 || cast<int>(k + cast<clong>(l)) != 42) return 3;
+    float single = 20.5f; double precise = 21.5;
+    if (cast<int>(single) != 20 || cast<int>(precise) != 21) return 4;
+    int hex = 0x2A; int binary = 0b101010; bool enabled = true;
+    int* missing = null;
+    if (!enabled || hex != binary || missing != null) return 5;
+    free(missing); free(null);
+    return hex;
+}

@@ -1,0 +1,30 @@
+namespace AssignmentOrder;
+struct Log { public static int Trace; }
+interface I { int Value { get; set; } int this[int index] { get; set; } }
+struct Cell : I
+{
+    public int Field;
+    public int Value { get { Log.Trace = Log.Trace * 10 + 4; return Field; } set { Log.Trace = Log.Trace * 10 + 3; Field = value; } }
+    public int this[int index] { get { Log.Trace = Log.Trace * 10 + 4; return Field; } set { Log.Trace = Log.Trace * 10 + 3; Field = value; } }
+}
+Cell* Target(Cell* value) { Log.Trace = Log.Trace * 10 + 1; return value; }
+I& View(I& value) { Log.Trace = Log.Trace * 10 + 1; return value; }
+int Index() { Log.Trace = Log.Trace * 10 + 1; return 0; }
+int Rhs() { Log.Trace = Log.Trace * 10 + 2; return 7; }
+int Main()
+{
+    int[] array = new int[1]; int[,] grid = new int[1,1];
+    int index; array[(index = 0)] = index; if (array[0] != 0) return 1;
+    Log.Trace = 0; array[Index()] = Rhs(); if (Log.Trace != 12 || array[0] != 7) return 2;
+    Log.Trace = 0; grid[Index(),Index()] = Rhs(); if (Log.Trace != 112 || grid[0,0] != 7) return 3;
+    Cell cell = Cell();
+    Log.Trace = 0; Target(&cell)->Field = Rhs(); if (Log.Trace != 12 || cell.Field != 7) return 4;
+    Log.Trace = 0; Target(&cell)->Value = Rhs(); if (Log.Trace != 123) return 5;
+    Log.Trace = 0; Target(&cell)->Value += Rhs(); if (Log.Trace != 1423 || cell.Field != 14) return 6;
+    I view = cell;
+    Log.Trace = 0; View(view)[Index()] += Rhs(); if (Log.Trace != 11423 || cell.Field != 21) return 7;
+    int x = 1; x += (x = 10); if (x != 11) return 8;
+    Log.Trace = 0; array[Index()] = grid[Index(),Index()] = Rhs(); if (Log.Trace != 1112) return 9;
+    Log.Trace = 0; int old = array[Index()]++; if (Log.Trace != 1 || old != 7 || array[0] != 8) return 10;
+    free(array); free(grid); return 42;
+}

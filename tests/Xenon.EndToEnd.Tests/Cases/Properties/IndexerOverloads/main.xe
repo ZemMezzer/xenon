@@ -1,0 +1,15 @@
+namespace IndexerOverloads;
+struct Values
+{
+    public int this[int[] value] { get { return 10; } }
+    public int this[int[,] value] { get { return 20; } }
+    public int this[int[][] value] { get { return 12; } }
+}
+int Main()
+{
+    Values values = Values();
+    int[] vector = new int[0]; int[,] matrix = new int[0,0]; int[][] nested = new int[0][];
+    int result = values[vector] + values[matrix] + values[nested];
+    free(vector); free(matrix); free(nested);
+    return result;
+}

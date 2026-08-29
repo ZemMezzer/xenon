@@ -1,0 +1,19 @@
+namespace IntegerWidths;
+int Main()
+{
+    sbyte s8 = cast<sbyte>(1) << 7; byte u8 = cast<byte>(1) << 7;
+    short s16 = cast<short>(1) << 15; ushort u16 = cast<ushort>(1) << 15;
+    int s32 = 1 << 31; uint u32 = cast<uint>(1) << 31;
+    long s64 = cast<long>(1) << 63; ulong u64 = cast<ulong>(1) << 63;
+    int nativeBits = cast<int>(sizeof(nint)) * 8;
+    nint sn = cast<nint>(1) << (nativeBits - 1); nuint un = cast<nuint>(1) << (nativeBits - 1);
+    int cBits = cast<int>(sizeof(clong)) * 8;
+    clong sc = cast<clong>(1) << (cBits - 1); culong uc = cast<culong>(1) << (cBits - 1);
+    if ((s8 >> 7) != cast<sbyte>(-1) || (u8 >> 7) != cast<byte>(1)) return 1;
+    if ((s16 >> 15) != cast<short>(-1) || (u16 >> 15) != cast<ushort>(1)) return 2;
+    if ((s32 >> 31) != -1 || (u32 >> 31) != cast<uint>(1)) return 3;
+    if ((s64 >> 63) != cast<long>(-1) || (u64 >> 63) != cast<ulong>(1)) return 4;
+    if ((sn >> (nativeBits - 1)) != cast<nint>(-1) || (un >> (nativeBits - 1)) != cast<nuint>(1)) return 5;
+    if ((sc >> (cBits - 1)) != cast<clong>(-1) || (uc >> (cBits - 1)) != cast<culong>(1)) return 6;
+    return 42;
+}

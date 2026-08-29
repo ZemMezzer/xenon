@@ -1,0 +1,32 @@
+namespace ScopeExits;
+struct Log { public static int Trace; }
+struct Resource
+{
+    public int Id;
+    public Resource(int id) { Id = id; }
+    public ~Resource() { Log.Trace = Log.Trace * 10 + Id; }
+}
+void Early(bool condition) { Resource first = Resource(1); { Resource second = Resource(2); if (condition) return; } }
+void Conditional(bool condition) { Resource value; if (condition) value = Resource(1); }
+void Ordered(bool forward)
+{
+    Resource first; Resource second;
+    if (forward) { first = Resource(1); second = Resource(2); }
+    else { second = Resource(2); first = Resource(1); }
+}
+int Main()
+{
+    Early(true); if (Log.Trace != 21) return 1;
+    Log.Trace = 0; Early(false); if (Log.Trace != 21) return 2;
+    Log.Trace = 0;
+    for (int i = 0; i < 3; i++) { Resource value = Resource(i + 1); if (i == 0) continue; break; }
+    if (Log.Trace != 12) return 3;
+    Log.Trace = 0; Conditional(false); if (Log.Trace != 0) return 4;
+    Conditional(true); if (Log.Trace != 1) return 5;
+    Log.Trace = 0; Ordered(true); if (Log.Trace != 21) return 6;
+    Log.Trace = 0; Ordered(false); if (Log.Trace != 12) return 7;
+    Log.Trace = 0;
+    { Resource first = Resource(1); Resource[] middle = Resource[2]; middle[0].Id = 2; middle[1].Id = 3; Resource last = Resource(4); }
+    if (Log.Trace != 4321) return 8;
+    return 42;
+}
