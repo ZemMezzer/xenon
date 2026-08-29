@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -172,6 +173,31 @@ public sealed class SemanticModel
         return FilterDiagnostics(span);
     }
 
+    /// <summary>
+    /// Returns only successfully bound source occurrences. Candidate-only, ambiguous and
+    /// unresolved nodes are deliberately excluded so tooling never treats spelling as identity.
+    /// </summary>
+    public ImmutableArray<ResolvedSymbolReference> GetResolvedReferences(
+        CancellationToken cancellationToken = default)
+    {
+        var result = ImmutableArray.CreateBuilder<ResolvedSymbolReference>();
+        var seen = new HashSet<(Symbol Symbol, SourceFileId File, TextSpan Span)>(
+            ResolvedReferenceIdentityComparer.Instance);
+        foreach ((SyntaxNode syntax, SymbolInfo info) in _semanticInfo.Symbols)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (info.Symbol is not { IsSourceDefined: true } symbol ||
+                !TryGetReferenceLocation(syntax, out TextLocation location) ||
+                _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source) ||
+                !seen.Add((symbol, location.Source.FileId, location.Span)))
+                continue;
+            result.Add(new ResolvedSymbolReference(symbol, location, GetReferenceKind(syntax)));
+        }
+        return result.OrderBy(item => item.Location.Source.Path, StringComparer.Ordinal)
+            .ThenBy(item => item.Location.Span.Start).ThenBy(item => item.Location.Span.Length)
+            .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+    }
+
     private ImmutableArray<Diagnostic> FilterDiagnostics(TextSpan? span)
     {
         IEnumerable<Diagnostic> diagnostics = Diagnostics;
@@ -251,5 +277,61 @@ public sealed class SemanticModel
         if (left.Length == 0) return left.Start >= right.Start && left.Start < right.End;
         if (right.Length == 0) return right.Start >= left.Start && right.Start < left.End;
         return left.Start < right.End && right.Start < left.End;
+    }
+
+    private static ResolvedReferenceKind GetReferenceKind(SyntaxNode syntax) => syntax switch
+    {
+        TypeSyntax or NewExpressionSyntax or StructPositionalConstructionExpressionSyntax =>
+            ResolvedReferenceKind.Type,
+        CallExpressionSyntax => ResolvedReferenceKind.Call,
+        MemberAccessExpressionSyntax or IndexExpressionSyntax => ResolvedReferenceKind.Member,
+        _ => ResolvedReferenceKind.Reference,
+    };
+
+    private static bool TryGetReferenceLocation(SyntaxNode syntax, out TextLocation location)
+    {
+        SyntaxToken? token = syntax switch
+        {
+            NameExpressionSyntax value => value.IdentifierToken,
+            MemberAccessExpressionSyntax value => value.MemberToken,
+            NamedTypeSyntax value => value.NameToken,
+            UnaryTypeSyntax value => value.NameToken,
+            NewExpressionSyntax value => value.Type.NameToken,
+            StructPositionalConstructionExpressionSyntax value => value.Type.NameToken,
+            CallExpressionSyntax value => GetReferenceToken(value.Target),
+            IndexExpressionSyntax value => value.OpenBracketToken,
+            ThisExpressionSyntax value => value.ThisKeyword,
+            TypeLayoutExpressionSyntax value when value.FieldToken is not null => value.FieldToken,
+            _ => null,
+        };
+        if (token is null)
+        {
+            location = default;
+            return false;
+        }
+        location = token.Location;
+        return true;
+    }
+
+    private static SyntaxToken? GetReferenceToken(ExpressionSyntax syntax) => syntax switch
+    {
+        NameExpressionSyntax value => value.IdentifierToken,
+        MemberAccessExpressionSyntax value => value.MemberToken,
+        CallExpressionSyntax value => GetReferenceToken(value.Target),
+        ParenthesizedExpressionSyntax value => GetReferenceToken(value.Expression),
+        _ => null,
+    };
+
+    private sealed class ResolvedReferenceIdentityComparer :
+        IEqualityComparer<(Symbol Symbol, SourceFileId File, TextSpan Span)>
+    {
+        public static ResolvedReferenceIdentityComparer Instance { get; } = new();
+
+        public bool Equals((Symbol Symbol, SourceFileId File, TextSpan Span) x,
+            (Symbol Symbol, SourceFileId File, TextSpan Span) y) =>
+            ReferenceEquals(x.Symbol, y.Symbol) && x.File == y.File && x.Span == y.Span;
+
+        public int GetHashCode((Symbol Symbol, SourceFileId File, TextSpan Span) value) =>
+            HashCode.Combine(RuntimeHelpers.GetHashCode(value.Symbol), value.File, value.Span);
     }
 }

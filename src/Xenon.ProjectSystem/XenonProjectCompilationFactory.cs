@@ -1,4 +1,5 @@
 using Xenon.Compiler;
+using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 
 namespace Xenon.ProjectSystem;
@@ -30,7 +31,7 @@ public static class XenonProjectCompilationFactory
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(sources);
-        dependencyCompilations ??= new Dictionary<string, Compilation>(StringComparer.OrdinalIgnoreCase);
+        dependencyCompilations ??= new Dictionary<string, Compilation>(ProjectPath.Comparer);
         var references = new List<CompilationReference>(project.ProjectReferences.Length);
         foreach (string identity in project.ProjectReferences)
         {
@@ -44,5 +45,31 @@ public static class XenonProjectCompilationFactory
             project.Type == XenonProjectType.Executable
                 ? CompilationOutputKind.Executable : CompilationOutputKind.Library);
         return Compilation.Create(options, references, cancellationToken, sources.ToArray());
+    }
+
+    /// <summary>Creates a project compilation from already parsed immutable tooling trees.</summary>
+    public static Compilation Create(
+        XenonProject project,
+        string profileName,
+        IEnumerable<SyntaxTree> syntaxTrees,
+        IReadOnlyDictionary<string, Compilation>? dependencyCompilations = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(syntaxTrees);
+        dependencyCompilations ??= new Dictionary<string, Compilation>(ProjectPath.Comparer);
+        var references = new List<CompilationReference>(project.ProjectReferences.Length);
+        foreach (string identity in project.ProjectReferences)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!dependencyCompilations.TryGetValue(identity, out Compilation? dependency))
+                throw new ProjectSystemException(
+                    $"compilation for project reference '{identity}' is unavailable while compiling '{project.Name}'");
+            references.Add(new SourceCompilationReference(dependency));
+        }
+        _ = project.GetProfile(profileName);
+        var options = new CompilationOptions(project.Type == XenonProjectType.Executable
+            ? CompilationOutputKind.Executable : CompilationOutputKind.Library);
+        return Compilation.Create(syntaxTrees, options, references, cancellationToken);
     }
 }

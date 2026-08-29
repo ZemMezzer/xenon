@@ -21,4 +21,11 @@
     <ProjectReference Include="../../src/Xenon.Driver/Xenon.Driver.csproj" />
     <ProjectReference Include="../../src/Xenon.ProjectSystem/Xenon.ProjectSystem.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../Workspaces/**/*">
+      <Link>Workspaces/%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 </Project>

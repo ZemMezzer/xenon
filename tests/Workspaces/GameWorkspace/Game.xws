@@ -1,0 +1,7 @@
+[workspace]
+name = "Game Workspace"
+projects = [
+    "Core/Core.xeproj",
+    "Game/Game.xeproj",
+    "Tools/Tools.xeproj",
+]

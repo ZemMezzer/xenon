@@ -1,0 +1,9 @@
+[project]
+name = "Game"
+type = "executable"
+
+[source]
+root = "src"
+
+[references]
+projects = ["../Core/Core.xeproj"]

@@ -1,0 +1,3 @@
+using Core;
+namespace Game;
+int Main() { return Value() + 1; }

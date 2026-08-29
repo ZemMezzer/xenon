@@ -1,0 +1,6 @@
+[project]
+name = "Tools"
+type = "static-library"
+
+[source]
+root = "src"
