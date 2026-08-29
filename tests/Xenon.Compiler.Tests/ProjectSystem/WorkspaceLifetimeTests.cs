@@ -128,9 +128,9 @@ public sealed class WorkspaceLifetimeTests
         snapshot = workspace.ApplyDocumentChanges(appDocument, new DocumentVersion(1),
             new DocumentVersion(2), []);
         obsolete.Add(new WeakReference(snapshot));
-        snapshot = workspace.CloseDocument(appDocument, new DocumentVersion(3));
+        snapshot = workspace.CloseDocument(appDocument, new DocumentVersion(2));
         obsolete.Add(new WeakReference(snapshot));
-        workspace.CloseDocument(libraryDocument, new DocumentVersion(2));
+        workspace.CloseDocument(libraryDocument, new DocumentVersion(1));
         return obsolete.ToArray();
     }
 

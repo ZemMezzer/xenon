@@ -104,10 +104,7 @@ public sealed class Workspace : IDisposable
     {
         ArgumentNullException.ThrowIfNull(editorText);
         return UpdateDocument(documentId, document =>
-        {
-            SourceText overlay = document.EffectiveText.WithText(editorText);
-            return document.WithEditorState(document.DiskText, overlay, version, cancellationToken);
-        });
+            document.OpenEditorState(editorText, version, cancellationToken));
     }
 
     public WorkspaceSnapshot ApplyDocumentChanges(DocumentId documentId,
@@ -120,7 +117,11 @@ public sealed class Workspace : IDisposable
         return document.ApplyChanges(expectedVersion, newVersion, changes, cancellationToken);
     });
 
-    public WorkspaceSnapshot CloseDocument(DocumentId documentId, DocumentVersion version,
+    /// <summary>
+    /// Closes the editor overlay after validating its current editor-owned version. Closing is a
+    /// lifecycle transition and does not create a new <see cref="DocumentVersion"/>.
+    /// </summary>
+    public WorkspaceSnapshot CloseDocument(DocumentId documentId, DocumentVersion expectedVersion,
         CancellationToken cancellationToken = default)
     {
         lock (_updateGate)
@@ -131,11 +132,10 @@ public sealed class Workspace : IDisposable
             DocumentSnapshot document = current.GetDocument(documentId);
             if (!document.IsOpen)
                 throw new InvalidOperationException($"Document '{documentId}' is not open.");
-            if (version <= document.Version)
-                throw new StaleDocumentVersionException(document.Id, document.Version, version);
+            EnsureCurrentVersion(document, expectedVersion);
             if (document.DiskText is null)
                 return RemoveDocumentCore(current, documentId);
-            var change = document.WithEditorState(document.DiskText, null, version, cancellationToken);
+            var change = document.CloseEditorState(expectedVersion, cancellationToken);
             return PublishDocumentChange(current, change.Snapshot, change.Kind);
         }
     }

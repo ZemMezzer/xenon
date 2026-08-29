@@ -38,8 +38,9 @@ public sealed class WorkspaceSnapshotTests
         Assert.Equal(overlay, File.ReadAllText(d1.PhysicalPath!));
         Assert.True(saved.GetDocument(d1.Id).IsOpen);
         Assert.False(saved.GetDocument(d1.Id).IsUnsaved);
-        WorkspaceSnapshot closed = workspace.CloseDocument(d1.Id, new DocumentVersion(44));
+        WorkspaceSnapshot closed = workspace.CloseDocument(d1.Id, new DocumentVersion(42));
         Assert.False(closed.GetDocument(d1.Id).IsOpen);
+        Assert.Equal(new DocumentVersion(42), closed.GetDocument(d1.Id).Version);
         Assert.Equal(overlay, closed.GetDocument(d1.Id).EffectiveText.Text);
         Assert.Same(saved.GetDocument(d1.Id).SyntaxTree, closed.GetDocument(d1.Id).SyntaxTree);
     }
@@ -62,10 +63,39 @@ public sealed class WorkspaceSnapshotTests
         Assert.Throws<StaleDocumentVersionException>(() => workspace.ApplyDocumentChanges(original.Id,
             new DocumentVersion(10), new DocumentVersion(12), []));
         Assert.Same(beforeStale, workspace.CurrentSnapshot);
-        WorkspaceSnapshot closed = workspace.CloseDocument(original.Id, new DocumentVersion(12));
+        Assert.Throws<StaleDocumentVersionException>(() => workspace.CloseDocument(original.Id,
+            new DocumentVersion(10)));
+        WorkspaceSnapshot closed = workspace.CloseDocument(original.Id, new DocumentVersion(11));
         Assert.Equal(original.EffectiveText.Text, closed.GetDocument(original.Id).EffectiveText.Text);
         Assert.Equal("namespace App; int Value() { return 3; }", edited.GetDocument(original.Id).EffectiveText.Text);
         Assert.Equal("namespace App; int Value() { return 2; }", opened.GetDocument(original.Id).EffectiveText.Text);
+    }
+
+    [Fact]
+    public void ClosePreservesVersionAndReopenStartsANewEditorVersionStream()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("App", sources: [("main.xe", "namespace App; int Value() { return 1; }")]);
+        using Workspace workspace = directory.CreateWorkspace();
+        DocumentSnapshot original = Assert.Single(workspace.CurrentSnapshot.Documents);
+        WorkspaceSnapshot opened = workspace.OpenDocument(original.Id,
+            "namespace App; int Value() { return 10; }", new DocumentVersion(10));
+
+        WorkspaceSnapshot closed = workspace.CloseDocument(original.Id, new DocumentVersion(10));
+        Assert.Equal(new DocumentVersion(10), closed.GetDocument(original.Id).Version);
+        Assert.False(closed.GetDocument(original.Id).IsOpen);
+        Assert.True(opened.GetDocument(original.Id).IsOpen);
+        Assert.Contains("return 10", opened.GetDocument(original.Id).EffectiveText.Text);
+
+        WorkspaceSnapshot reopened = workspace.OpenDocument(original.Id,
+            "namespace App; int Value() { return 1; }", new DocumentVersion(1));
+        WorkspaceSnapshot changed = workspace.ApplyDocumentChanges(original.Id,
+            new DocumentVersion(1), new DocumentVersion(2),
+            [new DocumentTextChange(new TextSpan(
+                reopened.GetDocument(original.Id).EffectiveText.Text.IndexOf("return 1", StringComparison.Ordinal) + 7,
+                1), "2")]);
+        Assert.Equal(new DocumentVersion(2), changed.GetDocument(original.Id).Version);
+        Assert.Contains("return 2", changed.GetDocument(original.Id).EffectiveText.Text);
     }
 
     [Fact]
@@ -165,7 +195,7 @@ public sealed class WorkspaceSnapshotTests
         DocumentId discardedId = DocumentId.CreateNew(reloaded.RootProjectId);
         workspace.AddDocument(discardedId, "namespace App; int Discarded() { return 3; }",
             new DocumentVersion(1));
-        WorkspaceSnapshot closed = workspace.CloseDocument(discardedId, new DocumentVersion(2));
+        WorkspaceSnapshot closed = workspace.CloseDocument(discardedId, new DocumentVersion(1));
         Assert.False(closed.TryGetDocument(discardedId, out _));
     }
 

@@ -7,6 +7,7 @@ using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xenon.Driver;
+using Xenon.LanguageServer;
 using Xenon.ProjectSystem;
 
 namespace Xenon.Cli;
@@ -29,6 +30,13 @@ internal static class Program
         {
             Console.WriteLine("xenon 0.1.0-dev");
             return Success;
+        }
+
+        if (args.Length > 0 && string.Equals(args[0], "lsp", StringComparison.Ordinal))
+        {
+            if (args.Length != 1)
+                return WriteUsageError("'xenon lsp' does not accept command-line arguments");
+            return RunLanguageServer();
         }
 
         bool buildCommand = args.Length > 0 && string.Equals(args[0], "build", StringComparison.Ordinal);
@@ -319,6 +327,31 @@ internal static class Program
         return UsageError;
     }
 
+    private static int RunLanguageServer()
+    {
+        string? logPath = Environment.GetEnvironmentVariable("XENON_LSP_LOG_FILE");
+        if (string.IsNullOrWhiteSpace(logPath))
+            return LanguageServerEntryPoint.RunAsync(
+                Console.OpenStandardInput(), Console.OpenStandardOutput(), Console.Error)
+                .GetAwaiter().GetResult();
+
+        try
+        {
+            using var log = new StreamWriter(new FileStream(Path.GetFullPath(logPath),
+                FileMode.Append, FileAccess.Write, FileShare.ReadWrite),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)) { AutoFlush = true };
+            return LanguageServerEntryPoint.RunAsync(
+                Console.OpenStandardInput(), Console.OpenStandardOutput(), log)
+                .GetAwaiter().GetResult();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+            or ArgumentException or NotSupportedException)
+        {
+            Console.Error.WriteLine($"fatal: cannot open LSP log: {exception.Message}");
+            return CompilationError;
+        }
+    }
+
     private static int RunProjectCommand(string inputPath, string profileName, string? targetTriple,
         bool run, bool dumpTokens, bool compileOnly = false, bool skipLink = false)
     {
@@ -412,6 +445,7 @@ internal static class Program
         Console.WriteLine("Usage:");
         Console.WriteLine("  xenon build [path] [--profile debug|release] [--target triple] [--dump-tokens] [--emit-llvm]");
         Console.WriteLine("  xenon run [path] [--profile debug|release]");
+        Console.WriteLine("  xenon lsp");
         Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] [--emit-object] <source.xe> [additional.xe ...]");
         Console.WriteLine("  xenon --version");
         Console.WriteLine("  xenon --help");

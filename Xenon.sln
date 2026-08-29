@@ -23,6 +23,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.EndToEnd.Tests", "tes
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.TestProcess", "tests\Xenon.TestProcess\Xenon.TestProcess.csproj", "{00A412E6-D92C-4A29-9742-401DA29697A3}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.LanguageServer", "src\Xenon.LanguageServer\Xenon.LanguageServer.csproj", "{EE4803F4-CC0F-4CE7-AD27-F8E5D9C8E9AC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.LanguageServer.Tests", "tests\Xenon.LanguageServer.Tests\Xenon.LanguageServer.Tests.csproj", "{9AD22A9D-D544-4C1E-A847-3B90E7349E99}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -61,6 +65,14 @@ Global
 		{00A412E6-D92C-4A29-9742-401DA29697A3}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{00A412E6-D92C-4A29-9742-401DA29697A3}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{00A412E6-D92C-4A29-9742-401DA29697A3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EE4803F4-CC0F-4CE7-AD27-F8E5D9C8E9AC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EE4803F4-CC0F-4CE7-AD27-F8E5D9C8E9AC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EE4803F4-CC0F-4CE7-AD27-F8E5D9C8E9AC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EE4803F4-CC0F-4CE7-AD27-F8E5D9C8E9AC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9AD22A9D-D544-4C1E-A847-3B90E7349E99}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9AD22A9D-D544-4C1E-A847-3B90E7349E99}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9AD22A9D-D544-4C1E-A847-3B90E7349E99}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9AD22A9D-D544-4C1E-A847-3B90E7349E99}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -74,5 +86,7 @@ Global
 		{16061568-E257-4AB4-B358-8BD94E6EBE05} = {4A39986B-4D5D-4639-AB91-B6FCE794364C}
 		{AE709E27-69B9-4126-939B-42C69FA9E04B} = {4A39986B-4D5D-4639-AB91-B6FCE794364C}
 		{00A412E6-D92C-4A29-9742-401DA29697A3} = {4A39986B-4D5D-4639-AB91-B6FCE794364C}
+		{EE4803F4-CC0F-4CE7-AD27-F8E5D9C8E9AC} = {5A170833-BE66-4444-941B-2AFF7FD0D257}
+		{9AD22A9D-D544-4C1E-A847-3B90E7349E99} = {4A39986B-4D5D-4639-AB91-B6FCE794364C}
 	EndGlobalSection
 EndGlobal
