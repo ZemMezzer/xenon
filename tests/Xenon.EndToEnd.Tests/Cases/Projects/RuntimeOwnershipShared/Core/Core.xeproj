@@ -1,0 +1,6 @@
+[project]
+name = "RuntimeOwnershipSharedCore"
+type = "shared-library"
+
+[source]
+root = "src"

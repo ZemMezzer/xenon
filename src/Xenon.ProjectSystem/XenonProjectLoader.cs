@@ -6,21 +6,21 @@ namespace Xenon.ProjectSystem;
 
 public static class XenonProjectLoader
 {
-    private static readonly HashSet<string> SupportedSettings = new(StringComparer.Ordinal)
-    {
+    private static readonly ImmutableHashSet<string> SupportedSettings = ImmutableHashSet.Create(StringComparer.Ordinal,
         "project.name",
         "project.type",
         "project.version",
         "source.root",
         "native.libraries",
         "native.library-paths",
+        "references.projects",
         "profile.debug.optimization",
         "profile.debug.debug-info",
         "profile.debug.checks",
         "profile.release.optimization",
         "profile.release.debug-info",
-        "profile.release.checks",
-    };
+        "profile.release.checks"
+    );
 
     public static XenonProject Resolve(string inputPath)
     {
@@ -156,6 +156,11 @@ public static class XenonProjectLoader
                 fullPath)
             .Select(path => Path.GetFullPath(path, rootDirectory))
             .ToImmutableArray();
+        ImmutableArray<string> projectReferences = GetOptionalStringArray(
+                settings, "references.projects", fullPath)
+            .Select(path => Path.GetFullPath(path, rootDirectory))
+            .Order(StringComparer.Ordinal)
+            .ToImmutableArray();
 
         return new XenonProject(
             name,
@@ -167,6 +172,7 @@ public static class XenonProjectLoader
             sourceFiles,
             nativeLibraries,
             nativeLibraryPaths,
+            projectReferences,
             debugProfile,
             releaseProfile);
     }
@@ -182,6 +188,7 @@ public static class XenonProjectLoader
             rootDirectory,
             projectFilePath: null,
             [sourceFile],
+            [],
             [],
             [],
             XenonBuildProfile.Debug,
@@ -201,6 +208,7 @@ public static class XenonProjectLoader
             directory,
             projectFilePath: null,
             sourceFiles,
+            [],
             [],
             [],
             XenonBuildProfile.Debug,

@@ -1,0 +1,12 @@
+namespace RuntimeOwnership.SharedCore;
+interface IState { int Read(); }
+struct State : IState
+{
+    public static int Value = 1;
+    public int Initialized = 40;
+    public State() { }
+    public int Read() { return Initialized; }
+    public static int AddTwo(int value) { return value + 2; }
+}
+public int ReadStatic() { return State.Value; }
+public int ReadInitialized(State value) { return value.Initialized; }

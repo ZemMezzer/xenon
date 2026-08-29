@@ -1,0 +1,6 @@
+[project]
+name = "SameFqnSharedB"
+type = "shared-library"
+
+[source]
+root = "src"

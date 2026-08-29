@@ -4,65 +4,145 @@ using Xenon.Compiler.Semantics.Symbols;
 
 namespace Xenon.CodeGen.LLVM;
 
-/// <summary>Queries LLVM DataLayout without creating an executable module or lowering any expressions.</summary>
-internal sealed class LlvmTypeLayout(NativeTargetMachine target) : ITargetTypeLayout, IDisposable
+/// <summary>
+/// Durable compiler-side copy of the target ABI facts used by semantic analysis.
+/// It owns no LLVM context, target data, machine, or other disposable native handle.
+/// </summary>
+internal sealed class LlvmTypeLayout : ITargetTypeLayout
 {
-    private readonly LLVMContextRef _context = LLVMContextRef.Create();
-    private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structures = [];
-    private readonly HashSet<StructTypeSymbol> _building = [];
+    private readonly int _pointerBitWidth;
+    private readonly AbiValueLayout _pointer;
+    private readonly AbiValueLayout _bool;
+    private readonly AbiValueLayout _int8;
+    private readonly AbiValueLayout _int16;
+    private readonly AbiValueLayout _int32;
+    private readonly AbiValueLayout _int64;
+    private readonly AbiValueLayout _float;
+    private readonly AbiValueLayout _double;
+    private readonly bool _windowsCLong;
+
+    private LlvmTypeLayout(int pointerBitWidth, AbiValueLayout pointer, AbiValueLayout @bool,
+        AbiValueLayout int8, AbiValueLayout int16, AbiValueLayout int32, AbiValueLayout int64,
+        AbiValueLayout @float, AbiValueLayout @double, bool windowsCLong)
+    {
+        _pointerBitWidth = pointerBitWidth;
+        _pointer = pointer;
+        _bool = @bool;
+        _int8 = int8;
+        _int16 = int16;
+        _int32 = int32;
+        _int64 = int64;
+        _float = @float;
+        _double = @double;
+        _windowsCLong = windowsCLong;
+    }
+
+    public static LlvmTypeLayout Create(NativeTargetMachine target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        LLVMTargetDataRef data = target.TargetData;
+        static AbiValueLayout Query(LLVMTargetDataRef data, LLVMTypeRef type) =>
+            new(data.ABISizeOfType(type), data.ABIAlignmentOfType(type));
+        LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        bool windows = target.Triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
+            target.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase);
+        return new LlvmTypeLayout(target.PointerBitWidth,
+            Query(data, pointer), Query(data, LLVMTypeRef.Int1), Query(data, LLVMTypeRef.Int8),
+            Query(data, LLVMTypeRef.Int16), Query(data, LLVMTypeRef.Int32), Query(data, LLVMTypeRef.Int64),
+            Query(data, LLVMTypeRef.Float), Query(data, LLVMTypeRef.Double), windows);
+    }
 
     public int GetIntegerBitWidth(PrimitiveTypeSymbol type)
     {
         if (type.BitWidth is int width) return width;
         if (TypeIdentity.AreSame(type, BuiltinTypes.CLong) || TypeIdentity.AreSame(type, BuiltinTypes.CULong))
-            return target.Triple.Contains("windows", StringComparison.OrdinalIgnoreCase) || target.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase)
-                ? 32 : target.PointerBitWidth;
-        if (TypeIdentity.AreSame(type, BuiltinTypes.NInt) || TypeIdentity.AreSame(type, BuiltinTypes.NUInt)) return target.PointerBitWidth;
+            return _windowsCLong ? 32 : _pointerBitWidth;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.NInt) || TypeIdentity.AreSame(type, BuiltinTypes.NUInt))
+            return _pointerBitWidth;
         throw new LlvmCodeGenerationException($"'{type.Name}' is not an integer type.");
     }
 
-    public ulong GetSize(TypeSymbol type) => target.TargetData.ABISizeOfType(MapType(type));
-    public uint GetAlignment(TypeSymbol type) => target.TargetData.ABIAlignmentOfType(MapType(type));
-    // All ancestor subobjects start at zero, so an inherited field keeps its
-    // declaring type's offset even when queried through a descendant.
-    public ulong GetFieldOffset(StructTypeSymbol type, FieldSymbol field) =>
-        target.TargetData.OffsetOfElement(MapType(field.ContainingType), (uint)field.Ordinal);
+    public ulong GetSize(TypeSymbol type) => GetLayout(type, []).Size;
 
-    private LLVMTypeRef MapType(TypeSymbol type)
+    public uint GetAlignment(TypeSymbol type) => GetLayout(type, []).Alignment;
+
+    public ulong GetFieldOffset(StructTypeSymbol type, FieldSymbol field)
     {
-        if (type is EnumTypeSymbol enumeration) return MapType(enumeration.UnderlyingType);
-        if (type is PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol)
-            return LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-        if (TypeIdentity.AreSame(type, BuiltinTypes.Bool)) return _context.Int1Type;
-        if (TypeIdentity.AreSame(type, BuiltinTypes.Float)) return _context.FloatType;
-        if (TypeIdentity.AreSame(type, BuiltinTypes.Double)) return _context.DoubleType;
+        ArgumentNullException.ThrowIfNull(type);
+        ArgumentNullException.ThrowIfNull(field);
+        StructTypeSymbol owner = field.ContainingType as StructTypeSymbol
+            ?? throw new LlvmCodeGenerationException($"Field '{field.Name}' is not owned by a struct.");
+        IReadOnlyList<AbiValueLayout> elements = GetStructElementLayouts(owner, []);
+        if ((uint)field.Ordinal >= (uint)elements.Count)
+            throw new LlvmCodeGenerationException($"Field '{field.Name}' has an invalid layout ordinal.");
+        ulong offset = 0;
+        for (int index = 0; index <= field.Ordinal; index++)
+        {
+            AbiValueLayout element = elements[index];
+            offset = AlignTo(offset, element.Alignment);
+            if (index == field.Ordinal) return offset;
+            offset = checked(offset + element.Size);
+        }
+        throw new InvalidOperationException("Field offset calculation did not produce a result.");
+    }
+
+    private AbiValueLayout GetLayout(TypeSymbol type, HashSet<StructTypeSymbol> building)
+    {
+        if (type is EnumTypeSymbol enumeration) return GetLayout(enumeration.UnderlyingType, building);
+        if (type is PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol) return _pointer;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Bool)) return _bool;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Float)) return _float;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Double)) return _double;
         if (type is PrimitiveTypeSymbol { IsInteger: true } integer)
             return GetIntegerBitWidth(integer) switch
             {
-                8 => _context.Int8Type,
-                16 => _context.Int16Type,
-                32 => _context.Int32Type,
-                64 => _context.Int64Type,
+                8 => _int8,
+                16 => _int16,
+                32 => _int32,
+                64 => _int64,
                 int width => throw new LlvmCodeGenerationException($"Unsupported integer width {width}."),
             };
-        if (type is InterfaceTypeSymbol)
-        {
-            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            return _context.GetStructType([pointer, pointer], false);
-        }
+        if (type is InterfaceTypeSymbol) return AggregateLayout([_pointer, _pointer]);
         if (type is StructTypeSymbol structure)
         {
-            if (_structures.TryGetValue(structure, out LLVMTypeRef existing)) return existing;
-            if (!_building.Add(structure)) throw new LlvmCodeGenerationException($"Recursive layout for '{structure.FullName}'.");
-            LLVMTypeRef result = _context.CreateNamedStruct(structure.FullName);
-            LLVMTypeRef[] fields = LlvmStructLayout.Elements(structure, MapType, LLVMTypeRef.CreatePointer(_context.Int8Type, 0));
-            result.StructSetBody(fields, false);
-            _building.Remove(structure);
-            _structures.Add(structure, result);
+            if (!building.Add(structure))
+                throw new LlvmCodeGenerationException($"Recursive layout for '{structure.FullName}'.");
+            AbiValueLayout result = AggregateLayout(GetStructElementLayouts(structure, building));
+            building.Remove(structure);
             return result;
         }
         throw new LlvmCodeGenerationException($"Cannot determine layout of '{type.Name}'.");
     }
 
-    public void Dispose() => _context.Dispose();
+    private IReadOnlyList<AbiValueLayout> GetStructElementLayouts(
+        StructTypeSymbol type, HashSet<StructTypeSymbol> building)
+    {
+        var elements = new List<AbiValueLayout>();
+        if (type.BaseType is not null) elements.Add(GetLayout(type.BaseType, building));
+        if (type.IntroducesVirtualDispatch) elements.Add(_pointer);
+        elements.AddRange(type.Fields.Select(field => GetLayout(field.Type, building)));
+        return elements;
+    }
+
+    private AbiValueLayout AggregateLayout(IEnumerable<AbiValueLayout> elements)
+    {
+        ulong size = 0;
+        uint alignment = 1;
+        foreach (AbiValueLayout element in elements)
+        {
+            size = AlignTo(size, element.Alignment);
+            size = checked(size + element.Size);
+            alignment = Math.Max(alignment, element.Alignment);
+        }
+        return new AbiValueLayout(AlignTo(size, alignment), alignment);
+    }
+
+    private static ulong AlignTo(ulong value, uint alignment)
+    {
+        ulong mask = alignment - 1UL;
+        return checked((value + mask) & ~mask);
+    }
+
+    private readonly record struct AbiValueLayout(ulong Size, uint Alignment);
+
 }

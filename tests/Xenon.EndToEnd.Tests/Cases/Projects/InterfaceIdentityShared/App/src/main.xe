@@ -1,0 +1,21 @@
+using InterfaceIdentity.SharedA;
+using InterfaceIdentity.SharedB;
+namespace InterfaceIdentity.SharedApp;
+
+interface ILocal { int ReadLocal(); }
+
+struct Both : IA, IB, ILocal
+{
+    public int ReadA() { return 10; }
+    public int ReadB() { return 20; }
+    public int ReadLocal() { return 12; }
+}
+
+int Main()
+{
+    Both both = Both { };
+    IA a = both;
+    IB b = both;
+    ILocal local = both;
+    return InvokeA(a) + InvokeB(b) + local.ReadLocal();
+}

@@ -1,0 +1,6 @@
+[project]
+name = "InterfaceIdentityStaticB"
+type = "static-library"
+
+[source]
+root = "src"

@@ -1,0 +1,2 @@
+namespace Epic3.Core;
+public int TwentyOne() { return 21; }

@@ -1,0 +1,6 @@
+[project]
+name = "SameFqnAmbiguousA"
+type = "static-library"
+
+[source]
+root = "src"

@@ -121,15 +121,20 @@ internal sealed class FileSymbolScope
             return alias.Type;
         }
 
-        TypeSymbol? local = ContainingNamespace.FindAnyType(name);
-        if (local is not null)
+        IReadOnlyList<DeclaredTypeSymbol> local = ContainingNamespace.FindTypes(name);
+        if (local.Count == 1)
         {
-            return local;
+            return local[0];
+        }
+        if (local.Count > 1)
+        {
+            diagnostics.Report(location, $"type name '{name}' is ambiguous between {FormatTypeCandidates(local)}",
+                DiagnosticIds.AmbiguousName);
+            return BuiltinTypes.Error;
         }
 
         List<TypeSymbol> matches = _importedNamespaces
-            .Select(@namespace => @namespace.FindAnyType(name))
-            .Where(type => type is not null)
+            .SelectMany(@namespace => @namespace.FindTypes(name))
             .Cast<TypeSymbol>()
             .ToList();
 
@@ -157,30 +162,25 @@ internal sealed class FileSymbolScope
         out bool diagnosticReported)
     {
         diagnosticReported = false;
-        FunctionSymbol? local = ContainingNamespace.FindFunction(name);
-        if (local is not null)
+        IReadOnlyList<FunctionSymbol> local = ContainingNamespace.FindFunctions(name);
+        if (local.Count == 1)
         {
-            return local;
+            return local[0];
+        }
+        if (local.Count > 1)
+        {
+            diagnostics.Report(location, $"function name '{name}' is ambiguous between {FormatFunctionCandidates(local)}",
+                DiagnosticIds.AmbiguousName);
+            diagnosticReported = true;
+            return null;
         }
 
         var publicMatches = new List<FunctionSymbol>();
         var privateMatches = new List<FunctionSymbol>();
         foreach (NamespaceSymbol imported in _importedNamespaces)
         {
-            FunctionSymbol? function = imported.FindFunction(name);
-            if (function is null)
-            {
-                continue;
-            }
-
-            if (function.IsPublic)
-            {
-                publicMatches.Add(function);
-            }
-            else
-            {
-                privateMatches.Add(function);
-            }
+            foreach (FunctionSymbol function in imported.FindFunctions(name))
+                if (function.IsPublic) publicMatches.Add(function); else privateMatches.Add(function);
         }
 
 
@@ -223,14 +223,16 @@ internal sealed class FileSymbolScope
 
     public ConstantSymbol? ResolveConstant(string name, TextLocation location, DiagnosticBag diagnostics)
     {
-        ConstantSymbol? local = ContainingNamespace.FindConstant(name);
-        if (local is not null)
-            return local;
+        IReadOnlyList<ConstantSymbol> local = ContainingNamespace.FindConstants(name);
+        if (local.Count == 1) return local[0];
+        if (local.Count > 1)
+        {
+            diagnostics.Report(location, $"constant name '{name}' is ambiguous", DiagnosticIds.AmbiguousName);
+            return null;
+        }
 
         ConstantSymbol[] matches = _importedNamespaces
-            .Select(@namespace => @namespace.FindConstant(name))
-            .Where(constant => constant is not null)
-            .Cast<ConstantSymbol>()
+            .SelectMany(@namespace => @namespace.FindConstants(name))
             .ToArray();
         if (matches.Length == 1)
             return matches[0];
@@ -254,11 +256,13 @@ internal sealed class FileSymbolScope
                 return alias.Type;
             }
 
-            return ContainingNamespace.FindAnyType(parts[0]);
+            IReadOnlyList<DeclaredTypeSymbol> candidates = ContainingNamespace.FindTypes(parts[0]);
+            return candidates.Count == 1 ? candidates[0] : null;
         }
 
         NamespaceSymbol? containingNamespace = ResolveNamespacePrefix(parts, parts.Count - 1);
-        return containingNamespace?.FindAnyType(parts[^1]);
+        IReadOnlyList<DeclaredTypeSymbol>? qualifiedCandidates = containingNamespace?.FindTypes(parts[^1]);
+        return qualifiedCandidates?.Count == 1 ? qualifiedCandidates[0] : null;
     }
 
     public FunctionSymbol? ResolveQualifiedFunction(
@@ -274,11 +278,20 @@ internal sealed class FileSymbolScope
         }
 
         NamespaceSymbol? containingNamespace = ResolveNamespacePrefix(parts, parts.Count - 1);
-        FunctionSymbol? function = containingNamespace?.FindFunction(parts[^1]);
-        if (function is null)
+        IReadOnlyList<FunctionSymbol>? candidates = containingNamespace?.FindFunctions(parts[^1]);
+        if (candidates is null || candidates.Count == 0)
         {
             return null;
         }
+        if (candidates.Count > 1)
+        {
+            diagnostics.Report(location,
+                $"function name '{string.Join('.', parts)}' is ambiguous between {FormatFunctionCandidates(candidates)}",
+                DiagnosticIds.AmbiguousName);
+            diagnosticReported = true;
+            return null;
+        }
+        FunctionSymbol function = candidates[0];
 
         if (!ReferenceEquals(containingNamespace, ContainingNamespace) && !function.IsPublic)
         {

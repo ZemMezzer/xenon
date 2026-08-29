@@ -12,7 +12,8 @@ public enum BuildFailureKind { Compiler, NativeTool, Environment }
 
 public sealed record XenonBuildRequest(
     string InputPath, string Profile = "debug", string? OutputRoot = null,
-    string? TargetTriple = null, bool CompileOnly = false, TimeSpan? ToolTimeout = null);
+    string? TargetTriple = null, bool CompileOnly = false, TimeSpan? ToolTimeout = null,
+    bool SkipLink = false);
 
 public sealed class XenonBuildResult
 {
@@ -21,6 +22,8 @@ public sealed class XenonBuildResult
     public BuildFailureKind? FailureKind { get; internal set; }
     public string? Failure { get; internal set; }
     public XenonProject? Project { get; internal set; }
+    public XenonProjectGraph? ProjectGraph { get; internal set; }
+    public Compilation? Compilation { get; internal set; }
     public string? TargetTriple { get; internal set; }
     public IReadOnlyList<Diagnostic> Diagnostics { get; internal set; } = [];
     public string? LlvmIrPath { get; internal set; }
@@ -28,6 +31,10 @@ public sealed class XenonBuildResult
     public string? ArtifactPath { get; internal set; }
     public string? ImportLibraryPath { get; internal set; }
     public NativeProcessResult? LinkProcess { get; internal set; }
+    /// <summary>True when native linking was intentionally omitted for an object-only or foreign-target build.</summary>
+    public bool NativeLinkSkipped { get; internal set; }
+    public bool IsRunnable => Success && Project?.Type == XenonProjectType.Executable &&
+        !NativeLinkSkipped && ArtifactPath is not null;
 }
 
 /// <summary>Reusable project-to-native pipeline. No console, CLI parser, or process-wide working-directory changes.</summary>
@@ -38,70 +45,117 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
         var result = new XenonBuildResult();
         try
         {
-            XenonProject project = XenonProjectLoader.Resolve(request.InputPath);
-            result.Project = project;
-            XenonBuildProfile profile = project.GetProfile(request.Profile);
-            SourceText[] sources = project.SourceFiles
-                .Select(path => SourceText.From(File.ReadAllText(path), path)).ToArray();
-            result.Stage = BuildStage.Compilation;
-            Compilation compilation = Compilation.Create(sources);
-            result.Diagnostics = compilation.Diagnostics;
-            if (compilation.HasErrors) return Fail(result, BuildFailureKind.Compiler, "Compilation failed.");
+            XenonProjectGraph graph = XenonProjectGraph.Load(request.InputPath);
+            result.ProjectGraph = graph;
+            result.Project = graph.Root;
+            string outputRoot = Path.GetFullPath(request.OutputRoot ?? graph.Root.RootDirectory);
+            string triple = request.TargetTriple ?? LlvmTargetPlatform.HostTriple;
+            bool canLinkForHost = string.Equals(
+                triple, LlvmTargetPlatform.HostTriple, StringComparison.OrdinalIgnoreCase);
+            result.TargetTriple = triple;
+            var compilations = new Dictionary<string, Compilation>(StringComparer.OrdinalIgnoreCase);
+            var artifacts = new Dictionary<string, LinkedNativeArtifact>(StringComparer.OrdinalIgnoreCase);
 
-            LlvmTargetOptions? target = null;
-            if (!request.CompileOnly || compilation.RequiresTargetLayout)
+            foreach (XenonProject project in graph.BuildOrder)
             {
-                string triple = request.TargetTriple ?? LlvmTargetPlatform.HostTriple;
-                result.TargetTriple = triple;
-                target = new LlvmTargetOptions(triple, profile.OptimizationLevel,
-                    PositionIndependentCode: project.Type == XenonProjectType.SharedLibrary ||
-                        (project.Type == XenonProjectType.Executable && LlvmTargetPlatform.GetObjectFileExtension(triple) != ".obj"));
-                compilation = LlvmIrGenerator.BindForTarget(compilation, target);
-                result.Diagnostics = compilation.Diagnostics;
-                if (compilation.HasErrors) return Fail(result, BuildFailureKind.Compiler, "Target semantic analysis failed.");
-            }
-            if (request.CompileOnly)
-            {
-                result.Success = true;
-                result.Stage = BuildStage.Complete;
-                return result;
-            }
+                XenonBuildProfile profile = project.GetProfile(request.Profile);
+                result.Stage = BuildStage.Compilation;
+                Compilation compilation = XenonProjectCompilationFactory.Create(
+                    project, request.Profile, compilations);
+                if (compilation.HasErrors)
+                {
+                    result.Diagnostics = compilation.Diagnostics;
+                    return Fail(result, BuildFailureKind.Compiler,
+                        $"Compilation failed for project '{project.Name}'.");
+                }
 
-            string root = Path.GetFullPath(request.OutputRoot ?? project.RootDirectory);
-            string hostTriple = target!.Triple;
-            result.ObjectPath = XenonBuildPaths.GetObjectFilePath(root, project.Name, request.Profile,
-                hostTriple, LlvmTargetPlatform.GetObjectFileExtension(hostTriple));
-            result.LlvmIrPath = Path.ChangeExtension(result.ObjectPath, ".ll");
-            result.ArtifactPath = XenonBuildPaths.GetArtifactPath(root, project.Name, project.Type, request.Profile, hostTriple);
-            bool executable = project.Type == XenonProjectType.Executable;
-            result.Stage = BuildStage.LlvmGeneration;
-            string ir = new LlvmIrGenerator().GenerateForTarget(compilation, target, project.Name, executable);
-            Directory.CreateDirectory(Path.GetDirectoryName(result.LlvmIrPath)!);
-            File.WriteAllText(result.LlvmIrPath, ir);
-            result.Stage = BuildStage.Emit;
-            new LlvmObjectEmitter().Emit(compilation, result.ObjectPath, target, project.Name, executable);
+                LlvmTargetOptions? target = null;
+                if (!request.CompileOnly || compilation.RequiresTargetLayout)
+                {
+                    target = new LlvmTargetOptions(triple, profile.OptimizationLevel,
+                        PositionIndependentCode: project.Type == XenonProjectType.SharedLibrary ||
+                            (project.Type == XenonProjectType.Executable &&
+                             LlvmTargetPlatform.GetObjectFileExtension(triple) != ".obj"));
+                    compilation = LlvmIrGenerator.BindForTarget(compilation, target);
+                    if (compilation.HasErrors)
+                    {
+                        result.Diagnostics = compilation.Diagnostics;
+                        return Fail(result, BuildFailureKind.Compiler,
+                            $"Target semantic analysis failed for project '{project.Name}'.");
+                    }
+                }
+                compilations.Add(project.Identity, compilation);
+                if (ReferenceEquals(project, graph.Root) || project.Identity == graph.Root.Identity)
+                {
+                    result.Compilation = compilation;
+                    result.Diagnostics = compilation.Diagnostics;
+                }
+                if (request.CompileOnly) continue;
 
-            result.Stage = BuildStage.Link;
-            var linker = new NativeLinker(processRunner, request.ToolTimeout, project.RootDirectory);
-            var options = new NativeLinkOptions(project.NativeLibraries, project.NativeLibraryPaths,
-                compilation.SemanticModel.Functions.Select(function => function.Symbol)
-                    .Where(symbol => symbol.IsExport).Select(NativeSymbolNames.Get).ToArray());
-            LinkedNativeArtifact artifact;
-            if (executable)
-            {
-                LinkedExecutable linked = linker.LinkExecutable(result.ObjectPath, result.ArtifactPath, hostTriple, options);
-                artifact = new(linked.Path, linked.LinkerPath) { ProcessResult = linked.ProcessResult };
+                string objectPath = XenonBuildPaths.GetObjectFilePath(outputRoot, project.Name,
+                    request.Profile, triple, LlvmTargetPlatform.GetObjectFileExtension(triple));
+                string llvmIrPath = Path.ChangeExtension(objectPath, ".ll");
+                string artifactPath = XenonBuildPaths.GetArtifactPath(outputRoot, project.Name,
+                    project.Type, request.Profile, triple);
+                if (project.Identity == graph.Root.Identity)
+                {
+                    result.ObjectPath = objectPath;
+                    result.LlvmIrPath = llvmIrPath;
+                }
+                result.Stage = BuildStage.LlvmGeneration;
+                LlvmCodeGenerationOptions codeGenerationOptions = CreateCodeGenerationOptions(
+                    graph, project, compilations);
+                string ir = new LlvmIrGenerator().GenerateForTarget(
+                    compilation, target!, project.Name, codeGenerationOptions);
+                Directory.CreateDirectory(Path.GetDirectoryName(llvmIrPath)!);
+                File.WriteAllText(llvmIrPath, ir);
+                result.Stage = BuildStage.Emit;
+                new LlvmObjectEmitter().Emit(
+                    compilation, objectPath, target!, project.Name, codeGenerationOptions);
+
+                if (request.SkipLink || !canLinkForHost)
+                {
+                    if (project.Identity == graph.Root.Identity)
+                        result.NativeLinkSkipped = true;
+                    continue;
+                }
+
+                result.Stage = BuildStage.Link;
+                var linker = new NativeLinker(processRunner, request.ToolTimeout, project.RootDirectory);
+                string[] dependencyArtifacts = graph.GetNativeLinkOrder(project)
+                    .Select(dependency => artifacts[dependency.Identity])
+                    .Select(artifact => artifact.ImportLibraryPath ?? artifact.Path).ToArray();
+                IEnumerable<string> exportedSymbols = project.Type == XenonProjectType.SharedLibrary
+                    ? LlvmIrGenerator.GetProjectNativeExports(compilation, project.Name).Select(export =>
+                        export.IsData && IsWindowsTarget(triple) ? $"{export.Name},DATA" : export.Name)
+                    : compilation.SemanticModel.Functions.Select(function => function.Symbol)
+                        .Where(symbol => symbol.IsExport).Select(NativeSymbolNames.Get);
+                var options = new NativeLinkOptions(project.NativeLibraries.AddRange(dependencyArtifacts),
+                    project.NativeLibraryPaths,
+                    exportedSymbols.Distinct(StringComparer.Ordinal).ToArray());
+                LinkedNativeArtifact artifact;
+                if (project.Type == XenonProjectType.Executable)
+                {
+                    LinkedExecutable linked = linker.LinkExecutable(objectPath, artifactPath, triple, options);
+                    artifact = new(linked.Path, linked.LinkerPath) { ProcessResult = linked.ProcessResult };
+                }
+                else if (project.Type == XenonProjectType.StaticLibrary)
+                    artifact = linker.CreateStaticLibrary(objectPath, artifactPath, triple);
+                else
+                    artifact = linker.LinkSharedLibrary(objectPath, artifactPath, triple, options,
+                        XenonBuildPaths.GetImportLibraryPath(outputRoot, project.Name, request.Profile, triple));
+                result.Stage = BuildStage.ArtifactValidation;
+                if (!File.Exists(artifact.Path) || new FileInfo(artifact.Path).Length == 0)
+                    return Fail(result, BuildFailureKind.Environment,
+                        $"Expected artifact is missing or empty: {artifact.Path}");
+                artifacts.Add(project.Identity, artifact);
+                if (project.Identity == graph.Root.Identity)
+                {
+                    result.ArtifactPath = artifact.Path;
+                    result.ImportLibraryPath = artifact.ImportLibraryPath;
+                    result.LinkProcess = artifact.ProcessResult;
+                }
             }
-            else if (project.Type == XenonProjectType.StaticLibrary)
-                artifact = linker.CreateStaticLibrary(result.ObjectPath, result.ArtifactPath, hostTriple);
-            else
-                artifact = linker.LinkSharedLibrary(result.ObjectPath, result.ArtifactPath, hostTriple, options,
-                    XenonBuildPaths.GetImportLibraryPath(root, project.Name, request.Profile, hostTriple));
-            result.LinkProcess = artifact.ProcessResult;
-            result.ImportLibraryPath = artifact.ImportLibraryPath;
-            result.Stage = BuildStage.ArtifactValidation;
-            if (!File.Exists(artifact.Path) || new FileInfo(artifact.Path).Length == 0)
-                return Fail(result, BuildFailureKind.Environment, $"Expected artifact is missing or empty: {artifact.Path}");
             result.Success = true;
             result.Stage = BuildStage.Complete;
             return result;
@@ -131,6 +185,22 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
     private static bool IsNativeEnvironmentFailure(Exception exception) =>
         exception is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException ||
         (exception.InnerException is not null && IsNativeEnvironmentFailure(exception.InnerException));
+
+    private static bool IsWindowsTarget(string triple) =>
+        triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
+        triple.Contains("win32", StringComparison.OrdinalIgnoreCase);
+
+    private static LlvmCodeGenerationOptions CreateCodeGenerationOptions(
+        XenonProjectGraph graph,
+        XenonProject project,
+        IReadOnlyDictionary<string, Compilation> compilations) =>
+        new(project.Name, graph.GetTransitiveDependencies(project).Select(dependency =>
+            new LlvmNativeReference(
+                compilations[dependency.Identity],
+                dependency.Type == XenonProjectType.SharedLibrary
+                    ? LlvmNativeReferenceKind.Shared
+                    : LlvmNativeReferenceKind.Static,
+                dependency.Name)));
 
     private static XenonBuildResult Fail(XenonBuildResult result, BuildFailureKind kind, string message)
     {

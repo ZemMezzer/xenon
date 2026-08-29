@@ -20,6 +20,8 @@ public sealed class SyntaxTree
 
     public SourceText Source { get; }
 
+    public SourceFileId SourceFileId => Source.FileId;
+
     public CompilationUnitSyntax Root { get; }
 
     public ImmutableArray<SyntaxToken> Tokens { get; }

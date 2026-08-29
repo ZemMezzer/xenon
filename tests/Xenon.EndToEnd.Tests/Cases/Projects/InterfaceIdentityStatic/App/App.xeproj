@@ -1,0 +1,9 @@
+[project]
+name = "InterfaceIdentityStaticApp"
+type = "executable"
+
+[source]
+root = "src"
+
+[references]
+projects = ["../LibraryA/LibraryA.xeproj", "../LibraryB/LibraryB.xeproj"]

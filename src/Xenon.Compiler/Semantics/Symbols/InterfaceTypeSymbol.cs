@@ -24,15 +24,12 @@ public sealed class InterfaceTypeSymbol : DeclaredTypeSymbol
     public ImmutableArray<FunctionSymbol> Methods => _methods;
     public ImmutableArray<InterfacePropertySymbol> Properties => _properties;
     public ImmutableArray<InterfaceIndexerSymbol> Indexers => _indexers;
-    public int DispatchId { get; private set; }
     public override InterfaceDeclarationSyntax Declaration { get; }
 
     internal void SetBaseInterfaces(ImmutableArray<InterfaceTypeSymbol> interfaces) => BaseInterfaces = interfaces;
     internal void SetMethods(ImmutableArray<FunctionSymbol> methods) => _methods = methods;
     internal void SetProperties(ImmutableArray<InterfacePropertySymbol> properties) => _properties = properties;
     internal void SetIndexers(ImmutableArray<InterfaceIndexerSymbol> indexers) => _indexers = indexers;
-    internal void SetDispatchId(int dispatchId) => DispatchId = dispatchId;
-
     internal void SetMethodSlots(IEnumerable<FunctionSymbol> methods) =>
         _methodSlots = methods.Select((method, slot) => (method, slot)).ToDictionary(pair => pair.method, pair => pair.slot);
 

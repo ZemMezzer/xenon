@@ -1,0 +1,3 @@
+using Epic3.Core;
+namespace Epic3.Middle;
+public int FortyTwo() { return TwentyOne() + TwentyOne(); }

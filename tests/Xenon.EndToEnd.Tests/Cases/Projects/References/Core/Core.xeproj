@@ -1,0 +1,6 @@
+[project]
+name = "Epic3Core"
+type = "static-library"
+
+[source]
+root = "src"

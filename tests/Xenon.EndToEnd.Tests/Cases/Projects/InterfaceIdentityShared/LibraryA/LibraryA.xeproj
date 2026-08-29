@@ -1,0 +1,6 @@
+[project]
+name = "InterfaceIdentitySharedA"
+type = "shared-library"
+
+[source]
+root = "src"
