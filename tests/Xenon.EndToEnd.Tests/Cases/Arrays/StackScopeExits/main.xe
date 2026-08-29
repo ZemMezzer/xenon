@@ -1,0 +1,32 @@
+namespace StackScopeExits;
+struct Item
+{
+    public static int Trace;
+    public int Id = 1;
+    public ~Item() { Item.Trace = Item.Trace * 10 + Id; }
+}
+int Main()
+{
+    int i = 0;
+    while (i < 2)
+    {
+        Item[] outer = Item[1]; outer[0].Id = 1;
+        { Item[,] inner = Item[1,1]; inner[0,0].Id = 2; i++; if (i == 1) continue; break; }
+    }
+    if (Item.Trace != 2121) return 1;
+    Item.Trace = 0; i = 0;
+    for (Item[] keep = Item[1]; i < 2; i++)
+    {
+        keep[0].Id = 9;
+        Item[] body = Item[1]; body[0].Id = 2;
+        switch (i)
+        {
+            case 0: Item[] first = Item[1]; first[0].Id = 3; continue;
+            default: Item[] last = Item[1]; last[0].Id = 4; break;
+        }
+        if (Item.Trace != 324) return 2;
+        break;
+    }
+    if (Item.Trace != 32429) return 3;
+    return 42;
+}

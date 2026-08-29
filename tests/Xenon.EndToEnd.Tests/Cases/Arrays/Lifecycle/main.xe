@@ -1,0 +1,25 @@
+namespace ArrayLifecycle;
+struct Counter
+{
+    public static int Trace;
+    public static int Count;
+    public int Id = 7;
+    public ~Counter() { Counter.Trace = Counter.Trace * 10 + Id; Counter.Count += 1; }
+}
+int Main()
+{
+    Counter[,] values = new Counter[2,2];
+    if (values[0,0].Id != 7) return 1;
+    values[0,0].Id = 1; values[0,1].Id = 2; values[1,0].Id = 3; values[1,1].Id = 4;
+    Counter[,] alias = values;
+    free(alias);
+    Counter[] empty = new Counter[0]; free(empty);
+    if (Counter.Trace != 4321 || Counter.Count != 4) return 2;
+    Counter[][] nested = new Counter[1][];
+    Counter[] child = new Counter[1]; child[0].Id = 5; nested[0] = child;
+    free(nested);
+    if (Counter.Count != 4) return 3;
+    free(child);
+    if (Counter.Trace != 43215 || Counter.Count != 5) return 4;
+    return 42;
+}

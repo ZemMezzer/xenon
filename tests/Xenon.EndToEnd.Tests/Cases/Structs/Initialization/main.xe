@@ -1,0 +1,25 @@
+namespace StructInitialization;
+int Offset() { return 2; }
+struct Base { public int Stage; public Base() { Stage = 40; } }
+struct Derived : Base
+{
+    public readonly int Result = Stage + Offset();
+    public int Marker = 7;
+    public Derived() { this->Marker += 1; }
+    public int readonly Read() { return Result; }
+    public static int Add(int left, int right) { return left + right; }
+}
+struct Value { public int Seed = 20; public readonly int Number = Seed + 2; }
+int Main()
+{
+    Derived value = Derived();
+    if (value.Read() != 42 || value.Marker != 8) return 1;
+    Value positional = Value { };
+    if (positional.Number != 22) return 2;
+    Derived copy = value;
+    if (copy.Result != 42 || Derived.Add(20, 22) != 42) return 3;
+    Derived* heap = new Derived();
+    int result = heap->Read();
+    free(heap);
+    return result;
+}

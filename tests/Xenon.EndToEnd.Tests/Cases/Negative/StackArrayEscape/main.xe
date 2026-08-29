@@ -1,0 +1,2 @@
+namespace NegativeStackArrayEscape;
+void Invalid() { int[,] values; { values = int[2,3]; } }

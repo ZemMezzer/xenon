@@ -1,0 +1,28 @@
+namespace ControlFlow;
+int Classify(int value)
+{
+    switch (value)
+    {
+        case 1:
+        case 2: return 10;
+        default: return 0;
+    }
+}
+int Main()
+{
+    int sum = 0;
+    for (int i = 0; i < 10; i++)
+    {
+        if (i == 3) continue;
+        if (i == 8) break;
+        sum += i;
+    }
+    if (sum != 25) return 1;
+    int count = 0;
+    while (sum > 20) { sum--; count++; }
+    if (count != 5) return 2;
+    bool skipped = false && (1 / 0 == 0);
+    bool chosen = true || (1 / 0 == 0);
+    if (skipped || !chosen) return 3;
+    return sum + Classify(1) + Classify(2) + 2;
+}

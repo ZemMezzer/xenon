@@ -1,0 +1,2 @@
+namespace NegativeDefiniteAssignment;
+int Main() { int value; return value; }

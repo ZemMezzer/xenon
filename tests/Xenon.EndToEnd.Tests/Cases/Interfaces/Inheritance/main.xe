@@ -1,0 +1,16 @@
+namespace InterfaceInheritance;
+interface Root { int Read(); }
+interface IA : Root { int Get(int value); }
+interface IB : Root { float Get(float value); }
+interface IC : IA, IB { }
+struct Parent { public int Read() { return 10; } public int Get(int value) { return value + 10; } }
+struct Child : Parent, IC { public float Get(float value) { return value + 20.0f; } }
+int Call(IC value) { return value.Read() + value.Get(1) + cast<int>(value.Get(1.0f)); }
+int Main()
+{
+    Child value = Child();
+    IC& child = value;
+    Root& root = child;
+    if (root.Read() != 10) return 1;
+    return Call(value);
+}

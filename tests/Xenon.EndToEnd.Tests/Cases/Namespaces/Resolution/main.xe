@@ -1,0 +1,12 @@
+using Library.Geometry;
+using P = Library.Geometry.Pair;
+using G = Library.Geometry;
+namespace Application;
+int Main()
+{
+    P value = P { 20, 22 };
+    if (Sum(value) != 42) return 1;
+    if (G.Sum(value) != 42) return 2;
+    Library.Geometry.Pair qualified = value;
+    return Library.Geometry.Sum(qualified);
+}

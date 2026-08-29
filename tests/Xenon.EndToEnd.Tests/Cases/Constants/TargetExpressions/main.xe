@@ -1,0 +1,21 @@
+namespace TargetExpressions;
+struct Packet { public byte Tag; public nint Payload; }
+const int PayloadOffset = cast<int>(offsetof(Packet, Payload));
+const int Base = 20;
+struct Values { const int Answer = Base + 22; }
+enum Layout { Size = cast<int>(sizeof(Packet)), After, Offset = PayloadOffset, Alignment = cast<int>(alignof(Packet)) }
+enum Native : nint { Size = cast<nint>(sizeof(nint)), Next }
+int Main()
+{
+    if (Values.Answer != 42) return 1;
+    if (cast<int>(Layout.Size) != cast<int>(sizeof(Packet))) return 2;
+    if (cast<int>(Layout.After) != cast<int>(sizeof(Packet)) + 1) return 3;
+    if (cast<int>(Layout.Offset) != cast<int>(offsetof(Packet, Payload))) return 4;
+    if (cast<int>(Layout.Alignment) != cast<int>(alignof(Packet))) return 5;
+    if (cast<int>(Native.Next) != cast<int>(sizeof(nint)) + 1) return 6;
+    const int Size = cast<int>(sizeof(Packet)); const int Next = Size + 1;
+    switch (cast<int>(Layout.After)) { case Next: break; default: return 7; }
+    const bool Skipped = false && (1 / 0 == 0);
+    if (Skipped) return 8;
+    return Values.Answer;
+}

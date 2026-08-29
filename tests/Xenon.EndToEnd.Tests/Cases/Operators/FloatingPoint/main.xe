@@ -1,0 +1,14 @@
+namespace FloatingPoint;
+int Main()
+{
+    float single = 85.0f % 43.0f;
+    double precise = 85.0 % 43.0;
+    double nan = 0.0 / 0.0;
+    double infinity = 1.0 / 0.0;
+    if (single != 42.0f || precise != 42.0) return 1;
+    if (nan == nan || !(nan != nan)) return 2;
+    if (!(infinity > 42.0) || !(-infinity < 0.0)) return 3;
+    if (!(0.0 == -0.0)) return 4;
+    if (cast<int>(42.75) != 42 || cast<int>(-42.75) != -42) return 5;
+    return cast<int>(precise);
+}

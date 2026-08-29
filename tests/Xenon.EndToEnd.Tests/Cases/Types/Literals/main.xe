@@ -1,0 +1,9 @@
+namespace Literals;
+extern int puts(readonly byte* text);
+int Main()
+{
+    puts("line 1\nline 2\t\"quoted\"\\");
+    if (0x2A != 42 || 0X2A != 42 || 0b101010 != 42 || 0B101010 != 42) return 1;
+    if (1.5e2 != 150.0 || 1.5E+2f != 150.0f) return 2;
+    return 42;
+}

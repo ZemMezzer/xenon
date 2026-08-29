@@ -1,0 +1,18 @@
+namespace StableLayout;
+struct Base { public int Value; }
+interface IValue { int Read(); }
+struct Derived : Base, IValue { public int Extra; public int Read() { return Value + Extra; } }
+Base RoundTrip(Base value) { value.Value += 1; return value; }
+int Main()
+{
+    if (sizeof(Base) != cast<nuint>(4) || offsetof(Base, Value) != cast<nuint>(0)) return 1;
+    if (offsetof(Derived, Value) != cast<nuint>(0)) return 2;
+    Derived value = Derived { 20, 22 }; Base* basePointer = &value; Base& reference = value;
+    if (basePointer != &reference || &basePointer->Value != &value.Value) return 3;
+    IValue view = value; if (view.Read() != 42) return 4;
+    Base original = Base { 41 }; Base copy = RoundTrip(original);
+    if (original.Value != 41 || copy.Value != 42) return 5;
+    Base[] values = Base[2]; Base* first = &values[0];
+    if (first + 1 != &values[1] || (first + 1) - first != cast<nint>(1)) return 6;
+    return copy.Value;
+}
