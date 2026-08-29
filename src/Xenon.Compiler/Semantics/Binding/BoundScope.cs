@@ -13,7 +13,11 @@ internal sealed class BoundScope
 
     public BoundScope? Parent { get; }
 
+    public IReadOnlyCollection<VariableSymbol> Variables => _variables.Values;
+
     public bool TryDeclare(VariableSymbol variable) => _variables.TryAdd(variable.Name, variable);
+
+    public VariableSymbol? LookupCurrent(string name) => _variables.GetValueOrDefault(name);
 
     public VariableSymbol? Lookup(string name)
     {

@@ -21,7 +21,7 @@ public static class BuiltinTypes
     public static PrimitiveTypeSymbol CLong { get; } = new("clong", true, true);
     public static PrimitiveTypeSymbol CULong { get; } = new("culong", true, false);
 
-    internal static TypeSymbol Error { get; } = new SpecialTypeSymbol("<error>");
+    public static ErrorTypeSymbol Error { get; } = new();
 
     internal static TypeSymbol Null { get; } = new SpecialTypeSymbol("<null>");
 

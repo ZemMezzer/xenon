@@ -26,9 +26,11 @@ public sealed class SyntaxTree
 
     public ImmutableArray<Diagnostic> Diagnostics { get; }
 
-    public static SyntaxTree Parse(SourceText source)
+    public static SyntaxTree Parse(SourceText source, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         LexedSource lexed = LexedSource.Lex(source);
+        cancellationToken.ThrowIfCancellationRequested();
         var parser = new Parser(lexed.Tokens);
         CompilationUnitSyntax root = parser.ParseCompilationUnit();
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();

@@ -3,5 +3,5 @@
   "profiles": ["debug"],
   "compileOnly": true,
   "expectedBuildSuccess": false,
-  "expectedDiagnostics": [{ "message": "left side of assignment must be writable" }]
+  "expectedDiagnostics": [{ "id": "XE2202", "message": "left side of assignment must be writable" }]
 }

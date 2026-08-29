@@ -10,4 +10,6 @@ public enum SymbolKind
     Constant,
     Parameter,
     LocalVariable,
+    Error,
+    Alias,
 }

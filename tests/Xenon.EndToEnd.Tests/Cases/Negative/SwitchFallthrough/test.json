@@ -3,5 +3,5 @@
   "profiles": ["debug"],
   "compileOnly": true,
   "expectedBuildSuccess": false,
-  "expectedDiagnostics": [{ "message": "implicit fallthrough is not allowed; terminate the case with break, return, or continue" }]
+  "expectedDiagnostics": [{ "id": "XE2206", "message": "implicit fallthrough is not allowed; terminate the case with break, return, or continue" }]
 }

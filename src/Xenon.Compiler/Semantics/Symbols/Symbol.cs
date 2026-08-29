@@ -48,3 +48,22 @@ public abstract class Symbol
         return null;
     }
 }
+
+public sealed class ErrorSymbol : Symbol
+{
+    public ErrorSymbol(string name = "<error>") : base(name, SymbolKind.Error) { }
+}
+
+public sealed class AliasSymbol : Symbol
+{
+    internal AliasSymbol(string name, Symbol target, SyntaxNode declaration)
+        : base(name, SymbolKind.Alias, target.ContainingSymbol)
+    {
+        Target = target;
+        Declaration = declaration;
+    }
+
+    public Symbol Target { get; }
+    private SyntaxNode Declaration { get; }
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+}

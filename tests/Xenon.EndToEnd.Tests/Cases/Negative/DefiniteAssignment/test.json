@@ -3,5 +3,5 @@
   "profiles": ["debug"],
   "compileOnly": true,
   "expectedBuildSuccess": false,
-  "expectedDiagnostics": [{ "message": "local variable 'value' is used before it is initialized" }]
+  "expectedDiagnostics": [{ "id": "XE2201", "message": "local variable 'value' is used before it is initialized" }]
 }

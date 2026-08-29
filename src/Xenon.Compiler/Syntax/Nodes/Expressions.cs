@@ -2,6 +2,11 @@ using System.Collections.Immutable;
 
 namespace Xenon.Compiler.Syntax;
 
+public sealed record MissingExpressionSyntax(SyntaxToken MissingToken) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.MissingExpression;
+}
+
 public sealed record LiteralExpressionSyntax(SyntaxToken LiteralToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.LiteralExpression;

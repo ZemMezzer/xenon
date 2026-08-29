@@ -1,0 +1,8 @@
+namespace Negative;
+
+struct Value
+{
+    public static virtual void RunVirtual() {}
+    public static override void RunOverride() {}
+    public static abstract void RunAbstract();
+}

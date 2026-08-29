@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Xenon.Compiler.Text;
 
 namespace Xenon.Compiler.Diagnostics;
@@ -7,6 +8,8 @@ public sealed record Diagnostic(
     string Message,
     TextLocation Location)
 {
-    // Optional until the compiler has a stable diagnostic catalog; never infer IDs from message text.
-    public string? Id { get; init; }
+    public required string Id { get; init; }
+    public ImmutableArray<RelatedDiagnosticLocation> RelatedLocations { get; init; } = [];
 }
+
+public sealed record RelatedDiagnosticLocation(TextLocation Location, string? Message = null);

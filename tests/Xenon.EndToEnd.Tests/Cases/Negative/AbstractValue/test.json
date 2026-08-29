@@ -3,5 +3,5 @@
   "profiles": ["debug"],
   "compileOnly": true,
   "expectedBuildSuccess": false,
-  "expectedDiagnostics": [{ "message": "abstract struct 'Shape' cannot be instantiated" }]
+  "expectedDiagnostics": [{ "id": "XE2208", "message": "abstract struct 'Shape' cannot be instantiated" }]
 }

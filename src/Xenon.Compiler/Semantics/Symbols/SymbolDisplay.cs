@@ -46,6 +46,9 @@ public static class SymbolDisplay
             FieldSymbol field => diagnostic ? name : $"{VariableType(field.Type, field.IsReadonly, typeFormat)} {name}",
             PropertySymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
             InterfacePropertySymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
+            SyntheticMemberSymbol { MemberKind: SyntheticMemberKind.Method } member =>
+                SyntheticMethod(member, name, typeFormat, diagnostic),
+            SyntheticMemberSymbol member => diagnostic ? name : $"{member.Type.ToDisplayString(typeFormat)} {name}",
             ConstantSymbol constant => diagnostic ? name : $"const {constant.Type.ToDisplayString(typeFormat)} {name}",
             VariableSymbol variable => diagnostic ? name : $"{VariableType(variable.Type, variable.IsReadonly, typeFormat)} {name}",
             _ => name,
@@ -82,6 +85,13 @@ public static class SymbolDisplay
     {
         string signature = $"{name}[{Parameters(parameters, format, !diagnostic)}]";
         return diagnostic ? signature : $"{type.ToDisplayString(format)} {signature}";
+    }
+
+    private static string SyntheticMethod(SyntheticMemberSymbol member, string name,
+        TypeDisplayFormat format, bool diagnostic)
+    {
+        string signature = $"{name}({Parameters(member.Parameters, format, !diagnostic)})";
+        return diagnostic ? signature : $"{member.ReturnType.ToDisplayString(format)} {signature}";
     }
 
     private static string Parameters(ImmutableArray<ParameterSymbol> parameters, TypeDisplayFormat format, bool includeNames) =>

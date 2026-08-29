@@ -18,7 +18,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     IReadOnlyDictionary<BoundExpression, TextLocation> locations,
     TextLocation fallbackLocation,
     IReadOnlyDictionary<FunctionSymbol, BoundBlockStatement> bodies,
-    ImmutableArray<StructTypeSymbol> types)
+    ImmutableArray<StructTypeSymbol> types,
+    CancellationToken cancellationToken)
 {
     private readonly object _hidden = new();
     private readonly object _external = new();
@@ -38,6 +39,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     public void Analyze(BoundBlockStatement body)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         _context = _rootContext;
         _context.Receiver.Add(_hidden);
         foreach (ParameterSymbol parameter in function.Parameters)
@@ -51,7 +53,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         {
             _memory = returnedState;
             if (HasHiddenAccess(_context.Returned, function.ReturnType))
-                Report(site, "cannot return a mutable capability obtained from hidden state");
+                Report(site, "cannot return a mutable capability obtained from hidden state",
+                    DiagnosticIds.MutableCapabilityReturn);
         }
     }
 
@@ -144,7 +147,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 }
                 CheckWrite(target, assignment);
                 if (target.Contains(_external) && ExposesWritableAccess(assignment.Target.Type) && HasHiddenAccess(value, assignment.Target.Type))
-                    Report(assignment, "cannot store a mutable capability obtained from hidden state through an output parameter");
+                    Report(assignment, "cannot store a mutable capability obtained from hidden state through an output parameter",
+                        DiagnosticIds.MutableCapabilityOutputEscape);
                 StoreValue(target, value, assignment.Target.Type);
                 if (assignment.Target is BoundVariableExpression { Variable: LocalVariableSymbol local })
                     RegisterScalarCleanup(local);
@@ -279,7 +283,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             HashSet<object> argument = arguments[index];
             if (index >= callee.Parameters.Length || !IsMutableParameter(callee.Parameters[index].Type)) continue;
             if (HasHiddenAccess(argument, callee.Parameters[index].Type))
-                Report(site, $"cannot pass a mutable capability obtained from hidden state to parameter '{callee.Parameters[index].Name}' of '{callee.Name}'");
+                Report(site, $"cannot pass a mutable capability obtained from hidden state to parameter '{callee.Parameters[index].Name}' of '{callee.Name}'",
+                    DiagnosticIds.MutableCapabilityArgumentEscape);
             available.UnionWith(argument);
             TypeSymbol elementType = callee.Parameters[index].Type switch
             {
@@ -329,7 +334,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             // explicit output. The body decides which of those fields is used.
             // Type-level readonly receivers have already been rejected by binding.
             if (receiver.Contains(_hidden))
-                Report(site, $"cannot call mutable instance method '{callee.Name}' on hidden state");
+                Report(site, $"cannot call mutable instance method '{callee.Name}' on hidden state",
+                    DiagnosticIds.MutableMethodOnHiddenState);
             return ContextualDispatch(callee, arguments, receiver, site, interfaceTypes);
         }
         return Call(callee, arguments, site);
@@ -368,7 +374,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         else targets.Add(callee);
 
         if (targets.Count == 0)
-            Report(site, $"cannot verify effects of member '{callee.Name}' without an implementation");
+            Report(site, $"cannot verify effects of member '{callee.Name}' without an implementation",
+                DiagnosticIds.MissingDispatchImplementation);
         HashSet<object> result = [];
         MemoryState entry = _memory.Copy();
         MemoryState? exit = null;
@@ -393,7 +400,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         // and arguments, without inventing a readonly declaration for the member.
         if (!bodies.TryGetValue(callee, out BoundBlockStatement? body))
         {
-            Report(site, $"cannot verify effects of member '{callee.Name}' without a body");
+            Report(site, $"cannot verify effects of member '{callee.Name}' without a body",
+                DiagnosticIds.MissingReadonlyCalleeBody);
             return [_hidden];
         }
         if (_activeCalls.ContainsKey(callee))
@@ -435,7 +443,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     return new(frame.Returned);
                 }
             }
-            Report(site, $"cannot verify recursive effects of '{callee.Name}' within the analysis limit");
+            Report(site, $"cannot verify recursive effects of '{callee.Name}' within the analysis limit",
+                DiagnosticIds.RecursiveReadonlyEffectLimit);
             return [_hidden];
         }
         finally
@@ -783,7 +792,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private void CheckWrite(HashSet<object> storage, BoundExpression site)
     {
         if (storage.Contains(_hidden))
-            Report(site, "cannot mutate hidden state; use an explicitly mutable pointer/reference parameter");
+            Report(site, "cannot mutate hidden state; use an explicitly mutable pointer/reference parameter",
+                DiagnosticIds.HiddenStateMutation);
     }
 
     private bool HasHiddenAccess(HashSet<object> origins, TypeSymbol type) =>
@@ -837,14 +847,15 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private void CheckCall(FunctionSymbol callee, BoundExpression site)
     {
         if (!callee.IsReadonly)
-            Report(site, $"cannot call non-readonly function or member '{callee.Name}'");
+            Report(site, $"cannot call non-readonly function or member '{callee.Name}'",
+                DiagnosticIds.NonReadonlyCallFromReadonlyFunction);
     }
 
-    private void Report(BoundExpression site, string message)
+    private void Report(BoundExpression site, string message, string id)
     {
         TextLocation location = locations.TryGetValue(site, out TextLocation source) ? source : _location;
         string diagnostic = $"readonly function '{function.Name}' {message}";
-        if (_reported.Add((location, diagnostic))) diagnostics.Report(location, diagnostic);
+        if (_reported.Add((location, diagnostic))) diagnostics.Report(location, diagnostic, id);
     }
 
     private static bool IsMutableParameter(TypeSymbol type) =>

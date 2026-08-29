@@ -9,17 +9,13 @@ namespace Xenon.Compiler;
 
 public sealed class Compilation
 {
-    private Compilation(ImmutableArray<SyntaxTree> syntaxTrees, ITargetTypeLayout? targetLayout = null)
+    private Compilation(ImmutableArray<SyntaxTree> syntaxTrees, ITargetTypeLayout? targetLayout = null,
+        CancellationToken cancellationToken = default)
     {
         SyntaxTrees = syntaxTrees;
-        ImmutableArray<Diagnostic> syntaxDiagnostics = syntaxTrees
-            .SelectMany(tree => tree.Diagnostics)
-            .ToImmutableArray();
-
-        SemanticModel = syntaxDiagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
-            ? SemanticModel.CreateEmpty(TypeFactory)
-            : SemanticAnalyzer.Analyze(syntaxTrees, TypeFactory, targetLayout);
-        Diagnostics = [.. syntaxDiagnostics, .. SemanticModel.Diagnostics];
+        cancellationToken.ThrowIfCancellationRequested();
+        SemanticModel = SemanticAnalyzer.Analyze(syntaxTrees, TypeFactory, targetLayout, cancellationToken);
+        Diagnostics = SemanticModel.Diagnostics;
     }
 
     public ImmutableArray<SyntaxTree> SyntaxTrees { get; }
@@ -36,14 +32,29 @@ public sealed class Compilation
 
     /// <summary>Rebinds the immutable syntax trees for an ABI without mutating this compilation.</summary>
     public Compilation WithTargetLayout(ITargetTypeLayout targetLayout)
+        => WithTargetLayout(targetLayout, CancellationToken.None);
+
+    public Compilation WithTargetLayout(ITargetTypeLayout targetLayout, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(targetLayout);
-        return new Compilation(SyntaxTrees, targetLayout);
+        return new Compilation(SyntaxTrees, targetLayout, cancellationToken);
     }
 
-    public static Compilation Create(params SourceText[] sources)
+    public static Compilation Create(params SourceText[] sources) => Create(CancellationToken.None, sources);
+
+    public static Compilation Create(CancellationToken cancellationToken, params SourceText[] sources)
     {
         ArgumentNullException.ThrowIfNull(sources);
-        return new Compilation(sources.Select(SyntaxTree.Parse).ToImmutableArray());
+        cancellationToken.ThrowIfCancellationRequested();
+        return new Compilation(sources.Select(source => SyntaxTree.Parse(source, cancellationToken)).ToImmutableArray(),
+            cancellationToken: cancellationToken);
+    }
+
+    public SemanticModel GetSemanticModel(SyntaxTree tree)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        if (!SyntaxTrees.Any(candidate => ReferenceEquals(candidate, tree)))
+            throw new ArgumentException("The syntax tree does not belong to this compilation.", nameof(tree));
+        return SemanticModel.ForTree(tree);
     }
 }
