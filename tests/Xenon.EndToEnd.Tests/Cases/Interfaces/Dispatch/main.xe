@@ -1,0 +1,9 @@
+namespace Interfaces;
+interface IScore { int Score(); }
+struct Player : IScore
+{
+    public int Value;
+    public int Score() { return Value; }
+}
+int Read(IScore value) { return value.Score(); }
+int Main() { Player player = Player { 42 }; return Read(player); }

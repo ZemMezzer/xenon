@@ -1,0 +1,21 @@
+namespace Properties;
+interface IGrid { int this[int x, int y] { get; set; } }
+struct Grid : IGrid
+{
+    public int stored;
+    public int Value { get { return stored; } set { stored = value; } }
+    public int this[int x, int y]
+    {
+        get { return stored + x + y; }
+        set { stored = value - x - y; }
+    }
+}
+int Main()
+{
+    Grid concrete = Grid { 0 };
+    concrete.Value = 31;
+    if (concrete.Value != 31) return 1;
+    IGrid grid = concrete;
+    grid[4,7] = 42;
+    return grid[4,7];
+}

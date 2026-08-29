@@ -1,0 +1,11 @@
+namespace Layout;
+struct Pair { public int First; public int Second; }
+const int Size = sizeof(Pair);
+const int Alignment = alignof(Pair);
+const int Offset = offsetof(Pair, Second);
+int Main()
+{
+    if (Size != 8 || Alignment != 4 || Offset != 4) return 1;
+    if (sizeof(nint) != sizeof(nuint)) return 2;
+    return Size + Alignment + Offset + 26;
+}

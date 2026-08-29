@@ -2,4 +2,8 @@
   <PropertyGroup>
     <RootNamespace>Xenon.Driver</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
+    <ProjectReference Include="../Xenon.ProjectSystem/Xenon.ProjectSystem.csproj" />
+  </ItemGroup>
 </Project>

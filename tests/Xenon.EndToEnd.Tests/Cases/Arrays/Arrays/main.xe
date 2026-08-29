@@ -1,0 +1,12 @@
+namespace Arrays;
+int Main()
+{
+    int[,] matrix = new int[2,3];
+    matrix[1,2] = 35;
+    int[][] rows = new int[1][];
+    rows[0] = new int[2]; rows[0][1] = 7;
+    if (matrix.Rank != 2 || matrix.Length != 6 || matrix.GetLength(1) != 3) return 1;
+    int result = matrix[1,2] + rows[0][1];
+    free(rows[0]); free(rows); free(matrix);
+    return result;
+}

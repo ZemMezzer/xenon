@@ -3593,14 +3593,12 @@ public sealed class NativeLinkerTests
             var objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "iteration4", generateExecutableEntryPoint: true);
             string executablePath = XenonBuildPaths.GetExecutablePath(directory, "iteration4", "debug", target.Triple);
             var executable = new NativeLinker().LinkExecutable(objectFile.Path, executablePath, target.Triple);
-            using Process process = Process.Start(new ProcessStartInfo(executable.Path) { UseShellExecute = false, CreateNoWindow = true })!;
-            if (!process.WaitForExit(30000))
-            {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit();
-                throw new Xunit.Sdk.XunitException("Iteration 4 program did not terminate within 30 seconds.");
-            }
-            return process.ExitCode;
+            NativeProcessResult process = new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+                executable.Path, [], directory, TimeSpan.FromSeconds(30))).GetAwaiter().GetResult();
+            Assert.True(process.StartError is null && !process.TimedOut && process.TerminationError is null,
+                $"Iteration 4 execution failed: {process.StartError}; timeout={process.TimedOut}; {process.TerminationError}\n" +
+                $"stdout: {process.Stdout}\nstderr: {process.Stderr}\nExecutable: {executable.Path}");
+            return process.ExitCode!.Value;
         }
         finally
         {

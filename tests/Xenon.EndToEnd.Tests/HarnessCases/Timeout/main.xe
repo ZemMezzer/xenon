@@ -1,0 +1,9 @@
+namespace Timeout;
+extern int puts(readonly byte* text);
+extern int fflush(byte* stream);
+int Main()
+{
+    puts("before timeout"); fflush(null);
+    while (true) { }
+    return 0;
+}

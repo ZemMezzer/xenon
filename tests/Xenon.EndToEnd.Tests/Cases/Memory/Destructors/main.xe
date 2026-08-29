@@ -1,0 +1,13 @@
+namespace Destructors;
+extern int puts(readonly byte* text);
+struct First
+{
+    public First() { puts("A ctor"); }
+    public ~First() { puts("A dtor"); }
+}
+struct Second
+{
+    public Second() { puts("B ctor"); }
+    public ~Second() { puts("B dtor"); }
+}
+int Main() { First a = First(); Second b = Second(); return 0; }

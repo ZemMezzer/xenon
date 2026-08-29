@@ -1,0 +1,2 @@
+namespace Negative;
+int Main() { return missing; }
