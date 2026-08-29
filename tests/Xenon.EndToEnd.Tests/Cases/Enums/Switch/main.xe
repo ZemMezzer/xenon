@@ -1,0 +1,14 @@
+namespace Enums;
+const int Start = 20;
+enum State : byte { Idle, Running = Start, Stopped }
+int Select(State value)
+{
+    switch (value)
+    {
+        case State.Idle: return 0;
+        case State.Running:
+        case State.Stopped: return 42;
+        default: return 1;
+    }
+}
+int Main() { return Select(cast<State>(21)); }

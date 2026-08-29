@@ -1,4 +1,4 @@
-
+﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -18,6 +18,10 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.Driver", "src\Xenon.Driver\Xenon.Driver.csproj", "{D47E6F97-6038-47D5-9F15-93AC8783C5E4}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.Compiler.Tests", "tests\Xenon.Compiler.Tests\Xenon.Compiler.Tests.csproj", "{16061568-E257-4AB4-B358-8BD94E6EBE05}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.EndToEnd.Tests", "tests\Xenon.EndToEnd.Tests\Xenon.EndToEnd.Tests.csproj", "{AE709E27-69B9-4126-939B-42C69FA9E04B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Xenon.TestProcess", "tests\Xenon.TestProcess\Xenon.TestProcess.csproj", "{00A412E6-D92C-4A29-9742-401DA29697A3}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -49,6 +53,14 @@ Global
 		{16061568-E257-4AB4-B358-8BD94E6EBE05}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{16061568-E257-4AB4-B358-8BD94E6EBE05}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{16061568-E257-4AB4-B358-8BD94E6EBE05}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AE709E27-69B9-4126-939B-42C69FA9E04B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AE709E27-69B9-4126-939B-42C69FA9E04B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AE709E27-69B9-4126-939B-42C69FA9E04B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AE709E27-69B9-4126-939B-42C69FA9E04B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{00A412E6-D92C-4A29-9742-401DA29697A3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{00A412E6-D92C-4A29-9742-401DA29697A3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{00A412E6-D92C-4A29-9742-401DA29697A3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{00A412E6-D92C-4A29-9742-401DA29697A3}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -60,5 +72,7 @@ Global
 		{BF9E28A4-CA87-4F65-91FB-F22771E39922} = {5A170833-BE66-4444-941B-2AFF7FD0D257}
 		{D47E6F97-6038-47D5-9F15-93AC8783C5E4} = {5A170833-BE66-4444-941B-2AFF7FD0D257}
 		{16061568-E257-4AB4-B358-8BD94E6EBE05} = {4A39986B-4D5D-4639-AB91-B6FCE794364C}
+		{AE709E27-69B9-4126-939B-42C69FA9E04B} = {4A39986B-4D5D-4639-AB91-B6FCE794364C}
+		{00A412E6-D92C-4A29-9742-401DA29697A3} = {4A39986B-4D5D-4639-AB91-B6FCE794364C}
 	EndGlobalSection
 EndGlobal

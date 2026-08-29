@@ -1,0 +1,5 @@
+[project]
+name = "interop"
+type = "static-library"
+[source]
+root = "."

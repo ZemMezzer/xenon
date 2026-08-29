@@ -1,0 +1,8 @@
+namespace Arithmetic;
+int Main()
+{
+    int value = 6 * 7;
+    if (value / 2 != 21 || value % 5 != 2) return 1;
+    if (false && (1 / 0 == 0)) return 2;
+    return value;
+}

@@ -1,0 +1,3 @@
+using Library.Math;
+namespace Functions;
+int Main() { return Add(20, 22); }

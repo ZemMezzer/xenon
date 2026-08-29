@@ -1,0 +1,5 @@
+[project]
+name = "functions"
+type = "executable"
+[source]
+root = "."

@@ -1,0 +1,13 @@
+namespace Readonly;
+struct Cell { public int Value; }
+int Read(readonly Cell& cell) { return cell.Value; }
+int Main()
+{
+    int a = 20; int b = 22;
+    readonly int* view = &a;
+    int* readonly fixed = &b;
+    *fixed += 0;
+    Cell cell = Cell { *view + *fixed };
+    readonly Cell& reference = cell;
+    return Read(reference);
+}

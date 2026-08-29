@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace Xenon.Driver;
@@ -8,12 +7,29 @@ public sealed record NativeLinkOptions(
     IReadOnlyList<string>? LibraryPaths = null,
     IReadOnlyList<string>? ExportedSymbols = null);
 
-public sealed record LinkedExecutable(string Path, string LinkerPath);
+public sealed record LinkedExecutable(string Path, string LinkerPath)
+{
+    public NativeProcessResult? ProcessResult { get; init; }
+}
 
-public sealed record LinkedNativeArtifact(string Path, string ToolPath, string? ImportLibraryPath = null);
+public sealed record LinkedNativeArtifact(string Path, string ToolPath, string? ImportLibraryPath = null)
+{
+    public NativeProcessResult? ProcessResult { get; init; }
+}
 
 public sealed class NativeLinker
 {
+    private readonly INativeProcessRunner _processRunner;
+    private readonly TimeSpan _timeout;
+    private readonly string? _workingDirectory;
+
+    public NativeLinker(INativeProcessRunner? processRunner = null, TimeSpan? timeout = null, string? workingDirectory = null)
+    {
+        _processRunner = processRunner ?? new NativeProcessRunner();
+        _timeout = timeout ?? TimeSpan.FromMinutes(2);
+        _workingDirectory = workingDirectory;
+    }
+
     public LinkedExecutable LinkExecutable(
         string objectFilePath,
         string outputPath,
@@ -23,7 +39,7 @@ public sealed class NativeLinker
         LinkedNativeArtifact artifact = CreateArtifact(
             objectFilePath, outputPath, targetTriple, NativeArtifactKind.Executable,
             options ?? new NativeLinkOptions(), importLibraryPath: null);
-        return new LinkedExecutable(artifact.Path, artifact.ToolPath);
+        return new LinkedExecutable(artifact.Path, artifact.ToolPath) { ProcessResult = artifact.ProcessResult };
     }
 
     public LinkedNativeArtifact CreateStaticLibrary(
@@ -44,7 +60,7 @@ public sealed class NativeLinker
             objectFilePath, outputPath, targetTriple, NativeArtifactKind.SharedLibrary,
             options ?? new NativeLinkOptions(), importLibraryPath);
 
-    private static LinkedNativeArtifact CreateArtifact(
+    private LinkedNativeArtifact CreateArtifact(
         string objectFilePath,
         string outputPath,
         string targetTriple,
@@ -75,9 +91,11 @@ public sealed class NativeLinker
 
         LinkerCommand command = CreateHostCommand(
             objectPath, temporaryPath, targetTriple, kind, options, temporaryImportLibraryPath);
+        NativeProcessResult? processResult = null;
         try
         {
-            RunTool(command);
+            // Preserve existing callers' relative native-library semantics. The build driver supplies its project root.
+            processResult = RunTool(command, _workingDirectory ?? Directory.GetCurrentDirectory());
             EnsureProduced(temporaryPath, kind.ToString().ToLowerInvariant());
             if (temporaryImportLibraryPath is not null)
             {
@@ -87,7 +105,25 @@ public sealed class NativeLinker
             }
 
             File.Move(temporaryPath, artifactPath, overwrite: true);
-            return new LinkedNativeArtifact(artifactPath, command.ExecutablePath, finalImportLibraryPath);
+            return new LinkedNativeArtifact(artifactPath, command.ExecutablePath, finalImportLibraryPath)
+            {
+                ProcessResult = processResult,
+            };
+        }
+        catch (LinkerException exception) when (exception.ProcessResult is null)
+        {
+            throw new LinkerException(exception.Message, exception)
+            {
+                ProcessResult = processResult,
+                IsEnvironmentFailure = exception.IsEnvironmentFailure,
+            };
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new LinkerException($"Cannot publish native artifact '{artifactPath}': {exception.Message}", exception)
+            {
+                ProcessResult = processResult,
+            };
         }
         finally
         {
@@ -354,54 +390,20 @@ public sealed class NativeLinker
         throw new LinkerException($"Windows SDK libraries for architecture '{architecture}' were not found");
     }
 
-    private static void RunTool(LinkerCommand command)
+    private NativeProcessResult RunTool(LinkerCommand command, string workingDirectory)
     {
-        var startInfo = new ProcessStartInfo
+        NativeProcessResult result = _processRunner.RunAsync(new NativeProcessRequest(
+            command.ExecutablePath, command.Arguments, workingDirectory, _timeout)).GetAwaiter().GetResult();
+        if (result.StartError is null && !result.TimedOut && result.ExitCode == 0) return result;
+        string reason = result.StartError is not null ? $"could not start: {result.StartError}"
+            : result.TimedOut ? $"exceeded timeout of {_timeout.TotalSeconds} seconds"
+            : $"failed with exit code {result.ExitCode}";
+        throw new LinkerException($"native tool '{command.ExecutablePath}' {reason}\n{result.GetStdoutForDiagnostics()}\n{result.GetStderrForDiagnostics()}")
         {
-            FileName = command.ExecutablePath,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
+            ProcessResult = result,
+            IsEnvironmentFailure = result.StartError is not null || result.TerminationError is not null,
         };
-        foreach (string argument in command.Arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        try
-        {
-            using Process process = Process.Start(startInfo)
-                ?? throw new LinkerException($"failed to start native tool '{command.ExecutablePath}'");
-            Task<string> standardOutputTask = process.StandardOutput.ReadToEndAsync();
-            Task<string> standardErrorTask = process.StandardError.ReadToEndAsync();
-            process.WaitForExit();
-            Task.WaitAll(standardOutputTask, standardErrorTask);
-            if (process.ExitCode == 0)
-            {
-                return;
-            }
-
-            string details = string.Join(
-                Environment.NewLine,
-                new[] { standardOutputTask.Result, standardErrorTask.Result }
-                    .Where(text => !string.IsNullOrWhiteSpace(text))
-                    .Select(text => text.Trim()));
-            throw new LinkerException(
-                $"native tool '{command.ExecutablePath}' failed with exit code {process.ExitCode}" +
-                (details.Length == 0 ? string.Empty : $":{Environment.NewLine}{details}"));
-        }
-        catch (LinkerException)
-        {
-            throw;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            throw new LinkerException(
-                $"cannot execute native tool '{command.ExecutablePath}': {exception.Message}", exception);
-        }
     }
-
     private static string CreateTemporaryPath(string finalPath)
     {
         string directory = Path.GetDirectoryName(finalPath)!;

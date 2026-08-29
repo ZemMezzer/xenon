@@ -1,0 +1,8 @@
+{
+  "input": "project.xeproj",
+  "artifact": "staticLibrary",
+  "profiles": [
+    "debug",
+    "release"
+  ]
+}

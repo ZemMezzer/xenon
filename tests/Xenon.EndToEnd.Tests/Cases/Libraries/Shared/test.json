@@ -1,0 +1,9 @@
+{
+  "input": "project.xeproj",
+  "artifact": "sharedLibrary",
+  "profiles": [
+    "debug",
+    "release"
+  ],
+  "exportSymbol": "Interop_Add"
+}

@@ -1,0 +1,19 @@
+namespace Inheritance;
+struct Base
+{
+    public virtual int Score() { return 1; }
+    public virtual ~Base() { }
+}
+struct Derived : Base
+{
+    public override int Score() { return 42; }
+    public override ~Derived() { }
+}
+int Main()
+{
+    Derived* derived = new Derived();
+    Base* view = derived;
+    int result = view->Score();
+    free(view);
+    return result;
+}

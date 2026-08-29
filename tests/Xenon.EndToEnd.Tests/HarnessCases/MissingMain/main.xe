@@ -1,0 +1,2 @@
+namespace MissingMain;
+int Other() { return 0; }

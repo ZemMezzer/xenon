@@ -1,0 +1,9 @@
+{
+  "input": "project.xeproj",
+  "profiles": [
+    "debug",
+    "release"
+  ],
+  "run": true,
+  "expectedExitCode": 42
+}

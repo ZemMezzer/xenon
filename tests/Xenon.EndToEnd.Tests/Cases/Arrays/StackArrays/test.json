@@ -1,0 +1,9 @@
+{
+  "input": ".",
+  "profiles": [
+    "debug",
+    "release"
+  ],
+  "run": true,
+  "expectedExitCode": 42
+}

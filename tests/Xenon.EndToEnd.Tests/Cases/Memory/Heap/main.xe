@@ -1,0 +1,15 @@
+namespace Heap;
+struct Item
+{
+    public static int Destroyed = 0;
+    public int Value;
+    public Item(int value) { Value = value; }
+    public ~Item() { Item.Destroyed += Value; }
+}
+int Main()
+{
+    Item* item = new Item(42);
+    if (item->Value != 42) return 1;
+    free(item);
+    return Item.Destroyed;
+}

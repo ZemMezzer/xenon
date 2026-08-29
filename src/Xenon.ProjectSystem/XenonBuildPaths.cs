@@ -2,6 +2,15 @@ namespace Xenon.ProjectSystem;
 
 public static class XenonBuildPaths
 {
+    public static string GetArtifactPath(string rootDirectory, string projectName, XenonProjectType type,
+        string profileName, string targetTriple) => type switch
+    {
+        XenonProjectType.Executable => GetExecutablePath(rootDirectory, projectName, profileName, targetTriple),
+        XenonProjectType.StaticLibrary => GetStaticLibraryPath(rootDirectory, projectName, profileName, targetTriple),
+        XenonProjectType.SharedLibrary => GetSharedLibraryPath(rootDirectory, projectName, profileName, targetTriple),
+        _ => throw new ArgumentOutOfRangeException(nameof(type)),
+    };
+
     public static string GetObjectFilePath(
         XenonProject project,
         string profileName,

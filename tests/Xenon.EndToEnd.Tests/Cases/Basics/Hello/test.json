@@ -1,0 +1,10 @@
+{
+  "input": "main.xe",
+  "profiles": [
+    "debug",
+    "release"
+  ],
+  "run": true,
+  "expectedExitCode": 0,
+  "expectedStdout": "Hello, Xenon!\n"
+}

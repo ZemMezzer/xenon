@@ -1,0 +1,15 @@
+namespace StackArrays;
+struct Item
+{
+    public static int Trace = 0;
+    public int Id;
+    public ~Item() { Item.Trace = Item.Trace * 10 + Id; }
+}
+void Work()
+{
+    Item[] items = Item[2];
+    items[0].Id = 2; items[1].Id = 4;
+    int[,] matrix = int[2,3];
+    matrix[1,2] = 42;
+}
+int Main() { Work(); return Item.Trace; }
