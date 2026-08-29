@@ -51,7 +51,7 @@ public sealed class NativeLinkerTests
     [Fact]
     public void Linker_CreatesAndRunsHostExecutable()
     {
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Integration;
 
             extern int puts(readonly byte* text);
@@ -84,8 +84,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "integration",
-                generateExecutableEntryPoint: true);
+                "integration"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path,
                 executablePath,
@@ -115,7 +115,7 @@ public sealed class NativeLinkerTests
     [Fact]
     public void Linker_CreatesAndRunsHostExecutableUsingStructMethods()
     {
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Integration;
 
             struct Counter
@@ -178,8 +178,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "methods-integration",
-                generateExecutableEntryPoint: true);
+                "methods-integration"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path,
                 executablePath,
@@ -203,7 +203,7 @@ public sealed class NativeLinkerTests
     [Fact]
     public void Linker_CreatesAndRunsHostExecutableAcrossFilesUsingNamespaceImport()
     {
-        Compilation compilation = Compilation.Create(
+        Compilation compilation = CreateExecutableCompilation(
             SourceText.From("""
                 namespace Library.Math;
 
@@ -246,8 +246,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "using-integration",
-                generateExecutableEntryPoint: true);
+                "using-integration"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path,
                 executablePath,
@@ -271,7 +271,7 @@ public sealed class NativeLinkerTests
     [MacOsFact]
     public void Linker_CreatesAndRunsMacOsMachOExecutable()
     {
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace MacOsIntegration;
 
             extern int puts(readonly byte* text);
@@ -301,8 +301,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "macos-integration",
-                generateExecutableEntryPoint: true);
+                "macos-integration"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path,
                 executablePath,
@@ -347,7 +347,7 @@ public sealed class NativeLinkerTests
         try
         {
             LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
-                compilation, objectPath, target, "math", generateExecutableEntryPoint: false);
+                compilation, objectPath, target, "math");
             LinkedNativeArtifact library = new NativeLinker().CreateStaticLibrary(
                 objectFile.Path, libraryPath, target.Triple);
 
@@ -378,7 +378,7 @@ public sealed class NativeLinkerTests
         try
         {
             LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
-                compilation, objectPath, target, "math", generateExecutableEntryPoint: false);
+                compilation, objectPath, target, "math");
             LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
                 objectFile.Path,
                 libraryPath,
@@ -427,7 +427,7 @@ public sealed class NativeLinkerTests
         string executableObjectPath = Path.Combine(directory, $"app{objectExtension}");
         string executablePath = XenonBuildPaths.GetExecutablePath(
             directory, "app", "debug", target.Triple);
-        Compilation executableCompilation = Compilation.Create(SourceText.From("""
+        Compilation executableCompilation = CreateExecutableCompilation(SourceText.From("""
             namespace Integration;
 
             extern int Integration_Add(int left, int right);
@@ -444,16 +444,16 @@ public sealed class NativeLinkerTests
                 CreateLibraryCompilation(),
                 libraryObjectPath,
                 target,
-                "math",
-                generateExecutableEntryPoint: false);
+                "math"
+                );
             new NativeLinker().CreateStaticLibrary(libraryObject.Path, libraryPath, target.Triple);
 
             LlvmObjectFile executableObject = new LlvmObjectEmitter().Emit(
                 executableCompilation,
                 executableObjectPath,
                 target,
-                "app",
-                generateExecutableEntryPoint: true);
+                "app"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 executableObject.Path,
                 executablePath,
@@ -515,7 +515,7 @@ public sealed class NativeLinkerTests
         try
         {
             LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
-                compilation, objectPath, target, "vector", generateExecutableEntryPoint: false);
+                compilation, objectPath, target, "vector");
             LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
                 objectFile.Path,
                 libraryPath,
@@ -568,7 +568,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Pair
@@ -611,8 +611,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "struct-copy",
-                generateExecutableEntryPoint: true);
+                "struct-copy"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -636,7 +636,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Vector3
@@ -667,8 +667,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "heap-struct",
-                generateExecutableEntryPoint: true);
+                "heap-struct"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -692,7 +692,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             abstract struct Entity
@@ -725,8 +725,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "abstract-link",
-                generateExecutableEntryPoint: true);
+                "abstract-link"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -750,7 +750,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             interface IA { int A(); }
@@ -785,8 +785,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "interface-reference-upcast",
-                generateExecutableEntryPoint: true);
+                "interface-reference-upcast"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -810,7 +810,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Counter
@@ -848,8 +848,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "readonly-flow",
-                generateExecutableEntryPoint: true);
+                "readonly-flow"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -873,7 +873,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Container
@@ -915,8 +915,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "readonly-overloads",
-                generateExecutableEntryPoint: true);
+                "readonly-overloads"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -940,7 +940,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             int Offset()
@@ -1000,8 +1000,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "field-initializers",
-                generateExecutableEntryPoint: true);
+                "field-initializers"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -1025,7 +1025,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Value
@@ -1067,8 +1067,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "default-field-initializers",
-                generateExecutableEntryPoint: true);
+                "default-field-initializers"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
             using Process process = Process.Start(new ProcessStartInfo
@@ -1091,7 +1091,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Player
@@ -1125,8 +1125,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "properties",
-                generateExecutableEntryPoint: true);
+                "properties"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -1150,7 +1150,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Base
@@ -1196,8 +1196,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "virtual-properties",
-                generateExecutableEntryPoint: true);
+                "virtual-properties"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -1221,7 +1221,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Base
@@ -1279,8 +1279,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "compound-virtual-properties",
-                generateExecutableEntryPoint: true);
+                "compound-virtual-properties"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -1304,7 +1304,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             interface IValue
@@ -1344,8 +1344,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "interface-properties",
-                generateExecutableEntryPoint: true);
+                "interface-properties"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -1369,7 +1369,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             interface IGrid
@@ -1409,8 +1409,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "interface-indexers",
-                generateExecutableEntryPoint: true);
+                "interface-indexers"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -1434,7 +1434,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             interface IGrid
@@ -1494,8 +1494,8 @@ public sealed class NativeLinkerTests
                 compilation,
                 objectPath,
                 target,
-                "compound-interface-indexers",
-                generateExecutableEntryPoint: true);
+                "compound-interface-indexers"
+                );
             LinkedExecutable executable = new NativeLinker().LinkExecutable(
                 objectFile.Path, executablePath, target.Triple);
 
@@ -1519,7 +1519,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             const int A = 4;
@@ -1539,7 +1539,7 @@ public sealed class NativeLinkerTests
         try
         {
             Assert.Empty(compilation.Diagnostics);
-            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "constants", generateExecutableEntryPoint: true);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "constants");
             LinkedExecutable executable = new NativeLinker().LinkExecutable(objectFile.Path, executablePath, target.Triple);
             using Process process = Process.Start(new ProcessStartInfo { FileName = executable.Path, UseShellExecute = false })!;
             process.WaitForExit();
@@ -1557,7 +1557,7 @@ public sealed class NativeLinkerTests
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
             positionIndependentCode: !OperatingSystem.IsWindows());
-        Compilation compilation = Compilation.Create(SourceText.From("""
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
             namespace Example;
 
             struct Pair
@@ -1582,7 +1582,7 @@ public sealed class NativeLinkerTests
         try
         {
             Assert.Empty(compilation.Diagnostics);
-            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "layout-constants", generateExecutableEntryPoint: true);
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "layout-constants");
             LinkedExecutable executable = new NativeLinker().LinkExecutable(objectFile.Path, executablePath, target.Triple);
             using Process process = Process.Start(new ProcessStartInfo { FileName = executable.Path, UseShellExecute = false })!;
             process.WaitForExit();
@@ -3583,14 +3583,15 @@ public sealed class NativeLinkerTests
 
     private static int RunIterationFourProgram(string source, int optimization)
     {
-        Compilation compilation = Compilation.Create(SourceText.From("namespace IterationFour; " + source, "iteration4.xe"));
+        Compilation compilation = CreateExecutableCompilation(
+            SourceText.From("namespace IterationFour; " + source, "iteration4.xe"));
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         string directory = CreateTemporaryDirectory();
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(optimizationLevel: optimization, positionIndependentCode: !OperatingSystem.IsWindows());
         try
         {
             string objectPath = Path.Combine(directory, "iteration4" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
-            var objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "iteration4", generateExecutableEntryPoint: true);
+            var objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "iteration4");
             string executablePath = XenonBuildPaths.GetExecutablePath(directory, "iteration4", "debug", target.Triple);
             var executable = new NativeLinker().LinkExecutable(objectFile.Path, executablePath, target.Triple);
             NativeProcessResult process = new NativeProcessRunner().RunAsync(new NativeProcessRequest(
@@ -3629,6 +3630,12 @@ public sealed class NativeLinkerTests
             return left + right;
         }
         """, "math.xe"));
+
+    private static Compilation CreateExecutableCompilation(params SourceText[] sources) =>
+        Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Executable),
+            references: null,
+            sources);
 
     private static string CreateTemporaryDirectory()
     {

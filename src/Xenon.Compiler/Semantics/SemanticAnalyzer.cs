@@ -30,26 +30,33 @@ internal sealed class SemanticAnalyzer
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
     private readonly SemanticInfoStore _semanticInfo = new();
     private readonly CancellationToken _cancellationToken;
+    private readonly ImmutableArray<NamespaceSymbol> _referencedNamespaces;
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
-        ITargetTypeLayout? targetLayout, CancellationToken cancellationToken)
+        ImmutableArray<NamespaceSymbol> referencedNamespaces, ITargetTypeLayout? targetLayout,
+        CancellationToken cancellationToken)
     {
         _syntaxTrees = syntaxTrees;
         _typeFactory = typeFactory;
+        _referencedNamespaces = referencedNamespaces;
         _constants = new ConstantEvaluationContext(targetLayout);
         _cancellationToken = cancellationToken;
     }
 
     public static SemanticModel Analyze(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
+        ImmutableArray<NamespaceSymbol> referencedNamespaces = default,
         ITargetTypeLayout? targetLayout = null, CancellationToken cancellationToken = default)
     {
-        var analyzer = new SemanticAnalyzer(syntaxTrees, typeFactory, targetLayout, cancellationToken);
+        var analyzer = new SemanticAnalyzer(syntaxTrees, typeFactory,
+            referencedNamespaces.IsDefault ? [] : referencedNamespaces, targetLayout, cancellationToken);
         return analyzer.Analyze();
     }
 
     private SemanticModel Analyze()
     {
         _cancellationToken.ThrowIfCancellationRequested();
+        foreach (NamespaceSymbol referencedNamespace in _referencedNamespaces)
+            _globalNamespace.ImportPublicMembers(referencedNamespace);
         DeclareNamespaces();
         DeclareStructs();
         DeclareInterfaces();
@@ -1360,10 +1367,8 @@ internal sealed class SemanticAnalyzer
 
     private void AssignInterfaceMethodSlots()
     {
-        int dispatchId = 0;
         foreach (InterfaceTypeSymbol @interface in _interfaceSymbols.Values)
         {
-            @interface.SetDispatchId(dispatchId++);
             @interface.SetMethodSlots(@interface.AllMethods);
         }
     }

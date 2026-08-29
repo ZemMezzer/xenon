@@ -1,0 +1,2 @@
+namespace App;
+int Main() { return 0; }

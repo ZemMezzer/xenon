@@ -1,0 +1,9 @@
+{
+  "input": "App/App.xeproj",
+  "profiles": ["debug"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2006", "message": "function name 'Value' is ambiguous between 'Shared.Value' and 'Shared.Value'" }
+  ]
+}

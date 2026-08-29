@@ -3,9 +3,9 @@ using System.Diagnostics;
 using System.Text;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
-using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Driver;
 using Xenon.ProjectSystem;
 
@@ -131,6 +131,22 @@ internal static class Program
             return UsageError;
         }
 
+        // Project commands use the reusable graph-aware build pipeline. The CLI only
+        // selects a project/profile/target and presents the result.
+        if (projectCommand)
+        {
+            return RunProjectCommand(inputs[0], profileName, targetTriple, runCommand, dumpTokens);
+        }
+
+        // A project file or directory always goes through the graph-aware driver,
+        // including the legacy command shape (`xenon path --emit-llvm`).
+        if (IsProjectShapedInput(inputs))
+        {
+            bool compileOnly = !emitObject && !emitLlvm;
+            return RunProjectCommand(inputs[0], profileName, targetTriple, run: false, dumpTokens,
+                compileOnly, skipLink: true);
+        }
+
         CompilationInput input;
         try
         {
@@ -140,11 +156,6 @@ internal static class Program
         {
             Console.Error.WriteLine($"error: {exception.Message}");
             return UsageError;
-        }
-
-        if (runCommand && !input.GenerateExecutableEntryPoint)
-        {
-            return WriteUsageError("'xenon run' requires an executable project");
         }
 
         var sources = new List<SourceText>(input.SourceFiles.Length);
@@ -161,7 +172,10 @@ internal static class Program
             return CompilationError;
         }
 
-        Compilation compilation = Compilation.Create([.. sources]);
+        Compilation compilation = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Executable),
+            references: null,
+            [.. sources]);
 
         if (dumpTokens)
         {
@@ -174,10 +188,8 @@ internal static class Program
             try
             {
                 string effectiveTriple = targetTriple ?? LlvmTargetPlatform.HostTriple;
-                bool positionIndependentCode = input.PositionIndependentCode ||
-                    (input.GenerateExecutableEntryPoint && !IsWindowsTarget(effectiveTriple));
                 selectedTarget = new LlvmTargetOptions(effectiveTriple, input.Profile.OptimizationLevel,
-                    PositionIndependentCode: positionIndependentCode);
+                    PositionIndependentCode: !IsWindowsTarget(effectiveTriple));
                 compilation = LlvmIrGenerator.BindForTarget(compilation, selectedTarget);
             }
             catch (LlvmCodeGenerationException exception)
@@ -213,8 +225,7 @@ internal static class Program
                     compilation,
                     objectPath,
                     selectedTarget,
-                    input.Name,
-                    input.GenerateExecutableEntryPoint);
+                    input.Name);
                 Console.WriteLine(
                     $"Wrote {objectFile.TargetTriple} object file to '{objectFile.Path}'.");
             }
@@ -230,92 +241,6 @@ internal static class Program
             }
         }
 
-        LinkedExecutable? executable = null;
-        if (projectCommand)
-        {
-            if (selectedTarget is null || objectFile is null)
-            {
-                Console.Error.WriteLine("error: executable linking requires an emitted object file");
-                return CompilationError;
-            }
-
-            string hostTriple = LlvmTargetPlatform.HostTriple;
-            if (!string.Equals(selectedTarget.Triple, hostTriple, StringComparison.OrdinalIgnoreCase))
-            {
-                if (runCommand)
-                {
-                    Console.Error.WriteLine(
-                        $"error: cannot run target '{selectedTarget.Triple}' on host '{hostTriple}'");
-                    return UsageError;
-                }
-
-                Console.WriteLine(
-                    $"Skipped linking for cross target '{selectedTarget.Triple}'; the object file is ready for a configured target SDK/linker.");
-            }
-            else
-            {
-                try
-                {
-                    var nativeLinker = new NativeLinker();
-                    var nativeOptions = new NativeLinkOptions(
-                        input.NativeLibraries,
-                        input.NativeLibraryPaths,
-                        compilation.SemanticModel.Functions
-                            .Select(function => function.Symbol)
-                            .Where(symbol => symbol.IsExport)
-                            .Select(NativeSymbolNames.Get)
-                            .ToImmutableArray());
-                    switch (input.ProjectType)
-                    {
-                        case XenonProjectType.Executable:
-                            string executablePath = XenonBuildPaths.GetExecutablePath(
-                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
-                            executable = nativeLinker.LinkExecutable(
-                                objectFile.Path, executablePath, selectedTarget.Triple, nativeOptions);
-                            Console.WriteLine($"Wrote executable to '{executable.Path}'.");
-                            break;
-                        case XenonProjectType.StaticLibrary:
-                            string staticLibraryPath = XenonBuildPaths.GetStaticLibraryPath(
-                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
-                            LinkedNativeArtifact staticLibrary = nativeLinker.CreateStaticLibrary(
-                                objectFile.Path, staticLibraryPath, selectedTarget.Triple);
-                            Console.WriteLine($"Wrote static library to '{staticLibrary.Path}'.");
-                            break;
-                        case XenonProjectType.SharedLibrary:
-                            string sharedLibraryPath = XenonBuildPaths.GetSharedLibraryPath(
-                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
-                            string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
-                                input.RootDirectory, input.Name, profileName, selectedTarget.Triple);
-                            LinkedNativeArtifact sharedLibrary = nativeLinker.LinkSharedLibrary(
-                                objectFile.Path,
-                                sharedLibraryPath,
-                                selectedTarget.Triple,
-                                nativeOptions,
-                                importLibraryPath);
-                            Console.WriteLine($"Wrote shared library to '{sharedLibrary.Path}'.");
-                            if (sharedLibrary.ImportLibraryPath is not null)
-                            {
-                                Console.WriteLine($"Wrote import library to '{sharedLibrary.ImportLibraryPath}'.");
-                            }
-
-                            break;
-                        default:
-                            throw new InvalidOperationException($"unsupported project type '{input.ProjectType}'");
-                    }
-                }
-                catch (LinkerException exception)
-                {
-                    Console.Error.WriteLine($"error: {exception.Message}");
-                    return CompilationError;
-                }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-                {
-                    Console.Error.WriteLine($"error: cannot write executable: {exception.Message}");
-                    return CompilationError;
-                }
-            }
-        }
-
         if (emitLlvm)
         {
             try
@@ -325,8 +250,7 @@ internal static class Program
                     : new LlvmIrGenerator().GenerateForTarget(
                         compilation,
                         selectedTarget,
-                        input.Name,
-                        input.GenerateExecutableEntryPoint);
+                        input.Name);
                 File.WriteAllText(
                     input.LlvmOutputPath,
                     llvmIr,
@@ -352,43 +276,11 @@ internal static class Program
             $"Analyzed {projectKind} project '{input.Name}' ({profileName}): " +
             $"{compilation.SyntaxTrees.Length} file(s), {memberCount} declaration(s), {tokenCount} token(s).");
 
-        if (runCommand)
-        {
-            if (executable is null)
-            {
-                Console.Error.WriteLine("error: no executable was produced");
-                return CompilationError;
-            }
-
-            return RunExecutable(executable.Path, input.RootDirectory);
-        }
-
         return Success;
     }
 
     private static CompilationInput ResolveInput(IReadOnlyList<string> inputs, string profileName)
     {
-        if (inputs.Count == 1)
-        {
-            XenonProject project = XenonProjectLoader.Resolve(inputs[0]);
-            XenonBuildProfile projectProfile = project.GetProfile(profileName);
-            string llvmOutputPath = project.IsImplicit && project.SourceFiles.Length == 1
-                ? Path.ChangeExtension(project.SourceFiles[0], ".ll")
-                : Path.Combine(project.RootDirectory, $"{project.Name}.ll");
-            return new CompilationInput(
-                project.Name,
-                project.IsImplicit,
-                project.RootDirectory,
-                project.SourceFiles,
-                llvmOutputPath,
-                projectProfile,
-                project.Type,
-                project.NativeLibraries,
-                project.NativeLibraryPaths,
-                project.Type is XenonProjectType.SharedLibrary,
-                project.Type is XenonProjectType.Executable);
-        }
-
         var sourceFiles = ImmutableArray.CreateBuilder<string>(inputs.Count);
         foreach (string input in inputs)
         {
@@ -418,12 +310,7 @@ internal static class Program
             rootDirectory,
             sourceFiles.ToImmutable(),
             Path.ChangeExtension(firstSource, ".ll"),
-            defaultProfile,
-            XenonProjectType.Executable,
-            NativeLibraries: [],
-            NativeLibraryPaths: [],
-            PositionIndependentCode: false,
-            GenerateExecutableEntryPoint: true);
+            defaultProfile);
     }
 
     private static int WriteUsageError(string message)
@@ -431,6 +318,47 @@ internal static class Program
         Console.Error.WriteLine($"error: {message}");
         return UsageError;
     }
+
+    private static int RunProjectCommand(string inputPath, string profileName, string? targetTriple,
+        bool run, bool dumpTokens, bool compileOnly = false, bool skipLink = false)
+    {
+        XenonBuildResult result = new XenonBuildDriver().Build(CreateProjectBuildRequest(
+            inputPath, profileName, targetTriple, compileOnly, skipLink));
+        foreach (Diagnostic diagnostic in result.Diagnostics)
+            DiagnosticWriter.Write(Console.Error, diagnostic);
+        if (!result.Success)
+        {
+            Console.Error.WriteLine($"error: {result.Failure}");
+            return result.FailureKind == BuildFailureKind.Compiler ? CompilationError : UsageError;
+        }
+        if (run && result.Project!.Type != XenonProjectType.Executable)
+            return WriteUsageError("'xenon run' requires an executable project");
+        if (run && !result.IsRunnable)
+            return WriteUsageError(
+                $"cannot run target '{result.TargetTriple}' on host '{LlvmTargetPlatform.HostTriple}'");
+        if (dumpTokens && result.Compilation is not null)
+            DumpTokens(result.Compilation);
+        if (result.ObjectPath is not null)
+            Console.WriteLine($"Wrote {result.TargetTriple} object file to '{result.ObjectPath}'.");
+        if (result.ArtifactPath is not null)
+            Console.WriteLine($"Wrote artifact to '{result.ArtifactPath}'.");
+        if (result.ImportLibraryPath is not null)
+            Console.WriteLine($"Wrote import library to '{result.ImportLibraryPath}'.");
+        if (result.NativeLinkSkipped && !compileOnly)
+            Console.WriteLine($"Skipped native linking for target '{result.TargetTriple}'; emitted LLVM IR and object files.");
+        if (!run) return Success;
+        return RunExecutable(result.ArtifactPath!, result.Project!.RootDirectory);
+    }
+
+    internal static XenonBuildRequest CreateProjectBuildRequest(string inputPath, string profileName,
+        string? targetTriple, bool compileOnly, bool skipLink) =>
+        new(inputPath, profileName, TargetTriple: targetTriple, CompileOnly: compileOnly,
+            SkipLink: skipLink);
+
+    internal static bool IsProjectShapedInput(IReadOnlyList<string> inputs) =>
+        inputs.Count == 1 &&
+        (Directory.Exists(inputs[0]) ||
+         string.Equals(Path.GetExtension(inputs[0]), ".xeproj", StringComparison.OrdinalIgnoreCase));
 
     private static int RunExecutable(string executablePath, string workingDirectory)
     {
@@ -497,10 +425,5 @@ internal static class Program
         string RootDirectory,
         ImmutableArray<string> SourceFiles,
         string LlvmOutputPath,
-        XenonBuildProfile Profile,
-        XenonProjectType ProjectType,
-        ImmutableArray<string> NativeLibraries,
-        ImmutableArray<string> NativeLibraryPaths,
-        bool PositionIndependentCode,
-        bool GenerateExecutableEntryPoint);
+        XenonBuildProfile Profile);
 }

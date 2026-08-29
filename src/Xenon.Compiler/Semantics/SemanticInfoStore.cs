@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Collections.Concurrent;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
@@ -14,20 +15,18 @@ internal sealed class SemanticInfoStore
     public List<PositionScope> Scopes { get; } = [];
     public List<TypeRegion> TypeRegions { get; } = [];
     public Dictionary<SourceText, FileSymbolScope> FileScopes { get; } = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<ArrayTypeSymbol, ImmutableArray<SyntheticMemberSymbol>> _arrayMembers = new(ReferenceEqualityComparer.Instance);
+    private readonly ConcurrentDictionary<ArrayTypeSymbol, ImmutableArray<SyntheticMemberSymbol>> _arrayMembers =
+        new(ReferenceEqualityComparer.Instance);
 
     public ImmutableArray<SyntheticMemberSymbol> GetArrayMembers(ArrayTypeSymbol array)
     {
-        if (_arrayMembers.TryGetValue(array, out ImmutableArray<SyntheticMemberSymbol> members)) return members;
-        members =
+        return _arrayMembers.GetOrAdd(array, static value =>
         [
-            new SyntheticMemberSymbol("Length", SyntheticMemberKind.Property, array, BuiltinTypes.Int),
-            new SyntheticMemberSymbol("Rank", SyntheticMemberKind.Property, array, BuiltinTypes.Int),
-            new SyntheticMemberSymbol("GetLength", SyntheticMemberKind.Method, array, BuiltinTypes.Int,
+            new SyntheticMemberSymbol("Length", SyntheticMemberKind.Property, value, BuiltinTypes.Int),
+            new SyntheticMemberSymbol("Rank", SyntheticMemberKind.Property, value, BuiltinTypes.Int),
+            new SyntheticMemberSymbol("GetLength", SyntheticMemberKind.Method, value, BuiltinTypes.Int,
                 [new ParameterSymbol("dimension", BuiltinTypes.Int, 0)]),
-        ];
-        _arrayMembers.Add(array, members);
-        return members;
+        ]);
     }
 
     public void RecordType(TypeSyntax syntax, TypeSymbol type)

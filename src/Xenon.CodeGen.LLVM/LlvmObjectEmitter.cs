@@ -10,7 +10,7 @@ public sealed class LlvmObjectEmitter
         string outputPath,
         LlvmTargetOptions targetOptions,
         string moduleName = "xenon",
-        bool generateExecutableEntryPoint = false)
+        LlvmCodeGenerationOptions? codeGenerationOptions = null)
     {
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
@@ -34,6 +34,7 @@ public sealed class LlvmObjectEmitter
                 compilation,
                 moduleName,
                 targetMachine,
+                codeGenerationOptions,
                 module =>
                 {
                     targetMachine.Handle.EmitToFile(
@@ -41,8 +42,7 @@ public sealed class LlvmObjectEmitter
                         temporaryPath,
                         LLVMCodeGenFileType.LLVMObjectFile);
                     return true;
-                },
-                generateExecutableEntryPoint);
+                });
 
             if (!File.Exists(temporaryPath) || new FileInfo(temporaryPath).Length == 0)
             {

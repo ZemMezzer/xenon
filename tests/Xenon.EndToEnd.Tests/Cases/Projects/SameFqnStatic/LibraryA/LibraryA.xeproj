@@ -1,0 +1,6 @@
+[project]
+name = "SameFqnStaticA"
+type = "static-library"
+
+[source]
+root = "src"

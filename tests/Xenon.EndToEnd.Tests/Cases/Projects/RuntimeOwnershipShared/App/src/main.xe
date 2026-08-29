@@ -1,0 +1,11 @@
+using RuntimeOwnership.SharedCore;
+namespace RuntimeOwnership.SharedApp;
+int Main()
+{
+    State.Value = 40;
+    State state = State();
+    if (ReadInitialized(state) != 40) return 1;
+    IState view = state;
+    if (view.Read() != 40) return 2;
+    return State.AddTwo(ReadStatic());
+}

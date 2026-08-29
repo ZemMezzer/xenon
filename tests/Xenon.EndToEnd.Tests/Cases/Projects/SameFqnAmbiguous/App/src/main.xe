@@ -1,0 +1,3 @@
+using Shared;
+namespace App;
+int Main() { return Value(); }

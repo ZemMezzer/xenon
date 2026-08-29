@@ -1,0 +1,3 @@
+using Epic3.Middle;
+namespace Epic3.App;
+int Main() { return FortyTwo(); }

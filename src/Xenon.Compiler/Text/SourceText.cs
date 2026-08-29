@@ -6,10 +6,11 @@ public sealed class SourceText
 {
     private readonly ImmutableArray<int> _lineStarts;
 
-    private SourceText(string text, string path)
+    private SourceText(string text, string path, SourceFileId fileId)
     {
         Text = text;
         Path = path;
+        FileId = fileId;
         _lineStarts = BuildLineStarts(text);
     }
 
@@ -17,11 +18,23 @@ public sealed class SourceText
 
     public string Path { get; }
 
+    public SourceFileId FileId { get; }
+
     public int Length => Text.Length;
 
     public char this[int index] => Text[index];
 
-    public static SourceText From(string text, string path = "<memory>") => new(text, path);
+    public static SourceText From(string text, string path = "<memory>") =>
+        new(text, path, SourceFileId.CreateNew());
+
+    public static SourceText From(string text, string path, SourceFileId fileId) =>
+        new(text, path, fileId);
+
+    /// <summary>Creates a new content version of the same logical source file.</summary>
+    public SourceText WithText(string text) => new(text, Path, FileId);
+
+    /// <summary>Creates a path-updated version while preserving logical source identity.</summary>
+    public SourceText WithPath(string path) => new(Text, path, FileId);
 
     public string GetText(TextSpan span) => Text.Substring(span.Start, span.Length);
 

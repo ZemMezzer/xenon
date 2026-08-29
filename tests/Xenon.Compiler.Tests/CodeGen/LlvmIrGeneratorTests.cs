@@ -1,4 +1,6 @@
 using Xenon.CodeGen.LLVM;
+using Xenon.Compiler.Diagnostics;
+using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xunit;
 
@@ -64,7 +66,7 @@ public sealed class LlvmIrGeneratorTests
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
         foreach (string function in new[] { "Object", "Positional", "Vector", "Matrix" })
         {
-            int start = ir.IndexOf("@Example." + function + "(", StringComparison.Ordinal);
+            int start = ir.IndexOf("@" + ManagedSymbol("xenon", $"Example.{function}", "function"), StringComparison.Ordinal);
             string body = ir[start..ir.IndexOf("\n}", start, StringComparison.Ordinal)];
             int allocation = body.IndexOf("call ptr @malloc", StringComparison.Ordinal);
             int check = body.IndexOf("allocation.valid = icmp ne ptr", StringComparison.Ordinal);
@@ -72,7 +74,7 @@ public sealed class LlvmIrGeneratorTests
             Assert.True(allocation >= 0 && check > allocation && branch > check, body);
             Assert.Contains("@llvm.trap", body, StringComparison.Ordinal);
             if (function == "Object")
-                Assert.True(body.IndexOf("call void @Example.S.__ctor", StringComparison.Ordinal) > branch, body);
+                Assert.True(body.IndexOf("call void @" + ManagedSymbol("xenon", "Example.S.__ctor", "function"), StringComparison.Ordinal) > branch, body);
         }
     }
 
@@ -118,7 +120,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "minimal");
 
-        Assert.Contains("define internal i32 @Example.Main()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @" + ManagedSymbol("minimal", "Example.Main", "function") + "()", llvmIr, StringComparison.Ordinal);
         Assert.Contains("ret i32 42", llvmIr, StringComparison.Ordinal);
     }
 
@@ -151,11 +153,11 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "core");
 
         Assert.Contains("declare i32 @puts(ptr)", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("define internal i32 @Example.Add(i32", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @" + ManagedSymbol("core", "Example.Add", "function") + "(i32", llvmIr, StringComparison.Ordinal);
         Assert.Contains("define i32 @Example_Multiply(i32", llvmIr, StringComparison.Ordinal);
         Assert.Contains("add i32", llvmIr, StringComparison.Ordinal);
         Assert.Contains("mul i32", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call i32 @Example.Add", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call i32 @" + ManagedSymbol("core", "Example.Add", "function"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("call i32 @puts", llvmIr, StringComparison.Ordinal);
     }
 
@@ -341,9 +343,9 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "visibility");
 
-        Assert.Contains("define internal i32 @Example.Hidden()", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("define i32 @Example.Visible()", llvmIr, StringComparison.Ordinal);
-        Assert.DoesNotContain("define internal i32 @Example.Visible()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @" + ManagedSymbol("visibility", "Example.Hidden", "function") + "()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @" + ManagedSymbol("visibility", "Example.Visible", "function") + "()", llvmIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("define internal i32 @" + ManagedSymbol("visibility", "Example.Visible", "function") + "()", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -388,9 +390,9 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, target, "lifecycle-arrays");
 
-        Assert.Contains("@Example.Box.__ctor", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Box.__dtor", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call void @Example.Box.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("lifecycle-arrays", "Example.Box.__ctor", "function"), llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("lifecycle-arrays", "Example.Box.__dtor", "function"), llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @" + ManagedSymbol("lifecycle-arrays", "Example.Box.__dtor", "function"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("stack.array = alloca i8", llvmIr, StringComparison.Ordinal);
         Assert.Contains("array.metadata.address", llvmIr, StringComparison.Ordinal);
         Assert.Contains("getelementptr", llvmIr, StringComparison.Ordinal);
@@ -439,10 +441,10 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "struct-methods");
 
-        Assert.Contains("define void @Example.Counter.Add(ptr", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("define i32 @Example.Counter.Read(ptr", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call void @Example.Counter.Add(ptr", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call i32 @Example.Counter.Read(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define void @" + ManagedSymbol("struct-methods", "Example.Counter.Add", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @" + ManagedSymbol("struct-methods", "Example.Counter.Read", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @" + ManagedSymbol("struct-methods", "Example.Counter.Add", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call i32 @" + ManagedSymbol("struct-methods", "Example.Counter.Read", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -498,7 +500,7 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Contains("ret ptr null", llvmIr, StringComparison.Ordinal);
         Assert.Contains("store ptr null", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call void @Example.Consume(ptr null)", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @" + ManagedSymbol("null-pointers", "Example.Consume", "function") + "(ptr null)", llvmIr, StringComparison.Ordinal);
         Assert.DoesNotContain("<null>", llvmIr, StringComparison.Ordinal);
     }
 
@@ -557,8 +559,9 @@ public sealed class LlvmIrGeneratorTests
             LlvmTargetOptions.CreateHost(),
             "static-layout");
 
-        Assert.Contains("@Example.Entity.Count = global i32 1024", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("load i32, ptr @Example.Entity.Count", llvmIr, StringComparison.Ordinal);
+        string count = ManagedSymbol("static-layout", "Example.Entity.Count", "static_field");
+        Assert.Contains($"@{count} = global i32 1024", llvmIr, StringComparison.Ordinal);
+        Assert.Contains($"load i32, ptr @{count}", llvmIr, StringComparison.Ordinal);
         Assert.Contains("ret i64 4", llvmIr, StringComparison.Ordinal);
     }
 
@@ -584,8 +587,9 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "static-write");
 
-        Assert.Contains("store i32 41, ptr @Example.State.Value", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("load i32, ptr @Example.State.Value", llvmIr, StringComparison.Ordinal);
+        string value = ManagedSymbol("static-write", "Example.State.Value", "static_field");
+        Assert.Contains($"store i32 41, ptr @{value}", llvmIr, StringComparison.Ordinal);
+        Assert.Contains($"load i32, ptr @{value}", llvmIr, StringComparison.Ordinal);
         Assert.Contains("store i32", llvmIr, StringComparison.Ordinal);
     }
 
@@ -618,7 +622,7 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "base-ctor");
 
         Assert.Contains("%Example.Enemy = type { %Example.Entity, i32 }", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call void @Example.Entity.__ctor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @" + ManagedSymbol("base-ctor", "Example.Entity.__ctor", "function"), llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -648,8 +652,8 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "virtual-dispatch");
 
-        Assert.Contains("@Example.Enemy.__vtable", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Enemy.Score", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("virtual-dispatch", "Example.Enemy.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("virtual-dispatch", "Example.Enemy.Score", "function"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("virtual.slot", llvmIr, StringComparison.Ordinal);
     }
 
@@ -680,9 +684,9 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "abstract-vtable");
 
-        Assert.Contains("define internal i32 @Example.Entity.Score(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @" + ManagedSymbol("abstract-vtable", "Example.Entity.Score", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("unreachable", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Enemy.__vtable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("abstract-vtable", "Example.Enemy.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
 
         Compilation privateAbstract = CreateCompilation("""
             namespace Example;
@@ -694,7 +698,7 @@ public sealed class LlvmIrGeneratorTests
             """);
         Assert.Empty(privateAbstract.Diagnostics);
         string privateIr = new LlvmIrGenerator().Generate(privateAbstract, "private-abstract-vtable");
-        Assert.Contains("define internal void @Example.Entity.Update(ptr", privateIr, StringComparison.Ordinal);
+        Assert.Contains("define internal void @" + ManagedSymbol("private-abstract-vtable", "Example.Entity.Update", "function") + "(ptr", privateIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -729,7 +733,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "reference-dispatch");
 
-        Assert.Contains("define internal i32 @Example.Read(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @" + ManagedSymbol("reference-dispatch", "Example.Read", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("virtual.slot", llvmIr, StringComparison.Ordinal);
     }
 
@@ -762,8 +766,8 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "interface-reference-dispatch");
 
-        Assert.Contains("define internal i32 @Example.Read(ptr", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Enemy.IScore.__itable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define internal i32 @" + ManagedSymbol("interface-reference-dispatch", "Example.Read", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("interface-reference-dispatch", "Example.Enemy.Example.IScore.__itable", "interface_table"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("interface.slot", llvmIr, StringComparison.Ordinal);
     }
 
@@ -814,8 +818,8 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "signed-static-constants");
 
-        Assert.Contains("@Example.Test.Less = global i1 true", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Test.Divide = global i32 -1", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("signed-static-constants", "Example.Test.Less", "static_field") + " = global i1 true", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("signed-static-constants", "Example.Test.Divide", "static_field") + " = global i32 -1", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -847,7 +851,7 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "interface-dispatch");
 
         Assert.Contains("%Example.IScore = type { ptr, ptr }", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Enemy.IScore.__itable", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("interface-dispatch", "Example.Enemy.Example.IScore.__itable", "interface_table"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("interface.slot", llvmIr, StringComparison.Ordinal);
     }
 
@@ -879,7 +883,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "multiple-interface-inheritance");
 
-        Assert.Contains("@Example.Value.IB.__itable = internal global [1 x ptr]", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("multiple-interface-inheritance", "Example.Value.Example.IB.__itable", "interface_table") + " = global [1 x ptr]", llvmIr, StringComparison.Ordinal);
         Assert.Contains("i32 0, i32 0", llvmIr, StringComparison.Ordinal);
     }
 
@@ -912,9 +916,9 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "inherited-interface-implementation");
 
-        Assert.Contains("@Example.Derived.IValue.__itable = internal global [1 x ptr] [ptr @Example.Base.Get]", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.Example.IValue.__itable", "interface_table") + " = global [1 x ptr] [ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Base.Get", "function") + "]", llvmIr, StringComparison.Ordinal);
         Assert.Contains("interface.runtime.map = load ptr", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Derived.__vtable = internal global [1 x ptr] [ptr @Example.Derived.__imap]", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__vtable", "vtable") + " = global [1 x ptr] [ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__imap", "interface_map") + "]", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -948,8 +952,8 @@ public sealed class LlvmIrGeneratorTests
             LlvmTargetOptions.CreateHost(),
             "virtual-destructor");
 
-        Assert.Contains("@Example.Enemy.__vtable", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("@Example.Enemy.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("virtual-destructor", "Example.Enemy.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("virtual-destructor", "Example.Enemy.__dtor", "function"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("destructor.slot", llvmIr, StringComparison.Ordinal);
     }
 
@@ -973,7 +977,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(), "inherited-destructor");
 
-        Assert.Contains("call void @Example.Entity.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @" + ManagedSymbol("inherited-destructor", "Example.Entity.__dtor", "function"), llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -998,8 +1002,8 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(), "destructor-gap");
 
-        Assert.Contains("@Example.Derived.__vtable", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call void @Example.Base.__dtor", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("destructor-gap", "Example.Derived.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @" + ManagedSymbol("destructor-gap", "Example.Base.__dtor", "function"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("destructor.slot", llvmIr, StringComparison.Ordinal);
     }
 
@@ -1017,15 +1021,14 @@ public sealed class LlvmIrGeneratorTests
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
 
         string llvmIr = new LlvmIrGenerator().GenerateForTarget(
-            compilation,
+            AsExecutable(compilation),
             target,
-            "targeted",
-            generateExecutableEntryPoint: true);
+            "targeted");
 
         Assert.Contains($"target triple = \"{target.Triple}\"", llvmIr, StringComparison.Ordinal);
         Assert.Contains("target datalayout =", llvmIr, StringComparison.Ordinal);
         Assert.Contains("define i32 @main()", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call i32 @Example.Main()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call i32 @" + ManagedSymbol("targeted", "Example.Main", "function") + "()", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1053,14 +1056,316 @@ public sealed class LlvmIrGeneratorTests
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
 
         string llvmIr = new LlvmIrGenerator().GenerateForTarget(
-            compilation,
+            AsExecutable(compilation),
             target,
-            "method-main",
-            generateExecutableEntryPoint: true);
+            "method-main");
 
-        Assert.Contains("define i32 @Example.Worker.Main(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @" + ManagedSymbol("method-main", "Example.Worker.Main", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("define i32 @main()", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call i32 @Example.Main()", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call i32 @" + ManagedSymbol("method-main", "Example.Main", "function") + "()", llvmIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_UsesCompilationOutputKindAsTheOnlyEntryPointAuthority()
+    {
+        Compilation library = CreateCompilation("namespace Example; int Main() { return 42; }");
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+
+        string libraryIr = new LlvmIrGenerator().GenerateForTarget(library, target, "library-main");
+        string executableIr = new LlvmIrGenerator().GenerateForTarget(
+            AsExecutable(library), target, "executable-main");
+
+        Assert.DoesNotContain("define i32 @main()", libraryIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @main()", executableIr, StringComparison.Ordinal);
+        Assert.Equal(CompilationOutputKind.Library, library.Options.OutputKind);
+    }
+
+    [Theory]
+    [InlineData(LlvmNativeReferenceKind.Static, false)]
+    [InlineData(LlvmNativeReferenceKind.Shared, true)]
+    public void Generator_UsesNativeReferenceKindForReferencedRuntimeData(
+        LlvmNativeReferenceKind referenceKind,
+        bool expectsDllImport)
+    {
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
+        Compilation library = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            references: null,
+            SourceText.From("""
+                namespace RuntimeOwnership.Core;
+                interface IState { int Read(); }
+                struct State : IState
+                {
+                    public static int Value = 1;
+                    public int Initialized = 40;
+                    public State() { }
+                    public int Read() { return Initialized; }
+                    public static int AddTwo(int value) { return value + 2; }
+                }
+                public int ReadStatic() { return State.Value; }
+                """, "core.xe"));
+        library = LlvmIrGenerator.BindForTarget(library, target);
+        Compilation application = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Executable),
+            [new SourceCompilationReference(library)],
+            SourceText.From("""
+                using RuntimeOwnership.Core;
+                namespace RuntimeOwnership.App;
+                int Main()
+                {
+                    State.Value = 40;
+                    State state = State();
+                    IState view = state;
+                    int initialized = view.Read();
+                    return State.AddTwo(ReadStatic());
+                }
+                """, "app.xe"));
+        application = LlvmIrGenerator.BindForTarget(application, target);
+
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        Assert.False(application.HasErrors, string.Join(Environment.NewLine, application.Diagnostics));
+        string libraryIr = new LlvmIrGenerator().GenerateForTarget(library, target, "runtime-core");
+        string applicationIr = new LlvmIrGenerator().GenerateForTarget(
+            application,
+            target,
+            "runtime-app",
+            new LlvmCodeGenerationOptions("runtime-app", [
+                new LlvmNativeReference(library, referenceKind, "runtime-core")
+            ]));
+
+        string staticField = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.State.Value", "static_field");
+        string interfaceKey = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.IState.__interface_key", "interface_key");
+        string vtable = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.State.__vtable", "vtable");
+        string interfaceTable = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.State.RuntimeOwnership.Core.IState.__itable", "interface_table");
+        string interfaceMap = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.State.__imap", "interface_map");
+        string initializer = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.State.__init_fields", "function");
+        string constructor = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.State.__ctor", "function");
+        string addTwo = ManagedSymbol("runtime-core", "RuntimeOwnership.Core.State.AddTwo", "function");
+        Assert.Contains($"@{staticField} = global i32 1", libraryIr,
+            StringComparison.Ordinal);
+        Assert.Contains($"@{interfaceKey} = internal constant", libraryIr,
+            StringComparison.Ordinal);
+        string storage = expectsDllImport && OperatingSystem.IsWindows()
+            ? "external dllimport global" : "external global";
+        Assert.Contains($"@{staticField} = {storage} i32",
+            applicationIr, StringComparison.Ordinal);
+        Assert.Contains($"@{interfaceKey} = internal constant",
+            applicationIr, StringComparison.Ordinal);
+        Assert.Contains($"@{vtable} = {storage}",
+            applicationIr, StringComparison.Ordinal);
+        Assert.Contains($"@{interfaceTable} = {storage}",
+            applicationIr, StringComparison.Ordinal);
+        Assert.Contains($"@{interfaceMap} = {storage}",
+            applicationIr, StringComparison.Ordinal);
+        if (!expectsDllImport)
+            Assert.DoesNotContain("dllimport global", applicationIr, StringComparison.Ordinal);
+        Assert.Contains($"declare void @{initializer}", applicationIr,
+            StringComparison.Ordinal);
+        Assert.Contains($"declare void @{constructor}", applicationIr,
+            StringComparison.Ordinal);
+        Assert.Contains($"declare i32 @{addTwo}", applicationIr,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain($"define void @{initializer}", applicationIr,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain($"define i32 @{addTwo}", applicationIr,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_InterfaceRuntimeIdentityIsStableAcrossModulesAndScopedByAbiIdentity()
+    {
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
+        const string contractSource = "namespace Contracts; interface IValue { int Read(); }";
+        Compilation contract = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            references: null,
+            SourceText.From(contractSource, "contract.xe"));
+        Compilation application = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            [new SourceCompilationReference(contract)],
+            SourceText.From("using Contracts; namespace App; int Read(IValue value) { return value.Read(); }", "app.xe"));
+
+        string contractIr = new LlvmIrGenerator().GenerateForTarget(contract, target, "ContractsModule");
+        string applicationIr = new LlvmIrGenerator().GenerateForTarget(
+            application,
+            target,
+            "ApplicationModule",
+            new LlvmCodeGenerationOptions("ApplicationModule", [
+                new LlvmNativeReference(contract, LlvmNativeReferenceKind.Static, "ContractsModule")
+            ]));
+        Compilation independent = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            references: null,
+            SourceText.From(contractSource, "independent.xe"));
+        string otherModuleIr = new LlvmIrGenerator().GenerateForTarget(independent, target, "OtherContractsModule");
+
+        static string KeyDefinition(string ir) => ir.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Single(line =>
+                line.Contains(" = internal constant", StringComparison.Ordinal) &&
+                line.Contains(":Contracts.IValue\\00\"", StringComparison.Ordinal));
+
+        Assert.Equal(KeyDefinition(contractIr), KeyDefinition(applicationIr));
+        Assert.NotEqual(KeyDefinition(contractIr), KeyDefinition(otherModuleIr));
+    }
+
+    [Fact]
+    public void Generator_ProjectScopesSameFunctionNamesAcrossReferencesAndLeavesAmbiguityToSemantics()
+    {
+        Compilation libraryA = Compilation.Create(SourceText.From(
+            "namespace Shared; public int Value() { return 1; }", "a.xe"));
+        Compilation libraryB = Compilation.Create(SourceText.From(
+            "namespace Shared; public int Value() { return 2; }", "b.xe"));
+        Compilation unused = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Executable),
+            [new SourceCompilationReference(libraryA), new SourceCompilationReference(libraryB)],
+            SourceText.From("namespace App; int Main() { return 0; }", "unused.xe"));
+        var options = new LlvmCodeGenerationOptions("App", [
+            new LlvmNativeReference(libraryA, LlvmNativeReferenceKind.Static, "LibraryA"),
+            new LlvmNativeReference(libraryB, LlvmNativeReferenceKind.Static, "LibraryB"),
+        ]);
+
+        Assert.False(unused.HasErrors, string.Join(Environment.NewLine, unused.Diagnostics));
+        string ir = new LlvmIrGenerator().Generate(unused, "App", options);
+        string symbolA = ManagedSymbol("LibraryA", "Shared.Value", "function");
+        string symbolB = ManagedSymbol("LibraryB", "Shared.Value", "function");
+        Assert.NotEqual(symbolA, symbolB);
+        Assert.Contains($"declare i32 @{symbolA}()", ir, StringComparison.Ordinal);
+        Assert.Contains($"declare i32 @{symbolB}()", ir, StringComparison.Ordinal);
+
+        Compilation reversed = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Executable),
+            [new SourceCompilationReference(libraryB), new SourceCompilationReference(libraryA)],
+            SourceText.From("namespace App; int Main() { return 0; }", "reversed.xe"));
+        string reversedIr = new LlvmIrGenerator().Generate(
+            reversed,
+            "App",
+            new LlvmCodeGenerationOptions("App", [
+                new LlvmNativeReference(libraryB, LlvmNativeReferenceKind.Static, "LibraryB"),
+                new LlvmNativeReference(libraryA, LlvmNativeReferenceKind.Static, "LibraryA"),
+            ]));
+        Assert.Contains($"declare i32 @{symbolA}()", reversedIr, StringComparison.Ordinal);
+        Assert.Contains($"declare i32 @{symbolB}()", reversedIr, StringComparison.Ordinal);
+
+        Compilation ambiguous = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Executable),
+            [new SourceCompilationReference(libraryA), new SourceCompilationReference(libraryB)],
+            SourceText.From("using Shared; namespace App; int Main() { return Value(); }", "ambiguous.xe"));
+        Assert.Contains(ambiguous.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousName);
+        Assert.Throws<LlvmCodeGenerationException>(() =>
+            new LlvmIrGenerator().Generate(ambiguous, "App", options));
+    }
+
+    [Fact]
+    public void Generator_ProjectScopesReferencedTypeRuntimeSymbols()
+    {
+        const string source = """
+            namespace Shared;
+            interface IValue { int Read(); }
+            struct State : IValue
+            {
+                public static int Value = 1;
+                public int Seed = 1;
+                public int Read() { return Seed; }
+            }
+            """;
+        Compilation libraryA = Compilation.Create(SourceText.From(source, "a.xe"));
+        Compilation libraryB = Compilation.Create(SourceText.From(source, "b.xe"));
+        Compilation app = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            [new SourceCompilationReference(libraryA), new SourceCompilationReference(libraryB)],
+            SourceText.From("namespace App; int Main() { return 0; }", "app.xe"));
+        var options = new LlvmCodeGenerationOptions("App", [
+            new LlvmNativeReference(libraryA, LlvmNativeReferenceKind.Static, "LibraryA"),
+            new LlvmNativeReference(libraryB, LlvmNativeReferenceKind.Static, "LibraryB"),
+        ]);
+
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        string ir = new LlvmIrGenerator().Generate(app, "App", options);
+        foreach (string abiIdentity in new[] { "LibraryA", "LibraryB" })
+        {
+            Assert.Contains("@" + ManagedSymbol(abiIdentity, "Shared.State.Value", "static_field"), ir, StringComparison.Ordinal);
+            Assert.Contains("@" + ManagedSymbol(abiIdentity, "Shared.State.__vtable", "vtable"), ir, StringComparison.Ordinal);
+            Assert.Contains("@" + ManagedSymbol(abiIdentity, "Shared.State.__imap", "interface_map"), ir, StringComparison.Ordinal);
+            Assert.Contains("@" + ManagedSymbol(abiIdentity, "Shared.State.Shared.IValue.__itable", "interface_table"), ir, StringComparison.Ordinal);
+            Assert.Contains("@" + ManagedSymbol(abiIdentity, "Shared.State.__init_fields", "function"), ir, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Generator_PreservesExplicitNativeAbiNamesWhileManglingManagedSymbols()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            extern int puts(readonly byte* value);
+            export int Api() { return 1; }
+            public int Managed() { return 2; }
+            """);
+
+        string ir = new LlvmIrGenerator().Generate(compilation, "ProjectA");
+
+        Assert.Contains("declare i32 @puts(ptr)", ir, StringComparison.Ordinal);
+        Assert.Contains("define i32 @Example_Api()", ir, StringComparison.Ordinal);
+        Assert.Contains("define i32 @" + ManagedSymbol("ProjectA", "Example.Managed", "function") + "()", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("puts.__xenon_", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("Example_Api.__xenon_", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_RequiresCompleteExactNativeReferenceMetadata()
+    {
+        Compilation library1 = Compilation.Create(SourceText.From(
+            "namespace Lib; public int Value() { return 1; }", "library.xe"));
+        Compilation library2 = library1.ReplaceSyntaxTree(
+            library1.SyntaxTrees[0],
+            SyntaxTree.Parse(SourceText.From(
+                "namespace Lib; public int Value() { return 2; }", "library.xe")));
+        Compilation app = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            [new SourceCompilationReference(library1)],
+            SourceText.From("namespace App; int Main() { return 0; }", "app.xe"));
+
+        LlvmCodeGenerationException missing = Assert.Throws<LlvmCodeGenerationException>(() =>
+            new LlvmIrGenerator().Generate(app, "App"));
+        Assert.Contains("Missing native ABI metadata", missing.Message, StringComparison.Ordinal);
+
+        LlvmCodeGenerationException wrongSnapshot = Assert.Throws<LlvmCodeGenerationException>(() =>
+            new LlvmIrGenerator().Generate(app, "App", new LlvmCodeGenerationOptions("App", [
+                new LlvmNativeReference(library2, LlvmNativeReferenceKind.Static, "Library")
+            ])));
+        Assert.Contains("does not match", wrongSnapshot.Message, StringComparison.Ordinal);
+
+        Assert.Throws<ArgumentException>(() =>
+            new LlvmNativeReference(library1, LlvmNativeReferenceKind.Static, " "));
+        Assert.Throws<ArgumentNullException>(() =>
+            new LlvmNativeReference(library1, LlvmNativeReferenceKind.Static, null!));
+        Assert.Throws<ArgumentException>(() => new LlvmCodeGenerationOptions(""));
+        Assert.Throws<ArgumentNullException>(() => new LlvmCodeGenerationOptions(null!));
+        Assert.Throws<ArgumentException>(() => new LlvmCodeGenerationOptions("App", [
+            new LlvmNativeReference(library1, LlvmNativeReferenceKind.Static, "Library"),
+            new LlvmNativeReference(library1, LlvmNativeReferenceKind.Shared, "Library"),
+        ]));
+
+        string ir = new LlvmIrGenerator().Generate(app, "App", new LlvmCodeGenerationOptions("App", [
+            new LlvmNativeReference(library1, LlvmNativeReferenceKind.Static, "Library")
+        ]));
+        Assert.Contains("@" + ManagedSymbol("Library", "Lib.Value", "function"), ir, StringComparison.Ordinal);
+
+        Compilation middle = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            [new SourceCompilationReference(library1)],
+            SourceText.From("namespace Middle; public int Ready() { return 1; }", "middle.xe"));
+        Compilation transitiveApp = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            [new SourceCompilationReference(middle)],
+            SourceText.From("namespace App; int Main() { return 0; }", "transitive-app.xe"));
+        LlvmCodeGenerationException incompleteClosure = Assert.Throws<LlvmCodeGenerationException>(() =>
+            new LlvmIrGenerator().Generate(
+                transitiveApp,
+                "App",
+                new LlvmCodeGenerationOptions("App", [
+                    new LlvmNativeReference(middle, LlvmNativeReferenceKind.Static, "Middle")
+                ])));
+        Assert.Contains("Missing native ABI metadata", incompleteClosure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1083,11 +1388,10 @@ public sealed class LlvmIrGeneratorTests
         try
         {
             LlvmObjectFile result = new LlvmObjectEmitter().Emit(
-                compilation,
+                AsExecutable(compilation),
                 outputPath,
                 options,
-                "object-test",
-                generateExecutableEntryPoint: true);
+                "object-test");
 
             Assert.Equal(Path.GetFullPath(outputPath), result.Path);
             Assert.Equal(options.Triple, result.TargetTriple);
@@ -1192,11 +1496,10 @@ public sealed class LlvmIrGeneratorTests
         {
             LlvmCodeGenerationException exception = Assert.Throws<LlvmCodeGenerationException>(
                 () => new LlvmObjectEmitter().Emit(
-                    compilation,
+                    AsExecutable(compilation),
                     outputPath,
                     options,
-                    "missing-main",
-                    generateExecutableEntryPoint: true));
+                    "missing-main"));
 
             Assert.Contains("int Main()", exception.Message, StringComparison.Ordinal);
             Assert.False(File.Exists(outputPath));
@@ -1354,6 +1657,57 @@ public sealed class LlvmIrGeneratorTests
         Assert.Equal(4294967296UL, Assert.Single(Assert.Single(wide.SemanticModel.GlobalNamespace.Namespaces).Enums).Members[0].Value);
         Assert.Equal(0UL, Assert.Single(Assert.Single(narrow.SemanticModel.GlobalNamespace.Namespaces).Enums).Members[0].Value);
         Assert.False(original.HasErrors);
+    }
+
+    [Fact]
+    public void TargetBoundCompilationRemainsValidAcrossAllSnapshotDerivations()
+    {
+        SourceText source = SourceText.From("""
+            namespace Example;
+            struct Packet { public byte Tag; public nint Payload; }
+            enum Layout
+            {
+                Size = cast<int>(sizeof(Packet)),
+                Alignment = cast<int>(alignof(Packet)),
+                Native = cast<int>(sizeof(nuint)),
+                CLong = cast<int>(sizeof(culong))
+            }
+            """, "layout.xe");
+        Compilation original = Compilation.Create(source);
+        LlvmTargetOptions options = LlvmTargetOptions.CreateHost();
+        Compilation target = LlvmIrGenerator.BindForTarget(original, options);
+        Compilation reference = Compilation.Create(SourceText.From(
+            "namespace Dependency; public int Value() { return 1; }", "dependency.xe"));
+
+        SyntaxTree oldTree = target.SyntaxTrees[0];
+        SyntaxTree replacementTree = SyntaxTree.Parse(oldTree.Source.WithText(oldTree.Source.Text +
+            Environment.NewLine + "int Identity(int value) { return value; }"));
+        Compilation replaced = target.ReplaceSyntaxTree(oldTree, replacementTree);
+        Compilation withOptions = target.WithOptions(new CompilationOptions(CompilationOutputKind.Executable));
+        Compilation withReferences = target.WithReferences([new SourceCompilationReference(reference)]);
+        SyntaxTree addedTree = SyntaxTree.Parse(SourceText.From(
+            "namespace Extra; struct Marker { public nint Value; }", "extra.xe"));
+        Compilation added = target.AddSyntaxTrees(addedTree);
+        Compilation removed = added.RemoveSyntaxTrees(addedTree);
+
+        int pointerBytes = IntPtr.Size;
+        int cLongBytes = OperatingSystem.IsWindows() ? 4 : pointerBytes;
+        foreach (Compilation snapshot in new[] { target, replaced, withOptions, withReferences, added, removed })
+        {
+            Assert.False(snapshot.HasErrors, string.Join(Environment.NewLine, snapshot.Diagnostics));
+            Assert.NotNull(snapshot.TargetLayout);
+            var layout = Assert.Single(snapshot.SemanticModel.GlobalNamespace.Namespaces
+                .Single(@namespace => @namespace.Name == "Example").Enums);
+            Assert.Equal([pointerBytes * 2, pointerBytes, pointerBytes, cLongBytes],
+                layout.Members.Select(member => (int)member.Value!).ToArray());
+        }
+
+        Assert.Null(original.TargetLayout);
+        Assert.True(original.RequiresTargetLayout);
+        Assert.Contains("target datalayout =", new LlvmIrGenerator().GenerateForTarget(target, options),
+            StringComparison.Ordinal);
+        Assert.Equal(CompilationOutputKind.Library, target.Options.OutputKind);
+        Assert.Equal(CompilationOutputKind.Executable, withOptions.Options.OutputKind);
     }
 
     [Theory]
@@ -1530,6 +1884,13 @@ public sealed class LlvmIrGeneratorTests
 
     private static Compilation CreateCompilation(string source) =>
         Compilation.Create(SourceText.From(source, "test.xe"));
+
+    private static Compilation AsExecutable(Compilation compilation) =>
+        compilation.WithOptions(new CompilationOptions(CompilationOutputKind.Executable));
+
+    private static string ManagedSymbol(string abiIdentity, string sourceIdentity, string category) =>
+        $"__xenon_{category}_{Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(abiIdentity))}_" +
+        Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(sourceIdentity));
 
     private static string CreateTemporaryDirectory()
     {

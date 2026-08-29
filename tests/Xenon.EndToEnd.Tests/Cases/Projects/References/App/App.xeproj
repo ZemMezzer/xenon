@@ -1,0 +1,9 @@
+[project]
+name = "Epic3App"
+type = "executable"
+
+[source]
+root = "src"
+
+[references]
+projects = ["../Middle/Middle.xeproj"]

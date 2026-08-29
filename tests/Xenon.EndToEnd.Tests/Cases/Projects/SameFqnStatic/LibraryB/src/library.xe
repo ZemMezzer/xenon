@@ -1,0 +1,9 @@
+namespace Shared;
+interface IValue { int Read(); }
+struct State : IValue
+{
+    public static int Value = 2;
+    public int Seed = 2;
+    public int Read() { return Seed; }
+}
+public int Value() { return 2; }

@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Numerics;
+using System.Text;
 using LLVMSharp.Interop;
 using Xenon.Compiler;
 using Xenon.Compiler.Semantics.Binding;
@@ -8,12 +9,15 @@ using Xenon.Compiler.Syntax;
 
 namespace Xenon.CodeGen.LLVM;
 
+public sealed record LlvmNativeExport(string Name, bool IsData = false);
+
 public sealed class LlvmIrGenerator
 {
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
     private readonly Dictionary<InterfaceTypeSymbol, LLVMTypeRef> _interfaceTypes = [];
+    private readonly Dictionary<InterfaceTypeSymbol, LLVMValueRef> _interfaceKeys = [];
     private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields = [];
     private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables = [];
     private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps = [];
@@ -21,20 +25,27 @@ public sealed class LlvmIrGenerator
     private LLVMModuleRef _module;
     private NativeTargetMachine? _targetMachine;
     private LlvmMemoryRuntime? _memoryRuntime;
+    private Compilation _compilation = null!;
+    private LLVMTypeRef _interfaceMapEntryType;
+    private IReadOnlyDictionary<NamespaceSymbol, LlvmNativeReference> _nativeReferences = null!;
+    private string _moduleIdentity = null!;
 
-    public string Generate(Compilation compilation, string moduleName = "xenon") =>
+    public string Generate(
+        Compilation compilation,
+        string moduleName = "xenon",
+        LlvmCodeGenerationOptions? codeGenerationOptions = null) =>
         GenerateModule(
             compilation,
             moduleName,
             targetMachine: null,
-            module => module.PrintToString(),
-            generateExecutableEntryPoint: false);
+            codeGenerationOptions,
+            module => module.PrintToString());
 
     public string GenerateForTarget(
         Compilation compilation,
         LlvmTargetOptions targetOptions,
         string moduleName = "xenon",
-        bool generateExecutableEntryPoint = false)
+        LlvmCodeGenerationOptions? codeGenerationOptions = null)
     {
         ArgumentNullException.ThrowIfNull(targetOptions);
         using NativeTargetMachine targetMachine = NativeTargetMachine.Create(targetOptions);
@@ -42,8 +53,8 @@ public sealed class LlvmIrGenerator
             compilation,
             moduleName,
             targetMachine,
-            module => module.PrintToString(),
-            generateExecutableEntryPoint);
+            codeGenerationOptions,
+            module => module.PrintToString());
     }
 
     /// <summary>Performs target-specific semantic validation and returns source-located diagnostics.</summary>
@@ -56,9 +67,50 @@ public sealed class LlvmIrGenerator
         return BindForTarget(compilation, target);
     }
 
+    /// <summary>Native implementation ABI required by source project references.</summary>
+    public static ImmutableArray<LlvmNativeExport> GetProjectNativeExports(
+        Compilation compilation,
+        string abiIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(compilation);
+        ArgumentException.ThrowIfNullOrWhiteSpace(abiIdentity);
+        var exports = ImmutableArray.CreateBuilder<LlvmNativeExport>();
+        foreach (BoundFunction bound in compilation.SemanticModel.Functions)
+        {
+            FunctionSymbol function = bound.Symbol;
+            if (compilation.IsSymbolDefinedHere(function) &&
+                (function.IsPublic || function.IsExport || function.FunctionKind == FunctionKind.InstanceInitializer))
+                exports.Add(new LlvmNativeExport(GetFunctionNativeName(function, abiIdentity)));
+        }
+        void AddTypeExports(NamespaceSymbol @namespace)
+        {
+            foreach (StructTypeSymbol type in @namespace.Structs
+                .Where(compilation.IsSymbolDefinedHere))
+            {
+                foreach (FieldSymbol field in type.StaticFields.Where(field => field.IsPublic))
+                    exports.Add(new LlvmNativeExport(MangleManagedName(
+                        abiIdentity, "static_field", GetStaticFieldSourceName(field)), IsData: true));
+                if (type.HasVirtualDispatch)
+                    exports.Add(new LlvmNativeExport(MangleManagedName(
+                        abiIdentity, "vtable", GetVirtualTableSourceName(type)), IsData: true));
+                if (type.ImplementedInterfaces.Any())
+                {
+                    foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces)
+                        exports.Add(new LlvmNativeExport(MangleManagedName(
+                            abiIdentity, "interface_table", GetInterfaceTableSourceName(type, @interface)), IsData: true));
+                    exports.Add(new LlvmNativeExport(MangleManagedName(
+                        abiIdentity, "interface_map", GetInterfaceMapSourceName(type)), IsData: true));
+                }
+            }
+            foreach (NamespaceSymbol child in @namespace.Namespaces) AddTypeExports(child);
+        }
+        AddTypeExports(compilation.SemanticModel.GlobalNamespace);
+        return exports.Distinct().OrderBy(item => item.Name, StringComparer.Ordinal).ToImmutableArray();
+    }
+
     private static Compilation BindForTarget(Compilation compilation, NativeTargetMachine target)
     {
-        using var layout = new LlvmTypeLayout(target);
+        LlvmTypeLayout layout = LlvmTypeLayout.Create(target);
         return compilation.WithTargetLayout(layout);
     }
 
@@ -66,8 +118,8 @@ public sealed class LlvmIrGenerator
         Compilation compilation,
         string moduleName,
         NativeTargetMachine? targetMachine,
-        Func<LLVMModuleRef, TResult> resultFactory,
-        bool generateExecutableEntryPoint)
+        LlvmCodeGenerationOptions? codeGenerationOptions,
+        Func<LLVMModuleRef, TResult> resultFactory)
     {
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentException.ThrowIfNullOrWhiteSpace(moduleName);
@@ -89,9 +141,15 @@ public sealed class LlvmIrGenerator
         if (compilation.RequiresTargetLayout)
             throw new LlvmCodeGenerationException("Constant evaluation requires a target layout; use GenerateForTarget or select a CLI target.");
 
+        IReadOnlyDictionary<NamespaceSymbol, LlvmNativeReference> nativeReferences =
+            ValidateNativeReferences(compilation, codeGenerationOptions);
+
         _context = LLVMContextRef.Create();
         _module = _context.CreateModuleWithName(moduleName);
         _targetMachine = targetMachine;
+        _compilation = compilation;
+        _moduleIdentity = codeGenerationOptions?.AbiIdentity ?? moduleName;
+        _nativeReferences = nativeReferences;
 
         try
         {
@@ -102,6 +160,9 @@ public sealed class LlvmIrGenerator
             }
 
             ValidateEnumStorage(compilation.SemanticModel.GlobalNamespace);
+            _interfaceMapEntryType = _context.CreateNamedStruct("__xenon.interface_map_entry");
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            _interfaceMapEntryType.StructSetBody([pointer, pointer], false);
             DeclareInterfaceTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareStructTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
@@ -109,7 +170,7 @@ public sealed class LlvmIrGenerator
             DeclareVirtualTables(compilation.SemanticModel.GlobalNamespace);
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
             EmitFunctionBodies(compilation.SemanticModel.Functions);
-            if (generateExecutableEntryPoint)
+            if (compilation.Options.OutputKind == CompilationOutputKind.Executable)
             {
                 EmitExecutableEntryPoint(compilation.SemanticModel.Functions);
             }
@@ -133,12 +194,110 @@ public sealed class LlvmIrGenerator
             _nativeFunctions.Clear();
             _structTypes.Clear();
             _interfaceTypes.Clear();
+            _interfaceKeys.Clear();
             _staticFields.Clear();
             _virtualTables.Clear();
             _interfaceMaps.Clear();
             _targetMachine = null;
             _memoryRuntime = null;
+            _nativeReferences = null!;
+            _moduleIdentity = null!;
         }
+    }
+
+    private static IReadOnlyDictionary<NamespaceSymbol, LlvmNativeReference> ValidateNativeReferences(
+        Compilation compilation,
+        LlvmCodeGenerationOptions? options)
+    {
+        var required = new HashSet<Compilation>(ReferenceEqualityComparer.Instance);
+        void Collect(Compilation current)
+        {
+            foreach (SourceCompilationReference reference in current.References.OfType<SourceCompilationReference>())
+                if (required.Add(reference.Compilation)) Collect(reference.Compilation);
+        }
+        Collect(compilation);
+
+        if (required.Count != 0 && options is null)
+            throw new LlvmCodeGenerationException(
+                "Missing native ABI metadata for referenced compilation snapshot(s).");
+
+        LlvmNativeReference[] supplied = options?.NativeReferences.ToArray() ?? [];
+        foreach (LlvmNativeReference reference in supplied)
+            if (!required.Contains(reference.Compilation))
+                throw new LlvmCodeGenerationException(
+                    "Native reference metadata does not match a semantic compilation reference snapshot.");
+        foreach (Compilation reference in required)
+            if (!supplied.Any(item => ReferenceEquals(item.Compilation, reference)))
+                throw new LlvmCodeGenerationException(
+                    "Missing native ABI metadata for an exact referenced compilation snapshot.");
+
+        var result = new Dictionary<NamespaceSymbol, LlvmNativeReference>(ReferenceEqualityComparer.Instance);
+        foreach (LlvmNativeReference reference in supplied)
+            result.Add(reference.Compilation.SemanticModel.GlobalNamespace, reference);
+        return result;
+    }
+
+    private bool IsSharedReference(Symbol symbol)
+    {
+        Symbol root = symbol;
+        while (root.ContainingSymbol is not null) root = root.ContainingSymbol;
+        return root is NamespaceSymbol @namespace &&
+            _nativeReferences.TryGetValue(@namespace, out LlvmNativeReference? reference) &&
+            reference.Kind == LlvmNativeReferenceKind.Shared;
+    }
+
+    private static string GetInterfaceKeySourceName(InterfaceTypeSymbol type) =>
+        $"{type.FullName}.__interface_key";
+
+    private static string GetInterfaceTableSourceName(
+        StructTypeSymbol type,
+        InterfaceTypeSymbol @interface) =>
+        $"{type.FullName}.{@interface.FullName}.__itable";
+
+    private static string GetStaticFieldSourceName(FieldSymbol field) =>
+        $"{field.ContainingType.FullName}.{field.Name}";
+
+    private static string GetVirtualTableSourceName(StructTypeSymbol type) =>
+        $"{type.FullName}.__vtable";
+
+    private static string GetInterfaceMapSourceName(StructTypeSymbol type) =>
+        $"{type.FullName}.__imap";
+
+    private static string MangleManagedName(
+        string abiIdentity,
+        string category,
+        string sourceIdentity) =>
+        $"__xenon_{category}_{Convert.ToHexString(Encoding.UTF8.GetBytes(abiIdentity))}_" +
+        Convert.ToHexString(Encoding.UTF8.GetBytes(sourceIdentity));
+
+    private string GetManagedName(Symbol owner, string category, string sourceIdentity) =>
+        MangleManagedName(GetAbiIdentity(owner), category, sourceIdentity);
+
+    private static string GetFunctionNativeName(FunctionSymbol function, string abiIdentity) =>
+        function.IsExtern || function.IsExport
+            ? NativeSymbolNames.Get(function)
+            : MangleManagedName(abiIdentity, "function", function.FullName);
+
+    private string GetFunctionNativeName(FunctionSymbol function) =>
+        GetFunctionNativeName(function, GetAbiIdentity(function));
+
+    private string GetAbiIdentity(Symbol symbol)
+    {
+        Symbol root = symbol;
+        while (root.ContainingSymbol is not null) root = root.ContainingSymbol;
+        if (ReferenceEquals(root, _compilation.SemanticModel.GlobalNamespace)) return _moduleIdentity;
+        if (root is NamespaceSymbol @namespace &&
+            _nativeReferences.TryGetValue(@namespace, out LlvmNativeReference? reference))
+            return reference.AbiIdentity;
+        throw new LlvmCodeGenerationException(
+            $"Missing native ABI metadata for symbol '{symbol.QualifiedName}'.");
+    }
+
+    private string GetInterfaceRuntimeIdentity(InterfaceTypeSymbol type)
+    {
+        string moduleIdentity = GetAbiIdentity(type);
+        int byteLength = Encoding.UTF8.GetByteCount(moduleIdentity);
+        return $"{byteLength}:{moduleIdentity}:{type.FullName}";
     }
 
     private void DeclareStructTypes(NamespaceSymbol globalNamespace)
@@ -147,7 +306,10 @@ public sealed class LlvmIrGenerator
         CollectStructTypes(globalNamespace, types);
         foreach (StructTypeSymbol type in types)
         {
-            _structTypes.Add(type, _context.CreateNamedStruct(type.FullName));
+            string typeName = _compilation.IsSymbolDefinedHere(type)
+                ? type.FullName
+                : GetManagedName(type, "ir_type", type.FullName);
+            _structTypes.Add(type, _context.CreateNamedStruct(typeName));
         }
 
         foreach (StructTypeSymbol type in types)
@@ -161,9 +323,23 @@ public sealed class LlvmIrGenerator
     {
         foreach (InterfaceTypeSymbol type in @namespace.Interfaces)
         {
-            LLVMTypeRef llvmType = _context.CreateNamedStruct(type.FullName);
+            string typeName = _compilation.IsSymbolDefinedHere(type)
+                ? type.FullName
+                : GetManagedName(type, "ir_type", type.FullName);
+            LLVMTypeRef llvmType = _context.CreateNamedStruct(typeName);
             llvmType.StructSetBody([LLVMTypeRef.CreatePointer(_context.Int8Type, 0), LLVMTypeRef.CreatePointer(_context.Int8Type, 0)], false);
             _interfaceTypes.Add(type, llvmType);
+
+            byte[] identity = Encoding.UTF8.GetBytes(GetInterfaceRuntimeIdentity(type) + '\0');
+            LLVMTypeRef keyType = LLVMTypeRef.CreateArray(_context.Int8Type, (uint)identity.Length);
+            LLVMValueRef key = _module.AddGlobal(keyType, GetManagedName(
+                type, "interface_key", GetInterfaceKeySourceName(type)));
+            key.Linkage = LLVMLinkage.LLVMInternalLinkage;
+            key.IsGlobalConstant = true;
+            key.Initializer = LLVMValueRef.CreateConstArray(
+                _context.Int8Type,
+                identity.Select(value => LLVMValueRef.CreateConstInt(_context.Int8Type, value, false)).ToArray());
+            _interfaceKeys.Add(type, key);
         }
         foreach (NamespaceSymbol child in @namespace.Namespaces)
             DeclareInterfaceTypes(child);
@@ -175,14 +351,21 @@ public sealed class LlvmIrGenerator
         {
             LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)type.VirtualMethods.Length + 1);
-            LLVMValueRef table = _module.AddGlobal(tableType, $"{type.FullName}.__vtable");
-            table.Linkage = LLVMLinkage.LLVMInternalLinkage;
-            // The runtime interface map precedes the virtual method slots.
-            // Object layout still needs only one dispatch pointer.
-            LLVMValueRef[] entries = [
-                _interfaceMaps.TryGetValue(type, out LlvmVTable map) ? map.Value : LLVMValueRef.CreateConstPointerNull(elementType),
-                .. type.VirtualMethods.Select(method => _functions[method].Value)];
-            table.Initializer = LLVMValueRef.CreateConstArray(elementType, entries);
+            LLVMValueRef table = _module.AddGlobal(tableType, GetManagedName(
+                type, "vtable", GetVirtualTableSourceName(type)));
+            bool owned = _compilation.IsSymbolDefinedHere(type);
+            table.Linkage = LLVMLinkage.LLVMExternalLinkage;
+            if (owned)
+            {
+                // The runtime interface map precedes the virtual method slots.
+                // Object layout still needs only one dispatch pointer.
+                LLVMValueRef[] entries = [
+                    _interfaceMaps.TryGetValue(type, out LlvmVTable map) ? map.Value : LLVMValueRef.CreateConstPointerNull(elementType),
+                    .. type.VirtualMethods.Select(method => _functions[method].Value)];
+                table.Initializer = LLVMValueRef.CreateConstArray(elementType, entries);
+            }
+            else if (IsWindowsTarget() && IsSharedReference(type))
+                table.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
             _virtualTables.Add(type, new LlvmVTable(table, tableType));
         }
         foreach (NamespaceSymbol child in @namespace.Namespaces)
@@ -194,30 +377,44 @@ public sealed class LlvmIrGenerator
         foreach (StructTypeSymbol type in @namespace.Structs)
         {
             var tables = new Dictionary<InterfaceTypeSymbol, LlvmVTable>();
-            foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces)
+            bool owned = _compilation.IsSymbolDefinedHere(type);
+            foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces
+                .OrderBy(item => item.FullName, StringComparer.Ordinal))
             {
-                FunctionSymbol[] implementations = @interface.AllMethods.Select(required => type.FindInterfaceImplementation(required)!).ToArray();
                 LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+                FunctionSymbol[] implementations = @interface.AllMethods
+                    .Select(required => type.FindInterfaceImplementation(required)!).ToArray();
                 LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)implementations.Length);
-                LLVMValueRef table = _module.AddGlobal(tableType, $"{type.FullName}.{@interface.Name}.__itable");
-                table.Linkage = LLVMLinkage.LLVMInternalLinkage;
-                table.Initializer = LLVMValueRef.CreateConstArray(elementType, implementations.Select(method => _functions[method].Value).ToArray());
+                LLVMValueRef table = _module.AddGlobal(
+                    tableType, GetManagedName(
+                        type, "interface_table", GetInterfaceTableSourceName(type, @interface)));
+                table.Linkage = LLVMLinkage.LLVMExternalLinkage;
+                if (owned)
+                    table.Initializer = LLVMValueRef.CreateConstArray(elementType,
+                        implementations.Select(method => _functions[method].Value).ToArray());
+                else if (IsWindowsTarget() && IsSharedReference(type))
+                    table.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
                 tables.Add(@interface, new LlvmVTable(table, tableType));
             }
 
             if (tables.Count > 0)
             {
-                LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-                LLVMTypeRef mapType = LLVMTypeRef.CreateArray(entryType, (uint)_interfaceTypes.Count);
-                LLVMValueRef[] entries = Enumerable.Repeat(
-                    LLVMValueRef.CreateConstPointerNull(entryType),
-                    _interfaceTypes.Count).ToArray();
-                foreach ((InterfaceTypeSymbol @interface, LlvmVTable table) in tables)
-                    entries[@interface.DispatchId] = table.Value;
+                LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+                LLVMTypeRef mapType = LLVMTypeRef.CreateArray(_interfaceMapEntryType, (uint)tables.Count + 1);
+                LLVMValueRef[] entries = tables
+                    .OrderBy(pair => pair.Key.FullName, StringComparer.Ordinal)
+                    .Select(pair => LLVMValueRef.CreateConstNamedStruct(
+                        _interfaceMapEntryType, [_interfaceKeys[pair.Key], pair.Value.Value]))
+                    .Append(LLVMValueRef.CreateConstNamedStruct(_interfaceMapEntryType,
+                        [LLVMValueRef.CreateConstPointerNull(pointerType), LLVMValueRef.CreateConstPointerNull(pointerType)]))
+                    .ToArray();
 
-                LLVMValueRef map = _module.AddGlobal(mapType, $"{type.FullName}.__imap");
-                map.Linkage = LLVMLinkage.LLVMInternalLinkage;
-                map.Initializer = LLVMValueRef.CreateConstArray(entryType, entries);
+                LLVMValueRef map = _module.AddGlobal(mapType, GetManagedName(
+                    type, "interface_map", GetInterfaceMapSourceName(type)));
+                map.Linkage = LLVMLinkage.LLVMExternalLinkage;
+                if (owned) map.Initializer = LLVMValueRef.CreateConstArray(_interfaceMapEntryType, entries);
+                else if (IsWindowsTarget() && IsSharedReference(type))
+                    map.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
                 _interfaceMaps.Add(type, new LlvmVTable(map, mapType));
             }
         }
@@ -232,9 +429,14 @@ public sealed class LlvmIrGenerator
             foreach (FieldSymbol field in type.StaticFields)
             {
                 LLVMTypeRef fieldType = MapType(field.Type);
-                LLVMValueRef global = _module.AddGlobal(fieldType, $"{type.FullName}.{field.Name}");
-                global.Linkage = field.IsPublic ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
-                global.Initializer = CreateStaticInitializer(field.Type, field.ConstantValue);
+                LLVMValueRef global = _module.AddGlobal(fieldType, GetManagedName(
+                    field, "static_field", GetStaticFieldSourceName(field)));
+                bool owned = _compilation.IsSymbolDefinedHere(field);
+                global.Linkage = !owned || field.IsPublic
+                    ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
+                if (owned) global.Initializer = CreateStaticInitializer(field.Type, field.ConstantValue);
+                else if (IsWindowsTarget() && IsSharedReference(field))
+                    global.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
                 _staticFields.Add(field, global);
             }
         }
@@ -334,7 +536,7 @@ public sealed class LlvmIrGenerator
 
         parameterTypes.AddRange(function.Parameters.Select(parameter => MapType(parameter.Type)));
         LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, [.. parameterTypes], false);
-        string nativeName = NativeSymbolNames.Get(function);
+        string nativeName = GetFunctionNativeName(function);
         if (_nativeFunctions.TryGetValue(nativeName, out LlvmFunction existing))
         {
             if (!function.IsExtern || existing.Type != functionType)
@@ -343,7 +545,12 @@ public sealed class LlvmIrGenerator
             return;
         }
         LLVMValueRef value = _module.AddFunction(nativeName, functionType);
-        if (function.IsAbstract)
+        bool owned = _compilation.IsSymbolDefinedHere(function);
+        if (!owned)
+        {
+            value.Linkage = LLVMLinkage.LLVMExternalLinkage;
+        }
+        else if (function.IsAbstract)
         {
             value.Linkage = LLVMLinkage.LLVMInternalLinkage;
             using LLVMBuilderRef builder = _context.CreateBuilder();
@@ -351,7 +558,8 @@ public sealed class LlvmIrGenerator
             builder.PositionAtEnd(entry);
             builder.BuildUnreachable();
         }
-        else if (!function.IsExtern && !function.IsExport && !function.IsPublic)
+        else if (!function.IsExtern && !function.IsExport && !function.IsPublic &&
+                 function.FunctionKind != FunctionKind.InstanceInitializer)
         {
             value.Linkage = LLVMLinkage.LLVMInternalLinkage;
         }
@@ -383,10 +591,12 @@ public sealed class LlvmIrGenerator
                 _staticFields,
                 _virtualTables,
                 _interfaceMaps,
-                _interfaceTypes.Count,
+                _interfaceKeys,
+                _interfaceMapEntryType,
                 MapType,
                 GetOrDeclareMemoryRuntime,
                 GetOrDeclareTrap,
+                GetOrDeclareStringCompare,
                 GetAbiSize,
                 GetAbiAlignment,
                 GetFieldOffset,
@@ -649,6 +859,22 @@ public sealed class LlvmIrGenerator
             : _module.AddFunction("llvm.trap", LLVMTypeRef.CreateFunction(_context.VoidType, [], false));
     }
 
+    private LlvmFunction GetOrDeclareStringCompare()
+    {
+        const string name = "strcmp";
+        LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+        LLVMTypeRef type = LLVMTypeRef.CreateFunction(_context.Int32Type, [pointer, pointer], false);
+        if (_nativeFunctions.TryGetValue(name, out LlvmFunction existing))
+        {
+            if (existing.Type != type)
+                throw new LlvmCodeGenerationException("Native symbol 'strcmp' has an incompatible declaration.");
+            return existing;
+        }
+        var function = new LlvmFunction(_module.AddFunction(name, type), type);
+        _nativeFunctions.Add(name, function);
+        return function;
+    }
+
     private int GetPointerBitWidth() => _targetMachine?.PointerBitWidth
         ?? throw new LlvmCodeGenerationException(
             "Target-dependent integer types require a configured LLVM target machine.");
@@ -680,10 +906,12 @@ public sealed class LlvmIrGenerator
         private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields;
         private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables;
         private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps;
-        private readonly int _interfaceCount;
+        private readonly Dictionary<InterfaceTypeSymbol, LLVMValueRef> _interfaceKeys;
+        private readonly LLVMTypeRef _interfaceMapEntryType;
         private readonly Func<TypeSymbol, LLVMTypeRef> _mapType;
         private readonly Func<LlvmMemoryRuntime> _getMemoryRuntime;
         private readonly Func<LLVMValueRef> _getTrap;
+        private readonly Func<LlvmFunction> _getStringCompare;
         private readonly Func<TypeSymbol, ulong> _getAbiSize;
         private readonly Func<TypeSymbol, uint> _getAbiAlignment;
         private readonly Func<StructTypeSymbol, FieldSymbol, ulong> _getFieldOffset;
@@ -708,10 +936,12 @@ public sealed class LlvmIrGenerator
             Dictionary<FieldSymbol, LLVMValueRef> staticFields,
             Dictionary<StructTypeSymbol, LlvmVTable> virtualTables,
             Dictionary<StructTypeSymbol, LlvmVTable> interfaceMaps,
-            int interfaceCount,
+            Dictionary<InterfaceTypeSymbol, LLVMValueRef> interfaceKeys,
+            LLVMTypeRef interfaceMapEntryType,
             Func<TypeSymbol, LLVMTypeRef> mapType,
             Func<LlvmMemoryRuntime> getMemoryRuntime,
             Func<LLVMValueRef> getTrap,
+            Func<LlvmFunction> getStringCompare,
             Func<TypeSymbol, ulong> getAbiSize,
             Func<TypeSymbol, uint> getAbiAlignment,
             Func<StructTypeSymbol, FieldSymbol, ulong> getFieldOffset,
@@ -725,10 +955,12 @@ public sealed class LlvmIrGenerator
             _staticFields = staticFields;
             _virtualTables = virtualTables;
             _interfaceMaps = interfaceMaps;
-            _interfaceCount = interfaceCount;
+            _interfaceKeys = interfaceKeys;
+            _interfaceMapEntryType = interfaceMapEntryType;
             _mapType = mapType;
             _getMemoryRuntime = getMemoryRuntime;
             _getTrap = getTrap;
+            _getStringCompare = getStringCompare;
             _getAbiSize = getAbiSize;
             _getAbiAlignment = getAbiAlignment;
             _getFieldOffset = getFieldOffset;
@@ -2044,11 +2276,7 @@ public sealed class LlvmIrGenerator
             LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
             LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMTypeRef mapType = LLVMTypeRef.CreateArray(entryType, (uint)_interfaceCount);
-            LLVMValueRef tableAddress = _builder.BuildGEP2(mapType, map,
-                new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.DispatchId, false) },
-                "interface.table.address");
-            LLVMValueRef table = _builder.BuildLoad2(entryType, tableAddress, "interface.table");
+            LLVMValueRef table = EmitInterfaceTableLookup(map, expression.InterfaceType);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length);
             LLVMValueRef address = _builder.BuildGEP2(tableType, table,
                 new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(expression.Method), false) },
@@ -2073,17 +2301,7 @@ public sealed class LlvmIrGenerator
             LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
             LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMTypeRef mapType = LLVMTypeRef.CreateArray(entryType, (uint)_interfaceCount);
-            LLVMValueRef tableAddress = _builder.BuildGEP2(
-                mapType,
-                map,
-                new LLVMValueRef[]
-                {
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false),
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.DispatchId, false),
-                },
-                "interface.table.address");
-            LLVMValueRef table = _builder.BuildLoad2(entryType, tableAddress, "interface.table");
+            LLVMValueRef table = EmitInterfaceTableLookup(map, expression.InterfaceType);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length);
             LLVMValueRef address = _builder.BuildGEP2(
                 tableType,
@@ -2112,17 +2330,7 @@ public sealed class LlvmIrGenerator
             LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
             LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMTypeRef mapType = LLVMTypeRef.CreateArray(entryType, (uint)_interfaceCount);
-            LLVMValueRef tableAddress = _builder.BuildGEP2(
-                mapType,
-                map,
-                new LLVMValueRef[]
-                {
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false),
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.DispatchId, false),
-                },
-                "interface.table.address");
-            LLVMValueRef table = _builder.BuildLoad2(entryType, tableAddress, "interface.table");
+            LLVMValueRef table = EmitInterfaceTableLookup(map, expression.InterfaceType);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length);
             LLVMValueRef address = _builder.BuildGEP2(
                 tableType,
@@ -2216,17 +2424,7 @@ public sealed class LlvmIrGenerator
             string name)
         {
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMTypeRef mapType = LLVMTypeRef.CreateArray(entryType, (uint)_interfaceCount);
-            LLVMValueRef tableAddress = _builder.BuildGEP2(
-                mapType,
-                map,
-                new LLVMValueRef[]
-                {
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false),
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)interfaceType.DispatchId, false),
-                },
-                "interface.table.address");
-            LLVMValueRef table = _builder.BuildLoad2(entryType, tableAddress, "interface.table");
+            LLVMValueRef table = EmitInterfaceTableLookup(map, interfaceType);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)interfaceType.AllMethods.Length);
             LLVMValueRef functionAddress = _builder.BuildGEP2(
                 tableType,
@@ -2245,6 +2443,81 @@ public sealed class LlvmIrGenerator
             callArguments[0] = data;
             arguments.CopyTo(callArguments, 1);
             return _builder.BuildCall2(signature, function, callArguments, name);
+        }
+
+        private LLVMValueRef EmitInterfaceTableLookup(
+            LLVMValueRef map,
+            InterfaceTypeSymbol interfaceType)
+        {
+            LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef indexAddress = _builder.BuildAlloca(_context.Int32Type, "interface.lookup.index");
+            LLVMValueRef resultAddress = _builder.BuildAlloca(pointerType, "interface.lookup.result");
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), indexAddress);
+
+            LLVMBasicBlockRef condition = _llvmFunction.AppendBasicBlock("interface.lookup.condition");
+            LLVMBasicBlockRef compare = _llvmFunction.AppendBasicBlock("interface.lookup.compare");
+            LLVMBasicBlockRef found = _llvmFunction.AppendBasicBlock("interface.lookup.found");
+            LLVMBasicBlockRef next = _llvmFunction.AppendBasicBlock("interface.lookup.next");
+            LLVMBasicBlockRef missing = _llvmFunction.AppendBasicBlock("interface.lookup.missing");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("interface.lookup.end");
+            _builder.BuildBr(condition);
+
+            _builder.PositionAtEnd(condition);
+            LLVMValueRef index = _builder.BuildLoad2(_context.Int32Type, indexAddress, "interface.lookup.current");
+            LLVMValueRef entry = _builder.BuildGEP2(
+                _interfaceMapEntryType,
+                map,
+                new LLVMValueRef[] { index },
+                "interface.map.entry");
+            LLVMValueRef key = _builder.BuildLoad2(
+                pointerType,
+                _builder.BuildStructGEP2(_interfaceMapEntryType, entry, 0, "interface.map.key.address"),
+                "interface.map.key");
+            _builder.BuildCondBr(
+                _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, key,
+                    LLVMValueRef.CreateConstPointerNull(pointerType), "interface.map.end"),
+                missing,
+                compare);
+
+            _builder.PositionAtEnd(compare);
+            LlvmFunction stringCompare = _getStringCompare();
+            LLVMValueRef identityComparison = _builder.BuildCall2(
+                stringCompare.Type,
+                stringCompare.Value,
+                new LLVMValueRef[] { key, _interfaceKeys[interfaceType] },
+                "interface.key.compare");
+            _builder.BuildCondBr(
+                _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, identityComparison,
+                    LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false),
+                    "interface.map.match"),
+                found,
+                next);
+
+            _builder.PositionAtEnd(found);
+            LLVMValueRef table = _builder.BuildLoad2(
+                pointerType,
+                _builder.BuildStructGEP2(_interfaceMapEntryType, entry, 1, "interface.map.table.address"),
+                "interface.map.table");
+            _builder.BuildStore(table, resultAddress);
+            _builder.BuildBr(end);
+
+            _builder.PositionAtEnd(next);
+            _builder.BuildStore(
+                _builder.BuildAdd(index, LLVMValueRef.CreateConstInt(_context.Int32Type, 1, false),
+                    "interface.lookup.increment"),
+                indexAddress);
+            _builder.BuildBr(condition);
+
+            _builder.PositionAtEnd(missing);
+            _builder.BuildCall2(
+                LLVMTypeRef.CreateFunction(_context.VoidType, [], false),
+                _getTrap(),
+                Array.Empty<LLVMValueRef>(),
+                string.Empty);
+            _builder.BuildUnreachable();
+
+            _builder.PositionAtEnd(end);
+            return _builder.BuildLoad2(pointerType, resultAddress, "interface.table");
         }
 
         private LLVMValueRef EmitInstanceAccessorCall(

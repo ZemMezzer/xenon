@@ -1,8 +1,10 @@
+using System.Collections.Frozen;
+
 namespace Xenon.Compiler.Syntax;
 
 public static class SyntaxFacts
 {
-    private static readonly IReadOnlyDictionary<string, SyntaxKind> Keywords =
+    private static readonly FrozenDictionary<string, SyntaxKind> Keywords =
         new Dictionary<string, SyntaxKind>(StringComparer.Ordinal)
         {
             ["using"] = SyntaxKind.UsingKeyword,
@@ -60,7 +62,7 @@ public static class SyntaxFacts
             ["bitcast"] = SyntaxKind.BitCastKeyword,
             ["new"] = SyntaxKind.NewKeyword,
             ["free"] = SyntaxKind.FreeKeyword,
-        };
+        }.ToFrozenDictionary(StringComparer.Ordinal);
 
     public static SyntaxKind GetKeywordKind(string text) =>
         Keywords.TryGetValue(text, out SyntaxKind kind) ? kind : SyntaxKind.IdentifierToken;

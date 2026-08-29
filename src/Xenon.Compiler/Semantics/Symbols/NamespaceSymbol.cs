@@ -6,9 +6,9 @@ namespace Xenon.Compiler.Semantics.Symbols;
 public sealed class NamespaceSymbol : Symbol
 {
     private readonly Dictionary<string, NamespaceSymbol> _namespaces = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, FunctionSymbol> _functions = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, DeclaredTypeSymbol> _types = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ConstantSymbol> _constants = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<FunctionSymbol>> _functions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<DeclaredTypeSymbol>> _types = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<ConstantSymbol>> _constants = new(StringComparer.Ordinal);
 
     internal NamespaceSymbol(string name, NamespaceSymbol? parent)
         : base(name, SymbolKind.Namespace, parent)
@@ -27,15 +27,15 @@ public sealed class NamespaceSymbol : Symbol
 
     public IReadOnlyCollection<NamespaceSymbol> Namespaces => _namespaces.Values;
 
-    public IReadOnlyCollection<FunctionSymbol> Functions => _functions.Values;
+    public IReadOnlyCollection<FunctionSymbol> Functions => _functions.Values.SelectMany(items => items).ToArray();
 
-    public IReadOnlyCollection<DeclaredTypeSymbol> Types => _types.Values;
+    public IReadOnlyCollection<DeclaredTypeSymbol> Types => _types.Values.SelectMany(items => items).ToArray();
 
-    public IReadOnlyCollection<StructTypeSymbol> Structs => _types.Values.OfType<StructTypeSymbol>().ToArray();
+    public IReadOnlyCollection<StructTypeSymbol> Structs => Types.OfType<StructTypeSymbol>().ToArray();
 
-    public IReadOnlyCollection<InterfaceTypeSymbol> Interfaces => _types.Values.OfType<InterfaceTypeSymbol>().ToArray();
-    public IReadOnlyCollection<ConstantSymbol> Constants => _constants.Values;
-    public IReadOnlyCollection<EnumTypeSymbol> Enums => _types.Values.OfType<EnumTypeSymbol>().ToArray();
+    public IReadOnlyCollection<InterfaceTypeSymbol> Interfaces => Types.OfType<InterfaceTypeSymbol>().ToArray();
+    public IReadOnlyCollection<ConstantSymbol> Constants => _constants.Values.SelectMany(items => items).ToArray();
+    public IReadOnlyCollection<EnumTypeSymbol> Enums => Types.OfType<EnumTypeSymbol>().ToArray();
 
     internal NamespaceSymbol? FindNamespace(string name) => _namespaces.GetValueOrDefault(name);
 
@@ -50,13 +50,52 @@ public sealed class NamespaceSymbol : Symbol
         return @namespace;
     }
 
-    internal bool TryDeclareFunction(FunctionSymbol function) => _functions.TryAdd(function.Name, function);
+    /// <summary>Builds a compilation-local namespace facade over public symbols from a referenced snapshot.</summary>
+    internal void ImportPublicMembers(NamespaceSymbol source)
+    {
+        foreach (NamespaceSymbol child in source.Namespaces.OrderBy(item => item.Name, StringComparer.Ordinal))
+            GetOrAddNamespace(child.Name).ImportPublicMembers(child);
+        foreach (DeclaredTypeSymbol type in source.Types.OrderBy(item => item.Name, StringComparer.Ordinal))
+            AddCandidate(_types, type.Name, type);
+        foreach (FunctionSymbol function in source.Functions.Where(item => item.IsPublic)
+            .OrderBy(item => item.Name, StringComparer.Ordinal))
+            AddCandidate(_functions, function.Name, function);
+        foreach (ConstantSymbol constant in source.Constants.OrderBy(item => item.Name, StringComparer.Ordinal))
+            AddCandidate(_constants, constant.Name, constant);
+    }
 
-    internal FunctionSymbol? FindFunction(string name) => _functions.GetValueOrDefault(name);
-    internal bool TryDeclareConstant(ConstantSymbol constant) => _constants.TryAdd(constant.Name, constant);
-    internal ConstantSymbol? FindConstant(string name) => _constants.GetValueOrDefault(name);
+    internal bool TryDeclareFunction(FunctionSymbol function) =>
+        TryDeclare(_functions, function.Name, function);
 
-    internal bool TryDeclareType(DeclaredTypeSymbol type) => _types.TryAdd(type.Name, type);
+    internal FunctionSymbol? FindFunction(string name) =>
+        FindSingle(_functions, name);
+    internal IReadOnlyList<FunctionSymbol> FindFunctions(string name) =>
+        _functions.GetValueOrDefault(name) ?? [];
+    internal bool TryDeclareConstant(ConstantSymbol constant) =>
+        TryDeclare(_constants, constant.Name, constant);
+    internal ConstantSymbol? FindConstant(string name) => FindSingle(_constants, name);
+    internal IReadOnlyList<ConstantSymbol> FindConstants(string name) => _constants.GetValueOrDefault(name) ?? [];
 
-    internal DeclaredTypeSymbol? FindAnyType(string name) => _types.GetValueOrDefault(name);
+    internal bool TryDeclareType(DeclaredTypeSymbol type) => TryDeclare(_types, type.Name, type);
+
+    internal DeclaredTypeSymbol? FindAnyType(string name) => FindSingle(_types, name);
+    internal IReadOnlyList<DeclaredTypeSymbol> FindTypes(string name) => _types.GetValueOrDefault(name) ?? [];
+
+    private static void AddCandidate<T>(Dictionary<string, List<T>> dictionary, string name, T value)
+    {
+        if (!dictionary.TryGetValue(name, out List<T>? candidates))
+            dictionary.Add(name, [value]);
+        else if (!candidates.Contains(value))
+            candidates.Add(value);
+    }
+
+    private static bool TryDeclare<T>(Dictionary<string, List<T>> dictionary, string name, T value)
+    {
+        if (dictionary.ContainsKey(name)) return false;
+        dictionary.Add(name, [value]);
+        return true;
+    }
+
+    private static T? FindSingle<T>(Dictionary<string, List<T>> dictionary, string name) where T : class =>
+        dictionary.TryGetValue(name, out List<T>? candidates) && candidates.Count == 1 ? candidates[0] : null;
 }

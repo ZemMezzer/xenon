@@ -19,9 +19,10 @@ public sealed record XenonBuildProfile(
     public static XenonBuildProfile Release { get; } = new(3, false, false);
 }
 
-public sealed class XenonProject
+/// <summary>Normalized immutable project configuration shared by build and tooling consumers.</summary>
+public class ProjectConfiguration
 {
-    internal XenonProject(
+    public ProjectConfiguration(
         string name,
         XenonProjectType type,
         string? version,
@@ -31,6 +32,7 @@ public sealed class XenonProject
         ImmutableArray<string> sourceFiles,
         ImmutableArray<string> nativeLibraries,
         ImmutableArray<string> nativeLibraryPaths,
+        ImmutableArray<string> projectReferences,
         XenonBuildProfile debugProfile,
         XenonBuildProfile releaseProfile)
     {
@@ -43,6 +45,7 @@ public sealed class XenonProject
         SourceFiles = sourceFiles;
         NativeLibraries = nativeLibraries;
         NativeLibraryPaths = nativeLibraryPaths;
+        ProjectReferences = projectReferences;
         DebugProfile = debugProfile;
         ReleaseProfile = releaseProfile;
     }
@@ -65,6 +68,10 @@ public sealed class XenonProject
 
     public ImmutableArray<string> NativeLibraryPaths { get; }
 
+    public ImmutableArray<string> ProjectReferences { get; }
+
+    public string Identity => ProjectFilePath ?? $"implicit:{RootDirectory}";
+
     public XenonBuildProfile DebugProfile { get; }
 
     public XenonBuildProfile ReleaseProfile { get; }
@@ -77,4 +84,18 @@ public sealed class XenonProject
         "release" => ReleaseProfile,
         _ => throw new ProjectSystemException($"unknown build profile '{name}'"),
     };
+}
+
+/// <summary>Compatibility name for the normalized project configuration.</summary>
+public sealed class XenonProject : ProjectConfiguration
+{
+    public XenonProject(string name, XenonProjectType type, string? version, string rootDirectory,
+        string sourceRoot, string? projectFilePath, ImmutableArray<string> sourceFiles,
+        ImmutableArray<string> nativeLibraries, ImmutableArray<string> nativeLibraryPaths,
+        ImmutableArray<string> projectReferences, XenonBuildProfile debugProfile,
+        XenonBuildProfile releaseProfile)
+        : base(name, type, version, rootDirectory, sourceRoot, projectFilePath, sourceFiles,
+            nativeLibraries, nativeLibraryPaths, projectReferences, debugProfile, releaseProfile)
+    {
+    }
 }

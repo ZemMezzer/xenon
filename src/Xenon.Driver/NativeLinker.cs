@@ -80,14 +80,25 @@ public sealed class NativeLinker
 
         string artifactPath = Path.GetFullPath(outputPath);
         Directory.CreateDirectory(Path.GetDirectoryName(artifactPath)!);
-        string temporaryPath = CreateTemporaryPath(artifactPath);
         bool hasExports = (options.ExportedSymbols?.Count ?? 0) > 0;
         string? finalImportLibraryPath = importLibraryPath is null || !hasExports
             ? null
             : Path.GetFullPath(importLibraryPath);
+        // PE import tables embed the DLL basename passed to LINK. Keep the final
+        // basename while isolating the unpublished output in a temporary directory.
+        string? temporaryDirectory = OperatingSystem.IsWindows() && kind == NativeArtifactKind.SharedLibrary
+            ? Path.Combine(Path.GetDirectoryName(artifactPath)!,
+                $".x-{Guid.NewGuid():N}"[..11])
+            : null;
+        if (temporaryDirectory is not null) Directory.CreateDirectory(temporaryDirectory);
+        string temporaryPath = temporaryDirectory is null
+            ? CreateTemporaryPath(artifactPath)
+            : Path.Combine(temporaryDirectory, Path.GetFileName(artifactPath));
         string? temporaryImportLibraryPath = finalImportLibraryPath is null
             ? null
-            : CreateTemporaryPath(finalImportLibraryPath);
+            : temporaryDirectory is null
+                ? CreateTemporaryPath(finalImportLibraryPath)
+                : Path.Combine(temporaryDirectory, Path.GetFileName(finalImportLibraryPath));
 
         LinkerCommand command = CreateHostCommand(
             objectPath, temporaryPath, targetTriple, kind, options, temporaryImportLibraryPath);
@@ -133,6 +144,8 @@ public sealed class NativeLinker
             {
                 DeleteIfExists(Path.ChangeExtension(temporaryImportLibraryPath, ".exp"));
             }
+            if (temporaryDirectory is not null && Directory.Exists(temporaryDirectory))
+                Directory.Delete(temporaryDirectory, recursive: false);
         }
     }
 

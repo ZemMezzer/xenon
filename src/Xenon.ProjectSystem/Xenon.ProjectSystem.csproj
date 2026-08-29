@@ -2,4 +2,7 @@
   <PropertyGroup>
     <RootNamespace>Xenon.ProjectSystem</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Xenon.Compiler/Xenon.Compiler.csproj" />
+  </ItemGroup>
 </Project>
