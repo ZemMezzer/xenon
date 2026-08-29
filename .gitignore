@@ -71,3 +71,4 @@ src/Xenon.Driver/bin
 src/Xenon.Driver/obj
 Xenon.sln.DotSettings.user
 out
+.xenon-test-sandboxes/
