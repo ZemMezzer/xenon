@@ -5,7 +5,7 @@ namespace Xenon.LanguageServer.Tests;
 public sealed class DiscoveryAndSnapshotTests
 {
     [Fact]
-    public void DiscoveryPrefersWorkspaceOverNearerProject()
+    public void DiscoveryPrefersNearerProjectOverAncestorWorkspace()
     {
         using var directory = new TestDirectory();
         directory.Write("App/src/main.xe", "fn main() {}\n");
@@ -26,9 +26,49 @@ public sealed class DiscoveryAndSnapshotTests
 
         using (result.Workspace)
         {
+            Assert.Equal(System.IO.Path.GetFullPath(project), result.ConfigurationPath);
+            Assert.Null(result.Workspace!.Configuration);
+        }
+    }
+
+    [Fact]
+    public void DiscoveryPrefersNearerWorkspaceOverAncestorProject()
+    {
+        using var directory = new TestDirectory();
+        directory.Write("src/root.xe", "namespace Root;\n");
+        directory.Write("Root.xeproj", Project("Root", "src"));
+        directory.Write("Child/src/main.xe", "namespace Child;\n");
+        directory.Write("Child/Child.xeproj", Project("Child", "src"));
+        string workspace = directory.Write("Child/Child.xws", """
+            [workspace]
+            projects = ["Child.xeproj"]
+            """);
+
+        WorkspaceDiscoveryResult result = WorkspaceDiscovery.Discover(null, null,
+            directory.PathOf("Child/src"));
+
+        using (result.Workspace)
+        {
             Assert.Equal(System.IO.Path.GetFullPath(workspace), result.ConfigurationPath);
             Assert.NotNull(result.Workspace!.Configuration);
         }
+    }
+
+    [Fact]
+    public void DiscoveryUsesWorkspaceAsSameDirectoryTieBreaker()
+    {
+        using var directory = new TestDirectory();
+        directory.Write("src/main.xe", "namespace App;\n");
+        directory.Write("App.xeproj", Project("App", "src"));
+        string workspace = directory.Write("App.xws", """
+            [workspace]
+            projects = ["App.xeproj"]
+            """);
+
+        WorkspaceDiscoveryResult result = WorkspaceDiscovery.Discover(null, null, directory.Path);
+
+        using (result.Workspace)
+            Assert.Equal(System.IO.Path.GetFullPath(workspace), result.ConfigurationPath);
     }
 
     [Fact]
@@ -63,4 +103,12 @@ public sealed class DiscoveryAndSnapshotTests
         Assert.True(next.Snapshot.Generation.Value > captured.Value);
         Assert.Equal(new DocumentVersion(1), next.Document.Version);
     }
+
+    private static string Project(string name, string sourceRoot) => $$"""
+        [project]
+        name = "{{name}}"
+        type = "executable"
+        [source]
+        root = "{{sourceRoot}}"
+        """;
 }

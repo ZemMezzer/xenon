@@ -243,6 +243,25 @@ public sealed class WorkspaceMemberRelationshipIndex
             .ThenBy(item => item.DeclarationIdentity, StringComparer.Ordinal).ToImmutableArray();
     }
 
+    /// <summary>Finds concrete implementations and overrides reachable from one contract member.</summary>
+    public ImmutableArray<WorkspaceSymbolId> FindImplementations(WorkspaceSymbolId contract)
+    {
+        var result = ImmutableArray.CreateBuilder<WorkspaceSymbolId>();
+        var pending = new Queue<WorkspaceSymbolId>();
+        var visited = new HashSet<WorkspaceSymbolId> { contract };
+        pending.Enqueue(contract);
+        while (pending.TryDequeue(out WorkspaceSymbolId current))
+            foreach (WorkspaceSymbolId implementation in Entries
+                         .Where(entry => entry.Contract == current)
+                         .Select(entry => entry.Implementation))
+                if (visited.Add(implementation))
+                {
+                    result.Add(implementation);
+                    pending.Enqueue(implementation);
+                }
+        return result.ToImmutable();
+    }
+
     public bool HasNonEditableMember(IEnumerable<WorkspaceSymbolId> family) =>
         family.Any(_nonEditableMembers.Contains);
 }

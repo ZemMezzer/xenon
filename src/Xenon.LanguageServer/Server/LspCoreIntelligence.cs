@@ -109,8 +109,16 @@ internal static class LspCoreIntelligence
         symbol = UnwrapAlias(symbol);
         if (typeDefinition) symbol = SemanticModel.GetAssociatedDeclaredType(symbol);
         if (symbol is null || !symbol.IsSourceDefined) return null;
-        return symbol.DeclaringSyntaxReferences.Select(reference =>
-            ToLocation(reference.Location)).DistinctBy(location => (location.Uri, location.Range)).ToArray();
+        SourceReference[] workspaceDeclarations = context.Snapshot.TryGetSymbolId(symbol,
+            out WorkspaceSymbolId id)
+            ? (await context.Snapshot.GetSymbolIndexAsync(context.CancellationToken)
+                .ConfigureAwait(false)).Entries.Where(entry => entry.Id == id)
+                .Select(entry => entry.Declaration).ToArray()
+            : [];
+        IEnumerable<LspLocation> locations = workspaceDeclarations.Length == 0
+            ? symbol.DeclaringSyntaxReferences.Select(reference => ToLocation(reference.Location))
+            : workspaceDeclarations.Select(reference => ToLocation(context.Snapshot, reference));
+        return locations.DistinctBy(location => (location.Uri, location.Range)).ToArray();
     }
 
     private static async Task<object?> ReferencesAsync(LanguageServerAnalysisContext context,
@@ -136,11 +144,27 @@ internal static class LspCoreIntelligence
     {
         (SemanticModel model, int position) = await ModelAndPositionAsync(context, lspPosition);
         Symbol? symbol = FindSymbol(model, context.Document.SyntaxTree, position);
-        if (symbol is not DeclaredTypeSymbol ||
-            !context.Snapshot.TryGetSymbolId(symbol, out WorkspaceSymbolId id)) return Array.Empty<LspLocation>();
-        WorkspaceTypeRelationshipIndex index = await context.Snapshot
-            .GetTypeRelationshipIndexAsync(context.CancellationToken).ConfigureAwait(false);
-        return index.FindTransitive(id).Select(entry => ToLocation(context.Snapshot, entry.DerivedDeclaration))
+        if (symbol is null) return Array.Empty<LspLocation>();
+        symbol = GetImplementationTarget(UnwrapAlias(symbol));
+        if (!context.Snapshot.TryGetSymbolId(symbol, out WorkspaceSymbolId id))
+            return Array.Empty<LspLocation>();
+
+        if (symbol is DeclaredTypeSymbol)
+        {
+            WorkspaceTypeRelationshipIndex typeIndex = await context.Snapshot
+                .GetTypeRelationshipIndexAsync(context.CancellationToken).ConfigureAwait(false);
+            return typeIndex.FindTransitive(id)
+                .Select(entry => ToLocation(context.Snapshot, entry.DerivedDeclaration))
+                .DistinctBy(location => (location.Uri, location.Range)).ToArray();
+        }
+
+        WorkspaceMemberRelationshipIndex memberIndex = await context.Snapshot
+            .GetMemberRelationshipIndexAsync(context.CancellationToken).ConfigureAwait(false);
+        WorkspaceSymbolIndex symbolIndex = await context.Snapshot
+            .GetSymbolIndexAsync(context.CancellationToken).ConfigureAwait(false);
+        HashSet<WorkspaceSymbolId> implementations = memberIndex.FindImplementations(id).ToHashSet();
+        return symbolIndex.Entries.Where(entry => implementations.Contains(entry.Id))
+            .Select(entry => ToLocation(context.Snapshot, entry.Declaration))
             .DistinctBy(location => (location.Uri, location.Range)).ToArray();
     }
 
@@ -424,6 +448,14 @@ internal static class LspCoreIntelligence
     }
 
     private static Symbol UnwrapAlias(Symbol symbol) => symbol is AliasSymbol alias ? alias.Target : symbol;
+
+    private static Symbol GetImplementationTarget(Symbol symbol) => symbol switch
+    {
+        FunctionSymbol { ContainingProperty: not null } function => function.ContainingProperty,
+        FunctionSymbol { ContainingInterfaceProperty: not null } function =>
+            function.ContainingInterfaceProperty,
+        _ => symbol,
+    };
 
     private static string HoverDisplay(Symbol symbol)
     {

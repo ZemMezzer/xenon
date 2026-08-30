@@ -40,20 +40,29 @@ public static class WorkspaceDiscovery
         if (!Directory.Exists(normalized))
             throw new ProjectSystemException($"initialization path '{normalized}' does not exist");
 
-        List<string> ancestors = EnumerateAncestors(normalized).ToList();
-        string? workspaceFile = FindUnique(ancestors, "*.xws", "workspace");
-        if (workspaceFile is not null)
-            return new WorkspaceDiscoveryResult(
-                Xenon.ProjectSystem.Workspace.Create(workspaceFile, cancellationToken: cancellationToken),
-                workspaceFile, normalized, IsLoose: false);
+        foreach (string directory in EnumerateAncestors(normalized))
+        {
+            // Proximity is authoritative. Configuration kind only breaks ties at one level.
+            string? workspaceFile = FindUnique(directory, "*.xws", "workspace");
+            if (workspaceFile is not null)
+                return new WorkspaceDiscoveryResult(
+                    Xenon.ProjectSystem.Workspace.Create(workspaceFile,
+                        cancellationToken: cancellationToken),
+                    workspaceFile, normalized, IsLoose: false);
 
-        string? projectFile = FindUnique(ancestors, "*.xeproj", "project");
-        if (projectFile is not null)
-            return new WorkspaceDiscoveryResult(
-                Xenon.ProjectSystem.Workspace.Create(projectFile, cancellationToken: cancellationToken),
-                projectFile, normalized, IsLoose: false);
+            string? projectFile = FindUnique(directory, "*.xeproj", "project");
+            if (projectFile is not null)
+                return new WorkspaceDiscoveryResult(
+                    Xenon.ProjectSystem.Workspace.Create(projectFile,
+                        cancellationToken: cancellationToken),
+                    projectFile, normalized, IsLoose: false);
+        }
 
-        return new WorkspaceDiscoveryResult(null, null, normalized, IsLoose: true);
+        // Reuse ProjectSystem's recursive implicit-directory source discovery. A real editor
+        // folder is one coherent project; only files without an applicable folder remain loose.
+        return new WorkspaceDiscoveryResult(
+            Xenon.ProjectSystem.Workspace.Create(normalized, cancellationToken: cancellationToken),
+            null, normalized, IsLoose: false);
     }
 
     public static Xenon.ProjectSystem.Workspace CreateLooseFile(string path,
@@ -90,20 +99,26 @@ public static class WorkspaceDiscovery
         }
     }
 
-    private static string? FindUnique(IEnumerable<string> directories, string pattern, string kind)
+    private static string? FindUnique(string directory, string pattern, string kind)
     {
-        foreach (string directory in directories)
+        string[] candidates;
+        try
         {
-            string[] candidates = Directory.EnumerateFiles(directory, pattern,
+            candidates = Directory.EnumerateFiles(directory, pattern,
                     SearchOption.TopDirectoryOnly)
                 .Select(DocumentUri.NormalizePath)
                 .Order(StringComparer.Ordinal)
                 .ToArray();
-            if (candidates.Length > 1)
-                throw new ProjectSystemException(
-                    $"directory '{directory}' contains multiple {kind} files; specify one explicitly");
-            if (candidates.Length == 1) return candidates[0];
         }
-        return null;
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // An inaccessible ancestor cannot provide a usable configuration. Keep discovery
+            // bounded and allow an accessible editor root to become an implicit project.
+            return null;
+        }
+        if (candidates.Length > 1)
+            throw new ProjectSystemException(
+                $"directory '{directory}' contains multiple {kind} files; specify one explicitly");
+        return candidates.Length == 1 ? candidates[0] : null;
     }
 }
