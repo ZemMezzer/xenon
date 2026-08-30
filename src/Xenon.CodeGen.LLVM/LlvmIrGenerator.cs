@@ -11,8 +11,12 @@ namespace Xenon.CodeGen.LLVM;
 
 public sealed record LlvmNativeExport(string Name, bool IsData = false);
 
+/// <summary>
+/// Generates one LLVM module. Instances are single-use; create a new generator for every operation.
+/// </summary>
 public sealed class LlvmIrGenerator
 {
+    private int _invocationStarted;
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
@@ -47,9 +51,14 @@ public sealed class LlvmIrGenerator
         string moduleName = "xenon",
         LlvmCodeGenerationOptions? codeGenerationOptions = null)
     {
+        ArgumentNullException.ThrowIfNull(compilation);
         ArgumentNullException.ThrowIfNull(targetOptions);
+        ArgumentException.ThrowIfNullOrWhiteSpace(moduleName);
+        ThrowIfCompilationHasErrors(compilation);
+        BeginInvocation();
+
         using NativeTargetMachine targetMachine = NativeTargetMachine.Create(targetOptions);
-        return GenerateModule(
+        return GenerateModuleCore(
             compilation,
             moduleName,
             targetMachine,
@@ -124,7 +133,24 @@ public sealed class LlvmIrGenerator
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentException.ThrowIfNullOrWhiteSpace(moduleName);
         ArgumentNullException.ThrowIfNull(resultFactory);
+        ThrowIfCompilationHasErrors(compilation);
+        BeginInvocation();
 
+        return GenerateModuleCore(
+            compilation,
+            moduleName,
+            targetMachine,
+            codeGenerationOptions,
+            resultFactory);
+    }
+
+    private TResult GenerateModuleCore<TResult>(
+        Compilation compilation,
+        string moduleName,
+        NativeTargetMachine? targetMachine,
+        LlvmCodeGenerationOptions? codeGenerationOptions,
+        Func<LLVMModuleRef, TResult> resultFactory)
+    {
         if (compilation.HasErrors)
         {
             throw new LlvmCodeGenerationException("LLVM IR cannot be generated while the compilation contains errors.");
@@ -202,6 +228,24 @@ public sealed class LlvmIrGenerator
             _memoryRuntime = null;
             _nativeReferences = null!;
             _moduleIdentity = null!;
+        }
+    }
+
+    private void BeginInvocation()
+    {
+        if (Interlocked.CompareExchange(ref _invocationStarted, 1, 0) != 0)
+        {
+            throw new InvalidOperationException(
+                "LlvmIrGenerator instances are single-use; create a new instance for each generation operation.");
+        }
+    }
+
+    private static void ThrowIfCompilationHasErrors(Compilation compilation)
+    {
+        if (compilation.HasErrors)
+        {
+            throw new LlvmCodeGenerationException(
+                "LLVM IR cannot be generated while the compilation contains errors.");
         }
     }
 

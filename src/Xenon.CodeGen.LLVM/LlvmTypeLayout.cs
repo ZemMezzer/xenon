@@ -41,15 +41,16 @@ internal sealed class LlvmTypeLayout : ITargetTypeLayout
     {
         ArgumentNullException.ThrowIfNull(target);
         LLVMTargetDataRef data = target.TargetData;
+        using LLVMContextRef context = LLVMContextRef.Create();
         static AbiValueLayout Query(LLVMTargetDataRef data, LLVMTypeRef type) =>
             new(data.ABISizeOfType(type), data.ABIAlignmentOfType(type));
-        LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0);
+        LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(context.Int8Type, 0);
         bool windows = target.Triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
             target.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase);
         return new LlvmTypeLayout(target.PointerBitWidth,
-            Query(data, pointer), Query(data, LLVMTypeRef.Int1), Query(data, LLVMTypeRef.Int8),
-            Query(data, LLVMTypeRef.Int16), Query(data, LLVMTypeRef.Int32), Query(data, LLVMTypeRef.Int64),
-            Query(data, LLVMTypeRef.Float), Query(data, LLVMTypeRef.Double), windows);
+            Query(data, pointer), Query(data, context.Int1Type), Query(data, context.Int8Type),
+            Query(data, context.Int16Type), Query(data, context.Int32Type), Query(data, context.Int64Type),
+            Query(data, context.FloatType), Query(data, context.DoubleType), windows);
     }
 
     public int GetIntegerBitWidth(PrimitiveTypeSymbol type)
