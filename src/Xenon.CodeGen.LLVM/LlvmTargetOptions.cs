@@ -51,7 +51,7 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
         TargetData = targetData;
         Triple = triple;
         DataLayout = GetDataLayoutString(targetData);
-        PointerBitWidth = checked((int)targetData.SizeOfTypeInBits(LLVMTypeRef.CreatePointer(LLVMTypeRef.Int8, 0)));
+        PointerBitWidth = checked((int)(LLVMApi.PointerSizeForAS(targetData, 0) * 8u));
     }
 
     public LLVMTargetMachineRef Handle { get; }
@@ -140,6 +140,7 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
             return;
         }
 
+        // The data layout is owned by this wrapper and must not outlive its target machine.
         LLVMApi.DisposeTargetData(TargetData);
         LLVMApi.DisposeTargetMachine(Handle);
         _disposed = true;
