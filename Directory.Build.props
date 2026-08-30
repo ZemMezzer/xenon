@@ -8,5 +8,8 @@
     <Deterministic>true</Deterministic>
     <BaseOutputPath>$(MSBuildThisFileDirectory)out/$(MSBuildProjectName)/bin/</BaseOutputPath>
     <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)out/$(MSBuildProjectName)/obj/</BaseIntermediateOutputPath>
+    <!-- Keep artifacts produced with the SDK defaults out of implicit Compile items.
+         This matters after switching to the repository-wide output paths above. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/bin/**;**/obj/**</DefaultItemExcludes>
   </PropertyGroup>
 </Project>
