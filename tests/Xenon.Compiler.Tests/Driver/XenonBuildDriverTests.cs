@@ -7,6 +7,22 @@ namespace Xenon.Compiler.Tests.Driver;
 
 public sealed class XenonBuildDriverTests
 {
+    [Theory]
+    [InlineData(XenonProjectType.Executable, "x86_64-pc-linux-gnu", true)]
+    [InlineData(XenonProjectType.StaticLibrary, "x86_64-pc-linux-gnu", true)]
+    [InlineData(XenonProjectType.SharedLibrary, "x86_64-pc-linux-gnu", true)]
+    [InlineData(XenonProjectType.Executable, "x86_64-pc-windows-msvc", false)]
+    [InlineData(XenonProjectType.StaticLibrary, "x86_64-pc-windows-msvc", false)]
+    [InlineData(XenonProjectType.SharedLibrary, "x86_64-pc-windows-msvc", true)]
+    public void PositionIndependentCodePolicySupportsUnixPieAndSharedLibraries(
+        XenonProjectType projectType,
+        string triple,
+        bool expected)
+    {
+        Assert.Equal(expected,
+            XenonBuildDriver.RequiresPositionIndependentCode(projectType, triple));
+    }
+
     [Fact]
     public void HostExecutableBuildEmitsLinksAndIsRunnable()
     {

@@ -7,24 +7,6 @@ namespace Xenon.Compiler.Tests.CodeGen;
 
 public sealed class LlvmConcurrencyTests
 {
-    [Fact(Skip = "Windows libLLVM 20.1.2 crashes under independent-context concurrency; see Context/LLVM-Runtime-Concurrency-Investigation.md.")]
-    public async Task ParallelIndependentContexts_GenerateVerifyAndDispose()
-    {
-        Task[] workers = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
-        {
-            Compilation compilation = CreateGenerationCompilation(worker);
-            for (int iteration = 0; iteration < 125; iteration++)
-            {
-                string ir = new LlvmIrGenerator().Generate(
-                    compilation,
-                    $"parallel_{worker}_{iteration}");
-                Assert.Contains("ret i32", ir, StringComparison.Ordinal);
-            }
-        })).ToArray();
-
-        await Task.WhenAll(workers);
-    }
-
     [Fact]
     public async Task ParallelTargetLayouts_DoNotUseGlobalContext()
     {

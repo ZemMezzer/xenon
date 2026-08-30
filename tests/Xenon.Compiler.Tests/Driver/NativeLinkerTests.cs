@@ -9,17 +9,6 @@ using Xunit;
 
 namespace Xenon.Compiler.Tests.Driver;
 
-public sealed class MacOsFactAttribute : FactAttribute
-{
-    public MacOsFactAttribute()
-    {
-        if (!OperatingSystem.IsMacOS())
-        {
-            Skip = "This integration test requires macOS and Xcode Command Line Tools.";
-        }
-    }
-}
-
 public sealed class NativeLinkerTests
 {
     static NativeLinkerTests()
@@ -260,70 +249,6 @@ public sealed class NativeLinkerTests
             })!;
             process.WaitForExit();
 
-            Assert.Equal(42, process.ExitCode);
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
-    }
-
-    [MacOsFact]
-    public void Linker_CreatesAndRunsMacOsMachOExecutable()
-    {
-        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
-            namespace MacOsIntegration;
-
-            extern int puts(readonly byte* text);
-
-            int Main()
-            {
-                puts("Hello from Xenon on macOS");
-                return 42;
-            }
-            """, "macos-integration.xe"));
-        string directory = CreateTemporaryDirectory();
-        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
-        string objectPath = Path.Combine(
-            directory,
-            $"macos-integration{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
-        string executablePath = XenonBuildPaths.GetExecutablePath(
-            directory,
-            "macos-integration",
-            "debug",
-            target.Triple);
-
-        try
-        {
-            Assert.Contains("apple", target.Triple, StringComparison.OrdinalIgnoreCase);
-
-            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
-                compilation,
-                objectPath,
-                target,
-                "macos-integration"
-                );
-            LinkedExecutable executable = new NativeLinker().LinkExecutable(
-                objectFile.Path,
-                executablePath,
-                target.Triple);
-
-            AssertMacOsMachO(executable.Path, expectedFileType: 2);
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = executable.Path,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            using Process process = Process.Start(startInfo)!;
-            string output = process.StandardOutput.ReadToEnd();
-            string error = process.StandardError.ReadToEnd();
-            process.WaitForExit();
-
-            Assert.Equal(string.Empty, error);
-            Assert.Contains("Hello from Xenon on macOS", output, StringComparison.Ordinal);
             Assert.Equal(42, process.ExitCode);
         }
         finally

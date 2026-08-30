@@ -73,9 +73,7 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 if (!request.CompileOnly || compilation.RequiresTargetLayout)
                 {
                     target = new LlvmTargetOptions(triple, profile.OptimizationLevel,
-                        PositionIndependentCode: project.Type == XenonProjectType.SharedLibrary ||
-                            (project.Type == XenonProjectType.Executable &&
-                             LlvmTargetPlatform.GetObjectFileExtension(triple) != ".obj"));
+                        PositionIndependentCode: RequiresPositionIndependentCode(project.Type, triple));
                     compilation = LlvmIrGenerator.BindForTarget(compilation, target);
                     if (compilation.HasErrors)
                     {
@@ -189,6 +187,10 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
     private static bool IsWindowsTarget(string triple) =>
         triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
         triple.Contains("win32", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool RequiresPositionIndependentCode(XenonProjectType projectType, string triple) =>
+        projectType == XenonProjectType.SharedLibrary ||
+        LlvmTargetPlatform.GetObjectFileExtension(triple) != ".obj";
 
     private static LlvmCodeGenerationOptions CreateCodeGenerationOptions(
         XenonProjectGraph graph,
