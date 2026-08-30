@@ -18,6 +18,8 @@ internal static class Program
     private const int CompilationError = 1;
     private const int UsageError = 2;
 
+    internal static string ProductVersion => XenonBuildInfo.Version;
+
     public static int Main(string[] args)
     {
         if (args.Contains("--help", StringComparer.Ordinal))
@@ -28,7 +30,7 @@ internal static class Program
 
         if (args.Contains("--version", StringComparer.Ordinal))
         {
-            Console.WriteLine("xenon 0.1.0-dev");
+            Console.WriteLine($"xenon {ProductVersion}");
             return Success;
         }
 

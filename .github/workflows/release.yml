@@ -1,0 +1,164 @@
+name: Release Xenon
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+jobs:
+  build-and-test:
+    name: Build and test tagged version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Validate release tag
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use the MAJOR.MINOR.PATCH format, for example 0.1.0."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore dependencies
+        run: dotnet restore Xenon.sln
+
+      - name: Build release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: dotnet build Xenon.sln --configuration Release --no-restore -p:XenonVersion="${VERSION}"
+
+      - name: Run tests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: dotnet test Xenon.sln --configuration Release --no-build -p:XenonVersion="${VERSION}"
+
+      - name: Verify executable version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          cli_assembly="$(find out/Xenon.Cli/bin/Release -name xenon.dll -print -quit)"
+          if [[ -z "${cli_assembly}" ]]; then
+            echo "Could not find the built Xenon CLI assembly."
+            exit 1
+          fi
+
+          actual="$(dotnet "${cli_assembly}" --version)"
+          expected="xenon ${VERSION}"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "Expected '${expected}', got '${actual}'."
+            exit 1
+          fi
+
+  package:
+    name: Package ${{ matrix.rid }}
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        rid:
+          - linux-x64
+          - linux-arm64
+          - osx-arm64
+          - win-x64
+          - win-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Publish self-contained distribution
+        env:
+          RID: ${{ matrix.rid }}
+          VERSION: ${{ needs.build-and-test.outputs.version }}
+        shell: bash
+        run: |
+          publish_dir="${RUNNER_TEMP}/xenon-${VERSION}-${RID}"
+          dotnet publish src/Xenon.Cli/Xenon.Cli.csproj \
+            --configuration Release \
+            --runtime "${RID}" \
+            --self-contained true \
+            -p:XenonVersion="${VERSION}" \
+            --output "${publish_dir}"
+
+          mkdir -p release
+          if [[ "${RID}" == win-* ]]; then
+            archive="${GITHUB_WORKSPACE}/release/xenon-${VERSION}-${RID}.zip"
+            (cd "${publish_dir}" && zip -qr "${archive}" .)
+          else
+            archive="${GITHUB_WORKSPACE}/release/xenon-${VERSION}-${RID}.tar.gz"
+            tar -C "${publish_dir}" -czf "${archive}" .
+          fi
+
+          echo "archive=${archive}" >> "${GITHUB_ENV}"
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenon-${{ needs.build-and-test.outputs.version }}-${{ matrix.rid }}
+          path: ${{ env.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create GitHub release
+    needs:
+      - build-and-test
+      - package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd release
+          sha256sum xenon-* > SHA256SUMS
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build-and-test.outputs.version }}
+        shell: bash
+        run: |
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            gh release upload "${VERSION}" release/* --clobber
+          else
+            gh release create "${VERSION}" release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Xenon ${VERSION}"
+          fi

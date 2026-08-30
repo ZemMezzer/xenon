@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <!-- Release builds override XenonVersion from the Git tag. -->
+    <XenonVersion Condition="'$(XenonVersion)' == ''">0.1.0-dev</XenonVersion>
+    <TargetFramework>net10.0</TargetFramework>
+
+    <LlvmSharpVersion>20.1.2</LlvmSharpVersion>
+    <MicrosoftNetTestSdkVersion>17.8.0</MicrosoftNetTestSdkVersion>
+    <XunitVersion>2.4.1</XunitVersion>
+    <XunitRunnerVisualStudioVersion>2.4.3</XunitRunnerVisualStudioVersion>
+
+    <Version>$(XenonVersion)</Version>
+    <PackageVersion>$(XenonVersion)</PackageVersion>
+    <InformationalVersion>$(XenonVersion)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

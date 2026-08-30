@@ -344,7 +344,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
         return new
         {
             capabilities = ServerCapabilities.Create(),
-            serverInfo = new { name = "Xenon Language Server", version = "0.1.0-dev" },
+            serverInfo = new { name = "Xenon Language Server", version = XenonBuildInfo.Version },
         };
     }
 

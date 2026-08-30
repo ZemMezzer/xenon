@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
+    <Compile Include="../Shared/XenonBuildInfo.cs" Link="XenonBuildInfo.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Xenon.Compiler/Xenon.Compiler.csproj" />
     <ProjectReference Include="../Xenon.ProjectSystem/Xenon.ProjectSystem.csproj" />
   </ItemGroup>
