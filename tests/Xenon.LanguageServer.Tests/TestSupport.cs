@@ -17,6 +17,7 @@ internal sealed class TestDirectory : IDisposable
     }
 
     public string Path { get; }
+    public string PathOf(string relativePath) => System.IO.Path.Combine(Path, relativePath);
     public string Write(string relativePath, string text)
     {
         string path = System.IO.Path.Combine(Path, relativePath);

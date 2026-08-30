@@ -39,6 +39,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
     private readonly LanguageServerRuntimeHooks? _runtimeHooks;
     private Xenon.ProjectSystem.Workspace? _primaryWorkspace;
     private string? _configurationPath;
+    private string? _workspaceDiscoveryRoot;
     private int _knownUriCount;
     private long _workspaceSetGeneration;
     private long _reloadSequence;
@@ -315,6 +316,8 @@ public sealed class LanguageServerSession : IAsyncDisposable
         JsonElement value = RequireParams(parameters);
         string? rootUri = GetOptionalString(value, "rootUri");
         string? rootPath = GetOptionalString(value, "rootPath");
+        if (string.IsNullOrWhiteSpace(rootUri))
+            rootUri = GetFirstWorkspaceFolderUri(value);
         string? explicitPath = null;
         if (value.TryGetProperty("initializationOptions", out JsonElement options) &&
             options.ValueKind == JsonValueKind.Object)
@@ -329,6 +332,10 @@ public sealed class LanguageServerSession : IAsyncDisposable
             {
                 _primaryWorkspace = discovery.Workspace;
                 _configurationPath = discovery.IsLoose ? null : discovery.ConfigurationPath;
+                _workspaceDiscoveryRoot = !discovery.IsLoose &&
+                    string.IsNullOrWhiteSpace(explicitPath) && Directory.Exists(discovery.SearchRoot)
+                        ? discovery.SearchRoot
+                        : null;
                 Volatile.Write(ref _workspaces, [discovery.Workspace]);
                 _workspaceSetGeneration++;
             }
@@ -339,6 +346,20 @@ public sealed class LanguageServerSession : IAsyncDisposable
             capabilities = ServerCapabilities.Create(),
             serverInfo = new { name = "Xenon Language Server", version = "0.1.0-dev" },
         };
+    }
+
+    private static string? GetFirstWorkspaceFolderUri(JsonElement initializeParams)
+    {
+        if (!initializeParams.TryGetProperty("workspaceFolders", out JsonElement folders) ||
+            folders.ValueKind != JsonValueKind.Array)
+            return null;
+        foreach (JsonElement folder in folders.EnumerateArray())
+        {
+            if (folder.ValueKind != JsonValueKind.Object) continue;
+            string? uri = GetOptionalString(folder, "uri");
+            if (!string.IsNullOrWhiteSpace(uri)) return uri;
+        }
+        return null;
     }
 
     private object? Shutdown()
@@ -476,7 +497,8 @@ public sealed class LanguageServerSession : IAsyncDisposable
         }
 
         bool hasConfigurationEvent = events.Any(item => IsConfigurationPath(item.Path));
-        bool configurationChanged = events.Any(item => IsRelevantConfigurationPath(item.Path));
+        bool configurationChanged = events.Any(item =>
+            IsRelevantConfigurationPath(item.Path) || IsDiscoveryConfigurationPath(item.Path));
         bool sourceSetMayHaveChanged = events.Any(item => item.Type is 1 or 3 &&
             Path.GetExtension(item.Path).Equals(".xe", StringComparison.OrdinalIgnoreCase));
         bool hasSourceEvent = events.Any(item =>
@@ -485,12 +507,12 @@ public sealed class LanguageServerSession : IAsyncDisposable
             Path.GetExtension(item.Path).Equals(".xe", StringComparison.OrdinalIgnoreCase) &&
             ResolveContexts(item.Uri).Count == 0);
         if (sourceSetMayHaveChanged) _pendingSourceReconciliation = true;
-        if (configurationChanged && _configurationPath is not null)
+        if (configurationChanged && CanReloadPrimaryWorkspace())
             _pendingConfigurationReconciliation = true;
         bool mustReconcile = configurationChanged || sourceSetMayHaveChanged ||
             unknownChangedSource || _pendingSourceReconciliation && hasSourceEvent ||
             _pendingConfigurationReconciliation && hasConfigurationEvent;
-        if (mustReconcile && _configurationPath is not null)
+        if (mustReconcile && CanReloadPrimaryWorkspace())
         {
             bool reloaded = await TryReloadPrimaryWorkspaceAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -519,6 +541,18 @@ public sealed class LanguageServerSession : IAsyncDisposable
             DocumentUri.PathComparer.Equals(DocumentUri.NormalizePath(projectPath), path));
     }
 
+    private bool IsDiscoveryConfigurationPath(string path)
+    {
+        if (!IsConfigurationPath(path) || _workspaceDiscoveryRoot is null) return false;
+        string root = DocumentUri.NormalizePath(_workspaceDiscoveryRoot);
+        string relative = Path.GetRelativePath(root, path);
+        return relative != ".." && !relative.StartsWith($"..{Path.DirectorySeparatorChar}",
+            StringComparison.Ordinal) && !Path.IsPathRooted(relative);
+    }
+
+    private bool CanReloadPrimaryWorkspace() =>
+        _configurationPath is not null || _workspaceDiscoveryRoot is not null;
+
     private static bool IsConfigurationPath(string path)
     {
         string extension = Path.GetExtension(path);
@@ -532,23 +566,30 @@ public sealed class LanguageServerSession : IAsyncDisposable
         Workspace[] published;
         Xenon.ProjectSystem.Workspace? previous;
         string? configurationPath;
+        string? discoveryRoot;
         long capturedGeneration;
         lock (_publicationGate)
         {
             published = _workspaces;
             previous = _primaryWorkspace;
             configurationPath = _configurationPath;
+            discoveryRoot = _workspaceDiscoveryRoot;
             capturedGeneration = _workspaceSetGeneration;
         }
-        if (previous is null || configurationPath is null) return false;
+        if (previous is null || configurationPath is null && discoveryRoot is null) return false;
 
         var unpublished = new List<Xenon.ProjectSystem.Workspace>();
         try
         {
             Dictionary<string, OpenDocumentState> overlays = CaptureOpenDocumentStates(published);
-            Xenon.ProjectSystem.Workspace candidate = Xenon.ProjectSystem.Workspace.Create(
-                configurationPath,
-                cancellationToken: cancellationToken);
+            WorkspaceDiscoveryResult? rediscovery = discoveryRoot is null ? null :
+                WorkspaceDiscovery.Discover(null, null, discoveryRoot, cancellationToken);
+            Xenon.ProjectSystem.Workspace candidate = rediscovery?.Workspace ??
+                Xenon.ProjectSystem.Workspace.Create(configurationPath!,
+                    cancellationToken: cancellationToken);
+            if (candidate is null)
+                throw new ProjectSystemException(
+                    $"workspace root '{discoveryRoot}' did not produce a Workspace");
             unpublished.Add(candidate);
 
             var candidatePaths = candidate.CurrentSnapshot.Documents
@@ -592,6 +633,8 @@ public sealed class LanguageServerSession : IAsyncDisposable
                     if (committed)
                     {
                         _primaryWorkspace = candidate;
+                        if (rediscovery is not null)
+                            _configurationPath = rediscovery.ConfigurationPath;
                         Volatile.Write(ref _workspaces, unpublished.ToArray());
                         _workspaceSetGeneration++;
                     }
@@ -850,6 +893,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
             retired = _workspaces;
             Volatile.Write(ref _workspaces, []);
             _primaryWorkspace = null;
+            _workspaceDiscoveryRoot = null;
             _workspaceSetGeneration++;
         }
         RetireWorkspaces(retired, "session Workspace disposal");
