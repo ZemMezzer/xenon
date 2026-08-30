@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using Xenon.Compiler.Text;
 using Xenon.LanguageServer.Protocol;
@@ -33,6 +34,12 @@ public sealed class CoreIntelligenceTests
         JsonElement initialize = Result(await session.HandleRequestAsync("initialize",
             LspTestProtocol.Json(new { rootUri = uri }), default));
         Assert.True(initialize.GetProperty("capabilities").GetProperty("hoverProvider").GetBoolean());
+        string? informationalVersion = typeof(LanguageServerSession).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion;
+        Assert.False(string.IsNullOrWhiteSpace(informationalVersion));
+        Assert.Equal(informationalVersion,
+            initialize.GetProperty("serverInfo").GetProperty("version").GetString());
         await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
         await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
         {

@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="../Shared/XenonBuildInfo.cs" Link="XenonBuildInfo.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
     <ProjectReference Include="../Xenon.Compiler/Xenon.Compiler.csproj" />
     <ProjectReference Include="../Xenon.Driver/Xenon.Driver.csproj" />
