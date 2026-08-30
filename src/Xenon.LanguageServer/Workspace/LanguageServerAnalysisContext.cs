@@ -5,10 +5,12 @@ namespace Xenon.LanguageServer;
 public sealed class LanguageServerAnalysisContext : IDisposable
 {
     private readonly WorkspaceAnalysisRequest _request;
+    private Xenon.ProjectSystem.Workspace? _workspace;
 
-    internal LanguageServerAnalysisContext(WorkspaceAnalysisRequest request, ProjectSnapshot project,
-        DocumentSnapshot document)
+    internal LanguageServerAnalysisContext(Xenon.ProjectSystem.Workspace workspace,
+        WorkspaceAnalysisRequest request, ProjectSnapshot project, DocumentSnapshot document)
     {
+        _workspace = workspace;
         _request = request;
         Snapshot = request.Snapshot;
         Project = project;
@@ -19,7 +21,11 @@ public sealed class LanguageServerAnalysisContext : IDisposable
     public ProjectSnapshot Project { get; }
     public DocumentSnapshot Document { get; }
     public CancellationToken CancellationToken => _request.CancellationToken;
-    public void Dispose() => _request.Dispose();
+    public void Dispose()
+    {
+        _request.Dispose();
+        _workspace = null;
+    }
 }
 
 public sealed class LanguageServerAnalysisContextFactory(DocumentContextResolver resolver)
@@ -34,7 +40,7 @@ public sealed class LanguageServerAnalysisContextFactory(DocumentContextResolver
             DocumentContext context = resolver.ResolvePrimary(request.Snapshot, uri);
             ProjectSnapshot project = request.Snapshot.GetProject(context.ProjectId);
             DocumentSnapshot document = project.GetDocument(context.DocumentId);
-            return new LanguageServerAnalysisContext(request, project, document);
+            return new LanguageServerAnalysisContext(workspace, request, project, document);
         }
         catch
         {

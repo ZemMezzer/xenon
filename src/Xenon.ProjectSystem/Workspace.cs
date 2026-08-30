@@ -56,6 +56,37 @@ public sealed class Workspace : IDisposable
         => CreateCore(graph, WorkspaceId.CreateNew(), profileName, cancellationToken,
             PhysicalWorkspaceFileSystem.Instance, NullWorkspaceSaveObserver.Instance, null);
 
+    /// <summary>
+    /// Creates an ad-hoc semantic Workspace for an editor-owned physical document. The file may
+    /// already be absent from disk; in that case the overlay remains the only backing state until
+    /// the editor closes or saves it.
+    /// </summary>
+    public static Workspace CreateOpenLooseDocument(string physicalPath, string overlayText,
+        DocumentVersion version, string profileName = "debug",
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(physicalPath);
+        ArgumentNullException.ThrowIfNull(overlayText);
+        string normalized = NormalizePhysicalPath(physicalPath);
+        string directory = Path.GetDirectoryName(normalized)!;
+        string name = Path.GetFileNameWithoutExtension(normalized);
+        var project = new XenonProject(name, XenonProjectType.Executable, null, directory,
+            directory, null, [], [], [], [], XenonBuildProfile.Debug, XenonBuildProfile.Release);
+        Workspace workspace = Create(XenonProjectGraph.Create(project, [project]), profileName,
+            cancellationToken);
+        try
+        {
+            workspace.AddDocument(DocumentId.CreateNew(workspace.CurrentSnapshot.RootProjectId),
+                overlayText, version, normalized, isOpen: true, cancellationToken);
+            return workspace;
+        }
+        catch
+        {
+            workspace.Dispose();
+            throw;
+        }
+    }
+
     internal static Workspace Create(XenonProjectGraph graph,
         IWorkspaceFileSystem fileSystem, IWorkspaceSaveObserver? saveObserver = null,
         string profileName = "debug", CancellationToken cancellationToken = default) =>
@@ -322,13 +353,14 @@ public sealed class Workspace : IDisposable
 
     public void Dispose()
     {
+        CancellationTokenSource stale;
         lock (_updateGate)
         {
             if (_disposed) return;
             _disposed = true;
-            _staleCancellation.Cancel();
-            _staleCancellation.Dispose();
+            stale = _staleCancellation;
         }
+        CancelAndDisposeForLifetime(stale);
     }
 
     private WorkspaceSnapshot UpdateDocument(DocumentId documentId,
@@ -418,10 +450,10 @@ public sealed class Workspace : IDisposable
         ImmutableArray<DocumentSnapshot> documents, DocumentChangeKind kind,
         ImmutableHashSet<DocumentId> changedDocuments) => BuildSnapshot(current,
             new Dictionary<ProjectId, ProjectMutation>
-        {
-            [projectId] = new(current.GetProject(projectId).Configuration, documents,
-                kind, changedDocuments, ConfigurationChanged: false),
-        });
+            {
+                [projectId] = new(current.GetProject(projectId).Configuration, documents,
+                    kind, changedDocuments, ConfigurationChanged: false),
+            });
 
     private WorkspaceSnapshot RemoveDocumentCore(WorkspaceSnapshot current, DocumentId documentId)
     {
@@ -611,18 +643,21 @@ public sealed class Workspace : IDisposable
         CancellationTokenSource stale = _staleCancellation;
         _staleCancellation = nextStaleCancellation ?? new CancellationTokenSource();
         Volatile.Write(ref _currentSnapshot, snapshot);
-        try
-        {
-            stale.Cancel();
-        }
+        CancelAndDisposeForLifetime(stale);
+    }
+
+    private static void CancelAndDisposeForLifetime(CancellationTokenSource cancellation)
+    {
+        try { cancellation.Cancel(); }
         catch (AggregateException)
         {
-            // A consumer cancellation callback cannot roll back an already-published generation.
+            // Consumer callback failures cannot roll back publication or interrupt retirement.
         }
-        finally
+        catch (ObjectDisposedException)
         {
-            stale.Dispose();
+            // A concurrent lifetime path already released the source.
         }
+        finally { cancellation.Dispose(); }
     }
 
     private static StringComparer PhysicalPathComparer => ProjectPath.Comparer;

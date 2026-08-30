@@ -2,8 +2,8 @@ using Xenon.ProjectSystem;
 
 namespace Xenon.LanguageServer;
 
-public sealed record DiagnosticResult(WorkspaceGeneration Generation, DocumentVersion Version,
-    object? Value);
+public sealed record DiagnosticResult(WorkspaceGeneration Generation, DocumentId DocumentId,
+    DocumentVersion Version, object? Value);
 
 /// <summary>
 /// Per-document debounce/coalescing with explicit ownership of every started job until completion.
@@ -15,6 +15,11 @@ public sealed class DiagnosticScheduler : IAsyncDisposable
     private readonly LanguageServerAnalysisContextFactory _contexts;
     private readonly Func<LanguageServerAnalysisContext, Task<object?>> _analyze;
     private readonly Func<string, DiagnosticResult, Task> _publish;
+    private readonly Func<Xenon.ProjectSystem.Workspace, string, long, CancellationToken,
+        LanguageServerAnalysisContext?> _acquireContext;
+    private readonly Func<Xenon.ProjectSystem.Workspace, long, bool> _canPublish;
+    private readonly Func<Xenon.ProjectSystem.Workspace, long, string, DiagnosticResult,
+        Task<bool>> _publishIfCurrent;
     private readonly Dictionary<string, Job> _currentByKey = new(DocumentUri.PathComparer);
     private readonly HashSet<Job> _inFlight = [];
     private readonly CancellationTokenSource _shutdown = new();
@@ -24,11 +29,25 @@ public sealed class DiagnosticScheduler : IAsyncDisposable
 
     public DiagnosticScheduler(LanguageServerAnalysisContextFactory contexts,
         Func<LanguageServerAnalysisContext, Task<object?>> analyze,
-        Func<string, DiagnosticResult, Task> publish, TimeSpan? debounce = null)
+        Func<string, DiagnosticResult, Task> publish, TimeSpan? debounce = null,
+        Func<Xenon.ProjectSystem.Workspace, string, long, CancellationToken,
+            LanguageServerAnalysisContext?>? acquireContext = null,
+        Func<Xenon.ProjectSystem.Workspace, long, bool>? canPublish = null,
+        Func<Xenon.ProjectSystem.Workspace, long, string, DiagnosticResult,
+            Task<bool>>? publishIfCurrent = null)
     {
         _contexts = contexts;
         _analyze = analyze;
         _publish = publish;
+        _acquireContext = acquireContext ?? ((workspace, uri, _, cancellationToken) =>
+            _contexts.Create(workspace, uri, staleSensitive: true, cancellationToken));
+        _canPublish = canPublish ?? ((_, _) => true);
+        _publishIfCurrent = publishIfCurrent ?? (async (workspace, generation, uri, result) =>
+        {
+            if (!_canPublish(workspace, generation)) return false;
+            await _publish(uri, result).ConfigureAwait(false);
+            return true;
+        });
         Debounce = debounce ?? TimeSpan.FromMilliseconds(200);
         if (Debounce < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(debounce));
     }
@@ -50,7 +69,8 @@ public sealed class DiagnosticScheduler : IAsyncDisposable
         get { lock (_gate) return _disposed; }
     }
 
-    public void Schedule(Xenon.ProjectSystem.Workspace workspace, string uri)
+    public void Schedule(Xenon.ProjectSystem.Workspace workspace, string uri,
+        long workspaceSetGeneration = 0)
     {
         ArgumentNullException.ThrowIfNull(workspace);
         string key = CreateKey(workspace, uri);
@@ -59,7 +79,7 @@ public sealed class DiagnosticScheduler : IAsyncDisposable
         {
             ThrowIfNotAcceptingWork();
             var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
-            var job = new Job(key, cancellation);
+            var job = new Job(key, cancellation, workspaceSetGeneration);
             _currentByKey.TryGetValue(key, out previous);
             _currentByKey[key] = job;
             _inFlight.Add(job);
@@ -69,10 +89,12 @@ public sealed class DiagnosticScheduler : IAsyncDisposable
         if (previous is not null) TryCancel(previous.Cancellation);
     }
 
-    public void ScheduleMany(Xenon.ProjectSystem.Workspace workspace, IEnumerable<string> uris)
+    public void ScheduleMany(Xenon.ProjectSystem.Workspace workspace, IEnumerable<string> uris,
+        long workspaceSetGeneration = 0)
     {
         ArgumentNullException.ThrowIfNull(uris);
-        foreach (string uri in uris.Distinct(StringComparer.Ordinal)) Schedule(workspace, uri);
+        foreach (string uri in uris.Distinct(StringComparer.Ordinal))
+            Schedule(workspace, uri, workspaceSetGeneration);
     }
 
     public bool Cancel(Xenon.ProjectSystem.Workspace workspace, string uri)
@@ -94,20 +116,26 @@ public sealed class DiagnosticScheduler : IAsyncDisposable
         try
         {
             await Task.Delay(Debounce, job.Cancellation.Token).ConfigureAwait(false);
-            using LanguageServerAnalysisContext context = _contexts.Create(workspace, uri,
-                staleSensitive: true, job.Cancellation.Token);
+            using LanguageServerAnalysisContext? context = _acquireContext(workspace, uri,
+                job.WorkspaceSetGeneration, job.Cancellation.Token);
+            if (context is null) return;
             analysisCancellation = context.CancellationToken;
             WorkspaceGeneration generation = context.Snapshot.Generation;
             DocumentVersion version = context.Document.Version;
             object? value = await _analyze(context).ConfigureAwait(false);
             job.Cancellation.Token.ThrowIfCancellationRequested();
+            analysisCancellation.ThrowIfCancellationRequested();
+            _shutdown.Token.ThrowIfCancellationRequested();
 
             WorkspaceSnapshot current = workspace.CurrentSnapshot;
             if (current.Generation != generation ||
                 !current.TryGetDocument(context.Document.Id, out DocumentSnapshot? currentDocument) ||
-                currentDocument!.Version != version)
+                currentDocument!.Version != version || !IsCurrent(job) ||
+                !_canPublish(workspace, job.WorkspaceSetGeneration))
                 return;
-            await _publish(uri, new DiagnosticResult(generation, version, value)).ConfigureAwait(false);
+            await _publishIfCurrent(workspace, job.WorkspaceSetGeneration, uri,
+                new DiagnosticResult(generation, context.Document.Id, version, value))
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (
             job.Cancellation.IsCancellationRequested ||
@@ -175,10 +203,19 @@ public sealed class DiagnosticScheduler : IAsyncDisposable
                 "Diagnostic scheduling is unavailable after disposal begins.");
     }
 
-    private sealed class Job(string key, CancellationTokenSource cancellation)
+    private bool IsCurrent(Job job)
+    {
+        lock (_gate)
+            return _currentByKey.TryGetValue(job.Key, out Job? current) &&
+                ReferenceEquals(current, job);
+    }
+
+    private sealed class Job(string key, CancellationTokenSource cancellation,
+        long workspaceSetGeneration)
     {
         public string Key { get; } = key;
         public CancellationTokenSource Cancellation { get; } = cancellation;
+        public long WorkspaceSetGeneration { get; } = workspaceSetGeneration;
         public Task Task { get; set; } = Task.CompletedTask;
     }
 
