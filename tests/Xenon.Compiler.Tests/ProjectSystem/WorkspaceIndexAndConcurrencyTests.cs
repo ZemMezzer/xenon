@@ -1,4 +1,5 @@
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Semantics;
 using Xenon.ProjectSystem;
 using Xunit;
 
@@ -6,6 +7,219 @@ namespace Xenon.Compiler.Tests.ProjectSystem;
 
 public sealed class WorkspaceIndexAndConcurrencyTests
 {
+    [Fact]
+    public async Task MemberRelationshipIndexBuildsTransitiveOverrideAndInterfaceFamilies()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("App", sources: [("main.xe", """
+            namespace App;
+            interface IUpdatable { void Update(); }
+            struct Base { public virtual void Update() {} }
+            struct Child : Base, IUpdatable { public override void Update() {} }
+            struct GrandChild : Child { public override void Update() {} }
+            struct Second : IUpdatable { public void Update() {} }
+            struct Other { public void Update() {} }
+            """)]);
+        using Workspace workspace = directory.CreateWorkspace();
+        WorkspaceSymbolIndex symbols = await workspace.CurrentSnapshot.GetSymbolIndexAsync();
+        WorkspaceMemberRelationshipIndex relationships = await workspace.CurrentSnapshot
+            .GetMemberRelationshipIndexAsync();
+        WorkspaceSymbolId baseMethod = symbols.Search(qualifiedName: "App.Base.Update").Single().Id;
+        string[] family = relationships.GetFamily(baseMethod).Select(id =>
+            symbols.Entries.Single(entry => entry.Id == id).QualifiedName).ToArray();
+
+        Assert.Equal(new[]
+        {
+            "App.IUpdatable.Update", "App.Base.Update", "App.Child.Update",
+            "App.GrandChild.Update", "App.Second.Update",
+        }.OrderBy(name => name, StringComparer.Ordinal), family.OrderBy(name => name, StringComparer.Ordinal));
+        Assert.DoesNotContain("App.Other.Update", family);
+        Assert.Contains(relationships.Entries, entry => entry.Kind == MemberRelationshipKind.Override);
+        Assert.Contains(relationships.Entries,
+            entry => entry.Kind == MemberRelationshipKind.InterfaceImplementation);
+    }
+
+    [Fact]
+    public async Task MemberRelationshipIndexConnectsCrossProjectContractAndOverride()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("Core", "static-library", sources: [("core.xe", """
+            namespace Core;
+            interface IUpdatable { void Update(); }
+            struct Base : IUpdatable { public virtual void Update() {} }
+            """)]);
+        directory.WriteProject("Game", "executable", ["../Core/Core.xeproj"], ("main.xe", """
+            using Core;
+            namespace Game;
+            struct Player : Base { public override void Update() {} }
+            """));
+        using Workspace workspace = directory.CreateWorkspace("Game");
+        WorkspaceSymbolIndex symbols = await workspace.CurrentSnapshot.GetSymbolIndexAsync();
+        WorkspaceMemberRelationshipIndex relationships = await workspace.CurrentSnapshot
+            .GetMemberRelationshipIndexAsync();
+        WorkspaceSymbolId implementation = symbols.Search(qualifiedName: "Game.Player.Update").Single().Id;
+        string[] family = relationships.GetFamily(implementation).Select(id =>
+            symbols.Entries.Single(entry => entry.Id == id).QualifiedName).ToArray();
+
+        Assert.Contains("Core.IUpdatable.Update", family);
+        Assert.Contains("Core.Base.Update", family);
+        Assert.Contains("Game.Player.Update", family);
+    }
+
+    [Fact]
+    public async Task SharedPhysicalReferencesRemainDuplicateSemanticallyButDeclarationsAreConservative()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("Core", "static-library", sources: [("core.xe",
+            "namespace Core; public void Target() {}")]);
+        directory.Write("Shared/shared.xe", "namespace Shared; void Use() { Core.Target(); }");
+        foreach (string project in new[] { "B", "C" })
+            directory.Write($"{project}/{project}.xeproj", $"""
+                [project]
+                name = "{project}"
+                type = "static-library"
+                [source]
+                root = "../Shared"
+                [references]
+                projects = ["../Core/Core.xeproj"]
+                """);
+        directory.Write("Both.xws", """
+            [workspace]
+            projects = ["Core/Core.xeproj", "B/B.xeproj", "C/C.xeproj"]
+            """);
+        using Workspace workspace = Workspace.Create(directory.PathOf("Both.xws"));
+        WorkspaceSymbolIndex symbols = await workspace.CurrentSnapshot.GetSymbolIndexAsync();
+        WorkspaceReferenceIndex references = await workspace.CurrentSnapshot.GetReferenceIndexAsync();
+        WorkspaceSymbolId target = symbols.Search(qualifiedName: "Core.Target").Single().Id;
+        ReferenceIndexEntry[] physicalReferences = references.FindReferences(target).ToArray();
+
+        Assert.Equal(2, physicalReferences.Length);
+        Assert.Single(physicalReferences.Select(reference =>
+            (Path.GetFullPath(reference.Source.Path), reference.Source.Span)).Distinct());
+        SymbolIndexEntry shared = symbols.Search(qualifiedName: "Shared.Use").First();
+        SharedPhysicalDeclarationGroup group = symbols.GetSharedPhysicalDeclarationGroup(shared.Id);
+        Assert.Equal(2, group.Entries.Length);
+        Assert.False(group.IsCompatible);
+    }
+
+    [Fact]
+    public async Task SymbolIndexPublishesExactEditorKindsOwnershipAndNoCompilerGeneratedSymbols()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("App", sources: [("main.xe", """
+            namespace App;
+            enum State { Ready }
+            interface IService { void InterfaceMethod(); }
+            const int Global = 1;
+            int FreeFunction() { return Global; }
+            struct Widget
+            {
+                public int Field;
+                public int Property { get { return Field; } }
+                const int MemberConstant = 2;
+                public Widget() {}
+                public void Method() {}
+            }
+            """)]);
+        using Workspace workspace = directory.CreateWorkspace();
+        WorkspaceSymbolIndex index = await workspace.CurrentSnapshot.GetSymbolIndexAsync();
+
+        Assert.Equal(EditorSymbolKind.Namespace,
+            index.Search(qualifiedName: "App").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.Enum,
+            index.Search(qualifiedName: "App.State").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.EnumMember,
+            index.Search(qualifiedName: "App.State.Ready").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.Interface,
+            index.Search(qualifiedName: "App.IService").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.Constant,
+            index.Search(qualifiedName: "App.Global").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.Function,
+            index.Search(qualifiedName: "App.FreeFunction").Single().EditorKind);
+        SymbolIndexEntry widget = index.Search(qualifiedName: "App.Widget").Single();
+        Assert.Equal(EditorSymbolKind.Struct, widget.EditorKind);
+        Assert.Equal(EditorSymbolKind.Field,
+            index.Search(qualifiedName: "App.Widget.Field").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.Property,
+            index.Search(qualifiedName: "App.Widget.Property").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.Constant,
+            index.Search(qualifiedName: "App.Widget.MemberConstant").Single().EditorKind);
+        SymbolIndexEntry constructor = index.Entries.Single(entry =>
+            entry.FunctionKind == FunctionKind.Constructor);
+        Assert.Equal(EditorSymbolKind.Constructor, constructor.EditorKind);
+        Assert.Equal(widget.Id, constructor.ContainingSymbolId);
+        Assert.Equal(EditorSymbolKind.Method,
+            index.Search(qualifiedName: "App.Widget.Method").Single().EditorKind);
+        Assert.DoesNotContain(index.Entries, entry => entry.Name == "__init_fields");
+    }
+
+    [Fact]
+    public async Task ConstructionSitesKeepConstructorIdentityAndAlsoCountAsTypeReferences()
+    {
+        const string source = """
+            namespace App;
+            struct Player
+            {
+                public Player() {}
+                ~Player() {}
+            }
+            void Test(Player value, Player* pointer)
+            {
+                Player created = Player();
+                Player* heap = new Player();
+            }
+            """;
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("App", sources: [("main.xe", source)]);
+        using Workspace workspace = directory.CreateWorkspace();
+        WorkspaceSymbolIndex symbols = await workspace.CurrentSnapshot.GetSymbolIndexAsync();
+        WorkspaceReferenceIndex references = await workspace.CurrentSnapshot.GetReferenceIndexAsync();
+        SymbolIndexEntry type = symbols.Search(qualifiedName: "App.Player").Single();
+        SymbolIndexEntry constructor = symbols.Entries.Single(entry =>
+            entry.FunctionKind == FunctionKind.Constructor);
+
+        Assert.Equal(type.Id, constructor.ContainingSymbolId);
+        ReferenceIndexEntry[] typeReferences = references.FindReferences(type.Id).ToArray();
+        ReferenceIndexEntry[] constructorReferences = references.FindReferences(constructor.Id).ToArray();
+        int call = source.IndexOf("Player();", StringComparison.Ordinal);
+        int allocation = source.LastIndexOf("Player();", StringComparison.Ordinal);
+        Assert.Contains(typeReferences, reference => reference.Source.Span.Start == call &&
+            reference.Kind == Xenon.Compiler.Semantics.ResolvedReferenceKind.Type);
+        Assert.Contains(typeReferences, reference => reference.Source.Span.Start == allocation &&
+            reference.Kind == Xenon.Compiler.Semantics.ResolvedReferenceKind.Type);
+        Assert.Contains(constructorReferences, reference => reference.Source.Span.Start == call);
+        Assert.Contains(constructorReferences, reference => reference.Source.Span.Start == allocation);
+        Assert.True(typeReferences.Length >= 6);
+        Assert.Equal(2, constructorReferences.Length);
+    }
+
+    [Fact]
+    public async Task TypeRelationshipIndexFindsCrossProjectDirectAndTransitiveImplementations()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("Library", "static-library", sources: [("types.xe", """
+            namespace Library;
+            interface IEntity {}
+            struct Entity {}
+            """)]);
+        directory.WriteProject("App", "executable", ["../Library/Library.xeproj"], ("main.xe", """
+            using Library;
+            namespace App;
+            struct Player : Entity, IEntity {}
+            struct AdvancedPlayer : Player {}
+            """));
+        using Workspace workspace = directory.CreateWorkspace();
+        WorkspaceSnapshot snapshot = workspace.CurrentSnapshot;
+        WorkspaceSymbolIndex symbols = await snapshot.GetSymbolIndexAsync();
+        WorkspaceTypeRelationshipIndex relationships = await snapshot.GetTypeRelationshipIndexAsync();
+
+        WorkspaceSymbolId entity = symbols.Search(qualifiedName: "Library.Entity").Single().Id;
+        WorkspaceSymbolId contract = symbols.Search(qualifiedName: "Library.IEntity").Single().Id;
+        Assert.Equal("App.Player", Assert.Single(relationships.FindDirect(entity)).DerivedType.QualifiedName);
+        Assert.Equal(new[] { "App.Player", "App.AdvancedPlayer" },
+            relationships.FindTransitive(contract).Select(item => item.DerivedType.QualifiedName).ToArray());
+    }
+
     [Fact]
     public async Task SymbolIndexesSearchAcrossProjectsAndRemainSnapshotIsolated()
     {

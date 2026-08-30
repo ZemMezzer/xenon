@@ -29,7 +29,14 @@ public sealed record SymbolIndexEntry(
     string Name,
     string QualifiedName,
     SymbolKind Kind,
-    SourceReference Declaration);
+    SourceReference Declaration)
+{
+    public FunctionKind? FunctionKind { get; init; }
+    public required EditorSymbolKind EditorKind { get; init; }
+    public WorkspaceSymbolId? ContainingSymbolId { get; init; }
+    public bool IsDefinition { get; init; }
+    public bool CanRename { get; init; }
+}
 
 public sealed class ProjectSymbolIndex
 {
@@ -55,6 +62,9 @@ public sealed class ProjectSymbolIndex
             (qualifiedName is null || string.Equals(entry.QualifiedName, qualifiedName, StringComparison.Ordinal)) &&
             (kind is null || entry.Kind == kind)).ToImmutableArray();
 
+    public ImmutableArray<SymbolIndexEntry> FindMembers(WorkspaceSymbolId containingSymbol) =>
+        Entries.Where(entry => entry.ContainingSymbolId == containingSymbol).ToImmutableArray();
+
     internal ImmutableDictionary<DocumentId, ImmutableArray<SymbolIndexEntry>> Contributions => _byDocument;
 }
 
@@ -76,7 +86,28 @@ public sealed class WorkspaceSymbolIndex
             (qualifiedName is null || string.Equals(entry.QualifiedName, qualifiedName, StringComparison.Ordinal)) &&
             (kind is null || entry.Kind == kind) &&
             (projectId is null || entry.Id.ProjectId == projectId)).ToImmutableArray();
+
+    public ImmutableArray<SymbolIndexEntry> FindMembers(WorkspaceSymbolId containingSymbol) =>
+        Entries.Where(entry => entry.ContainingSymbolId == containingSymbol).ToImmutableArray();
+
+    public SharedPhysicalDeclarationGroup GetSharedPhysicalDeclarationGroup(WorkspaceSymbolId symbol)
+    {
+        SymbolIndexEntry target = Entries.Single(entry => entry.Id == symbol);
+        ImmutableArray<SymbolIndexEntry> entries = Entries.Where(entry =>
+                ProjectPath.Comparer.Equals(ProjectPath.Normalize(entry.Declaration.Path),
+                    ProjectPath.Normalize(target.Declaration.Path)) &&
+                entry.Declaration.Span == target.Declaration.Span)
+            .ToImmutableArray();
+        // A physical declaration compiled in multiple project contexts may bind differently.
+        // Until cross-compilation type identities can be proven equivalent, reject it conservatively.
+        bool compatible = entries.Select(entry => entry.Id.ProjectId).Distinct().Take(2).Count() == 1;
+        return new SharedPhysicalDeclarationGroup(entries, compatible);
+    }
 }
+
+public sealed record SharedPhysicalDeclarationGroup(
+    ImmutableArray<SymbolIndexEntry> Entries,
+    bool IsCompatible);
 
 public sealed record ReferenceIndexEntry(
     WorkspaceSymbolId Target,
@@ -120,6 +151,102 @@ public sealed class WorkspaceReferenceIndex
         Entries.Where(entry => entry.Target == symbol).ToImmutableArray();
 }
 
+public enum TypeRelationshipKind
+{
+    DerivedType,
+    InterfaceImplementation,
+    DerivedInterface,
+}
+
+public sealed record TypeRelationshipIndexEntry(
+    WorkspaceSymbolId BaseType,
+    WorkspaceSymbolId DerivedType,
+    SourceReference DerivedDeclaration,
+    TypeRelationshipKind Kind);
+
+/// <summary>Reverse, semantic type relationships for editor and other tooling consumers.</summary>
+public sealed class WorkspaceTypeRelationshipIndex
+{
+    internal WorkspaceTypeRelationshipIndex(IEnumerable<TypeRelationshipIndexEntry> entries)
+    {
+        Entries = entries.Distinct().OrderBy(entry => entry.DerivedDeclaration.Path,
+            StringComparer.Ordinal).ThenBy(entry => entry.DerivedDeclaration.Span.Start).ToImmutableArray();
+    }
+
+    public ImmutableArray<TypeRelationshipIndexEntry> Entries { get; }
+
+    public ImmutableArray<TypeRelationshipIndexEntry> FindDirect(WorkspaceSymbolId type) =>
+        Entries.Where(entry => entry.BaseType == type).ToImmutableArray();
+
+    public ImmutableArray<TypeRelationshipIndexEntry> FindTransitive(WorkspaceSymbolId type)
+    {
+        var result = ImmutableArray.CreateBuilder<TypeRelationshipIndexEntry>();
+        var pending = new Queue<WorkspaceSymbolId>();
+        var visited = new HashSet<WorkspaceSymbolId> { type };
+        pending.Enqueue(type);
+        while (pending.TryDequeue(out WorkspaceSymbolId current))
+            foreach (TypeRelationshipIndexEntry entry in FindDirect(current))
+                if (visited.Add(entry.DerivedType))
+                {
+                    result.Add(entry);
+                    pending.Enqueue(entry.DerivedType);
+                }
+        return result.ToImmutable();
+    }
+}
+
+public enum MemberRelationshipKind
+{
+    Override,
+    InterfaceImplementation,
+}
+
+public sealed record MemberRelationshipIndexEntry(
+    WorkspaceSymbolId Contract,
+    WorkspaceSymbolId Implementation,
+    MemberRelationshipKind Kind);
+
+/// <summary>Exact semantic member families used by editor refactorings.</summary>
+public sealed class WorkspaceMemberRelationshipIndex
+{
+    private readonly ImmutableHashSet<WorkspaceSymbolId> _nonEditableMembers;
+
+    internal WorkspaceMemberRelationshipIndex(IEnumerable<MemberRelationshipIndexEntry> entries,
+        IEnumerable<WorkspaceSymbolId> nonEditableMembers)
+    {
+        Entries = entries.Distinct().OrderBy(entry => entry.Contract.ProjectId)
+            .ThenBy(entry => entry.Contract.DocumentId)
+            .ThenBy(entry => entry.Contract.DeclarationIdentity, StringComparer.Ordinal)
+            .ThenBy(entry => entry.Implementation.ProjectId)
+            .ThenBy(entry => entry.Implementation.DocumentId)
+            .ThenBy(entry => entry.Implementation.DeclarationIdentity, StringComparer.Ordinal)
+            .ToImmutableArray();
+        _nonEditableMembers = nonEditableMembers.ToImmutableHashSet();
+    }
+
+    public ImmutableArray<MemberRelationshipIndexEntry> Entries { get; }
+
+    public ImmutableArray<WorkspaceSymbolId> GetFamily(WorkspaceSymbolId member)
+    {
+        var family = new HashSet<WorkspaceSymbolId> { member };
+        var pending = new Queue<WorkspaceSymbolId>();
+        pending.Enqueue(member);
+        while (pending.TryDequeue(out WorkspaceSymbolId current))
+            foreach (MemberRelationshipIndexEntry relationship in Entries.Where(entry =>
+                         entry.Contract == current || entry.Implementation == current))
+            {
+                WorkspaceSymbolId related = relationship.Contract == current
+                    ? relationship.Implementation : relationship.Contract;
+                if (family.Add(related)) pending.Enqueue(related);
+            }
+        return family.OrderBy(item => item.ProjectId).ThenBy(item => item.DocumentId)
+            .ThenBy(item => item.DeclarationIdentity, StringComparer.Ordinal).ToImmutableArray();
+    }
+
+    public bool HasNonEditableMember(IEnumerable<WorkspaceSymbolId> family) =>
+        family.Any(_nonEditableMembers.Contains);
+}
+
 internal static class WorkspaceIndexBuilder
 {
     public static ImmutableArray<SymbolIndexEntry> BuildSymbols(ProjectId projectId,
@@ -136,13 +263,22 @@ internal static class WorkspaceIndexBuilder
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!visited.Add(symbol)) return;
-            foreach (var syntaxReference in symbol.DeclaringSyntaxReferences)
+            foreach (var syntaxReference in symbol.IsUserVisible ? symbol.DeclaringSyntaxReferences : [])
             {
                 SourceText source = syntaxReference.Source;
                 if (!sourceMap.TryGetValue(source.FileId, out var owner) || owner.ProjectId != projectId) continue;
                 SourceReference declaration = CreateSourceReference(owner, syntaxReference.Location);
                 WorkspaceSymbolId id = CreateSymbolId(symbol, owner);
-                result.Add(new SymbolIndexEntry(id, symbol.Name, symbol.QualifiedName, symbol.Kind, declaration));
+                result.Add(new SymbolIndexEntry(id, symbol.Name, symbol.QualifiedName, symbol.Kind, declaration)
+                {
+                    FunctionKind = (symbol as FunctionSymbol)?.FunctionKind,
+                    EditorKind = EditorSymbolClassifier.GetKind(symbol),
+                    ContainingSymbolId = symbol.ContainingSymbol is { IsSourceDefined: true } containing &&
+                        TryCreateSymbolId(containing, sourceMap, out WorkspaceSymbolId containingId)
+                            ? containingId : null,
+                    IsDefinition = symbol.IsDefinition,
+                    CanRename = EditorSymbolClassifier.CanRename(symbol),
+                });
             }
 
             switch (symbol)
@@ -176,7 +312,7 @@ internal static class WorkspaceIndexBuilder
         return result.ToImmutable();
     }
 
-    private static bool TryCreateSymbolId(Symbol symbol,
+    internal static bool TryCreateSymbolId(Symbol symbol,
         IReadOnlyDictionary<SourceFileId, (ProjectId ProjectId, DocumentId DocumentId)> sourceMap,
         out WorkspaceSymbolId id)
     {
@@ -190,6 +326,15 @@ internal static class WorkspaceIndexBuilder
         }
         id = default;
         return false;
+    }
+
+    internal static SourceReference CreateDeclarationReference(Symbol symbol,
+        IReadOnlyDictionary<SourceFileId, (ProjectId ProjectId, DocumentId DocumentId)> sourceMap)
+    {
+        SyntaxReference declaration = symbol.DeclaringSyntaxReferences
+            .OrderBy(reference => reference.Path, StringComparer.Ordinal)
+            .ThenBy(reference => reference.Span.Start).First();
+        return CreateSourceReference(sourceMap[declaration.Source.FileId], declaration.Location);
     }
 
     private static WorkspaceSymbolId CreateSymbolId(Symbol symbol,

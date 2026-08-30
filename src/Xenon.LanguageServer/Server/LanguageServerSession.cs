@@ -23,6 +23,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
     private readonly List<Xenon.ProjectSystem.Workspace> _workspaces = [];
     private readonly Dictionary<string, string> _openUris = new(DocumentUri.PathComparer);
     private readonly DiagnosticScheduler _diagnostics;
+    private readonly Func<string, object?, Task> _sendNotification;
     private readonly TextWriter _log;
     private bool _disposed;
 
@@ -30,12 +31,13 @@ public sealed class LanguageServerSession : IAsyncDisposable
         TimeSpan? diagnosticDebounce = null)
     {
         _log = log ?? TextWriter.Null;
+        _sendNotification = sendNotification;
         _analysisContexts = new LanguageServerAnalysisContextFactory(_resolver);
         _diagnostics = new DiagnosticScheduler(_analysisContexts,
-            _ => Task.FromResult<object?>(Array.Empty<object>()),
+            LspCoreIntelligence.DiagnosticsAsync,
             (uri, result) => sendNotification("textDocument/publishDiagnostics",
                 new { uri, version = LspDocumentVersions.ToLsp(result.Version),
-                    diagnostics = Array.Empty<object>() }),
+                    diagnostics = result.Value ?? Array.Empty<object>() }),
             diagnosticDebounce);
     }
 
@@ -91,9 +93,47 @@ public sealed class LanguageServerSession : IAsyncDisposable
             _ when State == LanguageServerLifecycleState.ShutdownRequested =>
                 throw new JsonRpcException(LspErrorCodes.InvalidRequest,
                     "The language server is shutting down."),
+            "workspace/symbol" => ExecuteWorkspaceSymbolRequestAsync(RequireParams(parameters), cancellationToken),
+            "textDocument/hover" or "textDocument/definition" or "textDocument/typeDefinition" or
+            "textDocument/references" or "textDocument/implementation" or
+            "textDocument/documentSymbol" or "textDocument/completion" or
+            "textDocument/signatureHelp" or "textDocument/semanticTokens/full" or
+            "textDocument/prepareRename" or "textDocument/rename" =>
+                ExecuteCoreDocumentRequestAsync(method, RequireParams(parameters), cancellationToken),
             _ => throw new JsonRpcException(LspErrorCodes.MethodNotFound,
                 $"Method '{method}' is not supported."),
         };
+    }
+
+    private Task<object?> ExecuteCoreDocumentRequestAsync(string method, JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        string uri = RequireString(RequireObject(parameters, "textDocument"), "uri");
+        return ExecuteSemanticRequestAsync(uri,
+            context => LspCoreIntelligence.HandleDocumentRequestAsync(context, method, parameters),
+            cancellationToken);
+    }
+
+    private async Task<object?> ExecuteWorkspaceSymbolRequestAsync(JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        EnsureRunning();
+        if (_workspaces.Count == 0) return Array.Empty<object>();
+        string query = RequireString(parameters, "query");
+        using WorkspaceAnalysisRequest request = _workspaces[0].CreateAnalysisRequest(
+            staleSensitive: true, cancellationToken);
+        try
+        {
+            object? result = await LspCoreIntelligence.WorkspaceSymbolsAsync(request.Snapshot, query,
+                request.CancellationToken).ConfigureAwait(false);
+            request.CancellationToken.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested ||
+            request.CancellationToken.IsCancellationRequested)
+        {
+            throw new JsonRpcException(LspErrorCodes.RequestCancelled, "Request cancelled.");
+        }
     }
 
     public async Task HandleNotificationAsync(string method, JsonElement? parameters,
@@ -125,7 +165,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
                 break;
             case "textDocument/didClose":
                 EnsureRunning();
-                DidClose(RequireParams(parameters), cancellationToken);
+                await DidCloseAsync(RequireParams(parameters), cancellationToken).ConfigureAwait(false);
                 break;
         }
     }
@@ -234,7 +274,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
         TrackAndSchedule(uri, contexts.Select(item => item.Workspace));
     }
 
-    private void DidClose(JsonElement parameters, CancellationToken cancellationToken)
+    private async Task DidCloseAsync(JsonElement parameters, CancellationToken cancellationToken)
     {
         JsonElement identifier = RequireObject(parameters, "textDocument");
         string uri = RequireString(identifier, "uri");
@@ -249,6 +289,8 @@ public sealed class LanguageServerSession : IAsyncDisposable
         foreach (Xenon.ProjectSystem.Workspace workspace in contexts.Select(item => item.Workspace).Distinct())
             _diagnostics.Cancel(workspace, uri);
         _openUris.Remove(DocumentUri.ToNormalizedPath(uri));
+        await _sendNotification("textDocument/publishDiagnostics",
+            new { uri, diagnostics = Array.Empty<object>() }).ConfigureAwait(false);
     }
 
     private void TrackAndSchedule(string uri, IEnumerable<Xenon.ProjectSystem.Workspace> changed)

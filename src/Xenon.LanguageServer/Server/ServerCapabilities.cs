@@ -12,5 +12,26 @@ public static class ServerCapabilities
             change = 2,
             save = new { includeText = false },
         },
+        hoverProvider = true,
+        definitionProvider = true,
+        typeDefinitionProvider = true,
+        referencesProvider = true,
+        implementationProvider = true,
+        documentSymbolProvider = true,
+        workspaceSymbolProvider = true,
+        completionProvider = new { triggerCharacters = new[] { "." }, resolveProvider = false },
+        signatureHelpProvider = new { triggerCharacters = new[] { "(", ",", "[" },
+            retriggerCharacters = new[] { "," } },
+        semanticTokensProvider = new
+        {
+            legend = new
+            {
+                tokenTypes = LspCoreIntelligence.SemanticTokenTypes,
+                tokenModifiers = LspCoreIntelligence.SemanticTokenModifiers,
+            },
+            full = true,
+            range = false,
+        },
+        renameProvider = new { prepareProvider = true },
     };
 }

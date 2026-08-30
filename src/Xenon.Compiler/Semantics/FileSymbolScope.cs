@@ -36,13 +36,37 @@ internal sealed class FileSymbolScope
     internal IEnumerable<NamespaceSymbol> ImportedNamespaces => _importedNamespaces;
 
     internal IEnumerable<Symbol> GetFileSymbols() =>
-        ContainingNamespace.Namespaces.Cast<Symbol>()
+        GlobalNamespace.Namespaces.Cast<Symbol>()
+            .Concat(ContainingNamespace.Namespaces)
             .Concat(ContainingNamespace.Types)
             .Concat(ContainingNamespace.Functions)
             .Concat(ContainingNamespace.Constants)
             .Concat(_importedNamespaces.SelectMany(ns => ns.Namespaces.Cast<Symbol>()
                 .Concat(ns.Types).Concat(ns.Functions.Where(function => function.IsPublic)).Concat(ns.Constants)))
             .Concat(_aliasSymbols)
+            .Distinct();
+
+    internal NamespaceSymbol? ResolveNamespaceForTooling(IReadOnlyList<string> parts) =>
+        ResolveNamespacePath(parts);
+
+    internal TypeSymbol? ResolveTypeForTooling(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1) return ResolveTypePath(parts);
+        if (_aliases.TryGetValue(parts[0], out UsingAliasTarget? alias) && alias?.Type is not null)
+            return alias.Type;
+        DeclaredTypeSymbol[] candidates = ContainingNamespace.FindTypes(parts[0])
+            .Concat(_importedNamespaces.SelectMany(@namespace => @namespace.FindTypes(parts[0])))
+            .Distinct().ToArray();
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    internal IEnumerable<Symbol> GetNamespaceSymbolsForTooling(NamespaceSymbol @namespace) =>
+        @namespace.Namespaces.Cast<Symbol>()
+            .Concat(@namespace.Types)
+            .Concat(@namespace.Functions.Where(function =>
+                ReferenceEquals(@namespace, ContainingNamespace) || function.IsPublic))
+            .Concat(@namespace.Constants)
+            .Where(symbol => symbol.IsUserVisible)
             .Distinct();
 
     public void BindUsings(ImmutableArray<UsingDirectiveSyntax> directives, DiagnosticBag diagnostics)

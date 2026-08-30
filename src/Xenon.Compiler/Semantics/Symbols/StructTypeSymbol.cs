@@ -237,6 +237,7 @@ public sealed class ConstantSymbol : Symbol
     internal SyntaxNode Declaration { get; }
     internal SyntaxToken IdentifierToken => new SyntaxReference(Declaration).IdentifierToken;
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override bool IsDefinition => true;
 
     internal void SetValue(object? value)
     {
@@ -276,6 +277,8 @@ public sealed class IndexerSymbol : Symbol
     public FunctionSymbol? Setter { get; private set; }
     internal IndexerDeclarationSyntax Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override bool IsDefinition => Getter?.IsDefinition == true || Setter?.IsDefinition == true;
+    public override bool HasUserEditableIdentifier => false;
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
     {
@@ -317,10 +320,14 @@ public sealed class PropertySymbol : Symbol
     public TypeSymbol Type { get; }
     public Accessibility Accessibility { get; }
     public bool IsPublic => Accessibility == Accessibility.Public;
+    public bool IsVirtual => Declaration.IsVirtual;
+    public bool IsOverride => Declaration.IsOverride;
+    public bool IsAbstract => Declaration.IsAbstract;
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
     internal PropertyDeclarationSyntax Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override bool IsDefinition => Getter?.IsDefinition == true || Setter?.IsDefinition == true;
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
     {
@@ -376,6 +383,7 @@ public sealed class FieldSymbol : Symbol
 
     internal FieldDeclarationSyntax Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override bool IsDefinition => true;
 
     internal void SetInitializer(BoundExpression initializer) => Initializer = initializer;
 }

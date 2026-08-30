@@ -16,6 +16,7 @@ public abstract class DeclaredTypeSymbol : TypeSymbol
     public abstract TypeDeclarationSyntax Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
     public abstract string DeclarationKind { get; }
+    public override bool IsDefinition => true;
     public abstract IEnumerable<Symbol> GetMembers();
 
     /// <summary>Visible members, including inherited declarations where the type's semantics permit them.</summary>
