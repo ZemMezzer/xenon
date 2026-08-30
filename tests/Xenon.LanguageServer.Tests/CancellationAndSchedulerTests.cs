@@ -169,7 +169,8 @@ public sealed class CancellationAndSchedulerTests
 
         Task disposal = scheduler.DisposeAsync().AsTask();
         releaseSecond.TrySetResult();
-        await AssertStillRunningAsync(disposal);
+        await WaitForAsync(() => scheduler.InFlightJobCount == 1);
+        Assert.False(disposal.IsCompleted);
         Assert.Equal(1, scheduler.InFlightJobCount);
         releaseFirst.TrySetResult();
         await disposal.WaitAsync(TimeSpan.FromSeconds(5));

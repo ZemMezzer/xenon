@@ -132,12 +132,8 @@ public sealed class ProcessRunnerTests
         Assert.Contains("ready", result.Stdout);
         Assert.True(result.Duration < TimeSpan.FromSeconds(10));
         int pid = int.Parse(File.ReadAllText(pidPath));
-        try
-        {
-            using Process child = Process.GetProcessById(pid);
-            Assert.True(child.HasExited);
-        }
-        catch (ArgumentException) { /* Already reaped. */ }
+        Assert.True(await WaitForProcessTerminationAsync(pid, TimeSpan.FromSeconds(5)),
+            $"Descendant process {pid} was still running after process-tree termination.");
         sandbox.Delete();
     }
 
@@ -158,4 +154,42 @@ public sealed class ProcessRunnerTests
 
     private static Task<NativeProcessResult> Run(params string[] args) =>
         new NativeProcessRunner().RunAsync(TestProcess.Command(AppContext.BaseDirectory, TimeSpan.FromSeconds(10), args));
+
+    private static async Task<bool> WaitForProcessTerminationAsync(int pid, TimeSpan timeout)
+    {
+        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (IsProcessTerminated(pid)) return true;
+            await Task.Delay(25);
+        }
+        return IsProcessTerminated(pid);
+    }
+
+    private static bool IsProcessTerminated(int pid)
+    {
+        try
+        {
+            using Process process = Process.GetProcessById(pid);
+            if (process.HasExited) return true;
+            if (!OperatingSystem.IsLinux()) return false;
+
+            // A killed orphan may remain in /proc as a zombie until init reaps it. It no
+            // longer executes or owns the inherited pipes, so it satisfies termination.
+            string stat = File.ReadAllText($"/proc/{pid}/stat");
+            int commandEnd = stat.LastIndexOf(')');
+            char state = commandEnd >= 0 && commandEnd + 2 < stat.Length
+                ? stat[commandEnd + 2]
+                : '\0';
+            return state is 'Z' or 'X';
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 }
