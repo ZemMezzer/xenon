@@ -101,6 +101,7 @@ public sealed class InterfaceIndexerSymbol : Symbol
     public FunctionSymbol? Setter { get; private set; }
     internal InterfaceIndexerDeclarationSyntax Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override bool HasUserEditableIdentifier => false;
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
     {

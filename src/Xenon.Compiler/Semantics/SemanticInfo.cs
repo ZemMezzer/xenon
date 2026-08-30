@@ -61,3 +61,18 @@ public readonly record struct MemberLookupOptions(
     MemberAccessKind AccessKind = MemberAccessKind.Instance,
     bool IncludeInaccessible = false,
     bool IsReadonlyReceiver = false);
+
+public enum CompletionReceiverKind
+{
+    None,
+    Namespace,
+    Type,
+    Value,
+    Ambiguous,
+}
+
+/// <summary>Compiler-resolved semantic category of a completion receiver.</summary>
+public readonly record struct CompletionReceiverInfo(
+    CompletionReceiverKind Kind,
+    NamespaceSymbol? Namespace = null,
+    TypeSymbol? Type = null);

@@ -30,4 +30,5 @@ public sealed class SyntheticMemberSymbol : Symbol
     public ImmutableArray<ParameterSymbol> Parameters { get; }
     public bool IsStatic { get; }
     public bool IsReadonly { get; }
+    public override bool IsCompilerGenerated => true;
 }

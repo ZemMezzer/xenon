@@ -67,6 +67,10 @@ public static class SyntaxFacts
     public static SyntaxKind GetKeywordKind(string text) =>
         Keywords.TryGetValue(text, out SyntaxKind kind) ? kind : SyntaxKind.IdentifierToken;
 
+    /// <summary>The canonical lexer keyword set for editor/tooling consumers.</summary>
+    public static IReadOnlyList<string> GetKeywordTexts() => Keywords.Keys
+        .OrderBy(keyword => keyword, StringComparer.Ordinal).ToArray();
+
     public static bool IsTypeName(SyntaxKind kind) => kind is
         SyntaxKind.VoidKeyword or
         SyntaxKind.BoolKeyword or

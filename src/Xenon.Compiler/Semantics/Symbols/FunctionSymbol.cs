@@ -210,6 +210,22 @@ public sealed class FunctionSymbol : Symbol
     public bool IsAbstract { get; }
     public bool IsReadonly { get; }
 
+    public bool IsAccessor => ContainingProperty is not null || ContainingInterfaceProperty is not null ||
+        ContainingIndexer is not null || ContainingInterfaceIndexer is not null;
+
+    public override bool IsCompilerGenerated => FunctionKind == FunctionKind.InstanceInitializer;
+    public override bool IsUserVisible => FunctionKind != FunctionKind.InstanceInitializer && !IsAccessor;
+    public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor;
+    public override bool IsDefinition => Declaration switch
+    {
+        FunctionDeclarationSyntax syntax => syntax.Body is not null,
+        MethodDeclarationSyntax syntax => syntax.Body is not null,
+        ConstructorDeclarationSyntax => true,
+        DestructorDeclarationSyntax => true,
+        PropertyAccessorDeclarationSyntax syntax => syntax.Body is not null,
+        _ => false,
+    };
+
     public int? VTableSlot { get; private set; }
     public int ConstructorOverload { get; private set; }
     public int ConstructorOverloadCount { get; private set; } = 1;
@@ -284,6 +300,7 @@ public sealed class LocalVariableSymbol : VariableSymbol
     internal VariableDeclarationStatementSyntax? Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
         Declaration is null ? [] : [new(Declaration)];
+    public override bool IsDefinition => Declaration is not null;
 
     public ArrayStorageKind ArrayStorage { get; internal set; }
     public FunctionSymbol? Destructor { get; internal set; }

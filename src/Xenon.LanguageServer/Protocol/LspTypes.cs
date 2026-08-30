@@ -21,6 +21,22 @@ public sealed record LspLocationLink(
     [property: JsonPropertyName("originSelectionRange"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     LspRange? OriginSelectionRange = null);
 
+public sealed class LspDocumentSymbol
+{
+    [JsonPropertyName("name")] public required string Name { get; init; }
+    [JsonPropertyName("detail"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Detail { get; init; }
+    [JsonPropertyName("kind")] public required int Kind { get; init; }
+    [JsonPropertyName("range")] public required LspRange Range { get; init; }
+    [JsonPropertyName("selectionRange")] public required LspRange SelectionRange { get; init; }
+    [JsonPropertyName("children"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<LspDocumentSymbol>? Children { get; set; }
+}
+
+public sealed record LspTextEdit(
+    [property: JsonPropertyName("range")] LspRange Range,
+    [property: JsonPropertyName("newText")] string NewText);
+
 public static class LspErrorCodes
 {
     public const int ParseError = -32700;

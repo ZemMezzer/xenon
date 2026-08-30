@@ -54,8 +54,11 @@ public sealed class SemanticModel
         ArgumentNullException.ThrowIfNull(syntax);
         cancellationToken.ThrowIfCancellationRequested();
         if (_semanticInfo.Symbols.TryGetValue(syntax, out SymbolInfo info)) return info;
-        return _semanticInfo.Declarations.TryGetValue(syntax, out Symbol? declared)
-            ? SymbolInfo.FromSymbol(declared) : SymbolInfo.None;
+        if (_semanticInfo.Declarations.TryGetValue(syntax, out Symbol? declared))
+            return SymbolInfo.FromSymbol(declared);
+        return syntax is TypeSyntax && _semanticInfo.Types.TryGetValue(syntax, out TypeInfo typeInfo) &&
+            TryGetDeclaredType(typeInfo.Type, out DeclaredTypeSymbol type)
+            ? SymbolInfo.FromSymbol(type) : SymbolInfo.None;
     }
 
     public TypeInfo GetTypeInfo(SyntaxNode syntax, CancellationToken cancellationToken = default)
@@ -73,6 +76,66 @@ public sealed class SemanticModel
         return _semanticInfo.Receivers.TryGetValue(receiver, out ReceiverInfo info) ? info : null;
     }
 
+    /// <summary>Resolves the exact semantic identity under an editor position.</summary>
+    public SymbolInfo GetSymbolInfoAtPosition(SyntaxTree tree, int position,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        EnsureTree(tree);
+        ArgumentOutOfRangeException.ThrowIfNegative(position);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(position, tree.Source.Length);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var matches = _semanticInfo.Symbols
+            .Select(pair => (Pair: pair, Location: TryGetReferenceLocation(pair.Key, out TextLocation location)
+                ? location : (TextLocation?)null))
+            .Where(item => item.Location is { } location && IsPositionMatch(location.Span, position))
+            .Select(item => (Info: item.Pair.Value, Span: item.Location!.Value.Span))
+            .Concat(_semanticInfo.Declarations
+                .SelectMany(pair => pair.Value.DeclaringSyntaxReferences
+                    .Where(reference => ReferenceEquals(reference.Declaration, pair.Key))
+                    .Select(reference => (Info: SymbolInfo.FromSymbol(pair.Value), Span: reference.Span)))
+                .Where(item => IsPositionMatch(item.Span, position)))
+            .Concat(_semanticInfo.Types
+                .Where(pair => pair.Key is TypeSyntax &&
+                    TryGetDeclaredType(pair.Value.Type, out _) &&
+                    TryGetReferenceLocation(pair.Key, out TextLocation location) &&
+                    IsPositionMatch(location.Span, position))
+                .Select(pair =>
+                {
+                    _ = TryGetDeclaredType(pair.Value.Type, out DeclaredTypeSymbol type);
+                    _ = TryGetReferenceLocation(pair.Key, out TextLocation location);
+                    return (Info: SymbolInfo.FromSymbol(type!), Span: location.Span);
+                }))
+            .OrderBy(item => item.Span.Length)
+            .ThenByDescending(item => item.Info.Symbol is not null)
+            .ToArray();
+        return matches.FirstOrDefault(item => item.Info.Symbol is not null).Info is { Symbol: not null } resolved
+            ? resolved
+            : matches.FirstOrDefault().Info;
+
+        static bool IsPositionMatch(TextSpan span, int value) => value >= span.Start &&
+            (value < span.End || span.Length == 0 && value == span.Start);
+    }
+
+    public SymbolInfo GetSymbolInfoAtPosition(int position,
+        CancellationToken cancellationToken = default) =>
+        GetSymbolInfoAtPosition(_primaryTree ?? throw new InvalidOperationException(
+            "Use the SyntaxTree overload for a multi-file compilation."), position, cancellationToken);
+
+    /// <summary>All explicit declarations contributed by the selected source tree.</summary>
+    public ImmutableArray<Symbol> GetDeclaredSymbols(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var seen = new HashSet<Symbol>(ReferenceEqualityComparer.Instance);
+        IEnumerable<Symbol> symbols = _semanticInfo.Declarations.Values.Where(seen.Add);
+        if (_primaryTree is not null)
+            symbols = symbols.Where(symbol => symbol.DeclaringSyntaxReferences.Any(reference =>
+                ReferenceEquals(reference.Source, _primaryTree.Source)));
+        return symbols.OrderBy(symbol => symbol.Locations.FirstOrDefault().Span.Start)
+            .ThenBy(symbol => symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+    }
+
     public ImmutableArray<Symbol> LookupSymbols(int position, CancellationToken cancellationToken = default) =>
         LookupSymbols(GetPrimarySource(), position, cancellationToken);
 
@@ -84,14 +147,125 @@ public sealed class SemanticModel
         return LookupSymbols(tree.Source, position, cancellationToken);
     }
 
+    /// <summary>
+    /// User-visible symbols valid for ordinary unqualified source lookup at a position.
+    /// Unlike raw scope inspection this applies callable context, inheritance,
+    /// accessibility, static/instance, readonly, and compiler-generated filtering.
+    /// </summary>
+    public ImmutableArray<Symbol> GetCompletionSymbols(int position,
+        CancellationToken cancellationToken = default) =>
+        GetCompletionSymbols(_primaryTree ?? throw new InvalidOperationException(
+            "Use the SyntaxTree overload for a multi-file compilation."), position, cancellationToken);
+
+    public ImmutableArray<Symbol> GetCompletionSymbols(SyntaxTree tree, int position,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        EnsureTree(tree);
+        ArgumentOutOfRangeException.ThrowIfNegative(position);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(position, tree.Source.Length);
+        cancellationToken.ThrowIfCancellationRequested();
+        PositionScope[] scopes = GetScopes(tree.Source, position);
+        var result = ImmutableArray.CreateBuilder<Symbol>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (PositionScope scope in scopes)
+            foreach (VariableSymbol variable in scope.Variables)
+            {
+                bool visible = variable is ParameterSymbol || variable.Locations.IsEmpty ||
+                    variable.Locations[0].Span.Start <= position;
+                if (visible && variable.IsUserVisible && names.Add(variable.Name)) result.Add(variable);
+            }
+
+        FunctionSymbol? function = scopes.FirstOrDefault()?.Function;
+        if (function?.ContainingType is DeclaredTypeSymbol containingType)
+            foreach (Symbol member in AllMembers(containingType)
+                .Where(member => IsUnqualifiedCompletionMember(member, function))
+                .Where(member => IsAccessible(member, containingType))
+                .OrderBy(member => member.Name, StringComparer.Ordinal))
+                if (names.Add(member.Name)) result.Add(member);
+
+        if (_semanticInfo.FileScopes.TryGetValue(tree.Source, out FileSymbolScope? fileScope))
+        {
+            HashSet<string> shadowedNames = names.ToHashSet(StringComparer.Ordinal);
+            var seenFileSymbols = new HashSet<Symbol>(ReferenceEqualityComparer.Instance);
+            foreach (IGrouping<string, Symbol> group in fileScope.GetFileSymbols()
+                .Where(EditorSymbolClassifier.IsEditorVisible)
+                .OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal)
+                .GroupBy(symbol => symbol.Name, StringComparer.Ordinal))
+            {
+                if (shadowedNames.Contains(group.Key)) continue;
+                foreach (Symbol symbol in group)
+                    if (seenFileSymbols.Add(symbol)) result.Add(symbol);
+                names.Add(group.Key);
+            }
+        }
+        return result.ToImmutable();
+    }
+
+    public CompletionReceiverInfo GetCompletionReceiver(ExpressionSyntax receiver,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(receiver);
+        cancellationToken.ThrowIfCancellationRequested();
+        bool hasSemanticReceiver = _semanticInfo.Receivers.TryGetValue(receiver, out ReceiverInfo semanticReceiver) &&
+            semanticReceiver.Type is not ErrorTypeSymbol;
+        if (hasSemanticReceiver && !semanticReceiver.IsStatic)
+            return new CompletionReceiverInfo(CompletionReceiverKind.Value, Type: semanticReceiver.Type);
+        SourceText? source = SyntaxNavigator.GetTokens(receiver).FirstOrDefault()?.Location.Source;
+        FileSymbolScope? fileScope = source is not null
+            ? _semanticInfo.FileScopes.GetValueOrDefault(source) : null;
+        string[]? dottedParts = TryGetDottedName(receiver, out string[] parts) ? parts : null;
+        NamespaceSymbol? namespaceCandidate = fileScope is not null && dottedParts is not null
+            ? fileScope.ResolveNamespaceForTooling(dottedParts) : null;
+        TypeSymbol? typeCandidate = fileScope is not null && dottedParts is not null
+            ? fileScope.ResolveTypeForTooling(dottedParts) : null;
+        if (namespaceCandidate is not null && typeCandidate is not null)
+            return new CompletionReceiverInfo(CompletionReceiverKind.Ambiguous);
+        if (hasSemanticReceiver)
+            return new CompletionReceiverInfo(CompletionReceiverKind.Type, Type: semanticReceiver.Type);
+        if (_semanticInfo.Symbols.TryGetValue(receiver, out SymbolInfo symbolInfo))
+        {
+            if (symbolInfo.Symbol is NamespaceSymbol @namespace)
+                return new CompletionReceiverInfo(CompletionReceiverKind.Namespace, Namespace: @namespace);
+            if (symbolInfo.Symbol is TypeSymbol type)
+                return new CompletionReceiverInfo(CompletionReceiverKind.Type, Type: type);
+        }
+        if (namespaceCandidate is not null)
+            return new CompletionReceiverInfo(CompletionReceiverKind.Namespace, Namespace: namespaceCandidate);
+        return typeCandidate is null ? default :
+            new CompletionReceiverInfo(CompletionReceiverKind.Type, Type: typeCandidate);
+    }
+
+    public ImmutableArray<Symbol> GetCompletionSymbols(MemberAccessExpressionSyntax access, int position,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        CompletionReceiverInfo receiver = GetCompletionReceiver(access.Receiver, cancellationToken);
+        if (receiver.Kind == CompletionReceiverKind.Namespace && receiver.Namespace is not null)
+        {
+            SourceText? source = SyntaxNavigator.GetTokens(access).FirstOrDefault()?.Location.Source;
+            if (source is not null && _semanticInfo.FileScopes.TryGetValue(source, out FileSymbolScope? fileScope))
+                return fileScope.GetNamespaceSymbolsForTooling(receiver.Namespace)
+                    .OrderBy(symbol => symbol.Name, StringComparer.Ordinal)
+                    .ThenBy(symbol => symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+            return [];
+        }
+        if (receiver.Type is null) return [];
+        if (receiver.Kind == CompletionReceiverKind.Value &&
+            _semanticInfo.Receivers.TryGetValue(access.Receiver, out ReceiverInfo value))
+            return LookupMembers(value.Type, position, new MemberLookupOptions(MemberAccessKind.Instance,
+                IncludeInaccessible: false, IsReadonlyReceiver: value.IsReadonly), cancellationToken);
+        return receiver.Kind == CompletionReceiverKind.Type
+            ? LookupMembers(receiver.Type, position, new MemberLookupOptions(MemberAccessKind.Static), cancellationToken)
+            : [];
+    }
+
     private ImmutableArray<Symbol> LookupSymbols(SourceText source, int position, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(position);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(position, source.Length);
         cancellationToken.ThrowIfCancellationRequested();
-        PositionScope[] scopes = _semanticInfo.Scopes
-            .Where(scope => ReferenceEquals(scope.Source, source) && Contains(scope.Span, position, scope.IncludeEnd))
-            .OrderBy(scope => scope.Span.Length).ToArray();
+        PositionScope[] scopes = GetScopes(source, position);
         var result = ImmutableArray.CreateBuilder<Symbol>();
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (PositionScope scope in scopes)
@@ -136,6 +310,7 @@ public sealed class SemanticModel
         if (type is null) return [];
         DeclaredTypeSymbol? withinType = GetContainingTypeAtPosition(position);
         return AllMembers(type).Distinct()
+            .Where(member => member.IsUserVisible)
             .Where(member => IsApplicableMember(member, options))
             .Where(member => options.IncludeInaccessible || IsAccessible(member, withinType))
             .OrderBy(member => member.Name, StringComparer.Ordinal)
@@ -192,10 +367,94 @@ public sealed class SemanticModel
                 !seen.Add((symbol, location.Source.FileId, location.Span)))
                 continue;
             result.Add(new ResolvedSymbolReference(symbol, location, GetReferenceKind(syntax)));
+            if (symbol is FunctionSymbol { FunctionKind: FunctionKind.Constructor,
+                    ContainingType: DeclaredTypeSymbol constructedType } &&
+                seen.Add((constructedType, location.Source.FileId, location.Span)))
+                result.Add(new ResolvedSymbolReference(constructedType, location, ResolvedReferenceKind.Type));
+        }
+        foreach ((SyntaxNode syntax, TypeInfo info) in _semanticInfo.Types)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (syntax is not TypeSyntax || !TryGetDeclaredType(info.Type, out DeclaredTypeSymbol symbol) ||
+                !TryGetReferenceLocation(syntax, out TextLocation location) ||
+                _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source) ||
+                !seen.Add((symbol, location.Source.FileId, location.Span)))
+                continue;
+            result.Add(new ResolvedSymbolReference(symbol, location, ResolvedReferenceKind.Type));
         }
         return result.OrderBy(item => item.Location.Source.Path, StringComparer.Ordinal)
             .ThenBy(item => item.Location.Span.Start).ThenBy(item => item.Location.Span.Length)
             .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+    }
+
+    /// <summary>The semantic type associated with a symbol for editor navigation.</summary>
+    public static TypeSymbol? GetAssociatedType(Symbol symbol)
+    {
+        ArgumentNullException.ThrowIfNull(symbol);
+        return symbol switch
+        {
+            DeclaredTypeSymbol type => type,
+            FunctionSymbol { FunctionKind: FunctionKind.Constructor or FunctionKind.Destructor,
+                ContainingType: not null } function => function.ContainingType,
+            FunctionSymbol function => function.ReturnType,
+            VariableSymbol variable => variable.Type,
+            FieldSymbol field => field.Type,
+            PropertySymbol property => property.Type,
+            InterfacePropertySymbol property => property.Type,
+            ConstantSymbol constant => constant.Type,
+            IndexerSymbol indexer => indexer.Type,
+            InterfaceIndexerSymbol indexer => indexer.Type,
+            SyntheticMemberSymbol member => member.Type,
+            _ => null,
+        };
+    }
+
+    public static DeclaredTypeSymbol? GetAssociatedDeclaredType(Symbol symbol)
+    {
+        TypeSymbol? type = GetAssociatedType(symbol);
+        return type is not null && TryGetDeclaredType(type, out DeclaredTypeSymbol declared)
+            ? declared : null;
+    }
+
+    /// <summary>Checks rename collisions against the exact semantic declaration scope/container.</summary>
+    public bool HasRenameConflict(Symbol symbol, string newName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(symbol);
+        ArgumentException.ThrowIfNullOrWhiteSpace(newName);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (symbol is ParameterSymbol parameter)
+            return ((FunctionSymbol)parameter.ContainingSymbol!).Parameters.Any(candidate =>
+                !ReferenceEquals(candidate, parameter) && candidate.Name == newName) ||
+                ScopeVariables(parameter).Any(candidate => candidate.Name == newName);
+        if (symbol is LocalVariableSymbol local)
+            return ScopeVariables(local).Any(candidate => candidate.Name == newName);
+        if (symbol.ContainingSymbol is DeclaredTypeSymbol containingType)
+            return containingType.GetMembers().Any(candidate =>
+                !ReferenceEquals(candidate, symbol) && ReferenceEquals(candidate.ContainingSymbol, containingType) &&
+                candidate.Name == newName);
+        if (symbol.ContainingSymbol is EnumTypeSymbol enumeration)
+            return enumeration.Members.Any(candidate => !ReferenceEquals(candidate, symbol) && candidate.Name == newName);
+        if (symbol.ContainingSymbol is NamespaceSymbol @namespace)
+        {
+            IEnumerable<Symbol> siblings = symbol switch
+            {
+                DeclaredTypeSymbol => @namespace.Types,
+                FunctionSymbol => @namespace.Functions,
+                ConstantSymbol => @namespace.Constants,
+                _ => [],
+            };
+            return siblings.Any(candidate => !ReferenceEquals(candidate, symbol) && candidate.Name == newName);
+        }
+        return false;
+
+        IEnumerable<VariableSymbol> ScopeVariables(VariableSymbol variable)
+        {
+            PositionScope? declarationScope = _semanticInfo.Scopes
+                .Where(scope => scope.Variables.Any(candidate => ReferenceEquals(candidate, variable)))
+                .OrderBy(scope => scope.Span.Length).FirstOrDefault();
+            return declarationScope?.Variables.Where(candidate => !ReferenceEquals(candidate, variable)) ?? [];
+        }
     }
 
     private ImmutableArray<Diagnostic> FilterDiagnostics(TextSpan? span)
@@ -224,6 +483,22 @@ public sealed class SemanticModel
         StructTypeSymbol structure => structure.GetMembers().Concat(structure.BaseType is null ? [] : AllMembers(structure.BaseType)),
         InterfaceTypeSymbol @interface => @interface.SelfAndBaseInterfaces.SelectMany(item => item.GetMembers()),
         _ => type.GetMembers(),
+    };
+
+    private static bool IsUnqualifiedCompletionMember(Symbol member, FunctionSymbol function) => member switch
+    {
+        ConstantSymbol => true,
+        FieldSymbol field => !function.IsStatic || field.IsStatic,
+        PropertySymbol property => !function.IsStatic && property.Getter is not null &&
+            (!function.IsReadonly || property.Getter.IsReadonly),
+        InterfacePropertySymbol property => !function.IsStatic && property.Getter is not null &&
+            (!function.IsReadonly || property.Getter.IsReadonly),
+        FunctionSymbol method => method.FunctionKind == FunctionKind.Method &&
+            (!function.IsStatic || method.IsStatic) &&
+            method.ContainingProperty is null && method.ContainingInterfaceProperty is null &&
+            method.ContainingIndexer is null && method.ContainingInterfaceIndexer is null &&
+            (!function.IsReadonly || method.IsStatic || method.IsReadonly),
+        _ => false,
     };
 
     private static bool IsApplicableMember(Symbol member, MemberLookupOptions options) => member switch
@@ -261,6 +536,10 @@ public sealed class SemanticModel
         if (_syntaxTrees.Length == 1) return _syntaxTrees[0].Source;
         throw new InvalidOperationException("Use Compilation.GetSemanticModel(tree) or LookupSymbols(tree, position) for a multi-file compilation.");
     }
+
+    private PositionScope[] GetScopes(SourceText source, int position) => _semanticInfo.Scopes
+        .Where(scope => ReferenceEquals(scope.Source, source) && Contains(scope.Span, position, scope.IncludeEnd))
+        .OrderBy(scope => scope.Span.Length).ToArray();
 
     private void EnsureTree(SyntaxTree tree)
     {
@@ -321,6 +600,45 @@ public sealed class SemanticModel
         ParenthesizedExpressionSyntax value => GetReferenceToken(value.Expression),
         _ => null,
     };
+
+    private static bool TryGetDottedName(ExpressionSyntax syntax, out string[] parts)
+    {
+        var result = new List<string>();
+        bool success = Append(syntax);
+        parts = success ? result.ToArray() : [];
+        return success;
+
+        bool Append(ExpressionSyntax expression)
+        {
+            switch (expression)
+            {
+                case NameExpressionSyntax name when !name.IdentifierToken.IsMissing:
+                    result.Add(name.IdentifierToken.Text);
+                    return true;
+                case MemberAccessExpressionSyntax member when member.OperatorToken.Kind == SyntaxKind.DotToken &&
+                    !member.MemberToken.IsMissing && Append(member.Receiver):
+                    result.Add(member.MemberToken.Text);
+                    return true;
+                default:
+                    return false;
+            }
+        }
+    }
+
+    private static bool TryGetDeclaredType(TypeSymbol type, out DeclaredTypeSymbol declared)
+    {
+        while (true)
+        {
+            switch (type)
+            {
+                case PointerTypeSymbol pointer: type = pointer.ElementType; continue;
+                case ReferenceTypeSymbol reference: type = reference.ElementType; continue;
+                case ArrayTypeSymbol array: type = array.ElementType; continue;
+                case DeclaredTypeSymbol result: declared = result; return true;
+                default: declared = null!; return false;
+            }
+        }
+    }
 
     private sealed class ResolvedReferenceIdentityComparer :
         IEqualityComparer<(Symbol Symbol, SourceFileId File, TextSpan Span)>

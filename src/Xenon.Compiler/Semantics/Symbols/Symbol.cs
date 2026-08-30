@@ -28,6 +28,18 @@ public abstract class Symbol
 
     public bool IsSourceDefined => !DeclaringSyntaxReferences.IsEmpty;
 
+    /// <summary>Whether an editor should offer this symbol in ordinary user-facing discovery.</summary>
+    public virtual bool IsUserVisible => true;
+
+    /// <summary>True for implementation artifacts synthesized by the compiler.</summary>
+    public virtual bool IsCompilerGenerated => false;
+
+    /// <summary>Whether this source declaration supplies the symbol's implementation/storage definition.</summary>
+    public virtual bool IsDefinition => false;
+
+    /// <summary>Whether the declaration/reference location denotes an identifier a user may edit.</summary>
+    public virtual bool HasUserEditableIdentifier => IsSourceDefined;
+
     public virtual string ToDisplayString(SymbolDisplayFormat format) => SymbolDisplay.ToDisplayString(this, format);
 
     public string QualifiedName

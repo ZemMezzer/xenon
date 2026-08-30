@@ -11,6 +11,206 @@ namespace Xenon.Compiler.Tests.Semantics;
 public sealed class SemanticModelTests
 {
     [Fact]
+    public void GeneralCompletionIncludesRootNamespacesAndPreservesNamespaceTypeAmbiguity()
+    {
+        Compilation compilation = Create(
+            "namespace Library.Tools; struct Remote {}",
+            "namespace App; struct Library {} void Test() { }");
+        SyntaxTree tree = compilation.SyntaxTrees[1];
+        SemanticModel model = compilation.GetSemanticModel(tree);
+        int position = tree.Source.Text.IndexOf("{ }", StringComparison.Ordinal) + 1;
+        Symbol[] candidates = model.GetCompletionSymbols(tree, position).Where(symbol =>
+            symbol.Name == "Library").ToArray();
+
+        Assert.Contains(candidates, symbol => symbol is NamespaceSymbol);
+        Assert.Contains(candidates, symbol => symbol is StructTypeSymbol);
+        Assert.Contains(model.GetCompletionSymbols(tree, position), symbol =>
+            symbol is NamespaceSymbol { Name: "App" });
+    }
+
+    [Fact]
+    public void EditorMetadataClassifiesEnumMembersAndHidesAccessorsAndIndexerIdentifiers()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            enum State { Ready }
+            interface IValue { int Value { get; set; } int this[int index] { get; } }
+            struct Box {
+                public int Value { get { return 1; } set {} }
+                public int this[int index] { get { return index; } }
+                public void Run() {}
+            }
+            """);
+        Symbol[] declarations = compilation.SemanticModel.GetDeclaredSymbols().ToArray();
+
+        ConstantSymbol member = declarations.OfType<ConstantSymbol>().Single(symbol => symbol.Name == "Ready");
+        Assert.Equal(EditorSymbolKind.EnumMember, EditorSymbolClassifier.GetKind(member));
+        Assert.All(declarations.OfType<FunctionSymbol>().Where(function => function.IsAccessor), accessor =>
+        {
+            Assert.False(accessor.IsUserVisible);
+            Assert.False(accessor.HasUserEditableIdentifier);
+            Assert.False(EditorSymbolClassifier.IsEditorVisible(accessor));
+        });
+        Assert.All(declarations.Where(symbol => symbol is IndexerSymbol or InterfaceIndexerSymbol),
+            indexer => Assert.False(indexer.HasUserEditableIdentifier));
+        Assert.True(declarations.OfType<PropertySymbol>().Single().HasUserEditableIdentifier);
+        Assert.True(declarations.OfType<FunctionSymbol>().Single(function => function.Name == "Run")
+            .HasUserEditableIdentifier);
+    }
+
+    [Fact]
+    public void CompletionSymbolsRespectCallableContextInheritanceAndUserVisibility()
+    {
+        const string source = """
+            namespace Example;
+            struct Base {
+                public int Inherited;
+                int Hidden;
+                public void readonly ReadOnly() {}
+                public void Mutate() {}
+            }
+            struct Derived : Base {
+                int OwnPrivate;
+                public Derived() {}
+                ~Derived() {}
+                public static void Static() { }
+                public void Instance(int parameter) { int local = 0; local; }
+                public void readonly Read() { }
+            }
+            """;
+        Compilation compilation = Create(source);
+        SemanticModel model = compilation.GetSemanticModel(compilation.SyntaxTrees[0]);
+
+        Symbol[] instanceSymbols = model.GetCompletionSymbols(source.IndexOf("local;", StringComparison.Ordinal)).ToArray();
+        string[] instance = instanceSymbols.Select(symbol => symbol.Name).ToArray();
+        Assert.Contains("local", instance);
+        Assert.Contains("parameter", instance);
+        Assert.Contains("OwnPrivate", instance);
+        Assert.Contains("Inherited", instance);
+        Assert.Contains("Mutate", instance);
+        Assert.Contains("ReadOnly", instance);
+        Assert.Contains("Static", instance);
+        Assert.DoesNotContain("Hidden", instance);
+        Assert.DoesNotContain(instanceSymbols, symbol => symbol is FunctionSymbol
+            { FunctionKind: FunctionKind.Constructor or FunctionKind.Destructor or FunctionKind.InstanceInitializer });
+        Assert.DoesNotContain(instanceSymbols, symbol => !symbol.IsUserVisible);
+
+        int staticPosition = source.IndexOf("Static() {", StringComparison.Ordinal) + "Static() {".Length;
+        string[] staticSymbols = model.GetCompletionSymbols(staticPosition).Select(symbol => symbol.Name).ToArray();
+        Assert.Contains("Static", staticSymbols);
+        Assert.DoesNotContain("OwnPrivate", staticSymbols);
+        Assert.DoesNotContain("Inherited", staticSymbols);
+        Assert.DoesNotContain("Mutate", staticSymbols);
+
+        int readonlyPosition = source.IndexOf("Read() {", StringComparison.Ordinal) + "Read() {".Length;
+        string[] readonlySymbols = model.GetCompletionSymbols(readonlyPosition).Select(symbol => symbol.Name).ToArray();
+        Assert.Contains("ReadOnly", readonlySymbols);
+        Assert.DoesNotContain("Mutate", readonlySymbols);
+    }
+
+    [Fact]
+    public void NamespaceCompletionIsSemanticNestedAndDetectsTypeAmbiguity()
+    {
+        Compilation nested = Create(
+            "namespace Game.Core; public void Run() {} struct Item {}",
+            "namespace Game; struct Root {}",
+            "namespace App; void Test() { Game.Core. }");
+        SyntaxTree nestedTree = nested.SyntaxTrees[2];
+        SemanticModel nestedModel = nested.GetSemanticModel(nestedTree);
+        MemberAccessExpressionSyntax access = SyntaxNavigator.DescendantNodesAndSelf(nestedTree.Root)
+            .OfType<MemberAccessExpressionSyntax>().Single(member => member.MemberToken.IsMissing);
+        CompletionReceiverInfo receiver = nestedModel.GetCompletionReceiver(access.Receiver);
+        Assert.Equal(CompletionReceiverKind.Namespace, receiver.Kind);
+        Assert.Equal("Game.Core", receiver.Namespace!.FullName);
+        Assert.Contains(nestedModel.GetCompletionSymbols(access, nestedTree.Source.Length), symbol => symbol.Name == "Run");
+        Assert.Contains(nestedModel.GetCompletionSymbols(access, nestedTree.Source.Length), symbol => symbol.Name == "Item");
+
+        Compilation root = Create(
+            "namespace Game.Core; struct Item {}",
+            "namespace App; void Test() { Game. }");
+        SyntaxTree rootTree = root.SyntaxTrees[1];
+        SemanticModel rootModel = root.GetSemanticModel(rootTree);
+        MemberAccessExpressionSyntax rootAccess = SyntaxNavigator.DescendantNodesAndSelf(rootTree.Root)
+            .OfType<MemberAccessExpressionSyntax>().Single(member => member.MemberToken.IsMissing);
+        Assert.Contains(rootModel.GetCompletionSymbols(rootAccess, rootTree.Source.Length), symbol => symbol.Name == "Core");
+
+        Compilation ambiguous = Create(
+            "namespace Game.Core; struct Item {}",
+            "namespace App; struct Game {} void Test() { Game. }");
+        SyntaxTree ambiguousTree = ambiguous.SyntaxTrees[1];
+        SemanticModel ambiguousModel = ambiguous.GetSemanticModel(ambiguousTree);
+        MemberAccessExpressionSyntax ambiguousAccess = SyntaxNavigator.DescendantNodesAndSelf(ambiguousTree.Root)
+            .OfType<MemberAccessExpressionSyntax>().Single(member => member.MemberToken.IsMissing);
+        Assert.Equal(CompletionReceiverKind.Ambiguous,
+            ambiguousModel.GetCompletionReceiver(ambiguousAccess.Receiver).Kind);
+        Assert.Empty(ambiguousModel.GetCompletionSymbols(ambiguousAccess, ambiguousTree.Source.Length));
+    }
+
+    [Fact]
+    public void RenameConflictsUseExactDeclarationScopeAndContainer()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct First { int A; int B; }
+            struct Second {}
+            void Test(int left, int right) {
+                int a = 0;
+                int b = 1;
+                { int shadow = 2; }
+            }
+            """);
+        SemanticModel model = compilation.GetSemanticModel(compilation.SyntaxTrees[0]);
+        Symbol[] declarations = model.GetDeclaredSymbols().ToArray();
+        Assert.True(model.HasRenameConflict(declarations.OfType<LocalVariableSymbol>().Single(symbol => symbol.Name == "a"), "b"));
+        Assert.False(model.HasRenameConflict(declarations.OfType<LocalVariableSymbol>().Single(symbol => symbol.Name == "a"), "shadow"));
+        Assert.True(model.HasRenameConflict(declarations.OfType<ParameterSymbol>().Single(symbol => symbol.Name == "left"), "right"));
+        Assert.True(model.HasRenameConflict(declarations.OfType<FieldSymbol>().Single(symbol => symbol.Name == "A"), "B"));
+        Assert.True(model.HasRenameConflict(declarations.OfType<StructTypeSymbol>().Single(symbol => symbol.Name == "First"), "Second"));
+    }
+
+    [Fact]
+    public void AssociatedTypeAndDefinitionMetadataDistinguishDeclarations()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            extern void Native();
+            interface IValue { void Read(); }
+            struct Value {
+                public int Field;
+                public Value() {}
+                public void Method(int parameter) { int local = 0; }
+            }
+            """);
+        SemanticModel model = compilation.GetSemanticModel(compilation.SyntaxTrees[0]);
+        Symbol[] declarations = model.GetDeclaredSymbols().ToArray();
+        FunctionSymbol constructor = declarations.OfType<FunctionSymbol>()
+            .Single(symbol => symbol.FunctionKind == FunctionKind.Constructor);
+        Assert.Equal("Value", SemanticModel.GetAssociatedDeclaredType(constructor)!.Name);
+        Assert.False(declarations.OfType<FunctionSymbol>().Single(symbol => symbol.Name == "Native").IsDefinition);
+        Assert.False(declarations.OfType<FunctionSymbol>().Single(symbol => symbol.Name == "Read").IsDefinition);
+        Assert.True(declarations.OfType<FunctionSymbol>().Single(symbol => symbol.Name == "Method").IsDefinition);
+        Assert.True(declarations.OfType<StructTypeSymbol>().Single().IsDefinition);
+        Assert.True(declarations.OfType<FieldSymbol>().Single().IsDefinition);
+        Assert.False(declarations.OfType<ParameterSymbol>().Single().IsDefinition);
+        Assert.True(declarations.OfType<LocalVariableSymbol>().Single().IsDefinition);
+    }
+
+    [Fact]
+    public void DeclaredTypesInSignaturesAreResolvedSymbolReferences()
+    {
+        Compilation compilation = Create(
+            "namespace Example; struct Player {} Player Create(Player value) { return value; }");
+        SyntaxTree tree = compilation.SyntaxTrees[0];
+        SemanticModel model = compilation.GetSemanticModel(tree);
+        FunctionDeclarationSyntax function = tree.Root.Members.OfType<FunctionDeclarationSyntax>().Single();
+
+        Assert.IsType<StructTypeSymbol>(model.GetSymbolInfo(function.ReturnType).Symbol);
+        Assert.IsType<StructTypeSymbol>(model.GetSymbolInfo(function.Parameters[0].Type).Symbol);
+        Assert.Equal(2, model.GetResolvedReferences().Count(reference =>
+            reference.Kind == ResolvedReferenceKind.Type && reference.Symbol.Name == "Player"));
+    }
+
+    [Fact]
     public void SyntaxErrors_DoNotEraseValidDeclarationsInSameOrOtherFiles()
     {
         Compilation compilation = Create(
