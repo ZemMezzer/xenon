@@ -175,6 +175,52 @@ public sealed class CoreIntelligenceTests
         Assert.Contains("Move", signature.GetProperty("signatures")[0].GetProperty("label").GetString());
     }
 
+    [Fact]
+    public async Task HoverAndDefinitionNeverLeakSymbolsAtSameOffsetFromAnotherFile()
+    {
+        const string targetSource = """
+            namespace Target;
+            struct Vector3 {}
+            void Use()
+            {
+                Vector3 vector = Vector3();
+            }
+            """;
+        int targetPosition = targetSource.IndexOf("Vector3 vector", StringComparison.Ordinal);
+        const string foreignPrefix = "namespace Other; struct Noise { private float ";
+        Assert.True(foreignPrefix.Length <= targetPosition);
+        string foreignSource = foreignPrefix +
+            new string(' ', targetPosition - foreignPrefix.Length) +
+            "Y; public float get() { return Y; } }";
+        using var directory = new TestDirectory();
+        string targetFile = directory.Write("Target.xe", targetSource);
+        directory.Write("Foreign.xe", foreignSource);
+        string targetUri = DocumentUri.FromPath(targetFile).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new
+        {
+            rootUri = DocumentUri.FromPath(directory.Path).AbsoluteUri,
+        }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri = targetUri, version = 1, text = targetSource },
+        }), default);
+
+        foreach (int position in Enumerable.Range(targetPosition, "Vector3".Length))
+        {
+            JsonElement hover = await RequestAtAsync(session, "textDocument/hover", targetUri,
+                targetSource, position);
+            Assert.Contains("struct Vector3",
+                hover.GetProperty("contents").GetProperty("value").GetString());
+            JsonElement definition = await RequestAtAsync(session, "textDocument/definition",
+                targetUri, targetSource, position);
+            Assert.Equal(targetUri, Assert.Single(definition.EnumerateArray())
+                .GetProperty("uri").GetString());
+        }
+    }
+
     private static async Task<JsonElement> RequestAtAsync(LanguageServerSession session, string method,
         string uri, string source, int offset, object? context = null, string? newName = null)
     {

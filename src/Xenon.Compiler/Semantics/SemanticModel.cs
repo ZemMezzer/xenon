@@ -89,17 +89,21 @@ public sealed class SemanticModel
         var matches = _semanticInfo.Symbols
             .Select(pair => (Pair: pair, Location: TryGetReferenceLocation(pair.Key, out TextLocation location)
                 ? location : (TextLocation?)null))
-            .Where(item => item.Location is { } location && IsPositionMatch(location.Span, position))
+            .Where(item => item.Location is { } location &&
+                location.Source.FileId == tree.Source.FileId &&
+                IsPositionMatch(location.Span, position))
             .Select(item => (Info: item.Pair.Value, Span: item.Location!.Value.Span))
             .Concat(_semanticInfo.Declarations
                 .SelectMany(pair => pair.Value.DeclaringSyntaxReferences
-                    .Where(reference => ReferenceEquals(reference.Declaration, pair.Key))
+                    .Where(reference => ReferenceEquals(reference.Declaration, pair.Key) &&
+                        reference.Source.FileId == tree.Source.FileId)
                     .Select(reference => (Info: SymbolInfo.FromSymbol(pair.Value), Span: reference.Span)))
                 .Where(item => IsPositionMatch(item.Span, position)))
             .Concat(_semanticInfo.Types
                 .Where(pair => pair.Key is TypeSyntax &&
                     TryGetDeclaredType(pair.Value.Type, out _) &&
                     TryGetReferenceLocation(pair.Key, out TextLocation location) &&
+                    location.Source.FileId == tree.Source.FileId &&
                     IsPositionMatch(location.Span, position))
                 .Select(pair =>
                 {

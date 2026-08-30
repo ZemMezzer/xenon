@@ -226,6 +226,38 @@ public sealed class CompilationSnapshotTests
     }
 
     [Fact]
+    public void PositionLookupNeverReturnsOverlappingSymbolFromAnotherSourceTree()
+    {
+        const string targetText = """
+            namespace Target;
+            struct Vector3 {}
+            void Use()
+            {
+                Vector3 vector = Vector3();
+            }
+            """;
+        int targetPosition = targetText.IndexOf("Vector3 vector", StringComparison.Ordinal);
+        const string foreignPrefix = "namespace Other; struct Noise { private float ";
+        Assert.True(foreignPrefix.Length <= targetPosition);
+        string foreignText = foreignPrefix + new string(' ', targetPosition - foreignPrefix.Length) +
+            "Y; public float get() { return Y; } }";
+        Compilation compilation = Compilation.Create(
+            SourceText.From(foreignText, "foreign.xe"),
+            SourceText.From(targetText, "target.xe"));
+        SyntaxTree targetTree = compilation.SyntaxTrees.Single(tree => tree.Source.Path == "target.xe");
+        SemanticModel model = compilation.GetSemanticModel(targetTree);
+
+        foreach (int position in Enumerable.Range(targetPosition, "Vector3".Length))
+        {
+            StructTypeSymbol symbol = Assert.IsType<StructTypeSymbol>(
+                model.GetSymbolInfoAtPosition(targetTree, position).Symbol);
+            Assert.Equal("Vector3", symbol.Name);
+            Assert.All(symbol.DeclaringSyntaxReferences,
+                reference => Assert.Equal(targetTree.SourceFileId, reference.Source.FileId));
+        }
+    }
+
+    [Fact]
     public void ObsoleteSourceReferenceGraphIsCollectibleAsAUnit()
     {
         (WeakReference application, WeakReference library) = CreateUnrootedReferenceGraph();
