@@ -16,34 +16,63 @@ public enum LanguageServerLifecycleState
     Exited,
 }
 
+public sealed class LanguageServerRuntimeHooks
+{
+    public Action? BeforeAnalysisAcquisition { get; init; }
+    public Func<CancellationToken, Task>? BeforeReloadCommitAsync { get; init; }
+    public Func<CancellationToken, Task>? AfterDiagnosticAnalysisAsync { get; init; }
+    public Action<IReadOnlyList<Xenon.ProjectSystem.Workspace>>? ReloadCandidatesPrepared { get; init; }
+}
+
 public sealed class LanguageServerSession : IAsyncDisposable
 {
+    private readonly object _publicationGate = new();
     private readonly DocumentContextResolver _resolver = new();
     private readonly LanguageServerAnalysisContextFactory _analysisContexts;
-    private readonly List<Xenon.ProjectSystem.Workspace> _workspaces = [];
+    private Workspace[] _workspaces = [];
     private readonly Dictionary<string, string> _openUris = new(DocumentUri.PathComparer);
     private readonly DiagnosticScheduler _diagnostics;
     private readonly Func<string, object?, Task> _sendNotification;
     private readonly TextWriter _log;
+    private readonly SemaphoreSlim _mutationGate = new(1, 1);
+    private readonly SemaphoreSlim _diagnosticPublicationGate = new(1, 1);
+    private readonly LanguageServerRuntimeHooks? _runtimeHooks;
+    private Xenon.ProjectSystem.Workspace? _primaryWorkspace;
+    private string? _configurationPath;
+    private int _knownUriCount;
+    private long _workspaceSetGeneration;
+    private long _reloadSequence;
+    private bool _pendingSourceReconciliation;
+    private bool _pendingConfigurationReconciliation;
     private bool _disposed;
 
     public LanguageServerSession(Func<string, object?, Task> sendNotification, TextWriter? log = null,
-        TimeSpan? diagnosticDebounce = null)
+        TimeSpan? diagnosticDebounce = null, LanguageServerRuntimeHooks? runtimeHooks = null)
     {
         _log = log ?? TextWriter.Null;
         _sendNotification = sendNotification;
+        _runtimeHooks = runtimeHooks;
         _analysisContexts = new LanguageServerAnalysisContextFactory(_resolver);
         _diagnostics = new DiagnosticScheduler(_analysisContexts,
-            LspCoreIntelligence.DiagnosticsAsync,
+            AnalyzeDiagnosticsAsync,
             (uri, result) => sendNotification("textDocument/publishDiagnostics",
-                new { uri, version = LspDocumentVersions.ToLsp(result.Version),
-                    diagnostics = result.Value ?? Array.Empty<object>() }),
-            diagnosticDebounce);
+                new
+                {
+                    uri,
+                    version = LspDocumentVersions.ToLsp(result.Version),
+                    diagnostics = result.Value ?? Array.Empty<object>()
+                }),
+            diagnosticDebounce, AcquireDiagnosticContext, CanPublishDiagnostics,
+            PublishDiagnosticsIfCurrentAsync);
     }
 
     public LanguageServerLifecycleState State { get; private set; }
     public int ExitCode { get; private set; } = 1;
-    public IReadOnlyList<Xenon.ProjectSystem.Workspace> Workspaces => _workspaces;
+    public IReadOnlyList<Xenon.ProjectSystem.Workspace> Workspaces => Volatile.Read(ref _workspaces);
+    public int KnownUriCount => Volatile.Read(ref _knownUriCount);
+    public int PendingDiagnosticCount => _diagnostics.InFlightJobCount;
+    public bool PendingConfigurationReconciliation =>
+        Volatile.Read(ref _pendingConfigurationReconciliation);
 
     /// <summary>
     /// Common execution boundary for future semantic handlers. It captures one stale-sensitive
@@ -55,14 +84,19 @@ public sealed class LanguageServerSession : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(handler);
         EnsureRunning();
-        Xenon.ProjectSystem.Workspace workspace = _workspaces.FirstOrDefault(candidate =>
-            !_resolver.ResolveAll(candidate.CurrentSnapshot, uri).IsEmpty) ??
-            throw InvalidParams($"Document '{uri}' is not part of an initialized Workspace.");
         LanguageServerAnalysisContext? context = null;
         try
         {
-            context = _analysisContexts.Create(workspace, uri, staleSensitive: true,
-                requestCancellation);
+            lock (_publicationGate)
+            {
+                _runtimeHooks?.BeforeAnalysisAcquisition?.Invoke();
+                Workspace[] workspaces = _workspaces;
+                Xenon.ProjectSystem.Workspace workspace = workspaces.FirstOrDefault(candidate =>
+                    !_resolver.ResolveAll(candidate.CurrentSnapshot, uri).IsEmpty) ??
+                    throw InvalidParams($"Document '{uri}' is not part of an initialized Workspace.");
+                context = _analysisContexts.Create(workspace, uri, staleSensitive: true,
+                    requestCancellation);
+            }
             object? result = await handler(context).ConfigureAwait(false);
             context.CancellationToken.ThrowIfCancellationRequested();
             return result;
@@ -118,21 +152,90 @@ public sealed class LanguageServerSession : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         EnsureRunning();
-        if (_workspaces.Count == 0) return Array.Empty<object>();
         string query = RequireString(parameters, "query");
-        using WorkspaceAnalysisRequest request = _workspaces[0].CreateAnalysisRequest(
-            staleSensitive: true, cancellationToken);
+        WorkspaceAnalysisRequest request;
+        lock (_publicationGate)
+        {
+            _runtimeHooks?.BeforeAnalysisAcquisition?.Invoke();
+            if (_workspaces.Length == 0) return Array.Empty<object>();
+            request = _workspaces[0].CreateAnalysisRequest(staleSensitive: true,
+                cancellationToken);
+        }
+        using (request)
+        {
+            try
+            {
+                object? result = await LspCoreIntelligence.WorkspaceSymbolsAsync(request.Snapshot, query,
+                    request.CancellationToken).ConfigureAwait(false);
+                request.CancellationToken.ThrowIfCancellationRequested();
+                return result;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested ||
+                request.CancellationToken.IsCancellationRequested)
+            {
+                throw new JsonRpcException(LspErrorCodes.RequestCancelled, "Request cancelled.");
+            }
+        }
+    }
+
+    private async Task<object?> AnalyzeDiagnosticsAsync(LanguageServerAnalysisContext context)
+    {
+        object? result = await LspCoreIntelligence.DiagnosticsAsync(context).ConfigureAwait(false);
+        if (_runtimeHooks?.AfterDiagnosticAnalysisAsync is { } hook)
+            await hook(context.CancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    private LanguageServerAnalysisContext? AcquireDiagnosticContext(
+        Xenon.ProjectSystem.Workspace workspace, string uri, long workspaceSetGeneration,
+        CancellationToken cancellationToken)
+    {
+        lock (_publicationGate)
+        {
+            if (_workspaceSetGeneration != workspaceSetGeneration ||
+                !_workspaces.Contains(workspace)) return null;
+            return _analysisContexts.Create(workspace, uri, staleSensitive: true,
+                cancellationToken);
+        }
+    }
+
+    private bool CanPublishDiagnostics(Xenon.ProjectSystem.Workspace workspace,
+        long workspaceSetGeneration)
+    {
+        lock (_publicationGate)
+            return _workspaceSetGeneration == workspaceSetGeneration &&
+                _workspaces.Contains(workspace);
+    }
+
+    private async Task<bool> PublishDiagnosticsIfCurrentAsync(
+        Xenon.ProjectSystem.Workspace workspace, long workspaceSetGeneration, string uri,
+        DiagnosticResult result)
+    {
+        await _diagnosticPublicationGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            object? result = await LspCoreIntelligence.WorkspaceSymbolsAsync(request.Snapshot, query,
-                request.CancellationToken).ConfigureAwait(false);
-            request.CancellationToken.ThrowIfCancellationRequested();
-            return result;
+            lock (_publicationGate)
+            {
+                if (_workspaceSetGeneration != workspaceSetGeneration ||
+                    !_workspaces.Contains(workspace)) return false;
+                WorkspaceSnapshot snapshot = workspace.CurrentSnapshot;
+                if (snapshot.Generation != result.Generation ||
+                    !snapshot.TryGetDocument(result.DocumentId, out DocumentSnapshot? document) ||
+                    document!.Version != result.Version)
+                    return false;
+            }
+            await _sendNotification("textDocument/publishDiagnostics",
+                new
+                {
+                    uri,
+                    version = LspDocumentVersions.ToLsp(result.Version),
+                    diagnostics = result.Value ?? Array.Empty<object>()
+                }).ConfigureAwait(false);
+            return true;
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested ||
-            request.CancellationToken.IsCancellationRequested)
+        finally
         {
-            throw new JsonRpcException(LspErrorCodes.RequestCancelled, "Request cancelled.");
+            _diagnosticPublicationGate.Release();
         }
     }
 
@@ -140,34 +243,69 @@ public sealed class LanguageServerSession : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        switch (method)
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            case "initialized":
-                if (State == LanguageServerLifecycleState.InitializeResponded)
-                    State = LanguageServerLifecycleState.Initialized;
-                else await _log.WriteLineAsync($"Ignoring invalid 'initialized' transition from {State}.");
-                break;
-            case "exit":
-                ExitCode = State == LanguageServerLifecycleState.ShutdownRequested ? 0 : 1;
-                State = LanguageServerLifecycleState.Exited;
-                break;
-            case "textDocument/didOpen":
-                EnsureRunning();
-                DidOpen(RequireParams(parameters), cancellationToken);
-                break;
-            case "textDocument/didChange":
-                EnsureRunning();
-                DidChange(RequireParams(parameters), cancellationToken);
-                break;
-            case "textDocument/didSave":
-                EnsureRunning();
-                DidSave(RequireParams(parameters), cancellationToken);
-                break;
-            case "textDocument/didClose":
-                EnsureRunning();
-                await DidCloseAsync(RequireParams(parameters), cancellationToken).ConfigureAwait(false);
-                break;
+            switch (method)
+            {
+                case "initialized":
+                    if (State == LanguageServerLifecycleState.InitializeResponded)
+                        State = LanguageServerLifecycleState.Initialized;
+                    else await _log.WriteLineAsync($"Ignoring invalid 'initialized' transition from {State}.");
+                    break;
+                case "exit":
+                    ExitCode = State == LanguageServerLifecycleState.ShutdownRequested ? 0 : 1;
+                    State = LanguageServerLifecycleState.Exited;
+                    break;
+                case "textDocument/didOpen":
+                    EnsureRunning();
+                    await MutateWithDiagnosticBarrierAsync(() =>
+                    {
+                        DidOpen(RequireParams(parameters), cancellationToken);
+                        return Task.CompletedTask;
+                    }, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "textDocument/didChange":
+                    EnsureRunning();
+                    await MutateWithDiagnosticBarrierAsync(() =>
+                    {
+                        DidChange(RequireParams(parameters), cancellationToken);
+                        return Task.CompletedTask;
+                    }, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "textDocument/didSave":
+                    EnsureRunning();
+                    await MutateWithDiagnosticBarrierAsync(() =>
+                    {
+                        DidSave(RequireParams(parameters), cancellationToken);
+                        return Task.CompletedTask;
+                    }, cancellationToken).ConfigureAwait(false);
+                    break;
+                case "textDocument/didClose":
+                    EnsureRunning();
+                    await MutateWithDiagnosticBarrierAsync(() =>
+                        DidCloseAsync(RequireParams(parameters), cancellationToken),
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case "workspace/didChangeWatchedFiles":
+                    EnsureRunning();
+                    await DidChangeWatchedFilesAsync(RequireParams(parameters), cancellationToken)
+                        .ConfigureAwait(false);
+                    break;
+            }
         }
+        finally
+        {
+            _mutationGate.Release();
+        }
+    }
+
+    private async Task MutateWithDiagnosticBarrierAsync(Func<Task> mutation,
+        CancellationToken cancellationToken)
+    {
+        await _diagnosticPublicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { await mutation().ConfigureAwait(false); }
+        finally { _diagnosticPublicationGate.Release(); }
     }
 
     private object? Initialize(JsonElement? parameters, CancellationToken cancellationToken)
@@ -185,7 +323,16 @@ public sealed class LanguageServerSession : IAsyncDisposable
 
         WorkspaceDiscoveryResult discovery = WorkspaceDiscovery.Discover(explicitPath, rootUri,
             rootPath, cancellationToken);
-        if (discovery.Workspace is not null) _workspaces.Add(discovery.Workspace);
+        if (discovery.Workspace is not null)
+        {
+            lock (_publicationGate)
+            {
+                _primaryWorkspace = discovery.Workspace;
+                _configurationPath = discovery.IsLoose ? null : discovery.ConfigurationPath;
+                Volatile.Write(ref _workspaces, [discovery.Workspace]);
+                _workspaceSetGeneration++;
+            }
+        }
         State = LanguageServerLifecycleState.InitializeResponded;
         return new
         {
@@ -217,8 +364,23 @@ public sealed class LanguageServerSession : IAsyncDisposable
         {
             string path = DocumentUri.ToNormalizedPath(uri);
             var loose = WorkspaceDiscovery.CreateLooseFile(path, cancellationToken);
-            _workspaces.Add(loose);
-            contexts = ResolveContexts(uri);
+            try
+            {
+                DocumentContext[] looseContexts = _resolver.ResolveAll(loose.CurrentSnapshot, uri)
+                    .ToArray();
+                ValidateOpen(looseContexts.Select(context => (loose, context)));
+                foreach (DocumentContext context in looseContexts)
+                    loose.OpenDocument(context.DocumentId, text, version, cancellationToken);
+                AppendWorkspace(loose);
+                contexts = looseContexts.Select(context => (loose, context)).ToList();
+                loose = null!;
+            }
+            finally
+            {
+                loose?.Dispose();
+            }
+            TrackAndSchedule(uri, contexts.Select(item => item.Workspace));
+            return;
         }
         ValidateOpen(contexts);
         foreach (var item in contexts)
@@ -271,7 +433,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
             DocumentSnapshot document = group.Key.CurrentSnapshot.GetDocument(primary.DocumentId);
             group.Key.ReloadFromDisk(document.Id, document.Version, cancellationToken);
         }
-        TrackAndSchedule(uri, contexts.Select(item => item.Workspace));
+        ScheduleAffectedOpenDiagnostics(contexts.Select(item => item.Workspace));
     }
 
     private async Task DidCloseAsync(JsonElement parameters, CancellationToken cancellationToken)
@@ -289,25 +451,293 @@ public sealed class LanguageServerSession : IAsyncDisposable
         foreach (Xenon.ProjectSystem.Workspace workspace in contexts.Select(item => item.Workspace).Distinct())
             _diagnostics.Cancel(workspace, uri);
         _openUris.Remove(DocumentUri.ToNormalizedPath(uri));
+        Volatile.Write(ref _knownUriCount, _openUris.Count);
         await _sendNotification("textDocument/publishDiagnostics",
             new { uri, diagnostics = Array.Empty<object>() }).ConfigureAwait(false);
+        PruneClosedAuxiliaryWorkspaces();
+    }
+
+    private async Task DidChangeWatchedFilesAsync(JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        if (!parameters.TryGetProperty("changes", out JsonElement changes) ||
+            changes.ValueKind != JsonValueKind.Array)
+            throw InvalidParams("changes must be an array.");
+
+        var events = new List<(string Uri, string Path, int Type)>();
+        foreach (JsonElement change in changes.EnumerateArray())
+        {
+            if (change.ValueKind != JsonValueKind.Object)
+                throw InvalidParams("A watched file change must be an object.");
+            string uri = RequireString(change, "uri");
+            int type = RequireInt32(change, "type");
+            if (type is < 1 or > 3) throw InvalidParams("A watched file change type must be 1, 2, or 3.");
+            events.Add((uri, DocumentUri.ToNormalizedPath(uri), type));
+        }
+
+        bool hasConfigurationEvent = events.Any(item => IsConfigurationPath(item.Path));
+        bool configurationChanged = events.Any(item => IsRelevantConfigurationPath(item.Path));
+        bool sourceSetMayHaveChanged = events.Any(item => item.Type is 1 or 3 &&
+            Path.GetExtension(item.Path).Equals(".xe", StringComparison.OrdinalIgnoreCase));
+        bool hasSourceEvent = events.Any(item =>
+            Path.GetExtension(item.Path).Equals(".xe", StringComparison.OrdinalIgnoreCase));
+        bool unknownChangedSource = events.Any(item => item.Type == 2 &&
+            Path.GetExtension(item.Path).Equals(".xe", StringComparison.OrdinalIgnoreCase) &&
+            ResolveContexts(item.Uri).Count == 0);
+        if (sourceSetMayHaveChanged) _pendingSourceReconciliation = true;
+        if (configurationChanged && _configurationPath is not null)
+            _pendingConfigurationReconciliation = true;
+        bool mustReconcile = configurationChanged || sourceSetMayHaveChanged ||
+            unknownChangedSource || _pendingSourceReconciliation && hasSourceEvent ||
+            _pendingConfigurationReconciliation && hasConfigurationEvent;
+        if (mustReconcile && _configurationPath is not null)
+        {
+            bool reloaded = await TryReloadPrimaryWorkspaceAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (reloaded)
+            {
+                _pendingSourceReconciliation = false;
+                _pendingConfigurationReconciliation = false;
+            }
+        }
+
+        foreach (var item in events.Where(item => item.Type == 2 &&
+                     File.Exists(item.Path) &&
+                     Path.GetExtension(item.Path).Equals(".xe", StringComparison.OrdinalIgnoreCase)))
+            await ReloadExternalSourceAsync(item.Uri, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool IsRelevantConfigurationPath(string path)
+    {
+        if (!IsConfigurationPath(path)) return false;
+        if (_configurationPath is not null && DocumentUri.PathComparer.Equals(
+                DocumentUri.NormalizePath(_configurationPath), path))
+            return true;
+        Xenon.ProjectSystem.Workspace? primary = _primaryWorkspace;
+        return primary is not null && primary.CurrentSnapshot.Projects.Any(project =>
+            project.Configuration.ProjectFilePath is { } projectPath &&
+            DocumentUri.PathComparer.Equals(DocumentUri.NormalizePath(projectPath), path));
+    }
+
+    private static bool IsConfigurationPath(string path)
+    {
+        string extension = Path.GetExtension(path);
+        return extension.Equals(".xeproj", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".xws", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<bool> TryReloadPrimaryWorkspaceAsync(CancellationToken cancellationToken)
+    {
+        long sequence = Interlocked.Increment(ref _reloadSequence);
+        Workspace[] published;
+        Xenon.ProjectSystem.Workspace? previous;
+        string? configurationPath;
+        long capturedGeneration;
+        lock (_publicationGate)
+        {
+            published = _workspaces;
+            previous = _primaryWorkspace;
+            configurationPath = _configurationPath;
+            capturedGeneration = _workspaceSetGeneration;
+        }
+        if (previous is null || configurationPath is null) return false;
+
+        var unpublished = new List<Xenon.ProjectSystem.Workspace>();
+        try
+        {
+            Dictionary<string, OpenDocumentState> overlays = CaptureOpenDocumentStates(published);
+            Xenon.ProjectSystem.Workspace candidate = Xenon.ProjectSystem.Workspace.Create(
+                configurationPath,
+                cancellationToken: cancellationToken);
+            unpublished.Add(candidate);
+
+            var candidatePaths = candidate.CurrentSnapshot.Documents
+                .Where(document => document.PhysicalPath is not null)
+                .GroupBy(document => DocumentUri.NormalizePath(document.PhysicalPath!),
+                    DocumentUri.PathComparer)
+                .ToDictionary(group => group.Key, group => group.ToArray(), DocumentUri.PathComparer);
+            foreach ((string path, OpenDocumentState overlay) in overlays)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!candidatePaths.TryGetValue(path, out DocumentSnapshot[]? documents)) continue;
+                foreach (DocumentSnapshot document in documents)
+                    candidate.OpenDocument(document.Id, overlay.OverlayText, overlay.Version,
+                        cancellationToken);
+            }
+
+            KeyValuePair<string, OpenDocumentState>[] unmatched = overlays.Where(pair =>
+                !candidatePaths.ContainsKey(pair.Key)).ToArray();
+            foreach ((string path, OpenDocumentState overlay) in unmatched)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                unpublished.Add(Xenon.ProjectSystem.Workspace.CreateOpenLooseDocument(path,
+                    overlay.OverlayText, overlay.Version, cancellationToken: cancellationToken));
+            }
+
+            _runtimeHooks?.ReloadCandidatesPrepared?.Invoke(unpublished);
+            if (_runtimeHooks?.BeforeReloadCommitAsync is { } hook)
+                await hook(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            bool committed;
+            await _diagnosticPublicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                lock (_publicationGate)
+                {
+                    committed = sequence == Volatile.Read(ref _reloadSequence) &&
+                        capturedGeneration == _workspaceSetGeneration &&
+                        ReferenceEquals(published, _workspaces) &&
+                        ReferenceEquals(previous, _primaryWorkspace);
+                    if (committed)
+                    {
+                        _primaryWorkspace = candidate;
+                        Volatile.Write(ref _workspaces, unpublished.ToArray());
+                        _workspaceSetGeneration++;
+                    }
+                }
+            }
+            finally { _diagnosticPublicationGate.Release(); }
+            if (!committed) return false;
+
+            unpublished.Clear();
+            RetireWorkspaces(published, "retired Workspace after reload");
+            try { ScheduleAllOpenDiagnostics(); }
+            catch (Exception exception)
+            {
+                TryLogLifecycleFailure("post-reload diagnostic scheduling", exception);
+            }
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            await _log.WriteLineAsync($"LSP workspace reload rejected; keeping last valid state: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            RetireWorkspaces(unpublished, "unpublished reload candidate");
+        }
+    }
+
+    private static Dictionary<string, OpenDocumentState> CaptureOpenDocumentStates(
+        IEnumerable<Xenon.ProjectSystem.Workspace> workspaces)
+    {
+        var states = new Dictionary<string, OpenDocumentState>(DocumentUri.PathComparer);
+        foreach (DocumentSnapshot document in workspaces.SelectMany(workspace =>
+                     workspace.CurrentSnapshot.Documents).Where(document =>
+                     document.IsOpen && document.PhysicalPath is not null))
+        {
+            string path = DocumentUri.NormalizePath(document.PhysicalPath!);
+            var state = new OpenDocumentState(document.OverlayText!.Text, document.Version);
+            if (states.TryGetValue(path, out OpenDocumentState? existing) && existing != state)
+                throw new InvalidOperationException(
+                    $"Open editor state for '{path}' is inconsistent across Workspace contexts.");
+            states[path] = state;
+        }
+        return states;
+    }
+
+    private sealed record OpenDocumentState(string OverlayText, DocumentVersion Version);
+
+    private async Task ReloadExternalSourceAsync(string uri,
+        CancellationToken cancellationToken)
+    {
+        await _diagnosticPublicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            List<(Xenon.ProjectSystem.Workspace Workspace, DocumentContext Context)> contexts =
+                ResolveContexts(uri);
+            foreach (IGrouping<Xenon.ProjectSystem.Workspace,
+                         (Xenon.ProjectSystem.Workspace Workspace, DocumentContext Context)> group in
+                     contexts.GroupBy(item => item.Workspace))
+            {
+                DocumentContext primary = group.OrderByDescending(item => item.Context.IsRootProject)
+                    .ThenBy(item => item.Context.DocumentId).First().Context;
+                DocumentSnapshot document = group.Key.CurrentSnapshot.GetDocument(primary.DocumentId);
+                group.Key.ReloadFromDisk(document.Id, document.Version, cancellationToken);
+            }
+            ScheduleAffectedOpenDiagnostics(contexts.Select(item => item.Workspace));
+        }
+        finally { _diagnosticPublicationGate.Release(); }
+    }
+
+    private void ScheduleAllOpenDiagnostics()
+    {
+        Workspace[] workspaces;
+        long generation;
+        lock (_publicationGate)
+        {
+            workspaces = _workspaces;
+            generation = _workspaceSetGeneration;
+        }
+        foreach (Xenon.ProjectSystem.Workspace workspace in workspaces)
+        {
+            string[] affected = _openUris.Values.Where(uri =>
+                !_resolver.ResolveAll(workspace.CurrentSnapshot, uri).IsEmpty).ToArray();
+            _diagnostics.ScheduleMany(workspace, affected, generation);
+        }
+    }
+
+    private void AppendWorkspace(Xenon.ProjectSystem.Workspace workspace)
+    {
+        lock (_publicationGate)
+        {
+            Workspace[] current = _workspaces;
+            Volatile.Write(ref _workspaces, [.. current, workspace]);
+            _workspaceSetGeneration++;
+        }
+    }
+
+    private void PruneClosedAuxiliaryWorkspaces()
+    {
+        Workspace[] retired;
+        lock (_publicationGate)
+        {
+            Workspace[] current = _workspaces;
+            Workspace[] retained = current.Where(workspace =>
+                ReferenceEquals(workspace, _primaryWorkspace) ||
+                workspace.CurrentSnapshot.Documents.Any(document => document.IsOpen)).ToArray();
+            retired = current.Except(retained).ToArray();
+            if (retired.Length != 0)
+            {
+                Volatile.Write(ref _workspaces, retained);
+                _workspaceSetGeneration++;
+            }
+        }
+        RetireWorkspaces(retired, "closed auxiliary Workspace");
     }
 
     private void TrackAndSchedule(string uri, IEnumerable<Xenon.ProjectSystem.Workspace> changed)
     {
         _openUris[DocumentUri.ToNormalizedPath(uri)] = uri;
-        foreach (Xenon.ProjectSystem.Workspace workspace in changed.Distinct())
+        Volatile.Write(ref _knownUriCount, _openUris.Count);
+        ScheduleAffectedOpenDiagnostics(changed);
+    }
+
+    private void ScheduleAffectedOpenDiagnostics(
+        IEnumerable<Xenon.ProjectSystem.Workspace> changed)
+    {
+        Workspace[] published;
+        long generation;
+        lock (_publicationGate)
+        {
+            published = _workspaces;
+            generation = _workspaceSetGeneration;
+        }
+        foreach (Xenon.ProjectSystem.Workspace workspace in changed.Distinct()
+                     .Where(published.Contains))
         {
             IEnumerable<string> affected = _openUris.Values.Where(openUri =>
                 !_resolver.ResolveAll(workspace.CurrentSnapshot, openUri).IsEmpty);
-            _diagnostics.ScheduleMany(workspace, affected);
+            _diagnostics.ScheduleMany(workspace, affected, generation);
         }
     }
 
     private List<(Xenon.ProjectSystem.Workspace Workspace, DocumentContext Context)> ResolveContexts(string uri)
     {
         var result = new List<(Xenon.ProjectSystem.Workspace, DocumentContext)>();
-        foreach (Xenon.ProjectSystem.Workspace workspace in _workspaces)
+        foreach (Xenon.ProjectSystem.Workspace workspace in Volatile.Read(ref _workspaces))
             result.AddRange(_resolver.ResolveAll(workspace.CurrentSnapshot, uri)
                 .Select(context => (workspace, context)));
         return result;
@@ -409,8 +839,43 @@ public sealed class LanguageServerSession : IAsyncDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        await _diagnostics.DisposeAsync().ConfigureAwait(false);
-        foreach (Xenon.ProjectSystem.Workspace workspace in _workspaces) workspace.Dispose();
-        _workspaces.Clear();
+        try { await _diagnostics.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception exception)
+        {
+            TryLogLifecycleFailure("diagnostic scheduler disposal", exception);
+        }
+        Workspace[] retired;
+        lock (_publicationGate)
+        {
+            retired = _workspaces;
+            Volatile.Write(ref _workspaces, []);
+            _primaryWorkspace = null;
+            _workspaceSetGeneration++;
+        }
+        RetireWorkspaces(retired, "session Workspace disposal");
+        _diagnosticPublicationGate.Dispose();
+        _mutationGate.Dispose();
+    }
+
+    private void RetireWorkspaces(IEnumerable<Xenon.ProjectSystem.Workspace> workspaces,
+        string operation)
+    {
+        foreach (Xenon.ProjectSystem.Workspace workspace in workspaces.Distinct())
+        {
+            try { workspace.Dispose(); }
+            catch (Exception exception)
+            {
+                TryLogLifecycleFailure(operation, exception);
+            }
+        }
+    }
+
+    private void TryLogLifecycleFailure(string operation, Exception exception)
+    {
+        try { _log.WriteLine($"LSP {operation} failed: {exception}"); }
+        catch
+        {
+            // Cleanup must continue even if the configured lifecycle log is unavailable.
+        }
     }
 }

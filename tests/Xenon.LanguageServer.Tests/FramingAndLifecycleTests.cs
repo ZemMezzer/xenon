@@ -205,4 +205,167 @@ public sealed class FramingAndLifecycleTests
         Assert.Equal(LspErrorCodes.RequestCancelled,
             cancellation.GetProperty("error").GetProperty("code").GetInt32());
     }
+
+    [Fact]
+    public async Task FatalFramingErrorCancelsAndDrainsActiveRequestBeforeDisposal()
+    {
+        using var input = new PushReadStream();
+        using var output = new MemoryStream();
+        using var errors = new StringWriter();
+        var started = Signal();
+        var cancelled = Signal();
+        var release = Signal();
+        var host = new LspServerHost(input, output, errors,
+            additionalRequestHandler: async (_, _, _, token) =>
+            {
+                started.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException)
+                {
+                    cancelled.TrySetResult();
+                    await release.Task;
+                    throw;
+                }
+                return null;
+            });
+        Task<int> run = host.RunAsync();
+        PushInitializedSlowRequest(input);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        input.Push(Encoding.ASCII.GetBytes("Content-Length: nope\r\n\r\n"));
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Yield();
+        Assert.False(run.IsCompleted);
+        release.TrySetResult();
+
+        Assert.Equal(1, await run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, host.ActiveRequestCount);
+        Assert.Contains("LSP framing error", errors.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PrematureEofCancelsAndDrainsActiveRequestBeforeDisposal()
+    {
+        using var input = new PushReadStream();
+        using var output = new MemoryStream();
+        var started = Signal();
+        var cancelled = Signal();
+        var release = Signal();
+        var host = new LspServerHost(input, output,
+            additionalRequestHandler: DrainingHandler(started, cancelled, release));
+        Task<int> run = host.RunAsync();
+        PushInitializedSlowRequest(input);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        input.Complete();
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Yield();
+        Assert.False(run.IsCompleted);
+        release.TrySetResult();
+
+        Assert.Equal(1, await run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, host.ActiveRequestCount);
+    }
+
+    [Fact]
+    public async Task ExternalCancellationDrainsEveryActiveRequest()
+    {
+        using var input = new PushReadStream();
+        using var output = new MemoryStream();
+        using var lifetime = new CancellationTokenSource();
+        var bothStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bothCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = Signal();
+        int starts = 0, cancellations = 0;
+        var host = new LspServerHost(input, output,
+            additionalRequestHandler: async (_, _, _, token) =>
+            {
+                if (Interlocked.Increment(ref starts) == 2) bothStarted.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException)
+                {
+                    if (Interlocked.Increment(ref cancellations) == 2) bothCancelled.TrySetResult();
+                    await release.Task;
+                    throw;
+                }
+                return null;
+            });
+        Task<int> run = host.RunAsync(lifetime.Token);
+        input.Push(LspTestProtocol.Frame(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "initialize",
+            @params = new { }
+        }));
+        input.Push(LspTestProtocol.Frame(new
+        {
+            jsonrpc = "2.0",
+            method = "initialized",
+            @params = new { }
+        }));
+        input.Push(LspTestProtocol.Frame(new
+        {
+            jsonrpc = "2.0",
+            id = "slow-a",
+            method = "test/slow"
+        }));
+        input.Push(LspTestProtocol.Frame(new
+        {
+            jsonrpc = "2.0",
+            id = "slow-b",
+            method = "test/slow"
+        }));
+        await bothStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        lifetime.Cancel();
+        await bothCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Yield();
+        Assert.False(run.IsCompleted);
+        release.TrySetResult();
+
+        Assert.Equal(1, await run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, host.ActiveRequestCount);
+    }
+
+    private static Func<LanguageServerSession, string, JsonElement?, CancellationToken,
+        Task<object?>> DrainingHandler(TaskCompletionSource started,
+        TaskCompletionSource cancelled, TaskCompletionSource release) => async (_, _, _, token) =>
+    {
+        started.TrySetResult();
+        try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+        catch (OperationCanceledException)
+        {
+            cancelled.TrySetResult();
+            await release.Task;
+            throw;
+        }
+        return null;
+    };
+
+    private static void PushInitializedSlowRequest(PushReadStream input)
+    {
+        input.Push(LspTestProtocol.Frame(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "initialize",
+            @params = new { }
+        }));
+        input.Push(LspTestProtocol.Frame(new
+        {
+            jsonrpc = "2.0",
+            method = "initialized",
+            @params = new { }
+        }));
+        input.Push(LspTestProtocol.Frame(new
+        {
+            jsonrpc = "2.0",
+            id = "slow",
+            method = "test/slow"
+        }));
+    }
+
+    private static TaskCompletionSource Signal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 }

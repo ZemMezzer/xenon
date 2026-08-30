@@ -13,14 +13,18 @@ public sealed class LspServerHost(Stream input, Stream output, TextWriter? error
     private readonly RequestCancellationRegistry _requests = new();
     private readonly Func<LanguageServerSession, string, JsonElement?, CancellationToken,
         Task<object?>>? _additionalRequestHandler = additionalRequestHandler;
+    private int _suppressResponses;
 
     public int ActiveRequestCount => _requests.ActiveCount;
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
-        await using var session = new LanguageServerSession(
-            (method, parameters) => _writer.WriteNotificationAsync(method, parameters), _error);
+        var session = new LanguageServerSession(
+            (method, parameters) => ResponsesAllowed
+                ? _writer.WriteNotificationAsync(method, parameters)
+                : Task.CompletedTask, _error);
         var active = new List<Task>();
+        int exitCode = 1;
         try
         {
             while (!cancellationToken.IsCancellationRequested &&
@@ -30,19 +34,20 @@ public sealed class LspServerHost(Stream input, Stream output, TextWriter? error
                 try { payload = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    _requests.CancelAll();
-                    return 1;
+                    exitCode = 1;
+                    break;
                 }
                 catch (LspFramingException exception)
                 {
                     await _error.WriteLineAsync($"LSP framing error: {exception.Message}");
-                    _requests.CancelAll();
-                    return 1;
+                    Volatile.Write(ref _suppressResponses, 1);
+                    exitCode = 1;
+                    break;
                 }
                 if (payload is null)
                 {
-                    _requests.CancelAll();
-                    return session.State == LanguageServerLifecycleState.ShutdownRequested ? 0 : 1;
+                    exitCode = session.State == LanguageServerLifecycleState.ShutdownRequested ? 0 : 1;
+                    break;
                 }
 
                 JsonElement message;
@@ -102,17 +107,45 @@ public sealed class LspServerHost(Stream input, Stream output, TextWriter? error
 
                 // Lifecycle requests are serialized so transitions and their responses are ordered.
                 if (method is "initialize" or "shutdown") await task.ConfigureAwait(false);
-                active.RemoveAll(item => item.IsCompleted);
+                await ObserveCompletedRequestsAsync(active).ConfigureAwait(false);
             }
 
-            _requests.CancelAll();
-            await Task.WhenAll(active).ConfigureAwait(false);
-            return session.ExitCode;
+            if (session.State == LanguageServerLifecycleState.Exited) exitCode = session.ExitCode;
+            return exitCode;
         }
         finally
         {
-            _requests.Dispose();
-            _writer.Dispose();
+            try { _requests.CancelAll(); }
+            catch (Exception exception)
+            {
+                await TryLogCleanupFailureAsync("request cancellation", exception)
+                    .ConfigureAwait(false);
+            }
+            try
+            {
+                await Task.WhenAll(active).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                await TryLogCleanupFailureAsync("request drain", exception).ConfigureAwait(false);
+            }
+            try { await session.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception exception)
+            {
+                await TryLogCleanupFailureAsync("session disposal", exception).ConfigureAwait(false);
+            }
+            try { _requests.Dispose(); }
+            catch (Exception exception)
+            {
+                await TryLogCleanupFailureAsync("request registry disposal", exception)
+                    .ConfigureAwait(false);
+            }
+            try { _writer.Dispose(); }
+            catch (Exception exception)
+            {
+                await TryLogCleanupFailureAsync("protocol writer disposal", exception)
+                    .ConfigureAwait(false);
+            }
         }
     }
 
@@ -134,25 +167,45 @@ public sealed class LspServerHost(Stream input, Stream output, TextWriter? error
                 result = await _additionalRequestHandler(session, method, parameters,
                     requestCancellation.Token).ConfigureAwait(false);
             }
-            await _writer.WriteResultAsync(id, result).ConfigureAwait(false);
+            if (ResponsesAllowed)
+                await _writer.WriteResultAsync(id, result).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (requestCancellation.IsCancellationRequested)
         {
-            await _writer.WriteErrorAsync(id, LspErrorCodes.RequestCancelled,
-                "Request cancelled.").ConfigureAwait(false);
+            if (ResponsesAllowed)
+                await _writer.WriteErrorAsync(id, LspErrorCodes.RequestCancelled,
+                    "Request cancelled.").ConfigureAwait(false);
         }
         catch (JsonRpcException exception)
         {
-            await _writer.WriteErrorAsync(id, exception.Code, exception.Message,
-                exception.DataObject).ConfigureAwait(false);
+            if (ResponsesAllowed)
+                await _writer.WriteErrorAsync(id, exception.Code, exception.Message,
+                    exception.DataObject).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             await _error.WriteLineAsync($"LSP request '{method}' failed: {exception}");
-            await _writer.WriteErrorAsync(id, LspErrorCodes.InternalError,
-                "Internal server error.").ConfigureAwait(false);
+            if (ResponsesAllowed)
+                await _writer.WriteErrorAsync(id, LspErrorCodes.InternalError,
+                    "Internal server error.").ConfigureAwait(false);
         }
         finally { _requests.Complete(requestKey, requestCancellation); }
+    }
+
+    private bool ResponsesAllowed => Volatile.Read(ref _suppressResponses) == 0;
+
+    private async Task ObserveCompletedRequestsAsync(List<Task> active)
+    {
+        Task[] completed = active.Where(task => task.IsCompleted).ToArray();
+        foreach (Task task in completed)
+        {
+            try { await task.ConfigureAwait(false); }
+            catch (Exception exception)
+            {
+                await _error.WriteLineAsync($"Completed LSP request failed: {exception}");
+            }
+            active.Remove(task);
+        }
     }
 
     private void RouteCancellation(JsonElement? parameters)
@@ -214,4 +267,13 @@ public sealed class LspServerHost(Stream input, Stream output, TextWriter? error
     }
 
     private static string NormalizeId(JsonElement id) => id.GetRawText();
+
+    private async Task TryLogCleanupFailureAsync(string operation, Exception exception)
+    {
+        try { await _error.WriteLineAsync($"LSP {operation} failed: {exception}"); }
+        catch
+        {
+            // Lifecycle cleanup must not depend on the diagnostic sink remaining writable.
+        }
+    }
 }

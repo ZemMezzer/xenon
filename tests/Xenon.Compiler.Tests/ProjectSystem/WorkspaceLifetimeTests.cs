@@ -7,6 +7,31 @@ namespace Xenon.Compiler.Tests.ProjectSystem;
 public sealed class WorkspaceLifetimeTests
 {
     [Fact]
+    public void DisposeCancelsEveryStaleLeaseWhenOneConsumerCallbackThrows()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("App", sources: [("main.xe", "namespace App; int Main() { return 0; }")]);
+        using Workspace workspace = directory.CreateWorkspace();
+        using WorkspaceAnalysisRequest throwing = workspace.CreateAnalysisRequest();
+        using WorkspaceAnalysisRequest observed = workspace.CreateAnalysisRequest();
+        using CancellationTokenRegistration throwingRegistration =
+            throwing.CancellationToken.Register(() =>
+                throw new InvalidOperationException("consumer callback failure"));
+        int observedCancellation = 0;
+        using CancellationTokenRegistration observedRegistration =
+            observed.CancellationToken.Register(() =>
+                Interlocked.Exchange(ref observedCancellation, 1));
+
+        Exception? failure = Record.Exception(workspace.Dispose);
+
+        Assert.Null(failure);
+        Assert.True(throwing.CancellationToken.IsCancellationRequested);
+        Assert.True(observed.CancellationToken.IsCancellationRequested);
+        Assert.Equal(1, Volatile.Read(ref observedCancellation));
+        Assert.Throws<ObjectDisposedException>(() => workspace.CreateAnalysisRequest());
+    }
+
+    [Fact]
     public void ObsoleteSnapshotProjectDocumentCompilationAndIndexesAreCollectible()
     {
         using var directory = new WorkspaceTestDirectory();

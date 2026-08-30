@@ -29,27 +29,10 @@ public sealed class RequestCancellationRegistry : IDisposable
     public bool Cancel(string requestId)
     {
         if (!_active.TryGetValue(requestId, out CancellationTokenSource? source)) return false;
-        try
-        {
-            source.Cancel();
-            return true;
-        }
-        catch (ObjectDisposedException)
-        {
-            return false;
-        }
+        return TryCancelForLifetime(source);
     }
 
-    public void CancelAll()
-    {
-        try
-        {
-            if (!_shutdown.IsCancellationRequested) _shutdown.Cancel();
-        }
-        catch (ObjectDisposedException)
-        {
-        }
-    }
+    public void CancelAll() => TryCancelForLifetime(_shutdown);
 
     public void Dispose()
     {
@@ -57,5 +40,23 @@ public sealed class RequestCancellationRegistry : IDisposable
         foreach (CancellationTokenSource source in _active.Values) source.Dispose();
         _active.Clear();
         _shutdown.Dispose();
+    }
+
+    private static bool TryCancelForLifetime(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            if (!cancellation.IsCancellationRequested) cancellation.Cancel();
+            return true;
+        }
+        catch (AggregateException)
+        {
+            // Cancel() still invokes every callback before aggregating callback failures.
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
     }
 }

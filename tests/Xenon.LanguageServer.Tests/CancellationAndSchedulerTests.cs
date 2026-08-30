@@ -21,6 +21,28 @@ public sealed class CancellationAndSchedulerTests
     }
 
     [Fact]
+    public void RequestCancellationContinuesWhenConsumerCallbackThrows()
+    {
+        using var registry = new RequestCancellationRegistry();
+        CancellationTokenSource throwing = registry.Register("throwing");
+        CancellationTokenSource observed = registry.Register("observed");
+        using CancellationTokenRegistration throwingRegistration = throwing.Token.Register(() =>
+            throw new InvalidOperationException("consumer cancellation failure"));
+        int observedCancellation = 0;
+        using CancellationTokenRegistration observedRegistration = observed.Token.Register(() =>
+            Interlocked.Exchange(ref observedCancellation, 1));
+
+        registry.CancelAll();
+
+        Assert.True(throwing.IsCancellationRequested);
+        Assert.True(observed.IsCancellationRequested);
+        Assert.Equal(1, Volatile.Read(ref observedCancellation));
+        registry.Complete("throwing", throwing);
+        registry.Complete("observed", observed);
+        Assert.Equal(0, registry.ActiveCount);
+    }
+
+    [Fact]
     public async Task SchedulerCoalescesRapidWorkAndPublishesCurrentGenerationOnly()
     {
         using var directory = new TestDirectory();
@@ -81,6 +103,44 @@ public sealed class CancellationAndSchedulerTests
         await Task.Delay(100);
 
         Assert.Equal(0, publishes);
+    }
+
+    [Fact]
+    public async Task ReplacedSameGenerationJobCannotPublishAfterNewerJob()
+    {
+        using var fixture = CreateSchedulerFixture();
+        var firstStarted = NewSignal();
+        var releaseFirst = NewSignal();
+        var secondPublished = NewSignal();
+        int invocation = 0;
+        var publications = new List<int>();
+        await using var scheduler = new DiagnosticScheduler(
+            new LanguageServerAnalysisContextFactory(new DocumentContextResolver()),
+            async _ =>
+            {
+                int current = Interlocked.Increment(ref invocation);
+                if (current == 1)
+                {
+                    firstStarted.TrySetResult();
+                    await releaseFirst.Task;
+                }
+                return current;
+            }, (_, result) =>
+            {
+                int value = Assert.IsType<int>(result.Value);
+                lock (publications) publications.Add(value);
+                if (value == 2) secondPublished.TrySetResult();
+                return Task.CompletedTask;
+            }, TimeSpan.Zero);
+
+        scheduler.Schedule(fixture.Workspace, fixture.Uri);
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        scheduler.Schedule(fixture.Workspace, fixture.Uri);
+        await secondPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseFirst.TrySetResult();
+        await WaitForAsync(() => scheduler.InFlightJobCount == 0);
+
+        Assert.Equal(new[] { 2 }, publications);
     }
 
     [Fact]
