@@ -8,6 +8,61 @@ namespace Xenon.Compiler.Tests.CodeGen;
 
 public sealed class LlvmIrGeneratorTests
 {
+    [Fact]
+    public void Generator_RespectsRuntimeCheckCompilationOption()
+    {
+        const string Source = "namespace Example; int Divide(int value, int divisor) { return value / divisor; }";
+        Compilation checkedCompilation = CreateCompilation(Source);
+        Compilation uncheckedCompilation = checkedCompilation.WithOptions(
+            new CompilationOptions(CompilationOutputKind.Library, EnableRuntimeChecks: false));
+
+        string checkedIr = new LlvmIrGenerator().Generate(checkedCompilation);
+        string uncheckedIr = new LlvmIrGenerator().Generate(uncheckedCompilation);
+
+        Assert.Contains("call void @llvm.trap()", checkedIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("call void @llvm.trap()", uncheckedIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_RunsRequestedDefaultOptimizationPipeline()
+    {
+        Compilation compilation = CreateCompilation(
+            "namespace Example; export int Identity(int value) { int copy = value; return copy; }");
+        string unoptimized = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(optimizationLevel: 0));
+        string optimized = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(optimizationLevel: 3));
+
+        Assert.Contains("alloca", unoptimized, StringComparison.Ordinal);
+        Assert.DoesNotContain("alloca", optimized, StringComparison.Ordinal);
+        Assert.Contains("define dllexport i32 @Example_Identity", optimized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_VerifiesLoopVectorizerOutput()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int Main()
+            {
+                int count = 100000;
+                int[] values = new int[count];
+                for (int i = 0; i < count; i++)
+                    values[i] = values[i] * 3 + 1;
+                int result = values[count - 1];
+                free(values);
+                return result;
+            }
+            """).WithOptions(new CompilationOptions(
+                CompilationOutputKind.Executable,
+                EnableRuntimeChecks: false));
+
+        string optimized = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(optimizationLevel: 3));
+
+        Assert.Contains("<", optimized, StringComparison.Ordinal);
+        Assert.Contains(" x i32>", optimized, StringComparison.Ordinal);
+    }
 
     [Fact]
     public void Generator_VerifiesCheckedArithmeticWithoutMemoryRuntime()

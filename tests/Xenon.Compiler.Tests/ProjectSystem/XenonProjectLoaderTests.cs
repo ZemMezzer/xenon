@@ -48,6 +48,8 @@ public sealed class XenonProjectLoaderTests
         Assert.False(project.DebugProfile.EnableChecks);
         Assert.Equal(2, project.ReleaseProfile.OptimizationLevel);
         Assert.False(project.ReleaseProfile.EmitDebugInformation);
+        Assert.False(XenonProjectCompilationFactory.Create(project, "debug").Options.EnableRuntimeChecks);
+        Assert.False(XenonProjectCompilationFactory.Create(project, "release").Options.EnableRuntimeChecks);
         Assert.Equal(["sqlite3", "zlib"], project.NativeLibraries.ToArray());
         Assert.Equal(
             [Path.GetFullPath(directory.PathOf("native/lib")), Path.GetFullPath(directory.PathOf("vendor/lib"))],

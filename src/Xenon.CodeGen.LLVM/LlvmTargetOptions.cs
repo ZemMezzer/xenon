@@ -45,11 +45,13 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
     private NativeTargetMachine(
         LLVMTargetMachineRef handle,
         LLVMTargetDataRef targetData,
-        string triple)
+        string triple,
+        int optimizationLevel)
     {
         Handle = handle;
         TargetData = targetData;
         Triple = triple;
+        OptimizationLevel = optimizationLevel;
         DataLayout = GetDataLayoutString(targetData);
         PointerBitWidth = checked((int)(LLVMApi.PointerSizeForAS(targetData, 0) * 8u));
     }
@@ -59,6 +61,8 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
     public LLVMTargetDataRef TargetData { get; }
 
     public string Triple { get; }
+
+    public int OptimizationLevel { get; }
 
     public string DataLayout { get; }
 
@@ -112,7 +116,7 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
 
             try
             {
-                return new NativeTargetMachine(machine, targetData, options.Triple);
+                return new NativeTargetMachine(machine, targetData, options.Triple, options.OptimizationLevel);
             }
             catch
             {
