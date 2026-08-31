@@ -1960,7 +1960,7 @@ internal sealed class SemanticAnalyzer
             FileSymbolScope scope = _treeScopes[tree];
             foreach (FunctionDeclarationSyntax declaration in tree.Root.Members.OfType<FunctionDeclarationSyntax>())
             {
-                if (declaration.IsExtern && declaration.IdentifierToken.Text is "malloc" or "free")
+                if (declaration.IsExtern && declaration.IdentifierToken.Text is "malloc" or "calloc" or "free")
                 {
                     _diagnostics.Report(
                         declaration.IdentifierToken.Location,
