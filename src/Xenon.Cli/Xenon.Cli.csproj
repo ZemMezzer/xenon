@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="../Shared/XenonBuildInfo.cs" Link="XenonBuildInfo.cs" />
+    <None Include="../../LICENSE" Link="LICENSE" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
