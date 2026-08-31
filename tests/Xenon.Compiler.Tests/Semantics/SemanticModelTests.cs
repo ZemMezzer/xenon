@@ -789,9 +789,10 @@ public sealed class SemanticModelTests
         SemanticModel model = compilation.GetSemanticModel(tree);
         FunctionDeclarationSyntax function = tree.Root.Members.OfType<FunctionDeclarationSyntax>().Single();
         var forStatement = Assert.IsType<ForStatementSyntax>(function.Body!.Statements[0]);
+        var afterForStatement = Assert.IsType<ExpressionStatementSyntax>(function.Body.Statements[1]);
 
         int insideFor = tree.Source.Text.IndexOf("i; }", StringComparison.Ordinal);
-        int afterFor = tree.Source.Text.IndexOf("i;\n    switch", StringComparison.Ordinal);
+        int afterFor = SyntaxNavigator.GetSpan(afterForStatement.Expression).Start;
         Assert.Contains(model.LookupSymbols(insideFor), symbol => symbol.Name == "i");
         Assert.DoesNotContain(model.LookupSymbols(afterFor), symbol => symbol.Name == "i");
         Assert.DoesNotContain(model.LookupSymbols(((BlockStatementSyntax)forStatement.Body).CloseBraceToken.Location.Span.End),
