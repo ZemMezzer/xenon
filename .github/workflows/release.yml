@@ -181,10 +181,13 @@ jobs:
           VERSION: ${{ needs.build-and-test.outputs.version }}
         shell: bash
         run: |
-          if gh release view "${VERSION}" >/dev/null 2>&1; then
-            gh release upload "${VERSION}" release/* --clobber
+          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${VERSION}" release/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
           else
             gh release create "${VERSION}" release/* \
+              --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
               --generate-notes \
               --title "Xenon ${VERSION}"
