@@ -439,7 +439,7 @@ public sealed class LlvmIrGenerator
     {
         foreach (StructTypeSymbol type in @namespace.Structs)
         {
-            var tables = new Dictionary<InterfaceTypeSymbol, LlvmVTable>();
+            var tables = new Dictionary<InterfaceTypeSymbol, (LlvmVTable Table, FunctionSymbol[] Implementations)>();
             bool owned = _compilation.IsSymbolDefinedHere(type);
             foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces
                 .OrderBy(item => item.FullName, StringComparer.Ordinal))
@@ -447,17 +447,17 @@ public sealed class LlvmIrGenerator
                 LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
                 FunctionSymbol[] implementations = @interface.AllMethods
                     .Select(required => type.FindInterfaceImplementation(required)!).ToArray();
-                LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)implementations.Length);
+                // Slot zero retains the runtime interface map for interface upcasts.
+                // Method slots start at one, allowing ordinary calls to dispatch directly
+                // through the table stored in the two-word interface value.
+                LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)implementations.Length + 1);
                 LLVMValueRef table = _module.AddGlobal(
                     tableType, GetManagedName(
                         type, "interface_table", GetInterfaceTableSourceName(type, @interface)));
                 table.Linkage = LLVMLinkage.LLVMExternalLinkage;
-                if (owned)
-                    table.Initializer = LLVMValueRef.CreateConstArray(elementType,
-                        implementations.Select(method => _functions[method].Value).ToArray());
-                else if (IsWindowsTarget() && IsSharedReference(type))
+                if (!owned && IsWindowsTarget() && IsSharedReference(type))
                     table.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
-                tables.Add(@interface, new LlvmVTable(table, tableType));
+                tables.Add(@interface, (new LlvmVTable(table, tableType), implementations));
             }
 
             if (tables.Count > 0)
@@ -467,7 +467,7 @@ public sealed class LlvmIrGenerator
                 LLVMValueRef[] entries = tables
                     .OrderBy(pair => pair.Key.FullName, StringComparer.Ordinal)
                     .Select(pair => LLVMValueRef.CreateConstNamedStruct(
-                        _interfaceMapEntryType, [_interfaceKeys[pair.Key], pair.Value.Value]))
+                        _interfaceMapEntryType, [_interfaceKeys[pair.Key], pair.Value.Table.Value]))
                     .Append(LLVMValueRef.CreateConstNamedStruct(_interfaceMapEntryType,
                         [LLVMValueRef.CreateConstPointerNull(pointerType), LLVMValueRef.CreateConstPointerNull(pointerType)]))
                     .ToArray();
@@ -479,6 +479,20 @@ public sealed class LlvmIrGenerator
                 else if (IsWindowsTarget() && IsSharedReference(type))
                     map.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
                 _interfaceMaps.Add(type, new LlvmVTable(map, mapType));
+
+                if (owned)
+                {
+                    foreach ((LlvmVTable table, FunctionSymbol[] implementations) in tables.Values)
+                    {
+                        LLVMValueRef[] tableEntries =
+                        [
+                            map,
+                            .. implementations.Select(method => _functions[method].Value),
+                        ];
+                        LLVMValueRef tableValue = table.Value;
+                        tableValue.Initializer = LLVMValueRef.CreateConstArray(pointerType, tableEntries);
+                    }
+                }
             }
         }
         foreach (NamespaceSymbol child in @namespace.Namespaces)
@@ -1575,11 +1589,54 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitReferenceConversion(BoundReferenceConversionExpression expression)
         {
+            if (expression.ReferenceType.ElementType is InterfaceTypeSymbol targetInterface &&
+                GetReferencedInterface(expression.Source.Type) is InterfaceTypeSymbol sourceInterface &&
+                !TypeIdentity.AreSame(sourceInterface, targetInterface))
+            {
+                return EmitInterfaceReferenceUpcast(expression.Source, sourceInterface, targetInterface);
+            }
+
             if (expression.Source is BoundThisExpression)
                 return EmitExpression(expression.Source);
             if (IsAddressable(expression.Source))
                 return EmitAddress(expression.Source);
             return StoreTemporary(expression.Source, expression.Source.Type);
+        }
+
+        private static InterfaceTypeSymbol? GetReferencedInterface(TypeSymbol type) => type switch
+        {
+            InterfaceTypeSymbol @interface => @interface,
+            ReferenceTypeSymbol { ElementType: InterfaceTypeSymbol @interface } => @interface,
+            _ => null,
+        };
+
+        private LLVMValueRef EmitInterfaceReferenceUpcast(
+            BoundExpression source,
+            InterfaceTypeSymbol sourceInterface,
+            InterfaceTypeSymbol targetInterface)
+        {
+            LLVMValueRef sourceValue;
+            if (source.Type is ReferenceTypeSymbol)
+            {
+                LLVMValueRef sourceAddress = EmitExpression(source);
+                sourceValue = _builder.BuildLoad2(_mapType(sourceInterface), sourceAddress, "interface.upcast.source");
+            }
+            else
+            {
+                sourceValue = EmitExpression(source);
+            }
+
+            LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef data = _builder.BuildExtractValue(sourceValue, 0, "interface.data");
+            LLVMValueRef sourceTable = _builder.BuildExtractValue(sourceValue, 1, "interface.table");
+            LLVMValueRef map = _builder.BuildLoad2(pointerType, sourceTable, "interface.runtime.map");
+            LLVMValueRef targetTable = EmitInterfaceTableLookup(map, targetInterface);
+            LLVMValueRef targetValue = _mapType(targetInterface).Poison;
+            targetValue = _builder.BuildInsertValue(targetValue, data, 0, "interface.data");
+            targetValue = _builder.BuildInsertValue(targetValue, targetTable, 1, "interface.table");
+            LLVMValueRef temporary = _builder.BuildAlloca(_mapType(targetInterface), "interface.upcast.tmp");
+            _builder.BuildStore(targetValue, temporary);
+            return temporary;
         }
 
         private LLVMValueRef EmitReferenceDereference(BoundReferenceDereferenceExpression expression) =>
@@ -2349,9 +2406,10 @@ public sealed class LlvmIrGenerator
             LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMValueRef dispatch = EmitRuntimeDispatch(expression.SourceType, data);
             LLVMValueRef map = _builder.BuildLoad2(pointerType, dispatch, "interface.runtime.map");
+            LLVMValueRef table = EmitInterfaceTableLookup(map, expression.InterfaceType);
             LLVMValueRef value = _mapType(expression.InterfaceType).Poison;
             value = _builder.BuildInsertValue(value, data, 0, "interface.data");
-            return _builder.BuildInsertValue(value, map, 1, "interface.map");
+            return _builder.BuildInsertValue(value, table, 1, "interface.table");
         }
 
         private LLVMValueRef StoreTemporary(BoundExpression expression, TypeSymbol type)
@@ -2367,12 +2425,11 @@ public sealed class LlvmIrGenerator
                 ? _builder.BuildLoad2(_mapType(expression.InterfaceType), EmitExpression(expression.Receiver), "interface")
                 : EmitExpression(expression.Receiver);
             LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
-            LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
+            LLVMValueRef table = _builder.BuildExtractValue(interfaceValue, 1, "interface.table");
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMValueRef table = EmitInterfaceTableLookup(map, expression.InterfaceType);
-            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length);
+            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length + 1);
             LLVMValueRef address = _builder.BuildGEP2(tableType, table,
-                new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(expression.Method), false) },
+                new LLVMValueRef[] { LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false), LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(expression.Method) + 1, false) },
                 "interface.slot");
             LLVMValueRef function = _builder.BuildLoad2(entryType, address, "interface.method");
             var parameterTypes = new List<LLVMTypeRef> { LLVMTypeRef.CreatePointer(_context.Int8Type, 0) };
@@ -2392,17 +2449,16 @@ public sealed class LlvmIrGenerator
                 ? _builder.BuildLoad2(_mapType(expression.InterfaceType), EmitExpression(expression.Receiver), "interface")
                 : EmitExpression(expression.Receiver);
             LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
-            LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
+            LLVMValueRef table = _builder.BuildExtractValue(interfaceValue, 1, "interface.table");
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMValueRef table = EmitInterfaceTableLookup(map, expression.InterfaceType);
-            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length);
+            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length + 1);
             LLVMValueRef address = _builder.BuildGEP2(
                 tableType,
                 table,
                 new LLVMValueRef[]
                 {
                     LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false),
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(setter), false),
+                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(setter) + 1, false),
                 },
                 "interface.slot");
             LLVMValueRef function = _builder.BuildLoad2(entryType, address, "interface.method");
@@ -2421,17 +2477,16 @@ public sealed class LlvmIrGenerator
                 ?? throw new LlvmCodeGenerationException("interface indexer has no setter");
             LLVMValueRef interfaceValue = EmitExpression(expression.Receiver);
             LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
-            LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
+            LLVMValueRef table = _builder.BuildExtractValue(interfaceValue, 1, "interface.table");
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMValueRef table = EmitInterfaceTableLookup(map, expression.InterfaceType);
-            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length);
+            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)expression.InterfaceType.AllMethods.Length + 1);
             LLVMValueRef address = _builder.BuildGEP2(
                 tableType,
                 table,
                 new LLVMValueRef[]
                 {
                     LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false),
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(setter), false),
+                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)expression.InterfaceType.GetMethodSlot(setter) + 1, false),
                 },
                 "interface.slot");
             LLVMValueRef function = _builder.BuildLoad2(entryType, address, "interface.method");
@@ -2456,13 +2511,13 @@ public sealed class LlvmIrGenerator
                     ? _builder.BuildLoad2(_mapType(interfaceType), EmitExpression(expression.Receiver), "interface")
                     : EmitExpression(expression.Receiver);
                 LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
-                LLVMValueRef map = _builder.BuildExtractValue(interfaceValue, 1, "interface.map");
+                LLVMValueRef table = _builder.BuildExtractValue(interfaceValue, 1, "interface.table");
                 LLVMValueRef[] arguments = expression.Arguments.Select(EmitExpression).ToArray();
                 LLVMValueRef current = EmitInterfaceAccessorCall(
                     interfaceType,
                     expression.Getter,
                     data,
-                    map,
+                    table,
                     arguments,
                     "interface.get");
                 LLVMValueRef value = EmitExpression(expression.Value);
@@ -2471,7 +2526,7 @@ public sealed class LlvmIrGenerator
                     interfaceType,
                     expression.Setter,
                     data,
-                    map,
+                    table,
                     [.. arguments, result],
                     string.Empty);
                 return result;
@@ -2512,20 +2567,19 @@ public sealed class LlvmIrGenerator
             InterfaceTypeSymbol interfaceType,
             FunctionSymbol accessor,
             LLVMValueRef data,
-            LLVMValueRef map,
+            LLVMValueRef table,
             LLVMValueRef[] arguments,
             string name)
         {
             LLVMTypeRef entryType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMValueRef table = EmitInterfaceTableLookup(map, interfaceType);
-            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)interfaceType.AllMethods.Length);
+            LLVMTypeRef tableType = LLVMTypeRef.CreateArray(entryType, (uint)interfaceType.AllMethods.Length + 1);
             LLVMValueRef functionAddress = _builder.BuildGEP2(
                 tableType,
                 table,
                 new LLVMValueRef[]
                 {
                     LLVMValueRef.CreateConstInt(_context.Int32Type, 0, false),
-                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)interfaceType.GetMethodSlot(accessor), false),
+                    LLVMValueRef.CreateConstInt(_context.Int32Type, (ulong)interfaceType.GetMethodSlot(accessor) + 1, false),
                 },
                 "interface.slot");
             LLVMValueRef function = _builder.BuildLoad2(entryType, functionAddress, "interface.method");

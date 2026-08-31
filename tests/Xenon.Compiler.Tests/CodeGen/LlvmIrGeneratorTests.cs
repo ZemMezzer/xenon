@@ -824,6 +824,7 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("define internal i32 @" + ManagedSymbol("interface-reference-dispatch", "Example.Read", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("@" + ManagedSymbol("interface-reference-dispatch", "Example.Enemy.Example.IScore.__itable", "interface_table"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("interface.slot", llvmIr, StringComparison.Ordinal);
+        Assert.Equal(1, llvmIr.Split("call i32 @strcmp", StringSplitOptions.None).Length - 1);
     }
 
     [Fact]
@@ -938,7 +939,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "multiple-interface-inheritance");
 
-        Assert.Contains("@" + ManagedSymbol("multiple-interface-inheritance", "Example.Value.Example.IB.__itable", "interface_table") + " = global [1 x ptr]", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("multiple-interface-inheritance", "Example.Value.Example.IB.__itable", "interface_table") + " = global [2 x ptr]", llvmIr, StringComparison.Ordinal);
         Assert.Contains("i32 0, i32 0", llvmIr, StringComparison.Ordinal);
     }
 
@@ -971,7 +972,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "inherited-interface-implementation");
 
-        Assert.Contains("@" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.Example.IValue.__itable", "interface_table") + " = global [1 x ptr] [ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Base.Get", "function") + "]", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.Example.IValue.__itable", "interface_table") + " = global [2 x ptr] [ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__imap", "interface_map") + ", ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Base.Get", "function") + "]", llvmIr, StringComparison.Ordinal);
         Assert.Contains("interface.runtime.map = load ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("@" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__vtable", "vtable") + " = global [1 x ptr] [ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__imap", "interface_map") + "]", llvmIr, StringComparison.Ordinal);
     }
