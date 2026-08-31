@@ -902,7 +902,7 @@ public sealed class SemanticModelTests
             (Example("struct Value { public int Item { get { return 1; } get { return 2; } } }"), DiagnosticIds.DuplicateGetter),
             (Example("struct Value { public int Item { } }"), DiagnosticIds.AccessorRequired),
             (Example("abstract struct Value { public abstract int Item { get { return 1; } } }"), DiagnosticIds.AbstractAccessorHasBody),
-            (Example("extern void* malloc(nuint size);"), DiagnosticIds.ReservedNativeSymbol),
+            (Example("extern void* malloc(nuint size); extern void* calloc(nuint count, nuint size);"), DiagnosticIds.ReservedNativeSymbol),
             (["namespace A; extern int Native(int value);", "namespace B; extern int Native(float value);"], DiagnosticIds.NativeSymbolCollision),
             (Example("struct Value {} extern Value Read();"), DiagnosticIds.UnsupportedNativeStructByValue),
             (Example("void Test(int[] values) { values.GetLength(); }"), DiagnosticIds.InvalidGetLengthArguments),

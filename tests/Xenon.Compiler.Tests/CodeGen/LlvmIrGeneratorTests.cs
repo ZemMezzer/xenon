@@ -78,6 +78,7 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("division.valid", ir, StringComparison.Ordinal);
         Assert.Contains("shift.count.valid", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("@malloc", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("@calloc", ir, StringComparison.Ordinal);
     }
 
 
@@ -123,7 +124,8 @@ public sealed class LlvmIrGeneratorTests
         {
             int start = ir.IndexOf("@" + ManagedSymbol("xenon", $"Example.{function}", "function"), StringComparison.Ordinal);
             string body = ir[start..ir.IndexOf("\n}", start, StringComparison.Ordinal)];
-            int allocation = body.IndexOf("call ptr @malloc", StringComparison.Ordinal);
+            string allocator = function is "Vector" or "Matrix" ? "calloc" : "malloc";
+            int allocation = body.IndexOf($"call ptr @{allocator}", StringComparison.Ordinal);
             int check = body.IndexOf("allocation.valid = icmp ne ptr", StringComparison.Ordinal);
             int branch = body.IndexOf("br i1 %allocation.valid", StringComparison.Ordinal);
             Assert.True(allocation >= 0 && check > allocation && branch > check, body);
@@ -131,6 +133,20 @@ public sealed class LlvmIrGeneratorTests
             if (function == "Object")
                 Assert.True(body.IndexOf("call void @" + ManagedSymbol("xenon", "Example.S.__ctor", "function"), StringComparison.Ordinal) > branch, body);
         }
+    }
+
+    [Fact]
+    public void Generator_UsesZeroedAllocatorWithoutRedundantMemsetForHeapArrays()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int[] Create(int count) { return new int[count]; }
+            """);
+
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
+
+        Assert.Contains($"call ptr @calloc(i{IntPtr.Size * 8} 1, i{IntPtr.Size * 8}", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("call void @llvm.memset", ir, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -451,7 +467,7 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("stack.array = alloca i8", llvmIr, StringComparison.Ordinal);
         Assert.Contains("array.metadata.address", llvmIr, StringComparison.Ordinal);
         Assert.Contains("getelementptr", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call ptr @malloc", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call ptr @calloc", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1613,7 +1629,7 @@ public sealed class LlvmIrGeneratorTests
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
-        Assert.Contains($"call ptr @malloc(i{pointerBits}", ir, StringComparison.Ordinal);
+        Assert.Contains($"call ptr @calloc(i{pointerBits}", ir, StringComparison.Ordinal);
         Assert.Contains("array.dimension.inrange = icmp ult i32", ir, StringComparison.Ordinal);
         Assert.Contains("array.linear.index", ir, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
@@ -1892,6 +1908,7 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("local.constructed", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("call void @free", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("call ptr @malloc", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("call ptr @calloc", ir, StringComparison.Ordinal);
     }
 
     [Theory]

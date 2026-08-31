@@ -1448,18 +1448,23 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_ReservesNativeMallocForNew()
+    public void Analyzer_ReservesNativeAllocatorsForNew()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
 
             extern void* malloc(nuint size);
+            extern void* calloc(nuint count, nuint size);
             """);
 
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message ==
                 "native symbol 'malloc' is reserved for Xenon memory operations");
+        Assert.Contains(
+            compilation.Diagnostics,
+            diagnostic => diagnostic.Message ==
+                "native symbol 'calloc' is reserved for Xenon memory operations");
     }
 
     [Fact]

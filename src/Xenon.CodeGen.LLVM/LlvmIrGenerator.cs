@@ -923,19 +923,23 @@ public sealed class LlvmIrGenerator
         }
 
         if (_module.GetNamedFunction("malloc").Handle != IntPtr.Zero ||
+            _module.GetNamedFunction("calloc").Handle != IntPtr.Zero ||
             _module.GetNamedFunction("free").Handle != IntPtr.Zero)
         {
             throw new LlvmCodeGenerationException(
-                "Native symbols 'malloc' and 'free' are reserved for Xenon heap operations.");
+                "Native symbols 'malloc', 'calloc', and 'free' are reserved for Xenon heap operations.");
         }
 
         LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
         LLVMTypeRef sizeType = MapTargetInteger(BuiltinTypes.NUInt, _targetMachine.PointerBitWidth);
         LLVMTypeRef mallocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType], false);
+        LLVMTypeRef callocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType, sizeType], false);
         LLVMTypeRef freeType = LLVMTypeRef.CreateFunction(_context.VoidType, [pointerType], false);
         _memoryRuntime = new LlvmMemoryRuntime(
             _module.AddFunction("malloc", mallocType),
             mallocType,
+            _module.AddFunction("calloc", callocType),
+            callocType,
             _module.AddFunction("free", freeType),
             freeType,
             sizeType,
@@ -982,6 +986,8 @@ public sealed class LlvmIrGenerator
     private sealed record LlvmMemoryRuntime(
         LLVMValueRef Malloc,
         LLVMTypeRef MallocType,
+        LLVMValueRef Calloc,
+        LLVMTypeRef CallocType,
         LLVMValueRef Free,
         LLVMTypeRef FreeType,
         LLVMTypeRef SizeType,
@@ -2057,18 +2063,21 @@ public sealed class LlvmIrGenerator
             }
             else
             {
-                address = EmitAllocation(allocationSize, $"{expression.ElementType.Name}.heap.array");
+                address = EmitZeroedAllocation(allocationSize, $"{expression.ElementType.Name}.heap.array");
             }
             _builder.BuildStore(ToInt32(length), address);
             for (int i = 0; i < dimensions.Length; i++)
                 _builder.BuildStore(ToInt32(dimensions[i]), MetadataAddress(address, IntConstant(i + 1)));
             LLVMValueRef data = ArrayData(address, expression.ArrayType);
-            LLVMApi.BuildMemSet(
-                _builder,
-                data,
-                LLVMValueRef.CreateConstInt(_context.Int8Type, 0),
-                byteCount,
-                checked((uint)Math.Max(1, _getAbiAlignment(expression.ElementType))));
+            if (expression.Storage == ArrayStorageKind.Stack)
+            {
+                LLVMApi.BuildMemSet(
+                    _builder,
+                    data,
+                    LLVMValueRef.CreateConstInt(_context.Int8Type, 0),
+                    byteCount,
+                    checked((uint)Math.Max(1, _getAbiAlignment(expression.ElementType))));
+            }
             bool hasZeroDefault = HasAllBitsZeroDefault(expression.ElementType);
             if (expression.ElementType is StructTypeSymbol structure &&
                 (!hasZeroDefault || structure.HasVirtualDispatch || HasDefaultInstanceInitializer(structure)))
@@ -2210,6 +2219,19 @@ public sealed class LlvmIrGenerator
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
             LLVMValueRef address = _builder.BuildCall2(runtime.MallocType, runtime.Malloc, new LLVMValueRef[] { size }, name);
+            EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
+                LLVMValueRef.CreateConstPointerNull(address.TypeOf), "allocation.valid"));
+            return address;
+        }
+
+        private LLVMValueRef EmitZeroedAllocation(LLVMValueRef size, string name)
+        {
+            LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            LLVMValueRef address = _builder.BuildCall2(
+                runtime.CallocType,
+                runtime.Calloc,
+                new LLVMValueRef[] { SizeConstant(1), size },
+                name);
             EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
                 LLVMValueRef.CreateConstPointerNull(address.TypeOf), "allocation.valid"));
             return address;
