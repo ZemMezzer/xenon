@@ -43,10 +43,35 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: dotnet build Xenon.sln --configuration Release --no-restore -p:XenonVersion="${VERSION}"
 
-      - name: Run tests
+      - name: Run compiler tests
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: dotnet test Xenon.sln --configuration Release --no-build -p:XenonVersion="${VERSION}"
+        run: >-
+          dotnet test tests/Xenon.Compiler.Tests/Xenon.Compiler.Tests.csproj
+          --configuration Release
+          --no-build
+          --no-restore
+          -p:XenonVersion="${VERSION}"
+
+      - name: Run end-to-end tests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: >-
+          dotnet test tests/Xenon.EndToEnd.Tests/Xenon.EndToEnd.Tests.csproj
+          --configuration Release
+          --no-build
+          --no-restore
+          -p:XenonVersion="${VERSION}"
+
+      - name: Run language server tests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: >-
+          dotnet test tests/Xenon.LanguageServer.Tests/Xenon.LanguageServer.Tests.csproj
+          --configuration Release
+          --no-build
+          --no-restore
+          -p:XenonVersion="${VERSION}"
 
       - name: Verify executable version
         env:

@@ -27,7 +27,8 @@ public static class FixtureDiscovery
     }
 }
 
-// Separate collections let Debug and Release execute concurrently; the isolation self-test also runs same-case builds in parallel.
+// Separate classes preserve profile filtering and reporting. Assembly-level serialization keeps
+// native LLVM use deterministic; the isolation self-test still exercises parallel builds explicitly.
 [Trait("Category", "E2E")]
 [Trait("Profile", "debug")]
 public sealed class DebugRegressionTests
