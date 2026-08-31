@@ -8,7 +8,7 @@ on:
 jobs:
   build-and-test:
     name: Build and test tagged version
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -41,11 +41,13 @@ jobs:
       - name: Build release
         env:
           VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
         run: dotnet build Xenon.sln --configuration Release --no-restore -p:XenonVersion="${VERSION}"
 
       - name: Run compiler tests
         env:
           VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
         run: >-
           dotnet test tests/Xenon.Compiler.Tests/Xenon.Compiler.Tests.csproj
           --configuration Release
@@ -56,6 +58,7 @@ jobs:
       - name: Run end-to-end tests
         env:
           VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
         run: >-
           dotnet test tests/Xenon.EndToEnd.Tests/Xenon.EndToEnd.Tests.csproj
           --configuration Release
@@ -66,6 +69,7 @@ jobs:
       - name: Run language server tests
         env:
           VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
         run: >-
           dotnet test tests/Xenon.LanguageServer.Tests/Xenon.LanguageServer.Tests.csproj
           --configuration Release
@@ -102,8 +106,6 @@ jobs:
       fail-fast: false
       matrix:
         rid:
-          - linux-x64
-          - linux-arm64
           - osx-arm64
           - win-x64
           - win-arm64
