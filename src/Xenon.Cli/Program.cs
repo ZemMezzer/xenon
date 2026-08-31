@@ -183,7 +183,7 @@ internal static class Program
         }
 
         Compilation compilation = Compilation.Create(
-            new CompilationOptions(CompilationOutputKind.Executable),
+            new CompilationOptions(CompilationOutputKind.Executable, input.Profile.EnableChecks),
             references: null,
             [.. sources]);
 

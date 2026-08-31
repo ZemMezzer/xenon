@@ -43,7 +43,8 @@ public static class XenonProjectCompilationFactory
         XenonBuildProfile profile = project.GetProfile(profileName);
         var options = new CompilationOptions(
             project.Type == XenonProjectType.Executable
-                ? CompilationOutputKind.Executable : CompilationOutputKind.Library);
+                ? CompilationOutputKind.Executable : CompilationOutputKind.Library,
+            profile.EnableChecks);
         return Compilation.Create(options, references, cancellationToken, sources.ToArray());
     }
 
@@ -67,9 +68,10 @@ public static class XenonProjectCompilationFactory
                     $"compilation for project reference '{identity}' is unavailable while compiling '{project.Name}'");
             references.Add(new SourceCompilationReference(dependency));
         }
-        _ = project.GetProfile(profileName);
+        XenonBuildProfile profile = project.GetProfile(profileName);
         var options = new CompilationOptions(project.Type == XenonProjectType.Executable
-            ? CompilationOutputKind.Executable : CompilationOutputKind.Library);
+            ? CompilationOutputKind.Executable : CompilationOutputKind.Library,
+            profile.EnableChecks);
         return Compilation.Create(syntaxTrees, options, references, cancellationToken);
     }
 }

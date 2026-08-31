@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Numerics;
 using System.Text;
 using LLVMSharp.Interop;
+using LLVMApi = LLVMSharp.Interop.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -16,6 +17,7 @@ public sealed record LlvmNativeExport(string Name, bool IsData = false);
 /// </summary>
 public sealed class LlvmIrGenerator
 {
+    private static readonly object OptimizedContextLock = new();
     private int _invocationStarted;
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
@@ -151,6 +153,13 @@ public sealed class LlvmIrGenerator
         LlvmCodeGenerationOptions? codeGenerationOptions,
         Func<LLVMModuleRef, TResult> resultFactory)
     {
+        bool useGlobalContext = targetMachine is { OptimizationLevel: > 0 };
+        if (useGlobalContext && !Monitor.IsEntered(OptimizedContextLock))
+        {
+            lock (OptimizedContextLock)
+                return GenerateModuleCore(compilation, moduleName, targetMachine, codeGenerationOptions, resultFactory);
+        }
+
         if (compilation.HasErrors)
         {
             throw new LlvmCodeGenerationException("LLVM IR cannot be generated while the compilation contains errors.");
@@ -170,7 +179,11 @@ public sealed class LlvmIrGenerator
         IReadOnlyDictionary<NamespaceSymbol, LlvmNativeReference> nativeReferences =
             ValidateNativeReferences(compilation, codeGenerationOptions);
 
-        _context = LLVMContextRef.Create();
+        // LLVM 20.1.2's optimization passes create some loop metadata and
+        // opaque pointer types in the global context. Optimized modules must
+        // therefore share that context until the upstream package is updated.
+        // The enclosing lock keeps LLVM's global context access serialized.
+        _context = useGlobalContext ? LLVMContextRef.Global : LLVMContextRef.Create();
         _module = _context.CreateModuleWithName(moduleName);
         _targetMachine = targetMachine;
         _compilation = compilation;
@@ -202,6 +215,11 @@ public sealed class LlvmIrGenerator
             }
 
             _module.Verify(LLVMVerifierFailureAction.LLVMReturnStatusAction);
+            if (targetMachine is not null)
+            {
+                LlvmOptimizer.Run(_module, targetMachine);
+                _module.Verify(LLVMVerifierFailureAction.LLVMReturnStatusAction);
+            }
             return resultFactory(_module);
         }
         catch (LlvmCodeGenerationException)
@@ -215,7 +233,8 @@ public sealed class LlvmIrGenerator
         finally
         {
             _module.Dispose();
-            _context.Dispose();
+            if (!useGlobalContext)
+                _context.Dispose();
             _functions.Clear();
             _nativeFunctions.Clear();
             _structTypes.Clear();
@@ -516,6 +535,20 @@ public sealed class LlvmIrGenerator
         return LLVMValueRef.CreateConstNamedStruct(mapType(type), fields.ToArray());
     }
 
+    private static bool HasAllBitsZeroDefault(TypeSymbol type)
+    {
+        if (type is not StructTypeSymbol structure)
+            return true;
+
+        return !structure.IntroducesVirtualDispatch &&
+               (structure.BaseType is null || HasAllBitsZeroDefault(structure.BaseType)) &&
+               structure.Fields.All(field => HasAllBitsZeroDefault(field.Type));
+    }
+
+    private static bool HasDefaultInstanceInitializer(StructTypeSymbol structure) =>
+        structure.InstanceInitializer is not null ||
+        structure.BaseType is not null && HasDefaultInstanceInitializer(structure.BaseType);
+
     private static ulong GetIntegerConstantBits(object value) => value switch
     {
         int integer => unchecked((ulong)(long)integer),
@@ -644,7 +677,8 @@ public sealed class LlvmIrGenerator
                 GetAbiSize,
                 GetAbiAlignment,
                 GetFieldOffset,
-                GetIntegerBitWidth);
+                GetIntegerBitWidth,
+                _compilation.Options.EnableRuntimeChecks);
             emitter.Emit(function.Body);
         }
     }
@@ -940,7 +974,7 @@ public sealed class LlvmIrGenerator
         LLVMValueRef StackSave,
         LLVMValueRef StackRestore);
 
-    private sealed class FunctionEmitter
+    private sealed unsafe class FunctionEmitter
     {
         private readonly LLVMContextRef _context;
         private readonly LLVMBuilderRef _builder;
@@ -960,6 +994,7 @@ public sealed class LlvmIrGenerator
         private readonly Func<TypeSymbol, uint> _getAbiAlignment;
         private readonly Func<StructTypeSymbol, FieldSymbol, ulong> _getFieldOffset;
         private readonly Func<TypeSymbol, int> _getIntegerBitWidth;
+        private readonly bool _enableRuntimeChecks;
         private readonly LLVMValueRef _thisValue;
         private readonly Dictionary<VariableSymbol, LLVMValueRef> _addresses = [];
         private readonly Stack<LoopTargets> _loopTargets = [];
@@ -989,7 +1024,8 @@ public sealed class LlvmIrGenerator
             Func<TypeSymbol, ulong> getAbiSize,
             Func<TypeSymbol, uint> getAbiAlignment,
             Func<StructTypeSymbol, FieldSymbol, ulong> getFieldOffset,
-            Func<TypeSymbol, int> getIntegerBitWidth)
+            Func<TypeSymbol, int> getIntegerBitWidth,
+            bool enableRuntimeChecks)
         {
             _context = context;
             _builder = builder;
@@ -1009,6 +1045,7 @@ public sealed class LlvmIrGenerator
             _getAbiAlignment = getAbiAlignment;
             _getFieldOffset = getFieldOffset;
             _getIntegerBitWidth = getIntegerBitWidth;
+            _enableRuntimeChecks = enableRuntimeChecks;
             _thisValue = function.HasImplicitThis ? llvmFunction.GetParam(0) : default;
 
             uint parameterOffset = function.HasImplicitThis ? 1u : 0u;
@@ -1969,17 +2006,26 @@ public sealed class LlvmIrGenerator
             for (int i = 0; i < dimensions.Length; i++)
                 _builder.BuildStore(ToInt32(dimensions[i]), MetadataAddress(address, IntConstant(i + 1)));
             LLVMValueRef data = ArrayData(address, expression.ArrayType);
-            EmitElementLoop(length, reverse: false, index =>
+            LLVMApi.BuildMemSet(
+                _builder,
+                data,
+                LLVMValueRef.CreateConstInt(_context.Int8Type, 0),
+                byteCount,
+                checked((uint)Math.Max(1, _getAbiAlignment(expression.ElementType))));
+            bool hasZeroDefault = HasAllBitsZeroDefault(expression.ElementType);
+            if (expression.ElementType is StructTypeSymbol structure &&
+                (!hasZeroDefault || structure.HasVirtualDispatch || HasDefaultInstanceInitializer(structure)))
             {
-                LLVMValueRef element = _builder.BuildGEP2(_mapType(expression.ElementType), data, new LLVMValueRef[] { index }, "array.initialize.element");
-                _builder.BuildStore(DefaultValue(expression.ElementType, _mapType, _virtualTables), element);
-                if (expression.ElementType is StructTypeSymbol structure)
+                EmitElementLoop(length, reverse: false, index =>
                 {
+                    LLVMValueRef element = _builder.BuildGEP2(_mapType(expression.ElementType), data, new LLVMValueRef[] { index }, "array.initialize.element");
+                    if (!hasZeroDefault)
+                        _builder.BuildStore(DefaultValue(expression.ElementType, _mapType, _virtualTables), element);
                     if (structure.HasVirtualDispatch && _virtualTables.TryGetValue(structure, out LlvmVTable table))
                         _builder.BuildStore(table.Value, EmitDispatchAddress(structure, element));
                     EmitDefaultInstanceInitialization(structure, element);
-                }
-            });
+                });
+            }
             if (expression.Storage == ArrayStorageKind.Stack &&
                 expression.ElementType is StructTypeSymbol elementType && elementType.FindDestructor() is FunctionSymbol destructor)
             {
@@ -2025,6 +2071,9 @@ public sealed class LlvmIrGenerator
 
         private void EmitRuntimeCheck(LLVMValueRef valid)
         {
+            if (!_enableRuntimeChecks)
+                return;
+
             LLVMBasicBlockRef success = _llvmFunction.AppendBasicBlock("array.check.ok");
             LLVMBasicBlockRef failure = _llvmFunction.AppendBasicBlock("array.check.failed");
             _builder.BuildCondBr(valid, success, failure);

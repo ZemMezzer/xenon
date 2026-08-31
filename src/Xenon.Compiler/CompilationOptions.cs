@@ -8,4 +8,5 @@ public enum CompilationOutputKind
 
 /// <summary>Immutable target-independent options that affect a compilation snapshot.</summary>
 public sealed record CompilationOptions(
-    CompilationOutputKind OutputKind = CompilationOutputKind.Library);
+    CompilationOutputKind OutputKind = CompilationOutputKind.Library,
+    bool EnableRuntimeChecks = true);
