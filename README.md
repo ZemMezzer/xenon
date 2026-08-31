@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/ZemMezzer/xenon/release.yml?label=tests)](https://github.com/ZemMezzer/xenon/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/ZemMezzer/xenon?display_name=tag&sort=semver&label=release)](https://github.com/ZemMezzer/xenon/releases/latest)
 [![Documentation](https://img.shields.io/badge/documentation-xenonlang.com-2563eb)](https://xenonlang.com/)
-[![License](https://img.shields.io/github/license/ZemMezzer/xenon?label=license)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache_2.0-D22128)](LICENSE)
 
 ## What is Xenon?
 
@@ -131,4 +131,4 @@ Build outputs are written to the `out/` directory.
 
 ## License
 
-Xenon is available under the [MIT License](LICENSE).
+Copyright 2026 Zem. Xenon is available under the [Apache License 2.0](LICENSE).
