@@ -1,0 +1,11 @@
+namespace NegativeGenericNominalStructuralMismatch;
+
+template Runnable { int Run(float value); }
+struct WrongSignature { public int Run(double value) { return 0; } }
+struct PrivateMember { private int Run(float value) { return 0; } }
+struct Required<T> where T : Runnable { public T value; }
+
+struct WrongOuter<T> where T : WrongSignature { public Required<T> required; }
+struct PrivateOuter<T> where T : PrivateMember { public Required<T> required; }
+
+int Main() { return 0; }

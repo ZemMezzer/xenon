@@ -14,6 +14,7 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     private ImmutableArray<FunctionSymbol> _methods = [];
     private ImmutableArray<FunctionSymbol> _constructors = [];
     private ImmutableArray<FunctionSymbol> _virtualMethods = [];
+    private ImmutableArray<GenericParameterSymbol> _typeParameters = [];
 
     internal StructTypeSymbol(
         string name,
@@ -25,6 +26,11 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     }
 
     public override string DeclarationKind => "struct";
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short)
+    {
+        string name = base.ToDisplayString(format);
+        return TypeParameters.IsEmpty ? name : $"{name}<{string.Join(", ", TypeParameters.Select(parameter => parameter.Name))}>";
+    }
     public override IEnumerable<Symbol> GetMembers() =>
         Fields.Cast<Symbol>().Concat(StaticFields).Concat(Properties).Concat(Indexers).Concat(Constants)
             .Concat(Methods.Where(method => method.ContainingSymbol == this)).Concat(Constructors)
@@ -47,6 +53,16 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
 
     public ImmutableArray<FunctionSymbol> Methods => _methods;
     public ImmutableArray<FunctionSymbol> VirtualMethods => _virtualMethods;
+    public ImmutableArray<GenericParameterSymbol> TypeParameters => _typeParameters;
+    public bool IsGenericDefinition => !_typeParameters.IsEmpty;
+    public StructTypeSymbol? GenericDefinition { get; private set; }
+    public ImmutableArray<TypeSymbol> TypeArguments { get; private set; } = [];
+    public bool IsGenericSpecialization => GenericDefinition is not null;
+    public bool IsOpenGenericType => IsGenericDefinition ||
+        IsGenericSpecialization && TypeArguments.Any(global::Xenon.Compiler.Semantics.GenericTypeFacts.ContainsGenericParameter);
+    public bool IsConcreteType => !IsOpenGenericType;
+    public override bool IsCompilerGenerated => IsGenericSpecialization;
+    public override bool IsUserVisible => !IsGenericSpecialization;
 
     public FunctionSymbol? Constructor { get; private set; }
     public ImmutableArray<FunctionSymbol> Constructors => _constructors;
@@ -98,6 +114,12 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     internal void SetHasVirtualDispatch() => HasVirtualDispatch = true;
 
     internal void SetVirtualMethods(ImmutableArray<FunctionSymbol> methods) => _virtualMethods = methods;
+    internal void SetTypeParameters(ImmutableArray<GenericParameterSymbol> parameters) => _typeParameters = parameters;
+    internal void SetGenericSpecialization(StructTypeSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
+    {
+        GenericDefinition = definition;
+        TypeArguments = typeArguments;
+    }
 
     internal void SetMethods(ImmutableArray<FunctionSymbol> methods)
     {

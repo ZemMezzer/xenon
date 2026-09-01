@@ -1,0 +1,13 @@
+namespace NegativeGenericMixedCapabilitiesMissing;
+
+struct BaseRunnable { public int Run() { return 0; } }
+interface IUnrelated { int SomethingElse(); }
+template Advanced { int Run(); int State(); }
+struct Required<T> where T : Advanced { public T value; }
+
+struct InvalidOuter<T> where T : BaseRunnable, IUnrelated
+{
+    public Required<T> required;
+}
+
+int Main() { return 0; }

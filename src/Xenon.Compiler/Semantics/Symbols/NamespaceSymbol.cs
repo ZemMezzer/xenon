@@ -9,6 +9,7 @@ public sealed class NamespaceSymbol : Symbol
     private readonly Dictionary<string, List<FunctionSymbol>> _functions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<DeclaredTypeSymbol>> _types = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<ConstantSymbol>> _constants = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<TemplateSymbol>> _templates = new(StringComparer.Ordinal);
 
     internal NamespaceSymbol(string name, NamespaceSymbol? parent)
         : base(name, SymbolKind.Namespace, parent)
@@ -36,6 +37,7 @@ public sealed class NamespaceSymbol : Symbol
     public IReadOnlyCollection<InterfaceTypeSymbol> Interfaces => Types.OfType<InterfaceTypeSymbol>().ToArray();
     public IReadOnlyCollection<ConstantSymbol> Constants => _constants.Values.SelectMany(items => items).ToArray();
     public IReadOnlyCollection<EnumTypeSymbol> Enums => Types.OfType<EnumTypeSymbol>().ToArray();
+    public IReadOnlyCollection<TemplateSymbol> Templates => _templates.Values.SelectMany(items => items).ToArray();
 
     internal NamespaceSymbol? FindNamespace(string name) => _namespaces.GetValueOrDefault(name);
 
@@ -62,6 +64,8 @@ public sealed class NamespaceSymbol : Symbol
             AddCandidate(_functions, function.Name, function);
         foreach (ConstantSymbol constant in source.Constants.OrderBy(item => item.Name, StringComparer.Ordinal))
             AddCandidate(_constants, constant.Name, constant);
+        foreach (TemplateSymbol template in source.Templates.OrderBy(item => item.Name, StringComparer.Ordinal))
+            AddCandidate(_templates, template.Name, template);
     }
 
     internal bool TryDeclareFunction(FunctionSymbol function) =>
@@ -76,7 +80,13 @@ public sealed class NamespaceSymbol : Symbol
     internal ConstantSymbol? FindConstant(string name) => FindSingle(_constants, name);
     internal IReadOnlyList<ConstantSymbol> FindConstants(string name) => _constants.GetValueOrDefault(name) ?? [];
 
-    internal bool TryDeclareType(DeclaredTypeSymbol type) => TryDeclare(_types, type.Name, type);
+    internal bool TryDeclareType(DeclaredTypeSymbol type) => !_templates.ContainsKey(type.Name) && TryDeclare(_types, type.Name, type);
+
+    internal bool TryDeclareTemplate(TemplateSymbol template) =>
+        !_types.ContainsKey(template.Name) && TryDeclare(_templates, template.Name, template);
+
+    internal TemplateSymbol? FindTemplate(string name) => FindSingle(_templates, name);
+    internal IReadOnlyList<TemplateSymbol> FindTemplates(string name) => _templates.GetValueOrDefault(name) ?? [];
 
     internal DeclaredTypeSymbol? FindAnyType(string name) => FindSingle(_types, name);
     internal IReadOnlyList<DeclaredTypeSymbol> FindTypes(string name) => _types.GetValueOrDefault(name) ?? [];

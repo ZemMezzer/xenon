@@ -1,0 +1,90 @@
+namespace GenericConstraintImplicationRuntime;
+
+interface IRunnable { int Run(); }
+
+struct Base : IRunnable
+{
+    public int value;
+    public int Run() { return value; }
+}
+
+struct Derived : Base
+{
+    public Derived(int value) { this.value = value; }
+}
+
+struct InterfaceRequired<T> where T : IRunnable
+{
+    public T value;
+    public InterfaceRequired(T value) { this.value = value; }
+    public int Execute() { return value.Run(); }
+}
+
+struct BaseOuter<T> where T : Base
+{
+    public InterfaceRequired<T> required;
+    public BaseOuter(T value) { required = InterfaceRequired<T>(value); }
+    public int Execute() { return required.Execute(); }
+}
+
+template Runnable { int Run(); }
+template AdvancedRunnable { int Run(); int State(); }
+
+struct RunnableRequired<T> where T : Runnable
+{
+    public T value;
+    public RunnableRequired(T value) { this.value = value; }
+    public int Execute() { return value.Run(); }
+}
+
+struct AdvancedOuter<T> where T : AdvancedRunnable
+{
+    public RunnableRequired<T> required;
+    public AdvancedOuter(T value) { required = RunnableRequired<T>(value); }
+    public int Execute() { return required.Execute(); }
+}
+
+struct Worker
+{
+    public int Run() { return 42; }
+    public int State() { return 7; }
+}
+
+template Equalable { bool Equals(Equalable other); }
+template HashEqualable { bool Equals(HashEqualable other); int Hash(); }
+
+struct EqualableRequired<T> where T : Equalable
+{
+    public T value;
+    public EqualableRequired(T value) { this.value = value; }
+    public bool Same(T other) { return value.Equals(other); }
+}
+
+struct HashOuter<T> where T : HashEqualable
+{
+    public EqualableRequired<T> required;
+    public HashOuter(T value) { required = EqualableRequired<T>(value); }
+    public bool Same(T other) { return required.Same(other); }
+}
+
+struct HashWorker
+{
+    public int value;
+    public HashWorker(int value) { this.value = value; }
+    public bool Equals(HashWorker other) { return value == other.value; }
+    public int Hash() { return value; }
+}
+
+int Main()
+{
+    BaseOuter<Derived> nominal = BaseOuter<Derived>(Derived(42));
+    if (nominal.Execute() != 42) return 1;
+
+    AdvancedOuter<Worker> structural = AdvancedOuter<Worker>(Worker());
+    if (structural.Execute() != 42) return 2;
+
+    HashOuter<HashWorker> selfAware = HashOuter<HashWorker>(HashWorker(42));
+    if (!selfAware.Same(HashWorker(42))) return 3;
+    if (selfAware.Same(HashWorker(41))) return 4;
+    return 0;
+}

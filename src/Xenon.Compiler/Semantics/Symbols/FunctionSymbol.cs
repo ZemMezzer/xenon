@@ -14,7 +14,8 @@ public sealed class FunctionSymbol : Symbol
         NamespaceSymbol containingNamespace,
         TypeSymbol returnType,
         ImmutableArray<ParameterSymbol> parameters,
-        FunctionDeclarationSyntax declaration)
+        FunctionDeclarationSyntax declaration,
+        ImmutableArray<GenericParameterSymbol> typeParameters = default)
         : base(name, SymbolKind.Function, containingNamespace)
     {
         ReturnType = returnType;
@@ -23,6 +24,7 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
         FunctionKind = FunctionKind.Ordinary;
         IsReadonly = declaration.IsReadonly;
+        TypeParameters = typeParameters.IsDefault ? [] : typeParameters;
     }
 
     internal FunctionSymbol(
@@ -192,6 +194,14 @@ public sealed class FunctionSymbol : Symbol
 
     public ImmutableArray<ParameterSymbol> Parameters { get; }
 
+    public ImmutableArray<GenericParameterSymbol> TypeParameters { get; } = [];
+
+    public FunctionSymbol? GenericDefinition { get; private set; }
+    public ImmutableArray<TypeSymbol> TypeArguments { get; private set; } = [];
+    public bool IsGenericSpecialization => GenericDefinition is not null;
+
+    public bool IsGenericDefinition => !TypeParameters.IsEmpty || ContainingStruct?.IsOpenGenericType == true;
+
     public FunctionKind FunctionKind { get; }
 
     public Accessibility Accessibility { get; }
@@ -231,6 +241,11 @@ public sealed class FunctionSymbol : Symbol
     public int ConstructorOverloadCount { get; private set; } = 1;
 
     internal void SetVTableSlot(int slot) => VTableSlot = slot;
+    internal void SetGenericSpecialization(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
+    {
+        GenericDefinition = definition;
+        TypeArguments = typeArguments;
+    }
     internal void SetConstructorOverload(int index, int count)
     {
         ConstructorOverload = index;

@@ -1,0 +1,30 @@
+namespace GenericForwardConstantsRuntime;
+
+struct Forward<T>
+{
+    const nuint Result = Size;
+    const nuint Size = sizeof(T);
+    public nuint Get() { return Result; }
+}
+
+struct Chain<T>
+{
+    const nuint A = B;
+    const nuint B = C;
+    const nuint C = sizeof(T);
+    public nuint Get() { return A; }
+}
+
+int Main()
+{
+    Forward<int> first = Forward<int>();
+    Forward<long> second = Forward<long>();
+    Chain<int> third = Chain<int>();
+    Chain<long> fourth = Chain<long>();
+
+    if (first.Get() != sizeof(int)) return 1;
+    if (second.Get() != sizeof(long)) return 2;
+    if (third.Get() != sizeof(int)) return 3;
+    if (fourth.Get() != sizeof(long)) return 4;
+    return 0;
+}

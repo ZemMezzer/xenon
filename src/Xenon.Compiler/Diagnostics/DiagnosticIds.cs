@@ -19,6 +19,10 @@ public static class DiagnosticIds
     public const string ReadonlyReturnBindingNotAllowed = "XE1009";
     public const string ReadonlyAccessorRequiresGetter = "XE1010";
     public const string AccessorModifiersNotSupported = "XE1011";
+    public const string TemplateMemberBodyNotAllowed = "XE1012";
+    public const string InvalidTemplateConstructorName = "XE1013";
+    public const string InvalidTemplateMember = "XE1014";
+    public const string DuplicateGenericParameter = "XE1015";
     public const string DuplicateDeclaration = "XE2001";
     public const string UnknownIdentifier = "XE2002";
     public const string TypeMismatch = "XE2003";
@@ -142,6 +146,15 @@ public static class DiagnosticIds
     public const string MutableGetterOnReadonlyReceiver = "XE2131";
     public const string WriteThroughReadonlyReceiver = "XE2132";
     public const string MutableMethodOnReadonlyReceiver = "XE2133";
+    public const string UnknownConstraintTypeParameter = "XE2134";
+    public const string InvalidGenericConstraint = "XE2135";
+    public const string TemplateCannotBeUsedAsType = "XE2136";
+    public const string DuplicateGenericConstraint = "XE2137";
+    public const string GenericSpecializationNotImplemented = "XE2138";
+    public const string GenericMemberNotGuaranteed = "XE2139";
+    public const string GenericConstructorNotGuaranteed = "XE2140";
+    public const string GenericArityMismatch = "XE2141";
+    public const string GenericConstraintNotSatisfied = "XE2142";
     public const string DefiniteAssignment = "XE2201";
     public const string InvalidAssignmentTarget = "XE2202";
     public const string InvalidCondition = "XE2204";

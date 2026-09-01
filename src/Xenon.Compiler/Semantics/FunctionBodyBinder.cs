@@ -16,6 +16,7 @@ internal sealed class FunctionBodyBinder
     private readonly ConstantEvaluationContext _constants;
     private readonly SemanticInfoStore _semanticInfo;
     private readonly CancellationToken _cancellationToken;
+    private readonly GenericFunctionSpecializer? _genericSpecializer;
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
     internal IReadOnlyDictionary<BoundExpression, TextLocation> ExpressionLocations => _expressionLocations;
     private readonly HashSet<LocalVariableSymbol> _definitelyAssigned = [];
@@ -61,12 +62,20 @@ internal sealed class FunctionBodyBinder
 
     public FunctionBodyBinder(FunctionSymbol function, FileSymbolScope fileScope, DiagnosticBag diagnostics,
         ConstantEvaluationContext constants, SemanticInfoStore semanticInfo, CancellationToken cancellationToken = default)
+        : this(function, fileScope, diagnostics, constants, semanticInfo, null, cancellationToken)
+    {
+    }
+
+    internal FunctionBodyBinder(FunctionSymbol function, FileSymbolScope fileScope, DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants, SemanticInfoStore semanticInfo,
+        GenericFunctionSpecializer? genericSpecializer, CancellationToken cancellationToken = default)
     {
         _function = function;
         _fileScope = fileScope;
         _diagnostics = diagnostics;
         _constants = constants;
         _semanticInfo = semanticInfo;
+        _genericSpecializer = genericSpecializer;
         _cancellationToken = cancellationToken;
         if (function.FunctionKind == FunctionKind.InstanceInitializer && function.ContainingType is StructTypeSymbol initializedType)
             foreach (FieldSymbol field in initializedType.Fields.Where(field => TypeFacts.ContainsReferenceStorage(field.Type)))
@@ -89,10 +98,51 @@ internal sealed class FunctionBodyBinder
                 ValidateDefaultInitialization(defaultBase, body.OpenBraceToken.Location);
         }
         BoundStatement? baseConstructorCall = null;
+        bool callsThisConstructor = false;
+        ConstructorDeclarationSyntax? constructorSyntax =
+            _function.FunctionKind == FunctionKind.Constructor
+                ? _function.Declaration as ConstructorDeclarationSyntax
+                : null;
 
-        if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingStruct?.BaseType is StructTypeSymbol baseType && !baseType.Constructors.IsEmpty)
+        if (constructorSyntax is { HasThisInitializer: true } &&
+            _function.ContainingStruct is StructTypeSymbol thisType)
         {
-            ConstructorDeclarationSyntax? syntax = _function.Declaration as ConstructorDeclarationSyntax;
+            ImmutableArray<ExpressionSyntax> initializerArguments = constructorSyntax.BaseArguments;
+            _bindingBaseConstructorArguments = true;
+            ImmutableArray<BoundExpression> arguments;
+            try
+            {
+                arguments = initializerArguments.Select(BindExpression).ToImmutableArray();
+            }
+            finally
+            {
+                _bindingBaseConstructorArguments = false;
+            }
+            FunctionSymbol? target = ResolveConstructor(thisType, arguments, initializerArguments,
+                constructorSyntax.BaseKeyword!.Location);
+            if (target is not null)
+            {
+                if (ReferenceEquals(target, _function))
+                {
+                    _diagnostics.Report(constructorSyntax.BaseKeyword.Location,
+                        "a constructor cannot chain directly to itself", DiagnosticIds.MissingConstructor);
+                }
+                else
+                {
+                    arguments = ValidateFunctionArguments(target, arguments, initializerArguments,
+                        constructorSyntax.BaseKeyword.Location);
+                    baseConstructorCall = new BoundExpressionStatement(
+                        new BoundBaseLifecycleCallExpression(target, arguments));
+                    callsThisConstructor = true;
+                    _requiredFields.Clear();
+                }
+            }
+        }
+        else if (_function.FunctionKind == FunctionKind.Constructor &&
+                 _function.ContainingStruct?.BaseType is StructTypeSymbol baseType &&
+                 !baseType.Constructors.IsEmpty)
+        {
+            ConstructorDeclarationSyntax? syntax = constructorSyntax;
             ImmutableArray<ExpressionSyntax> baseArguments = syntax?.BaseArguments ?? [];
             TextLocation location = syntax?.IdentifierToken.Location ?? _function.ContainingType!.Declaration.IdentifierToken.Location;
             _bindingBaseConstructorArguments = true;
@@ -120,7 +170,7 @@ internal sealed class FunctionBodyBinder
         else if (_function.FunctionKind == FunctionKind.Constructor &&
                  _function.ContainingStruct?.BaseType is StructTypeSymbol baseWithoutConstructor)
         {
-            ConstructorDeclarationSyntax? syntax = _function.Declaration as ConstructorDeclarationSyntax;
+            ConstructorDeclarationSyntax? syntax = constructorSyntax;
             if (syntax is not null && !syntax.BaseArguments.IsEmpty)
             {
                 _diagnostics.Report(syntax.BaseKeyword?.Location ?? syntax.IdentifierToken.Location, $"base struct '{baseWithoutConstructor.Name}' does not declare a constructor",
@@ -139,7 +189,7 @@ internal sealed class FunctionBodyBinder
                 statements.Add(baseConstructorCall);
             else if (constructedType.BaseType is StructTypeSymbol defaultBase)
                 AddDefaultInstanceInitializerCalls(defaultBase, statements);
-            if (constructedType.InstanceInitializer is FunctionSymbol initializer)
+            if (!callsThisConstructor && constructedType.InstanceInitializer is FunctionSymbol initializer)
             {
                 statements.Add(new BoundExpressionStatement(
                     new BoundBaseLifecycleCallExpression(initializer, [])));
@@ -1111,6 +1161,10 @@ internal sealed class FunctionBodyBinder
             }
             if (resolved is DeclaredTypeSymbol staticType)
             {
+                if (staticType is StructTypeSymbol definition &&
+                    _function.ContainingStruct is StructTypeSymbol { GenericDefinition: not null } specialization &&
+                    ReferenceEquals(specialization.GenericDefinition, definition))
+                    staticType = specialization;
                 ConstantSymbol? constant = staticType.FindMember<ConstantSymbol>(qualifiedName[^1].Text);
                 if (constant?.HasValue == true)
                 {
@@ -1145,6 +1199,8 @@ internal sealed class FunctionBodyBinder
             return new BoundArrayMetadataExpression(receiver, syntax.MemberToken.Text);
         }
         bool pointerAccess = syntax.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
+        if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
+            return BindGenericMemberGet(syntax, receiver, genericParameter, pointerAccess);
         InterfaceTypeSymbol? interfaceType = pointerAccess
             ? (receiver.Type as PointerTypeSymbol)?.ElementType as InterfaceTypeSymbol
             : receiver.Type as InterfaceTypeSymbol;
@@ -1250,6 +1306,9 @@ internal sealed class FunctionBodyBinder
 
             receiver = BindFieldReceiver(member.Receiver);
             pointerAccess = member.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
+            if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
+                return TryBindGenericPropertyAssignment(syntax, member, receiver, genericParameter,
+                    pointerAccess, isSimpleAssignment);
             InterfaceTypeSymbol? interfaceType = pointerAccess
                 ? (receiver.Type as PointerTypeSymbol)?.ElementType as InterfaceTypeSymbol
                 : receiver.Type as InterfaceTypeSymbol;
@@ -1483,6 +1542,9 @@ internal sealed class FunctionBodyBinder
         BoundExpression receiver = BindExpression(syntax.Receiver);
         ImmutableArray<BoundExpression> arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
 
+        if (GetGenericReceiver(receiver.Type, pointerAccess: false) is GenericParameterSymbol genericParameter)
+            return BindGenericIndexerGet(syntax, receiver, genericParameter, arguments);
+
         if (receiver.Type is DeclaredTypeSymbol structType && structType is not InterfaceTypeSymbol)
         {
             bool receiverIsReadonly = IsAddressable(receiver) && !IsWritable(receiver);
@@ -1581,6 +1643,8 @@ internal sealed class FunctionBodyBinder
             return null;
 
         BoundExpression receiver = BindExpression(target.Receiver);
+        if (GetGenericReceiver(receiver.Type, pointerAccess: false) is GenericParameterSymbol genericParameter)
+            return BindGenericIndexerAssignment(syntax, target, receiver, genericParameter, isSimpleAssignment);
         if (receiver.Type is not DeclaredTypeSymbol)
             return null;
         ImmutableArray<BoundExpression> indices = target.Arguments.Select(BindExpression).ToImmutableArray();
@@ -1837,6 +1901,8 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindCallExpression(CallExpressionSyntax syntax)
     {
         var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        if (syntax.TypeArguments is { } typeArguments)
+            return BindExplicitGenericCall(syntax, typeArguments, arguments);
         bool incomplete = syntax.CloseParenthesisToken.IsMissing;
         int completedArgumentCount = GetCompletedArgumentCount(syntax.Arguments, incomplete);
 
@@ -1861,11 +1927,13 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        StructTypeSymbol? structType = _fileScope.ResolveType(
+        TypeSymbol? callTargetType = _fileScope.ResolveType(
             name.IdentifierToken.Text,
             name.IdentifierToken.Location,
-            _diagnostics) as StructTypeSymbol;
-        if (structType is not null)
+            _diagnostics);
+        if (callTargetType is GenericParameterSymbol genericParameter)
+            return BindGenericConstructionExpression(syntax, genericParameter, arguments);
+        if (callTargetType is StructTypeSymbol structType)
         {
             if (structType.IsAbstract)
             {
@@ -1980,11 +2048,159 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        if (function.IsGenericDefinition)
+        {
+            if (TryInferGenericTypeArguments(function, arguments, out ImmutableArray<TypeSymbol> inferredArguments) &&
+                inferredArguments.Any(ContainsGenericParameter))
+                return BindOpenGenericCall(syntax, function, inferredArguments, arguments,
+                    name.IdentifierToken.Location);
+            bool inferenceSucceeded = false;
+            FunctionSymbol? specialized = _genericSpecializer is null ? null :
+                _genericSpecializer.InferAndCreate(function, arguments,
+                    name.IdentifierToken.Location, out inferenceSucceeded);
+            if (specialized is null)
+            {
+                if (!inferenceSucceeded)
+                    _diagnostics.Report(name.IdentifierToken.Location,
+                        $"type arguments for generic function '{function.Name}' could not be inferred",
+                        DiagnosticIds.GenericSpecializationNotImplemented);
+                return new BoundErrorExpression();
+            }
+            RecordCandidates(syntax.Target, specialized, [function], CandidateReason.None);
+            arguments = ValidateFunctionArguments(specialized, arguments, syntax.Arguments,
+                name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
+            return new BoundCallExpression(specialized, arguments);
+        }
+
         CandidateReason functionReason = GetCallCandidateReason(function, arguments, incomplete, completedArgumentCount);
         RecordCandidates(syntax.Target, function, [function], functionReason);
         arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location,
             incomplete ? completedArgumentCount : null);
         return new BoundCallExpression(function, arguments);
+    }
+
+    private BoundExpression BindExplicitGenericCall(CallExpressionSyntax syntax,
+        TypeArgumentListSyntax typeArguments, ImmutableArray<BoundExpression> arguments)
+    {
+        FunctionSymbol? definition = null;
+        bool diagnosticReported = false;
+        TextLocation location = typeArguments.LessToken.Location;
+        if (syntax.Target is NameExpressionSyntax name)
+        {
+            location = name.IdentifierToken.Location;
+            TypeSymbol? possibleType = _fileScope.ResolveType(name.IdentifierToken.Text, location,
+                new DiagnosticBag());
+            if (possibleType is StructTypeSymbol { IsGenericDefinition: true })
+                return BindExplicitGenericStructConstruction(syntax, name, typeArguments, arguments);
+            definition = _fileScope.ResolveFunction(name.IdentifierToken.Text, location, _diagnostics,
+                out diagnosticReported);
+        }
+        else if (syntax.Target is MemberAccessExpressionSyntax member &&
+                 TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts))
+        {
+            location = member.MemberToken.Location;
+            definition = _fileScope.ResolveQualifiedFunction(parts.Select(part => part.Text).ToArray(),
+                location, _diagnostics, out diagnosticReported);
+        }
+        if (definition is null)
+        {
+            if (!diagnosticReported)
+                _diagnostics.Report(location, "generic call target must name a function",
+                    DiagnosticIds.InvalidCallTarget);
+            return new BoundErrorExpression();
+        }
+        if (definition.TypeParameters.IsEmpty || definition.ContainingType is not null)
+        {
+            _diagnostics.Report(location, $"function '{definition.Name}' is not generic",
+                DiagnosticIds.GenericSpecializationNotImplemented);
+            return new BoundErrorExpression();
+        }
+
+        ImmutableArray<TypeSymbol> resolvedArguments = typeArguments.Arguments
+            .Select(argument => TypeResolver.Resolve(argument, _fileScope, _diagnostics)).ToImmutableArray();
+        if (resolvedArguments.Any(ContainsGenericParameter))
+            return BindOpenGenericCall(syntax, definition, resolvedArguments, arguments, location);
+        FunctionSymbol? specialized = _genericSpecializer?.GetOrCreate(definition, resolvedArguments, location);
+        if (specialized is null) return new BoundErrorExpression();
+        RecordCandidates(syntax.Target, specialized, [definition], CandidateReason.None);
+        arguments = ValidateFunctionArguments(specialized, arguments, syntax.Arguments, location,
+            syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        return new BoundCallExpression(specialized, arguments);
+    }
+
+    private BoundExpression BindExplicitGenericStructConstruction(CallExpressionSyntax syntax,
+        NameExpressionSyntax name, TypeArgumentListSyntax typeArguments,
+        ImmutableArray<BoundExpression> arguments)
+    {
+        var typeSyntax = new NamedTypeSyntax([name.IdentifierToken], [], typeArguments);
+        TypeSymbol resolved = TypeResolver.Resolve(typeSyntax, _fileScope, _diagnostics);
+        if (resolved is not StructTypeSymbol structure) return new BoundErrorExpression();
+        if (structure.IsAbstract)
+        {
+            _diagnostics.Report(name.IdentifierToken.Location,
+                $"abstract struct '{structure.Name}' cannot be instantiated",
+                DiagnosticIds.AbstractInstantiation);
+            return new BoundErrorExpression();
+        }
+        bool incomplete = syntax.CloseParenthesisToken.IsMissing;
+        int completedArgumentCount = GetCompletedArgumentCount(syntax.Arguments, incomplete);
+        if (structure.Constructors.IsEmpty && completedArgumentCount == 0)
+        {
+            RecordCandidates(syntax.Target, structure, [], incomplete ? CandidateReason.Incomplete : CandidateReason.None);
+            ValidateDefaultInitialization(structure, name.IdentifierToken.Location);
+            return new BoundStructConstructionExpression(structure, []) { IsDefaultInitialization = true };
+        }
+        FunctionSymbol? constructor = ResolveConstructor(structure, arguments, syntax.Arguments,
+            name.IdentifierToken.Location, out CandidateReason reason,
+            incomplete ? completedArgumentCount : null);
+        RecordCandidates(syntax.Target, constructor, structure.Constructors, reason);
+        if (constructor is null)
+        {
+            if (!incomplete && structure.Constructors.IsEmpty)
+                _diagnostics.Report(name.IdentifierToken.Location,
+                    $"struct '{structure.Name}' does not declare a constructor",
+                    DiagnosticIds.MissingConstructor);
+            return new BoundErrorExpression();
+        }
+        if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structure))
+            _diagnostics.Report(name.IdentifierToken.Location,
+                $"constructor '{structure.Name}' is private", DiagnosticIds.InaccessibleSymbol);
+        arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments,
+            name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
+        return new BoundConstructorCallExpression(structure, constructor, arguments);
+    }
+
+    private BoundExpression BindOpenGenericCall(CallExpressionSyntax syntax, FunctionSymbol definition,
+        ImmutableArray<TypeSymbol> typeArguments, ImmutableArray<BoundExpression> arguments, TextLocation location)
+    {
+        if (typeArguments.Length != definition.TypeParameters.Length)
+        {
+            _diagnostics.Report(location,
+                $"generic function '{definition.Name}' expects {definition.TypeParameters.Length} type argument(s), but {typeArguments.Length} were provided",
+                DiagnosticIds.GenericArityMismatch);
+            return new BoundErrorExpression();
+        }
+        for (int index = 0; index < typeArguments.Length; index++)
+        {
+            if (typeArguments[index] is not GenericParameterSymbol argumentParameter) continue;
+            foreach (GenericConstraintSymbol required in definition.TypeParameters[index].Constraints)
+            {
+                if (GenericConstraintGuarantees.IsGuaranteed(argumentParameter, required)) continue;
+                _diagnostics.Report(location,
+                    $"constraints for '{argumentParameter.Name}' do not guarantee '{required.Target.Name}' required by '{definition.Name}'" +
+                    GenericConstraintGuarantees.GetFailureDetail(argumentParameter, required),
+                    DiagnosticIds.GenericConstraintNotSatisfied);
+                return new BoundErrorExpression();
+            }
+        }
+        var substitutions = definition.TypeParameters.Zip(typeArguments)
+            .ToDictionary(pair => pair.First, pair => pair.Second);
+        ImmutableArray<TypeSymbol> parameterTypes = definition.Parameters
+            .Select(parameter => SubstituteGenericType(parameter.Type, substitutions)).ToImmutableArray();
+        _ = ValidateGenericArguments(definition.Name, parameterTypes, arguments, syntax.Arguments, location,
+            syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        RecordCandidates(syntax.Target, definition, [definition], CandidateReason.None);
+        return new BoundDeferredConstantExpression(SubstituteGenericType(definition.ReturnType, substitutions));
     }
 
     private BoundExpression? TryBindStaticMethodCall(MemberAccessExpressionSyntax target, ImmutableArray<BoundExpression> arguments,
@@ -2188,6 +2404,9 @@ internal sealed class FunctionBodyBinder
             return new BoundArrayMetadataExpression(receiver, "GetLength", arguments[0]);
         }
         bool pointerAccess = target.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
+        if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
+            return BindGenericMethodCall(target, receiver, genericParameter, arguments, argumentSyntax,
+                pointerAccess, incomplete, completedArgumentCount);
         InterfaceTypeSymbol? interfaceType = pointerAccess
             ? (receiver.Type as PointerTypeSymbol)?.ElementType as InterfaceTypeSymbol
             : receiver.Type as InterfaceTypeSymbol;
@@ -2301,6 +2520,9 @@ internal sealed class FunctionBodyBinder
         {
             return BindArrayCreation(type, syntax.Arguments, syntax.Type.NameToken.Location, syntax.OpenDelimiterToken.Location, ArrayStorageKind.Heap);
         }
+
+        if (type is GenericParameterSymbol genericParameter)
+            return BindGenericNewExpression(syntax, genericParameter);
 
         if (type is not StructTypeSymbol structType)
         {
@@ -3172,6 +3394,430 @@ internal sealed class FunctionBodyBinder
         BoundInterfaceIndexerSetExpression indexer => indexer.Indexer,
         _ => null,
     };
+
+    private BoundExpression? TryBindGenericPropertyAssignment(AssignmentExpressionSyntax syntax,
+        MemberAccessExpressionSyntax target, BoundExpression receiver, GenericParameterSymbol parameter,
+        bool pointerAccess, bool isSimpleAssignment)
+    {
+        GenericFieldMember? field = GenericConstraintMemberLookup.GetFields(parameter, target.MemberToken.Text)
+            .FirstOrDefault(candidate => !candidate.IsStatic);
+        if (field is not null)
+        {
+            if (field.IsReadonly || IsReadonlyReceiver(receiver, pointerAccess))
+            {
+                _diagnostics.Report(target.MemberToken.Location,
+                    $"field '{target.MemberToken.Text}' cannot be assigned through this receiver",
+                    DiagnosticIds.WriteThroughReadonlyReceiver);
+                return new BoundErrorExpression();
+            }
+            BoundExpression fieldValue = BindExpression(syntax.Expression);
+            if (isSimpleAssignment)
+                _ = ValidateGenericArguments(field.Symbol.Name, [field.Type], [fieldValue], [syntax.Expression],
+                    target.MemberToken.Location);
+            else
+            {
+                SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
+                ValidateIntegerOperation(new BoundDeferredConstantExpression(field.Type), binaryOperator, fieldValue,
+                    syntax.OperatorToken.Location);
+            }
+            RecordSymbolAndType(target, field.Symbol, field.Type);
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(field.Symbol);
+            return new BoundDeferredConstantExpression(field.Type);
+        }
+
+        GenericPropertyMember[] candidates = GenericConstraintMemberLookup
+            .GetProperties(parameter, target.MemberToken.Text, _fileScope.TypeFactory,
+                _fileScope.GenericStructSpecializer)
+            .Where(property => !property.IsStatic)
+            .DistinctBy(property => (property.Type.ToDisplayString(TypeDisplayFormat.FullyQualified),
+                property.HasGetter, property.HasSetter, property.IsReadonly))
+            .ToArray();
+        if (candidates.Length == 0) return null;
+        GenericPropertyMember? property = candidates.FirstOrDefault(property =>
+            property.HasSetter && (isSimpleAssignment || property.HasGetter));
+        if (property is null)
+        {
+            RecordCandidates(target, null, candidates.Select(candidate => candidate.Symbol), CandidateReason.Inaccessible);
+            _diagnostics.Report(target.MemberToken.Location,
+                $"property '{target.MemberToken.Text}' is not guaranteed to provide the required accessor",
+                DiagnosticIds.MissingAccessor);
+            return new BoundErrorExpression();
+        }
+        if (IsReadonlyReceiver(receiver, pointerAccess))
+        {
+            _diagnostics.Report(target.MemberToken.Location,
+                $"property '{target.MemberToken.Text}' cannot be assigned through a readonly receiver",
+                DiagnosticIds.WriteThroughReadonlyReceiver);
+            return new BoundErrorExpression();
+        }
+        BoundExpression value = BindExpression(syntax.Expression);
+        if (isSimpleAssignment)
+        {
+            _ = ValidateGenericArguments(property.Symbol.Name, [property.Type], [value], [syntax.Expression],
+                target.MemberToken.Location);
+        }
+        else
+        {
+            SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
+            ValidateIntegerOperation(new BoundDeferredConstantExpression(property.Type), binaryOperator, value,
+                syntax.OperatorToken.Location);
+            if (!TypeIdentity.AreSame(GetBinaryResultType(property.Type, binaryOperator, value.Type), property.Type))
+                _diagnostics.Report(syntax.OperatorToken.Location,
+                    $"operator '{syntax.OperatorToken.Text}' is not defined for types '{property.Type.ToDisplayString()}' and '{value.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidOperatorOperands);
+        }
+        RecordSymbolAndType(target, property.Symbol, property.Type);
+        _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(property.Symbol);
+        return new BoundDeferredConstantExpression(property.Type);
+    }
+
+    private BoundExpression BindGenericIndexerAssignment(AssignmentExpressionSyntax syntax,
+        IndexExpressionSyntax target, BoundExpression receiver, GenericParameterSymbol parameter,
+        bool isSimpleAssignment)
+    {
+        ImmutableArray<BoundExpression> indices = target.Arguments.Select(BindExpression).ToImmutableArray();
+        GenericIndexerMember[] candidates = GenericConstraintMemberLookup.GetIndexers(parameter,
+                _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
+            .Where(indexer => indexer.HasSetter && (isSimpleAssignment || indexer.HasGetter))
+            .ToArray();
+        GenericIndexerMember? indexer = ResolveGenericCandidate(candidates, candidate => candidate.Symbol,
+            candidate => candidate.ParameterTypes, indices, target.OpenBracketToken.Location,
+            $"writable indexer on '{parameter.Name}'", target);
+        if (indexer is null)
+        {
+            if (candidates.Length == 0)
+                _diagnostics.Report(target.OpenBracketToken.Location,
+                    $"constraints for '{parameter.Name}' do not guarantee a writable indexer",
+                    DiagnosticIds.GenericMemberNotGuaranteed);
+            return new BoundErrorExpression();
+        }
+        if (!IsAddressable(receiver) || !IsWritable(receiver))
+        {
+            _diagnostics.Report(target.OpenBracketToken.Location,
+                "indexer cannot be assigned through a readonly receiver",
+                DiagnosticIds.WriteThroughReadonlyReceiver);
+            return new BoundErrorExpression();
+        }
+        _ = ValidateGenericArguments("this", indexer.ParameterTypes, indices, target.Arguments,
+            target.OpenBracketToken.Location);
+        BoundExpression value = BindExpression(syntax.Expression);
+        if (isSimpleAssignment)
+            _ = ValidateGenericArguments("this", [indexer.Type], [value], [syntax.Expression],
+                target.OpenBracketToken.Location);
+        else
+        {
+            SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
+            ValidateIntegerOperation(new BoundDeferredConstantExpression(indexer.Type), binaryOperator, value,
+                syntax.OperatorToken.Location);
+            if (!TypeIdentity.AreSame(GetBinaryResultType(indexer.Type, binaryOperator, value.Type), indexer.Type))
+                _diagnostics.Report(syntax.OperatorToken.Location,
+                    $"operator '{syntax.OperatorToken.Text}' is not defined for types '{indexer.Type.ToDisplayString()}' and '{value.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidOperatorOperands);
+        }
+        RecordSymbolAndType(target, indexer.Symbol, indexer.Type);
+        _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(indexer.Symbol);
+        return new BoundDeferredConstantExpression(indexer.Type);
+    }
+
+    private BoundExpression BindGenericMemberGet(MemberAccessExpressionSyntax syntax, BoundExpression receiver,
+        GenericParameterSymbol parameter, bool pointerAccess)
+    {
+        GenericFieldMember? field = GenericConstraintMemberLookup.GetFields(parameter, syntax.MemberToken.Text)
+            .FirstOrDefault(candidate => !candidate.IsStatic);
+        if (field is not null)
+        {
+            RecordSymbolAndType(syntax, field.Symbol, field.Type);
+            return new BoundDeferredConstantExpression(field.Type);
+        }
+        return BindGenericPropertyGet(syntax, receiver, parameter, pointerAccess);
+    }
+
+    private BoundExpression BindGenericPropertyGet(MemberAccessExpressionSyntax syntax, BoundExpression receiver,
+        GenericParameterSymbol parameter, bool pointerAccess)
+    {
+        GenericPropertyMember[] named = GenericConstraintMemberLookup
+            .GetProperties(parameter, syntax.MemberToken.Text, _fileScope.TypeFactory,
+                _fileScope.GenericStructSpecializer)
+            .Where(property => !property.IsStatic)
+            .DistinctBy(property => (property.Type.ToDisplayString(TypeDisplayFormat.FullyQualified), property.HasGetter,
+                property.HasSetter, property.IsReadonly))
+            .ToArray();
+        GenericPropertyMember? property = named.FirstOrDefault(property => property.HasGetter);
+        if (property is null)
+        {
+            RecordCandidates(syntax, null, named.Select(candidate => candidate.Symbol), CandidateReason.NotFound);
+            _diagnostics.Report(syntax.MemberToken.Location,
+                $"constraints for '{parameter.Name}' do not guarantee readable property '{syntax.MemberToken.Text}'",
+                DiagnosticIds.GenericMemberNotGuaranteed);
+            return new BoundErrorExpression();
+        }
+        if (IsReadonlyReceiver(receiver, pointerAccess) && !property.IsReadonly)
+        {
+            RecordCandidates(syntax, null, named.Select(candidate => candidate.Symbol), CandidateReason.Inaccessible);
+            _diagnostics.Report(syntax.MemberToken.Location,
+                $"property '{property.Symbol.Name}' is not guaranteed readonly for '{parameter.Name}'",
+                DiagnosticIds.MutableGetterOnReadonlyReceiver);
+            return new BoundErrorExpression();
+        }
+        RecordSymbolAndType(syntax, property.Symbol, property.Type);
+        return new BoundDeferredConstantExpression(property.Type);
+    }
+
+    private BoundExpression BindGenericMethodCall(MemberAccessExpressionSyntax target, BoundExpression receiver,
+        GenericParameterSymbol parameter, ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax, bool pointerAccess, bool incomplete,
+        int completedArgumentCount)
+    {
+        GenericMethodMember[] candidates = GenericConstraintMemberLookup
+            .GetMethods(parameter, target.MemberToken.Text, _fileScope.TypeFactory,
+                _fileScope.GenericStructSpecializer)
+            .Where(method => !method.IsStatic)
+            .DistinctBy(method => $"{method.ReturnType.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", method.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})/{method.IsReadonly}")
+            .ToArray();
+        GenericMethodMember? method = ResolveGenericCandidate(candidates, candidate => candidate.Symbol,
+            candidate => candidate.ParameterTypes, arguments, target.MemberToken.Location,
+            $"method '{target.MemberToken.Text}' on '{parameter.Name}'", target,
+            incomplete ? completedArgumentCount : null);
+        if (method is null)
+        {
+            if (candidates.Length == 0)
+                _diagnostics.Report(target.MemberToken.Location,
+                    $"constraints for '{parameter.Name}' do not guarantee method '{target.MemberToken.Text}'",
+                    DiagnosticIds.GenericMemberNotGuaranteed);
+            return new BoundErrorExpression();
+        }
+        if (IsReadonlyReceiver(receiver, pointerAccess) && !method.IsReadonly)
+        {
+            RecordCandidates(target, null, candidates.Select(candidate => candidate.Symbol), CandidateReason.Inaccessible);
+            _diagnostics.Report(target.MemberToken.Location,
+                $"method '{method.Symbol.Name}' is not guaranteed readonly for '{parameter.Name}'",
+                DiagnosticIds.MutableMethodOnReadonlyReceiver);
+            return new BoundErrorExpression();
+        }
+        _ = ValidateGenericArguments(method.Symbol.Name, method.ParameterTypes, arguments, argumentSyntax,
+            target.MemberToken.Location, incomplete ? completedArgumentCount : null);
+        RecordSymbolAndType(target, method.Symbol, method.ReturnType);
+        return new BoundDeferredConstantExpression(method.ReturnType);
+    }
+
+    private BoundExpression BindGenericIndexerGet(IndexExpressionSyntax syntax, BoundExpression receiver,
+        GenericParameterSymbol parameter, ImmutableArray<BoundExpression> arguments)
+    {
+        bool receiverIsReadonly = IsReadonlyReceiver(receiver, pointerAccess: false);
+        GenericIndexerMember[] candidates = GenericConstraintMemberLookup.GetIndexers(parameter,
+                _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
+            .Where(indexer => indexer.HasGetter && (!receiverIsReadonly || indexer.IsReadonly))
+            .DistinctBy(indexer => $"{indexer.Type.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", indexer.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})")
+            .ToArray();
+        GenericIndexerMember? indexer = ResolveGenericCandidate(candidates, candidate => candidate.Symbol,
+            candidate => candidate.ParameterTypes, arguments, syntax.OpenBracketToken.Location,
+            $"indexer on '{parameter.Name}'", syntax);
+        if (indexer is null)
+        {
+            if (candidates.Length == 0)
+                _diagnostics.Report(syntax.OpenBracketToken.Location,
+                    $"constraints for '{parameter.Name}' do not guarantee a readable indexer",
+                    DiagnosticIds.GenericMemberNotGuaranteed);
+            return new BoundErrorExpression();
+        }
+        _ = ValidateGenericArguments("this", indexer.ParameterTypes, arguments, syntax.Arguments,
+            syntax.OpenBracketToken.Location);
+        RecordSymbolAndType(syntax, indexer.Symbol, indexer.Type);
+        return new BoundDeferredConstantExpression(indexer.Type);
+    }
+
+    private BoundExpression BindGenericNewExpression(NewExpressionSyntax syntax, GenericParameterSymbol parameter)
+    {
+        ImmutableArray<BoundExpression> arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        GenericConstructorMember[] candidates = GenericConstraintMemberLookup
+            .GetConstructors(parameter, _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
+            .DistinctBy(constructor => string.Join(",", constructor.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified))))
+            .ToArray();
+        GenericConstructorMember? constructor = syntax.IsPositionalInitialization ? null :
+            ResolveGenericCandidate(candidates, candidate => candidate.Symbol, candidate => candidate.ParameterTypes,
+                arguments, syntax.NewKeyword.Location, $"constructor for '{parameter.Name}'", syntax,
+                syntax.CloseDelimiterToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        if (constructor is null)
+        {
+            if (syntax.IsPositionalInitialization || candidates.Length == 0)
+                _diagnostics.Report(syntax.NewKeyword.Location,
+                    $"constraints for '{parameter.Name}' do not guarantee this construction",
+                    DiagnosticIds.GenericConstructorNotGuaranteed);
+            return new BoundErrorExpression();
+        }
+        _ = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
+            syntax.NewKeyword.Location,
+            syntax.CloseDelimiterToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        RecordSymbolAndType(syntax, constructor.Symbol, _fileScope.TypeFactory.PointerTo(parameter));
+        return new BoundDeferredConstantExpression(_fileScope.TypeFactory.PointerTo(parameter));
+    }
+
+    private BoundExpression BindGenericConstructionExpression(CallExpressionSyntax syntax,
+        GenericParameterSymbol parameter, ImmutableArray<BoundExpression> arguments)
+    {
+        GenericConstructorMember[] candidates = GenericConstraintMemberLookup
+            .GetConstructors(parameter, _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
+            .DistinctBy(constructor => string.Join(",", constructor.ParameterTypes.Select(type =>
+                type.ToDisplayString(TypeDisplayFormat.FullyQualified))))
+            .ToArray();
+        bool incomplete = syntax.CloseParenthesisToken.IsMissing;
+        GenericConstructorMember? constructor = ResolveGenericCandidate(candidates,
+            candidate => candidate.Symbol, candidate => candidate.ParameterTypes, arguments,
+            GetLocation(syntax.Target), $"constructor for '{parameter.Name}'", syntax.Target,
+            incomplete ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        if (constructor is null)
+        {
+            if (candidates.Length == 0)
+                _diagnostics.Report(GetLocation(syntax.Target),
+                    $"constraints for '{parameter.Name}' do not guarantee this construction",
+                    DiagnosticIds.GenericConstructorNotGuaranteed);
+            return new BoundErrorExpression();
+        }
+        _ = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
+            GetLocation(syntax.Target),
+            incomplete ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        RecordSymbolAndType(syntax.Target, constructor.Symbol, parameter);
+        return new BoundDeferredConstantExpression(parameter);
+    }
+
+    private T? ResolveGenericCandidate<T>(IEnumerable<T> source, Func<T, Symbol> getSymbol,
+        Func<T, ImmutableArray<TypeSymbol>> getParameterTypes, ImmutableArray<BoundExpression> arguments,
+        TextLocation location, string description, SyntaxNode syntax, int? completedArgumentCount = null)
+        where T : class
+    {
+        T[] candidates = source.ToArray();
+        int suppliedCount = completedArgumentCount ?? arguments.Length;
+        bool incomplete = completedArgumentCount.HasValue;
+        var matches = candidates.Where(candidate =>
+                (incomplete ? getParameterTypes(candidate).Length >= suppliedCount :
+                    getParameterTypes(candidate).Length == suppliedCount))
+            .Select(candidate => new
+            {
+                Candidate = candidate,
+                Costs = getParameterTypes(candidate).Take(suppliedCount).Zip(arguments.Take(suppliedCount))
+                    .Select(pair => GetArgumentConversionCost(pair.First, pair.Second)).ToArray(),
+            })
+            .Where(candidate => candidate.Costs.All(cost => cost.HasValue))
+            .Select(candidate => new
+            {
+                candidate.Candidate,
+                Costs = candidate.Costs.Select(cost => cost!.Value).ToArray(),
+            }).ToArray();
+        if (matches.Length == 1)
+        {
+            RecordCandidates(syntax, getSymbol(matches[0].Candidate), candidates.Select(getSymbol),
+                incomplete ? CandidateReason.Incomplete : CandidateReason.None);
+            return matches[0].Candidate;
+        }
+        CandidateReason reason = candidates.Length == 0 ? CandidateReason.NotFound
+            : matches.Length > 1 ? CandidateReason.Ambiguous
+            : candidates.All(candidate => getParameterTypes(candidate).Length != suppliedCount)
+                ? CandidateReason.WrongArity : CandidateReason.NotInvocable;
+        RecordCandidates(syntax, null, candidates.Select(getSymbol), reason);
+        if (candidates.Length != 0 && !incomplete)
+            _diagnostics.Report(location, matches.Length > 1 ? $"{description} is ambiguous" :
+                $"no {description} matches the provided arguments",
+                matches.Length > 1 ? DiagnosticIds.AmbiguousCall :
+                reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+        return null;
+    }
+
+    private ImmutableArray<BoundExpression> ValidateGenericArguments(string name,
+        ImmutableArray<TypeSymbol> parameterTypes, ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax, TextLocation location,
+        int? completedArgumentCount = null)
+    {
+        int suppliedCount = completedArgumentCount ?? arguments.Length;
+        bool incomplete = completedArgumentCount.HasValue;
+        if ((!incomplete && suppliedCount != parameterTypes.Length) ||
+            incomplete && suppliedCount > parameterTypes.Length)
+            _diagnostics.Report(location,
+                $"'{name}' expects {parameterTypes.Length} argument(s), but {suppliedCount} were provided",
+                DiagnosticIds.WrongArity);
+        var converted = arguments.ToBuilder();
+        for (int index = 0; index < Math.Min(suppliedCount, parameterTypes.Length); index++)
+        {
+            BoundExpression argument = ContextualizeConversion(arguments[index], parameterTypes[index]);
+            converted[index] = argument;
+            SetConvertedType(argumentSyntax[index], argument.Type);
+            if (!TypeFacts.CanAssign(parameterTypes[index], argument.Type))
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterTypes[index]);
+        }
+        return converted.ToImmutable();
+    }
+
+    private static GenericParameterSymbol? GetGenericReceiver(TypeSymbol type, bool pointerAccess) => type switch
+    {
+        GenericParameterSymbol parameter when !pointerAccess => parameter,
+        PointerTypeSymbol { ElementType: GenericParameterSymbol parameter } when pointerAccess => parameter,
+        _ => null,
+    };
+
+    private TypeSymbol SubstituteGenericType(TypeSymbol type,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions)
+    {
+        if (_fileScope.GenericStructSpecializer is not null)
+            return _fileScope.GenericStructSpecializer.Substitute(type, substitutions);
+        return type;
+    }
+
+    private bool TryInferGenericTypeArguments(FunctionSymbol definition,
+        ImmutableArray<BoundExpression> arguments, out ImmutableArray<TypeSymbol> typeArguments)
+    {
+        var inferred = new Dictionary<GenericParameterSymbol, TypeSymbol>();
+        if (arguments.Length != definition.Parameters.Length)
+        {
+            typeArguments = [];
+            return false;
+        }
+        for (int index = 0; index < arguments.Length; index++)
+            if (!TryInferGenericType(definition.Parameters[index].Type, arguments[index].Type, inferred))
+            {
+                typeArguments = [];
+                return false;
+            }
+        if (definition.TypeParameters.Any(parameter => !inferred.ContainsKey(parameter)))
+        {
+            typeArguments = [];
+            return false;
+        }
+        typeArguments = definition.TypeParameters.Select(parameter => inferred[parameter]).ToImmutableArray();
+        return true;
+    }
+
+    private bool TryInferGenericType(TypeSymbol pattern, TypeSymbol actual,
+        IDictionary<GenericParameterSymbol, TypeSymbol> inferred)
+    {
+        if (pattern is GenericParameterSymbol parameter)
+        {
+            actual = _fileScope.TypeFactory.Intern(actual);
+            if (!inferred.TryGetValue(parameter, out TypeSymbol? previous))
+            {
+                inferred.Add(parameter, actual);
+                return true;
+            }
+            return TypeIdentity.AreSame(previous, actual);
+        }
+        return (pattern, actual) switch
+        {
+            (PointerTypeSymbol left, PointerTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
+                TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (ReferenceTypeSymbol left, ReferenceTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
+                TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (ArrayTypeSymbol left, ArrayTypeSymbol right) when left.Rank == right.Rank =>
+                TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (StructTypeSymbol { GenericDefinition: not null } left,
+                StructTypeSymbol { GenericDefinition: not null } right)
+                when ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
+                     left.TypeArguments.Length == right.TypeArguments.Length =>
+                left.TypeArguments.Zip(right.TypeArguments).All(pair =>
+                    TryInferGenericType(pair.First, pair.Second, inferred)),
+            _ => TypeIdentity.AreSame(pattern, actual),
+        };
+    }
+
+    private static bool ContainsGenericParameter(TypeSymbol type) =>
+        GenericTypeFacts.ContainsGenericParameter(type);
 
     private static bool IsAddressable(BoundExpression expression) => expression switch
     {

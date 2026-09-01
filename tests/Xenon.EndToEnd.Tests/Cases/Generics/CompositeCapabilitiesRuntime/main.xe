@@ -1,0 +1,96 @@
+namespace GenericCompositeCapabilitiesRuntime;
+
+template Runnable { int Run(); }
+template Stateful { int State(); }
+template Advanced { int Run(); int State(); }
+
+struct AdvancedRequired<T> where T : Advanced
+{
+    public T value;
+    public AdvancedRequired(T value) { this.value = value; }
+    public int Execute() { return value.Run() + value.State(); }
+}
+
+struct AdvancedOuter<T> where T : Runnable, Stateful
+{
+    public AdvancedRequired<T> required;
+    public AdvancedOuter(T value) { required = AdvancedRequired<T>(value); }
+    public int Execute() { return required.Execute(); }
+}
+
+struct Worker
+{
+    public int Run() { return 40; }
+    public int State() { return 2; }
+}
+
+template Equalable { bool Equals(Equalable other); }
+template Hashable { int Hash(); }
+template HashEqualable { bool Equals(HashEqualable other); int Hash(); }
+
+struct HashRequired<T> where T : HashEqualable
+{
+    public T value;
+    public HashRequired(T value) { this.value = value; }
+    public bool Same(T other) { return value.Equals(other); }
+    public int Hash() { return value.Hash(); }
+}
+
+struct HashOuter<T> where T : Equalable, Hashable
+{
+    public HashRequired<T> required;
+    public HashOuter(T value) { required = HashRequired<T>(value); }
+    public bool Same(T other) { return required.Same(other); }
+    public int Hash() { return required.Hash(); }
+}
+
+struct HashWorker
+{
+    public int value;
+    public HashWorker(int value) { this.value = value; }
+    public bool Equals(HashWorker other) { return value == other.value; }
+    public int Hash() { return value; }
+}
+
+template Readable { int Value { get; } }
+template Writable { int Value { set; } }
+template ReadWrite { int Value { get; set; } }
+
+struct PropertyRequired<T> where T : ReadWrite
+{
+    public T value;
+    public PropertyRequired(T value) { this.value = value; }
+    public int Read() { return value.Value; }
+    public void Write(int input) { value.Value = input; }
+}
+
+struct PropertyOuter<T> where T : Readable, Writable
+{
+    public PropertyRequired<T> required;
+    public PropertyOuter(T value) { required = PropertyRequired<T>(value); }
+    public int Replace(int value)
+    {
+        required.Write(value);
+        return required.Read();
+    }
+}
+
+struct PropertyWorker
+{
+    public int stored;
+    public int Value { get { return stored; } set { stored = value; } }
+}
+
+int Main()
+{
+    AdvancedOuter<Worker> advanced = AdvancedOuter<Worker>(Worker());
+    if (advanced.Execute() != 42) return 1;
+
+    HashOuter<HashWorker> hash = HashOuter<HashWorker>(HashWorker(42));
+    if (!hash.Same(HashWorker(42)) || hash.Same(HashWorker(41))) return 2;
+    if (hash.Hash() != 42) return 3;
+
+    PropertyOuter<PropertyWorker> property = PropertyOuter<PropertyWorker>(PropertyWorker());
+    if (property.Replace(42) != 42) return 4;
+    return 0;
+}

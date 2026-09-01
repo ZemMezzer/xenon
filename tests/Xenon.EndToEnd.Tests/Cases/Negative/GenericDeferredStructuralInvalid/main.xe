@@ -1,0 +1,15 @@
+namespace NegativeGenericDeferredStructuralInvalid;
+
+template Runnable { int Run(); }
+struct Required<T> where T : Runnable { public T* value; }
+
+struct BadNode<T>
+{
+    public Required<BadNode<T>>* metadata;
+}
+
+int Main()
+{
+    BadNode<int> value = BadNode<int>();
+    return 0;
+}

@@ -32,6 +32,10 @@ internal sealed class SemanticInfoStore
     public void RecordType(TypeSyntax syntax, TypeSymbol type)
     {
         Types[syntax] = new TypeInfo(type, type);
+        if (syntax is NamedTypeSyntax && type is GenericParameterSymbol parameter)
+            Symbols[syntax] = SymbolInfo.FromSymbol(parameter);
+        else if (syntax is NamedTypeSyntax && type is TemplateSelfTypeSymbol selfType)
+            Symbols[syntax] = SymbolInfo.FromSymbol(selfType.Template);
         switch (syntax)
         {
             case PointerTypeSyntax pointer when type is PointerTypeSymbol pointerType:

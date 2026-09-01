@@ -51,6 +51,16 @@ public sealed class LexerTests
     }
 
     [Fact]
+    public void Lexer_RecognizesTemplateConstraintKeywords()
+    {
+        LexedSource source = LexedSource.Lex(SourceText.From("template where"));
+
+        Assert.Empty(source.Diagnostics);
+        Assert.Equal(SyntaxKind.TemplateKeyword, source.Tokens[0].Kind);
+        Assert.Equal(SyntaxKind.WhereKeyword, source.Tokens[1].Kind);
+    }
+
+    [Fact]
     public void Lexer_UsesLongestOperatorMatch()
     {
         const string source = "<<= >>= -> ++ -- == != <= >= && || += -= *= /= %= &= |= ^=";

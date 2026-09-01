@@ -1,0 +1,18 @@
+namespace NegativeGenericNominalConstraints;
+
+interface IEntity { int Id(); }
+struct InterfaceLookalike { public int Id() { return 1; } }
+void NeedsInterface<T>(T value) where T : IEntity { }
+
+struct BaseEntity { public int Id() { return 1; } }
+struct BaseLookalike { public int Id() { return 1; } }
+void NeedsBase<T>(T value) where T : BaseEntity { }
+
+int Main()
+{
+    InterfaceLookalike first = InterfaceLookalike();
+    BaseLookalike second = BaseLookalike();
+    NeedsInterface<InterfaceLookalike>(first);
+    NeedsBase<BaseLookalike>(second);
+    return 0;
+}
