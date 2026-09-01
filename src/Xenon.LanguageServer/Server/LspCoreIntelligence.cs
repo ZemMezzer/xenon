@@ -18,7 +18,7 @@ internal static class LspCoreIntelligence
     [
         "namespace", "type", "interface", "enum", "enumMember", "function", "method",
         "constructor", "property", "field", "parameter", "variable", "constant",
-        "typeParameter",
+        "typeParameter", "modifier",
     ];
     internal static readonly string[] SemanticTokenModifiers = ["declaration", "definition", "static", "readonly"];
 
@@ -287,7 +287,7 @@ internal static class LspCoreIntelligence
                 reference.Location.Source.FileId == context.Document.SourceFileId)
                 tokens.Add((reference.Location.Span, reference.Symbol, false));
         var ordered = tokens.Where(item => item.Span.Length > 0 &&
-                SemanticTokenType(EditorSymbolClassifier.GetKind(item.Symbol)) >= 0)
+                SemanticTokenType(item.Symbol, item.Declaration) >= 0)
             .GroupBy(item => item.Span).Select(group => group.OrderByDescending(item => item.Declaration).First())
             .OrderBy(item => item.Span.Start).ToArray();
         var data = new List<int>(ordered.Length * 5);
@@ -299,7 +299,7 @@ internal static class LspCoreIntelligence
             int deltaLine = range.Start.Line - previousLine;
             int deltaCharacter = deltaLine == 0 ? range.Start.Character - previousCharacter : range.Start.Character;
             data.Add(deltaLine); data.Add(deltaCharacter); data.Add(range.End.Character - range.Start.Character);
-            data.Add(SemanticTokenType(EditorSymbolClassifier.GetKind(item.Symbol)));
+            data.Add(SemanticTokenType(item.Symbol, item.Declaration));
             data.Add(SemanticModifiers(item.Symbol, item.Declaration));
             previousLine = range.Start.Line; previousCharacter = range.Start.Character;
         }
@@ -541,7 +541,9 @@ internal static class LspCoreIntelligence
         EditorSymbolKind.EnumMember => 4,
         EditorSymbolKind.Function => 5,
         EditorSymbolKind.Method => 6,
-        EditorSymbolKind.Constructor => 7,
+        // Constructors are spelled with their containing type's name and should
+        // therefore receive the same editor color as that type.
+        EditorSymbolKind.Constructor => 1,
         EditorSymbolKind.Property => 8,
         EditorSymbolKind.Field => 9,
         EditorSymbolKind.Parameter => 10,
@@ -550,6 +552,28 @@ internal static class LspCoreIntelligence
         EditorSymbolKind.TypeParameter => 13,
         _ => -1,
     };
+
+    private static int SemanticTokenType(Symbol symbol, bool declaration)
+    {
+        if (declaration && symbol is IndexerSymbol or InterfaceIndexerSymbol)
+            return 14;
+        if (IsImplicitSetterValue(symbol))
+            return 14;
+        return SemanticTokenType(EditorSymbolClassifier.GetKind(symbol));
+    }
+
+    private static bool IsImplicitSetterValue(Symbol symbol)
+    {
+        if (symbol is not ParameterSymbol
+            {
+                Name: "value",
+                IsSourceDefined: false,
+                ContainingSymbol: FunctionSymbol accessor,
+            })
+            return false;
+        return ReferenceEquals(accessor.ContainingProperty?.Setter, accessor) ||
+               ReferenceEquals(accessor.ContainingIndexer?.Setter, accessor);
+    }
 
     private static int SemanticModifiers(Symbol symbol, bool declaration)
     {

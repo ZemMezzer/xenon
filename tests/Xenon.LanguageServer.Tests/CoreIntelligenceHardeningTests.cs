@@ -429,6 +429,74 @@ public sealed class CoreIntelligenceHardeningTests
         Assert.Equal(3, decoded.Single(token => token.Text == "local").Modifiers);
     }
 
+    [Fact]
+    public async Task GenericStructIndexerAndSetterValueHaveExactSemanticTokenKinds()
+    {
+        const string source = """
+            namespace App;
+            struct List<T>
+            {
+                T[] array;
+                public int size;
+                public T this[int index]
+                {
+                    get { return array[index]; }
+                    set { array[index] = value; }
+                }
+                public int Size
+                {
+                    get { return size; }
+                    set { size = value; }
+                }
+                public List(int capacity) { array = new T[capacity]; }
+            }
+            void Use() { List<int>* list = new List<int>(10); }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+
+        var lists = tokens.Where(token => token.Text == "List").ToArray();
+        Assert.Equal(4, lists.Length);
+        Assert.All(lists, token => Assert.Equal(1, token.Type)); // type and constructor spellings share a color
+        Assert.Equal(14, tokens.Single(token => token.Text == "this").Type); // contextual modifier
+        Assert.Equal(2, tokens.Count(token => token.Text == "value"));
+        Assert.All(tokens.Where(token => token.Text == "value"),
+            token => Assert.Equal(14, token.Type)); // contextual modifier
+    }
+
+    [Fact]
+    public async Task GenericParameterValueConstructionIsExposedAsAConstructor()
+    {
+        const string source = """
+            namespace App;
+            template VectorLike { VectorLike(float x, float y, float z); }
+            T Create<T>(float x, float y, float z) where T : VectorLike
+            {
+                return T(x, y, z);
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+        Assert.Single(tokens, token => token.Text == "T" && token.Type == 1); // constructor use
+
+        int construction = source.LastIndexOf("T(x", StringComparison.Ordinal);
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, construction);
+        Assert.Contains("VectorLike(float x, float y, float z)",
+            hover.GetProperty("contents").GetProperty("value").GetString());
+    }
+
     private static string Project(string name) => $"""
         [project]
         name = "{name}"
@@ -511,18 +579,19 @@ public sealed class CoreIntelligenceHardeningTests
         return Result(await session.HandleRequestAsync(method, LspTestProtocol.Json(parameters), default));
     }
 
-    private static IReadOnlyList<(string Text, int Modifiers)> DecodeTokens(string source, JsonElement data)
+    private static IReadOnlyList<(string Text, int Type, int Modifiers)> DecodeTokens(
+        string source, JsonElement data)
     {
         int line = 0;
         int character = 0;
         string[] lines = source.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         int[] values = data.EnumerateArray().Select(item => item.GetInt32()).ToArray();
-        var result = new List<(string, int)>();
+        var result = new List<(string, int, int)>();
         for (int i = 0; i < values.Length; i += 5)
         {
             line += values[i];
             character = values[i] == 0 ? character + values[i + 1] : values[i + 1];
-            result.Add((lines[line].Substring(character, values[i + 2]), values[i + 4]));
+            result.Add((lines[line].Substring(character, values[i + 2]), values[i + 3], values[i + 4]));
         }
         return result;
     }

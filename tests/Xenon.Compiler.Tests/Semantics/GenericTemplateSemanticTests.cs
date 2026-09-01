@@ -220,11 +220,40 @@ public sealed class GenericTemplateSemanticTests
             {
                 return new T(value);
             }
+            T CreateValue<T>(float value) where T : VectorLike
+            {
+                return T(value);
+            }
             """);
 
         Assert.Empty(compilation.Diagnostics);
         Assert.DoesNotContain(compilation.SemanticModel.Functions,
             function => function.Symbol.IsGenericDefinition);
+    }
+
+    [Fact]
+    public void SemanticModel_ClassifiesGenericParameterValueConstructionAsTemplateConstructor()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            template VectorLike { VectorLike(float x, float y, float z); }
+            T Create<T>(float x, float y, float z) where T : VectorLike
+            {
+                return T(x, y, z);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(compilation.SyntaxTrees[0].Root.Members[1]);
+        var @return = Assert.IsType<ReturnStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var construction = Assert.IsType<CallExpressionSyntax>(@return.Expression);
+        var constructor = Assert.IsType<TemplateConstructorRequirementSymbol>(
+            compilation.SemanticModel.GetSymbolInfo(construction.Target).Symbol);
+        var functionSymbol = Assert.IsType<FunctionSymbol>(compilation.SemanticModel.GetDeclaredSymbol(function));
+        GenericParameterSymbol parameter = Assert.IsType<GenericParameterSymbol>(functionSymbol.ReturnType);
+
+        Assert.Equal("VectorLike", constructor.Name);
+        Assert.Same(parameter, compilation.SemanticModel.GetTypeInfo(construction.Target).Type);
     }
 
     [Fact]
@@ -249,12 +278,15 @@ public sealed class GenericTemplateSemanticTests
             namespace Example;
             void Invoke<T>(T value) { value.Run(); }
             T* Create<T>() { return new T(); }
+            T CreateValue<T>() { return T(); }
             """);
 
         Assert.Contains(compilation.Diagnostics,
             diagnostic => diagnostic.Id == DiagnosticIds.GenericMemberNotGuaranteed);
         Assert.Contains(compilation.Diagnostics,
             diagnostic => diagnostic.Id == DiagnosticIds.GenericConstructorNotGuaranteed);
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UnknownFunction);
     }
 
     [Fact]

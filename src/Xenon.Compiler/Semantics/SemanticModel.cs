@@ -364,6 +364,8 @@ public sealed class SemanticModel
     /// <summary>
     /// Returns only successfully bound source occurrences. Candidate-only, ambiguous and
     /// unresolved nodes are deliberately excluded so tooling never treats spelling as identity.
+    /// Compiler-provided setter value parameters are included because their references are
+    /// explicit source tokens even though the parameter itself has no declaration token.
     /// </summary>
     public ImmutableArray<ResolvedSymbolReference> GetResolvedReferences(
         CancellationToken cancellationToken = default)
@@ -374,7 +376,7 @@ public sealed class SemanticModel
         foreach ((SyntaxNode syntax, SymbolInfo info) in _semanticInfo.Symbols)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (info.Symbol is not { IsSourceDefined: true } symbol ||
+            if (info.Symbol is not { } symbol || !IsReferenceableSourceSymbol(symbol) ||
                 !TryGetReferenceLocation(syntax, out TextLocation location) ||
                 _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source) ||
                 !seen.Add((symbol, location.Source.FileId, location.Span)))
@@ -398,6 +400,15 @@ public sealed class SemanticModel
         return result.OrderBy(item => item.Location.Source.Path, StringComparer.Ordinal)
             .ThenBy(item => item.Location.Span.Start).ThenBy(item => item.Location.Span.Length)
             .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+    }
+
+    private static bool IsReferenceableSourceSymbol(Symbol symbol)
+    {
+        if (symbol.IsSourceDefined) return true;
+        if (symbol is not ParameterSymbol { Name: "value", ContainingSymbol: FunctionSymbol accessor })
+            return false;
+        return ReferenceEquals(accessor.ContainingProperty?.Setter, accessor) ||
+               ReferenceEquals(accessor.ContainingIndexer?.Setter, accessor);
     }
 
     /// <summary>The semantic type associated with a symbol for editor navigation.</summary>
@@ -656,6 +667,9 @@ public sealed class SemanticModel
                 case PointerTypeSymbol pointer: type = pointer.ElementType; continue;
                 case ReferenceTypeSymbol reference: type = reference.ElementType; continue;
                 case ArrayTypeSymbol array: type = array.ElementType; continue;
+                case StructTypeSymbol { GenericDefinition: { } definition }:
+                    declared = definition;
+                    return true;
                 case DeclaredTypeSymbol result: declared = result; return true;
                 default: declared = null!; return false;
             }
