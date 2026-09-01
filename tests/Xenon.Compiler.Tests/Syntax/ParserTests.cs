@@ -1000,5 +1000,36 @@ public sealed class ParserTests
         Assert.NotNull(Assert.IsType<NamedTypeSyntax>(second.TypeArguments.Arguments[1]).TypeArguments);
     }
 
+    [Fact]
+    public void Parser_ParsesMoveAsDedicatedPrefixExpression()
+    {
+        SyntaxTree tree = Parse("namespace Example; Value Take(Value source) { return move source; }");
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var @return = Assert.IsType<ReturnStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var move = Assert.IsType<MoveExpressionSyntax>(@return.Expression);
+        Assert.Equal(SyntaxKind.MoveKeyword, move.MoveKeyword.Kind);
+        Assert.Equal("source", Assert.IsType<NameExpressionSyntax>(move.Operand).IdentifierToken.Text);
+    }
+
+    [Fact]
+    public void Parser_ParsesOwnershipTypesIncludingArrays()
+    {
+        SyntaxTree tree = Parse("namespace Example; void Own(unique<Resource> item, unique<int[]> values, shared<Resource> strong, weak<Resource> observer) {}");
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var item = Assert.IsType<NamedTypeSyntax>(function.Parameters[0].Type);
+        Assert.Equal(SyntaxKind.UniqueKeyword, item.NameToken.Kind);
+        Assert.Equal("Resource", Assert.Single(item.TypeArguments!.Arguments).Name);
+        var values = Assert.IsType<NamedTypeSyntax>(function.Parameters[1].Type);
+        Assert.IsType<ArrayTypeSyntax>(Assert.Single(values.TypeArguments!.Arguments));
+        Assert.Equal(SyntaxKind.SharedKeyword,
+            Assert.IsType<NamedTypeSyntax>(function.Parameters[2].Type).NameToken.Kind);
+        Assert.Equal(SyntaxKind.WeakKeyword,
+            Assert.IsType<NamedTypeSyntax>(function.Parameters[3].Type).NameToken.Kind);
+    }
+
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));
 }

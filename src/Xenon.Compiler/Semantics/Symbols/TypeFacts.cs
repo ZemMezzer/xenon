@@ -1,7 +1,96 @@
+using System.Collections.Immutable;
+
 namespace Xenon.Compiler.Semantics.Symbols;
 
-internal static class TypeFacts
+public enum Copyability
 {
+    Copyable,
+    NotGuaranteed,
+    NonCopyable,
+}
+
+internal sealed record CopyabilityFailure(
+    TypeSymbol Type,
+    ImmutableArray<FieldSymbol> FieldPath,
+    Copyability Kind);
+
+public static class TypeFacts
+{
+    public static bool CanCopy(TypeSymbol type) => GetCopyability(type) == Copyability.Copyable;
+
+    public static Copyability GetCopyability(TypeSymbol type) =>
+        GetCopyability(type, [], out _);
+
+    internal static CopyabilityFailure? GetCopyabilityFailure(TypeSymbol type)
+    {
+        GetCopyability(type, [], out CopyabilityFailure? failure);
+        return failure;
+    }
+
+    private static Copyability GetCopyability(
+        TypeSymbol type,
+        HashSet<TypeSymbol> active,
+        out CopyabilityFailure? failure)
+    {
+        failure = null;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Error)) return Copyability.Copyable;
+        if (type is UniqueTypeSymbol)
+        {
+            failure = new CopyabilityFailure(type, [], Copyability.NonCopyable);
+            return Copyability.NonCopyable;
+        }
+        if (type is SharedTypeSymbol or WeakTypeSymbol)
+            return Copyability.Copyable;
+        if (type is GenericParameterSymbol)
+        {
+            failure = new CopyabilityFailure(type, [], Copyability.NotGuaranteed);
+            return Copyability.NotGuaranteed;
+        }
+        if (type is not StructTypeSymbol structure || !active.Add(type))
+            return Copyability.Copyable;
+
+        try
+        {
+            if (structure.BaseType is { } baseType)
+            {
+                Copyability baseResult = GetCopyability(baseType, active, out failure);
+                if (baseResult != Copyability.Copyable) return baseResult;
+            }
+            foreach (FieldSymbol field in structure.Fields)
+            {
+                Copyability fieldResult = GetCopyability(field.Type, active, out failure);
+                if (fieldResult == Copyability.Copyable) continue;
+                failure = failure! with { FieldPath = failure.FieldPath.Insert(0, field) };
+                return fieldResult;
+            }
+            return Copyability.Copyable;
+        }
+        finally
+        {
+            active.Remove(type);
+        }
+    }
+
+    public static bool RequiresDrop(TypeSymbol type) => RequiresDrop(type, []);
+
+    private static bool RequiresDrop(TypeSymbol type, HashSet<TypeSymbol> visited)
+    {
+        if (type is OwnershipTypeSymbol) return true;
+        if (type is not StructTypeSymbol structure || !visited.Add(type)) return false;
+        return structure.Destructor is not null ||
+            structure.BaseType is not null && RequiresDrop(structure.BaseType, visited) ||
+            structure.Fields.Any(field => RequiresDrop(field.Type, visited));
+    }
+
+    public static FunctionSymbol? GetDropFunction(TypeSymbol type) => type switch
+    {
+        UniqueTypeSymbol unique => unique.DropFunction,
+        SharedTypeSymbol shared => shared.DropFunction,
+        WeakTypeSymbol weak => weak.DropFunction,
+        StructTypeSymbol structure => structure.DropFunction,
+        _ => null,
+    };
+
     // Raw aggregate storage does not invoke nested constructors/initializers.
     public static bool ContainsReferenceStorage(TypeSymbol type) => ContainsReferenceStorage(type, []);
 
@@ -18,8 +107,13 @@ internal static class TypeFacts
     {
         if (TypeIdentity.AreSame(left, right) && (IsNumeric(left) || left is EnumTypeSymbol || TypeIdentity.AreSame(left, BuiltinTypes.Bool)))
             return true;
+        if (TypeIdentity.AreSame(left, right) && left is SharedTypeSymbol or WeakTypeSymbol)
+            return true;
         if (left is PointerTypeSymbol && TypeIdentity.AreSame(right, BuiltinTypes.Null) ||
             right is PointerTypeSymbol && TypeIdentity.AreSame(left, BuiltinTypes.Null))
+            return true;
+        if (left is SharedTypeSymbol && TypeIdentity.AreSame(right, BuiltinTypes.Null) ||
+            right is SharedTypeSymbol && TypeIdentity.AreSame(left, BuiltinTypes.Null))
             return true;
         if (left is not PointerTypeSymbol a || right is not PointerTypeSymbol b) return false;
         return TypeIdentity.AreSame(a.ElementType, b.ElementType) ||
@@ -49,6 +143,9 @@ internal static class TypeFacts
         }
 
         if (destination is PointerTypeSymbol && TypeIdentity.AreSame(source, BuiltinTypes.Null))
+            return 1000;
+
+        if (destination is SharedTypeSymbol && TypeIdentity.AreSame(source, BuiltinTypes.Null))
             return 1000;
 
         if (destination is PointerTypeSymbol { IsReadonly: var destinationReadonly } destinationPointer &&

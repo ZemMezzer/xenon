@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text;
 using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
@@ -151,6 +152,7 @@ public sealed class FunctionSymbol : Symbol
             FunctionKind.Constructor => containingType.Name,
             FunctionKind.InstanceInitializer => "__init_fields",
             FunctionKind.Destructor => $"~{containingType.Name}",
+            FunctionKind.DropGlue => "__drop",
             _ => throw new ArgumentOutOfRangeException(nameof(functionKind)),
         }, SymbolKind.Function, containingType)
     {
@@ -168,6 +170,24 @@ public sealed class FunctionSymbol : Symbol
         IsOverride = declaration is DestructorDeclarationSyntax { IsOverride: true };
     }
 
+    internal FunctionSymbol(
+        OwnershipTypeSymbol ownershipType,
+        NamespaceSymbol containingNamespace,
+        PointerTypeSymbol addressType,
+        SyntaxNode declaration)
+        : base(
+            $"__drop_ownership_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(ownershipType)))}",
+            SymbolKind.Function,
+            containingNamespace)
+    {
+        FunctionKind = FunctionKind.OwnershipDrop;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = ParameterSymbol.Own([new ParameterSymbol("value", addressType, 0)], this);
+        Declaration = declaration;
+        Accessibility = Accessibility.Private;
+        OwnershipType = ownershipType;
+    }
+
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
 
     public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
@@ -177,6 +197,7 @@ public sealed class FunctionSymbol : Symbol
     public InterfacePropertySymbol? ContainingInterfaceProperty => ContainingSymbol as InterfacePropertySymbol;
     public IndexerSymbol? ContainingIndexer => ContainingSymbol as IndexerSymbol;
     public InterfaceIndexerSymbol? ContainingInterfaceIndexer => ContainingSymbol as InterfaceIndexerSymbol;
+    public OwnershipTypeSymbol? OwnershipType { get; }
 
     public string FullName => FunctionKind switch
     {
@@ -187,6 +208,8 @@ public sealed class FunctionSymbol : Symbol
         FunctionKind.Constructor => ConstructorOverloadCount == 1 ? $"{ContainingType!.FullName}.__ctor" : $"{ContainingType!.FullName}.__ctor.{ConstructorOverload}",
         FunctionKind.InstanceInitializer => $"{ContainingType!.FullName}.__init_fields",
         FunctionKind.Destructor => $"{ContainingType!.FullName}.__dtor",
+        FunctionKind.DropGlue => $"{ContainingType!.FullName}.__drop",
+        FunctionKind.OwnershipDrop => $"{ContainingNamespace.FullName}.{Name}",
         _ => $"{ContainingNamespace.FullName}.{Name}",
     };
 
@@ -223,8 +246,8 @@ public sealed class FunctionSymbol : Symbol
     public bool IsAccessor => ContainingProperty is not null || ContainingInterfaceProperty is not null ||
         ContainingIndexer is not null || ContainingInterfaceIndexer is not null;
 
-    public override bool IsCompilerGenerated => FunctionKind == FunctionKind.InstanceInitializer;
-    public override bool IsUserVisible => FunctionKind != FunctionKind.InstanceInitializer && !IsAccessor;
+    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DropGlue or FunctionKind.OwnershipDrop;
+    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.DropGlue or FunctionKind.OwnershipDrop) && !IsAccessor;
     public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor;
     public override bool IsDefinition => Declaration switch
     {
@@ -232,6 +255,8 @@ public sealed class FunctionSymbol : Symbol
         MethodDeclarationSyntax syntax => syntax.Body is not null,
         ConstructorDeclarationSyntax => true,
         DestructorDeclarationSyntax => true,
+        _ when FunctionKind == FunctionKind.DropGlue => true,
+        _ when FunctionKind == FunctionKind.OwnershipDrop => true,
         PropertyAccessorDeclarationSyntax syntax => syntax.Body is not null,
         _ => false,
     };
@@ -269,7 +294,7 @@ public sealed class FunctionSymbol : Symbol
 
     internal SyntaxNode Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
-        Declaration is TypeDeclarationSyntax ? [] : [new(Declaration)];
+        Declaration is TypeDeclarationSyntax || FunctionKind == FunctionKind.OwnershipDrop ? [] : [new(Declaration)];
 }
 
 public abstract class VariableSymbol : Symbol

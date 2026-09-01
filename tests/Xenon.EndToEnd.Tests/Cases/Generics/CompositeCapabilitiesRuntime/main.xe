@@ -7,14 +7,14 @@ template Advanced { int Run(); int State(); }
 struct AdvancedRequired<T> where T : Advanced
 {
     public T value;
-    public AdvancedRequired(T value) { this.value = value; }
+    public AdvancedRequired(T value) { this.value = move value; }
     public int Execute() { return value.Run() + value.State(); }
 }
 
 struct AdvancedOuter<T> where T : Runnable, Stateful
 {
     public AdvancedRequired<T> required;
-    public AdvancedOuter(T value) { required = AdvancedRequired<T>(value); }
+    public AdvancedOuter(T value) { required = AdvancedRequired<T>(move value); }
     public int Execute() { return required.Execute(); }
 }
 
@@ -31,16 +31,16 @@ template HashEqualable { bool Equals(HashEqualable other); int Hash(); }
 struct HashRequired<T> where T : HashEqualable
 {
     public T value;
-    public HashRequired(T value) { this.value = value; }
-    public bool Same(T other) { return value.Equals(other); }
+    public HashRequired(T value) { this.value = move value; }
+    public bool Same(T other) { return value.Equals(move other); }
     public int Hash() { return value.Hash(); }
 }
 
 struct HashOuter<T> where T : Equalable, Hashable
 {
     public HashRequired<T> required;
-    public HashOuter(T value) { required = HashRequired<T>(value); }
-    public bool Same(T other) { return required.Same(other); }
+    public HashOuter(T value) { required = HashRequired<T>(move value); }
+    public bool Same(T other) { return required.Same(move other); }
     public int Hash() { return required.Hash(); }
 }
 
@@ -59,7 +59,7 @@ template ReadWrite { int Value { get; set; } }
 struct PropertyRequired<T> where T : ReadWrite
 {
     public T value;
-    public PropertyRequired(T value) { this.value = value; }
+    public PropertyRequired(T value) { this.value = move value; }
     public int Read() { return value.Value; }
     public void Write(int input) { value.Value = input; }
 }
@@ -67,7 +67,7 @@ struct PropertyRequired<T> where T : ReadWrite
 struct PropertyOuter<T> where T : Readable, Writable
 {
     public PropertyRequired<T> required;
-    public PropertyOuter(T value) { required = PropertyRequired<T>(value); }
+    public PropertyOuter(T value) { required = PropertyRequired<T>(move value); }
     public int Replace(int value)
     {
         required.Write(value);

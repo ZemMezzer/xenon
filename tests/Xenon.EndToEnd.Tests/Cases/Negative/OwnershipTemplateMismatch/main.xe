@@ -1,0 +1,16 @@
+namespace Negative.OwnershipTemplateMismatch;
+
+template OwnerLike { void Set(unique<OwnerLike> value); }
+
+struct Wrong
+{
+    public void Set(shared<Wrong> value) {}
+}
+
+void Use<T>(T value) where T : OwnerLike {}
+
+void Main()
+{
+    Wrong value = Wrong();
+    Use<Wrong>(value);
+}

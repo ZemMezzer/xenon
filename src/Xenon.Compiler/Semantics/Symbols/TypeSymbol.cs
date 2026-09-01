@@ -7,6 +7,7 @@ public abstract class TypeSymbol : Symbol
     {
     }
 
+    public Copyability Copyability => TypeFacts.GetCopyability(this);
     public virtual string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) => Name;
     public override string ToString() => ToDisplayString();
 }
@@ -86,6 +87,50 @@ public sealed class ArrayTypeSymbol : TypeSymbol
     public TypeSymbol ElementType { get; }
     public int Rank { get; }
 
+}
+
+/// <summary>
+/// A single-owner handle for one fresh heap allocation. Its runtime value has the
+/// same representation as <see cref="StorageType"/>, while its distinct semantic
+/// identity prevents implicit raw-pointer adoption and ordinary copying.
+/// </summary>
+public abstract class OwnershipTypeSymbol : TypeSymbol
+{
+    public override string Name => ToDisplayString();
+
+    protected OwnershipTypeSymbol(string ownershipKind, TypeSymbol elementType, TypeSymbol storageType)
+        : base(string.Empty)
+    {
+        OwnershipKind = ownershipKind;
+        ElementType = elementType;
+        StorageType = storageType;
+    }
+
+    public string OwnershipKind { get; }
+    public TypeSymbol ElementType { get; }
+    public TypeSymbol StorageType { get; }
+    public FunctionSymbol? DropFunction { get; internal set; }
+
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
+        $"{OwnershipKind}<{ElementType.ToDisplayString(format)}>";
+}
+
+public sealed class UniqueTypeSymbol : OwnershipTypeSymbol
+{
+    internal UniqueTypeSymbol(TypeSymbol elementType, TypeSymbol storageType)
+        : base("unique", elementType, storageType) { }
+}
+
+public sealed class SharedTypeSymbol : OwnershipTypeSymbol
+{
+    internal SharedTypeSymbol(TypeSymbol elementType, TypeSymbol storageType)
+        : base("shared", elementType, storageType) { }
+}
+
+public sealed class WeakTypeSymbol : OwnershipTypeSymbol
+{
+    internal WeakTypeSymbol(TypeSymbol elementType, TypeSymbol storageType)
+        : base("weak", elementType, storageType) { }
 }
 
 public sealed class ErrorTypeSymbol : TypeSymbol

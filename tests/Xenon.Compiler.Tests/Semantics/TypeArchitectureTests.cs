@@ -107,6 +107,9 @@ public sealed class TypeArchitectureTests
         Assert.Same(factory.PointerTo(type), factory.PointerTo(type));
         Assert.Same(factory.ReferenceTo(type, true), factory.ReferenceTo(type, true));
         Assert.Same(factory.ArrayOf(type, 3), factory.ArrayOf(type, 3));
+        Assert.Same(factory.UniqueOf(type), factory.UniqueOf(type));
+        Assert.Same(factory.SharedOf(type), factory.SharedOf(type));
+        Assert.Same(factory.WeakOf(type), factory.WeakOf(type));
         Assert.NotSame(factory.PointerTo(type), factory.PointerTo(type, true));
         var other = new TypeFactory();
         TypeSymbol foreign = other.ReferenceTo(other.ArrayOf(other.PointerTo(type, true), 3));
@@ -114,6 +117,14 @@ public sealed class TypeArchitectureTests
         Assert.NotSame(foreign, local);
         Assert.Same(local, factory.Intern(foreign));
         Assert.Same(local, factory.ReferenceTo(other.ArrayOf(other.PointerTo(type, true), 3)));
+        Assert.True(TypeIdentity.AreSame(factory.UniqueOf(type), other.UniqueOf(type)));
+        Assert.True(TypeIdentity.AreSame(factory.SharedOf(type), other.SharedOf(type)));
+        Assert.True(TypeIdentity.AreSame(factory.WeakOf(type), other.WeakOf(type)));
+        Assert.False(TypeIdentity.AreSame(factory.UniqueOf(type), factory.SharedOf(type)));
+        Assert.False(TypeIdentity.AreSame(factory.SharedOf(type), factory.WeakOf(type)));
+        Assert.Equal("unique<Example.S>", factory.UniqueOf(type).ToDisplayString(TypeDisplayFormat.FullyQualified));
+        Assert.Equal("shared<Example.S>", factory.SharedOf(type).ToDisplayString(TypeDisplayFormat.FullyQualified));
+        Assert.Equal("weak<Example.S>", factory.WeakOf(type).ToDisplayString(TypeDisplayFormat.FullyQualified));
         Assert.Throws<ArgumentOutOfRangeException>(() => factory.ArrayOf(type, 0));
         Assert.Throws<ArgumentNullException>(() => factory.PointerTo(null!));
     }

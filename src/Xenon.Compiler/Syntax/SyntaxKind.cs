@@ -113,6 +113,10 @@ public enum SyntaxKind
     BitCastKeyword,
     NewKeyword,
     FreeKeyword,
+    MoveKeyword,
+    UniqueKeyword,
+    SharedKeyword,
+    WeakKeyword,
 
     CompilationUnit,
     UsingDirective,
@@ -169,6 +173,7 @@ public enum SyntaxKind
     StackArrayCreationExpression,
     NewExpression,
     FreeExpression,
+    MoveExpression,
     ParenthesizedExpression,
     TypeLayoutExpression,
     CastExpression,

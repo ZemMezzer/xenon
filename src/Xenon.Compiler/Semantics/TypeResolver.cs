@@ -63,6 +63,41 @@ internal static class TypeResolver
             }
             case NamedTypeSyntax named:
             {
+                if (named.NameParts.Length == 1 && named.NameToken.Kind is
+                    SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword)
+                {
+                    string ownershipKind = named.NameToken.Text;
+                    if (named.TypeArguments is not { } ownershipArguments || ownershipArguments.Arguments.Length != 1)
+                    {
+                        diagnostics.Report(
+                            named.TypeArguments?.LessToken.Location ?? named.NameToken.Location,
+                            $"ownership type '{ownershipKind}' requires exactly one type argument",
+                            DiagnosticIds.GenericArityMismatch);
+                        return BuiltinTypes.Error;
+                    }
+
+                    TypeSymbol element = ResolveCore(ownershipArguments.Arguments[0], scope, diagnostics);
+                    if (TypeIdentity.AreSame(element, BuiltinTypes.Void) ||
+                        element is ReferenceTypeSymbol or PointerTypeSymbol or OwnershipTypeSymbol)
+                    {
+                        diagnostics.Report(
+                            ownershipArguments.Arguments[0].NameToken.Location,
+                            $"type '{element.ToDisplayString()}' cannot be owned by '{ownershipKind}'; ownership wrappers cannot directly wrap pointers, references, void, or another ownership wrapper",
+                            DiagnosticIds.InvalidUniqueTypeArgument);
+                        return BuiltinTypes.Error;
+                    }
+
+                    OwnershipTypeSymbol ownership = named.NameToken.Kind switch
+                    {
+                        SyntaxKind.UniqueKeyword => scope.TypeFactory.UniqueOf(element),
+                        SyntaxKind.SharedKeyword => scope.TypeFactory.SharedOf(element),
+                        SyntaxKind.WeakKeyword => scope.TypeFactory.WeakOf(element),
+                        _ => throw new InvalidOperationException(),
+                    };
+                    scope.TypeFactory.EnsureOwnershipDropFunction(ownership, scope.GlobalNamespace, named);
+                    return ownership;
+                }
+
                 TypeSymbol? type = named.NameParts.Length == 1
                     ? BuiltinTypes.FromSyntaxKind(named.NameToken.Kind) ?? scope.ResolveType(named.Name, named.NameToken.Location, diagnostics)
                     : scope.ResolveQualifiedType(named.NameParts.Select(part => part.Text).ToArray());

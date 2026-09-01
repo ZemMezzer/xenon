@@ -166,5 +166,18 @@ public static class DiagnosticIds
     public const string WrongArity = "XE2211";
     public const string NoMatchingCandidate = "XE2212";
     public const string AmbiguousCall = "XE2213";
+    public const string InvalidMoveSource = "XE2214";
+    public const string UseAfterMove = "XE2215";
+    public const string SelfMove = "XE2216";
+    public const string MoveAcrossLoopBackedge = "XE2217";
+    public const string PartiallyMovedUse = "XE2218";
+    public const string PartialMoveWithDestructor = "XE2219";
+    public const string ValueNotCopyable = "XE2220";
+    public const string InvalidUniqueTypeArgument = "XE2221";
+    public const string UnsupportedNativeOwnershipType = "XE2222";
+    public const string UniqueRequiresFreshAllocation = "XE2223";
+    public const string SharedRequiresFreshAllocation = "XE2224";
+    public const string WeakRequiresSharedOwner = "XE2225";
+    public const string WeakDirectAccess = "XE2226";
     public const string RecursiveValueLayout = "XE2600";
 }

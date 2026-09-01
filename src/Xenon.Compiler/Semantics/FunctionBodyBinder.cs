@@ -19,32 +19,75 @@ internal sealed class FunctionBodyBinder
     private readonly GenericFunctionSpecializer? _genericSpecializer;
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
     internal IReadOnlyDictionary<BoundExpression, TextLocation> ExpressionLocations => _expressionLocations;
-    private readonly HashSet<LocalVariableSymbol> _definitelyAssigned = [];
+    private readonly HashSet<VariableSymbol> _definitelyAssigned = [];
+    private readonly HashSet<MovePlace> _movedPlaces = [];
     private BoundScope _scope = new(null);
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _localScopes = [];
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _stackArrayScopes = [];
     private int _loopDepth;
+    private readonly Stack<(HashSet<VariableSymbol> Entry, Dictionary<MovePlace, TextLocation> Sites)> _loopMoveContexts = [];
     private int _switchDepth;
-    private readonly Stack<(int LoopDepth, List<HashSet<LocalVariableSymbol>> Exits, List<Dictionary<LocalVariableSymbol, ArrayState>> ArrayExits)> _switchExits = [];
+    private readonly Stack<(int LoopDepth, List<HashSet<VariableSymbol>> Exits, List<HashSet<MovePlace>> MovedExits, List<Dictionary<LocalVariableSymbol, ArrayState>> ArrayExits)> _switchExits = [];
     private bool _bindingBaseConstructorArguments;
     private bool _suppressIntegerOperationDiagnostics;
     private readonly Dictionary<FieldSymbol, LocalVariableSymbol> _requiredFields = [];
     private ExpressionSyntax? _initializationTarget;
     private ExpressionSyntax? _fieldReceiverSyntax;
-    private sealed record ExpressionFlow(HashSet<LocalVariableSymbol> Assigned, Dictionary<LocalVariableSymbol, ArrayState> Arrays);
+    private int _memberAccessBindingDepth;
+    private sealed class MovePlace(
+        object root,
+        TypeSymbol rootType,
+        string rootName,
+        ImmutableArray<FieldSymbol> fields) : IEquatable<MovePlace>
+    {
+        public MovePlace(VariableSymbol root, ImmutableArray<FieldSymbol> fields)
+            : this(root, root.Type, root.Name, fields) { }
+
+        public object Root { get; } = root;
+        public VariableSymbol? RootVariable => Root as VariableSymbol;
+        public TypeSymbol RootType { get; } = rootType;
+        public string RootName { get; } = rootName;
+        public ImmutableArray<FieldSymbol> Fields { get; } = fields;
+        public string DisplayName => Fields.IsEmpty
+            ? RootName
+            : $"{RootName}.{string.Join('.', Fields.Select(projectedField => projectedField.Name))}";
+
+        public bool Equals(MovePlace? other) =>
+            other is not null &&
+            ReferenceEquals(Root, other.Root) &&
+            Fields.Length == other.Fields.Length &&
+            Fields.SequenceEqual(other.Fields);
+
+        public override bool Equals(object? obj) => obj is MovePlace other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            HashCode hash = new();
+            hash.Add(Root);
+            foreach (FieldSymbol field in Fields) hash.Add(field);
+            return hash.ToHashCode();
+        }
+    }
+    private sealed record ExpressionFlow(
+        HashSet<VariableSymbol> Assigned,
+        HashSet<MovePlace> Moved,
+        Dictionary<LocalVariableSymbol, ArrayState> Arrays);
     private readonly Dictionary<BoundExpression, (ExpressionFlow? True, ExpressionFlow? False)> _booleanFlows = new(ReferenceEqualityComparer.Instance);
 
-    private ExpressionFlow CaptureExpressionFlow() => new(CloneDefinitelyAssigned(), CloneArrayState());
+    private ExpressionFlow CaptureExpressionFlow() => new(CloneDefinitelyAssigned(), CloneMovedPlaces(), CloneArrayState());
     private void RestoreExpressionFlow(ExpressionFlow flow)
     {
         RestoreDefinitelyAssigned(flow.Assigned);
+        RestoreMovedPlaces(flow.Moved);
         RestoreArrayState(flow.Arrays);
     }
     private static ExpressionFlow? MergeExpressionFlow(ExpressionFlow? a, ExpressionFlow? b)
     {
         if (a is null) return b;
         if (b is null) return a;
-        return new(a.Assigned.Intersect(b.Assigned).ToHashSet(), MergeArrayState(a.Arrays, b.Arrays));
+        HashSet<VariableSymbol> assigned = a.Assigned.Intersect(b.Assigned).ToHashSet();
+        HashSet<MovePlace> moved = a.Moved.Union(b.Moved).ToHashSet();
+        return new(assigned, moved, MergeArrayState(a.Arrays, b.Arrays));
     }
     private (ExpressionFlow? True, ExpressionFlow? False) BooleanFlow(BoundExpression expression)
     {
@@ -84,12 +127,18 @@ internal sealed class FunctionBodyBinder
         foreach (ParameterSymbol parameter in function.Parameters)
         {
             _scope.TryDeclare(parameter);
+            _definitelyAssigned.Add(parameter);
+            if (TypeFacts.GetDropFunction(parameter.Type) is not null)
+                _function.HasScalarCleanup = true;
         }
     }
 
     public BoundBlockStatement BindBody(BlockStatementSyntax body)
     {
         _cancellationToken.ThrowIfCancellationRequested();
+        foreach (ParameterSymbol parameter in _function.Parameters)
+            if (TypeFacts.GetDropFunction(parameter.Type) is { } drop)
+                ValidateDestructorAccess(drop, body.OpenBraceToken.Location);
         if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingType is StructTypeSymbol owner)
         {
             foreach (FieldSymbol field in owner.Fields.Where(field => field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type)))
@@ -197,11 +246,12 @@ internal sealed class FunctionBodyBinder
             statements.AddRange(boundBody.Statements);
             boundBody = new BoundBlockStatement(statements.ToImmutable());
         }
-        else if (_function.FunctionKind == FunctionKind.Destructor && _function.ContainingStruct?.BaseType?.FindDestructor() is FunctionSymbol baseDestructor)
+        else if (_function.FunctionKind == FunctionKind.Destructor && _function.ContainingStruct is StructTypeSymbol destructedType)
         {
-            ValidateDestructorAccess(baseDestructor, body.OpenBraceToken.Location);
-            // Runs after local cleanup on both fallthrough and explicit returns.
-            boundBody = boundBody with { ExitCleanup = new BoundBaseLifecycleCallExpression(baseDestructor, []) };
+            ValidateDestructorAccess(destructedType.BaseType?.DropFunction, body.OpenBraceToken.Location);
+            // Runs after local cleanup on both fallthrough and explicit returns:
+            // own fields in reverse declaration order, then the complete base drop.
+            boundBody = boundBody with { ExitCleanup = new BoundDropFieldsExpression(destructedType) };
         }
 
         if (!TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void) && !AlwaysReturns(boundBody))
@@ -221,7 +271,7 @@ internal sealed class FunctionBodyBinder
         if (syntax is null)
             return null;
 
-        BoundExpression initializer = ContextualizeConversion(BindExpression(syntax), field.Type);
+        BoundExpression initializer = ContextualizeConversion(BindExpression(syntax), field.Type, GetLocation(syntax));
         SetConvertedType(syntax, initializer.Type);
         if (!TypeFacts.CanAssign(field.Type, initializer.Type))
             ReportCannotConvert(GetLocation(syntax), initializer.Type, field.Type);
@@ -246,7 +296,10 @@ internal sealed class FunctionBodyBinder
 
             var target = new BoundMemberAccessExpression(receiver, field, IsPointerAccess: true);
             statements.Add(new BoundExpressionStatement(
-                new BoundAssignmentExpression(target, SyntaxKind.EqualsToken, initializer)));
+                new BoundAssignmentExpression(target, SyntaxKind.EqualsToken, initializer)
+                {
+                    IsInitialization = true,
+                }));
         }
 
         return statements.ToImmutable();
@@ -309,42 +362,51 @@ internal sealed class FunctionBodyBinder
     private BoundIfStatement BindIfStatement(IfStatementSyntax syntax)
     {
         BoundExpression condition = BindBooleanCondition(syntax.Condition);
-        HashSet<LocalVariableSymbol> afterCondition = CloneDefinitelyAssigned();
+        HashSet<VariableSymbol> afterCondition = CloneDefinitelyAssigned();
+        HashSet<MovePlace> movedAfterCondition = CloneMovedPlaces();
         var arraysAfterCondition = CloneArrayState();
         var conditionFlow = BooleanFlow(condition);
         if (conditionFlow.True is { } whenTrue) RestoreExpressionFlow(whenTrue);
         BoundStatement thenStatement = BindEmbeddedStatement(syntax.ThenStatement);
-        HashSet<LocalVariableSymbol> afterThen = CloneDefinitelyAssigned();
+        HashSet<VariableSymbol> afterThen = CloneDefinitelyAssigned();
+        HashSet<MovePlace> movedAfterThen = CloneMovedPlaces();
         var arraysAfterThen = CloneArrayState();
 
         RestoreDefinitelyAssigned(afterCondition);
+        RestoreMovedPlaces(movedAfterCondition);
         RestoreArrayState(arraysAfterCondition);
         if (conditionFlow.False is { } whenFalse) RestoreExpressionFlow(whenFalse);
         BoundStatement? elseStatement = syntax.ElseStatement is null
             ? null
             : BindEmbeddedStatement(syntax.ElseStatement);
-        HashSet<LocalVariableSymbol> afterElse = CloneDefinitelyAssigned();
+        HashSet<VariableSymbol> afterElse = CloneDefinitelyAssigned();
+        HashSet<MovePlace> movedAfterElse = CloneMovedPlaces();
         var arraysAfterElse = CloneArrayState();
 
         if (conditionFlow.True is null || conditionFlow.False is null)
         {
             RestoreDefinitelyAssigned(conditionFlow.False is null ? afterThen : afterElse);
+            RestoreMovedPlaces(conditionFlow.False is null ? movedAfterThen : movedAfterElse);
             RestoreArrayState(conditionFlow.False is null ? arraysAfterThen : arraysAfterElse);
         }
         else if (AlwaysReturns(thenStatement) && (elseStatement is null || !AlwaysReturns(elseStatement)))
         {
             RestoreDefinitelyAssigned(afterElse);
+            RestoreMovedPlaces(movedAfterElse);
             RestoreArrayState(arraysAfterElse);
         }
         else if (elseStatement is not null && AlwaysReturns(elseStatement) && !AlwaysReturns(thenStatement))
         {
             RestoreDefinitelyAssigned(afterThen);
+            RestoreMovedPlaces(movedAfterThen);
             RestoreArrayState(arraysAfterThen);
         }
         else
         {
             afterThen.IntersectWith(afterElse);
             RestoreDefinitelyAssigned(afterThen);
+            movedAfterThen.UnionWith(movedAfterElse);
+            RestoreMovedPlaces(movedAfterThen);
             RestoreArrayState(MergeArrayState(arraysAfterThen, arraysAfterElse));
         }
 
@@ -354,12 +416,21 @@ internal sealed class FunctionBodyBinder
     private BoundWhileStatement BindWhileStatement(WhileStatementSyntax syntax)
     {
         BoundExpression condition = BindBooleanCondition(syntax.Condition);
-        HashSet<LocalVariableSymbol> afterCondition = CloneDefinitelyAssigned();
+        HashSet<VariableSymbol> afterCondition = CloneDefinitelyAssigned();
+        HashSet<MovePlace> movedAfterCondition = CloneMovedPlaces();
         var arraysAfterCondition = CloneArrayState();
+        _loopMoveContexts.Push((new(afterCondition), []));
         _loopDepth++;
         BoundStatement body = BindEmbeddedStatement(syntax.Body);
         _loopDepth--;
+        var moveContext = _loopMoveContexts.Pop();
+        ValidateLoopMoves(moveContext, body);
+        HashSet<VariableSymbol> afterBody = CloneDefinitelyAssigned();
+        HashSet<MovePlace> movedAfterBody = CloneMovedPlaces();
+        afterCondition.IntersectWith(afterBody);
+        movedAfterCondition.UnionWith(movedAfterBody);
         RestoreDefinitelyAssigned(afterCondition);
+        RestoreMovedPlaces(movedAfterCondition);
         RestoreArrayState(MergeArrayState(arraysAfterCondition, CloneArrayState()));
         return new BoundWhileStatement(condition, body);
     }
@@ -371,18 +442,26 @@ internal sealed class FunctionBodyBinder
 
         BoundStatement? initializer = syntax.Initializer is null ? null : BindStatement(syntax.Initializer);
         BoundExpression? condition = syntax.Condition is null ? null : BindBooleanCondition(syntax.Condition);
-        HashSet<LocalVariableSymbol> afterCondition = CloneDefinitelyAssigned();
+        HashSet<VariableSymbol> afterCondition = CloneDefinitelyAssigned();
+        HashSet<MovePlace> movedAfterCondition = CloneMovedPlaces();
         var arraysAfterCondition = CloneArrayState();
 
+        _loopMoveContexts.Push((new(afterCondition), []));
         _loopDepth++;
         BoundStatement body = BindEmbeddedStatement(syntax.Body);
-        RestoreDefinitelyAssigned(afterCondition);
-        RestoreArrayState(MergeArrayState(arraysAfterCondition, CloneArrayState()));
         BoundExpression? increment = syntax.Increment is null ? null : BindExpression(syntax.Increment);
         _loopDepth--;
+        var moveContext = _loopMoveContexts.Pop();
+        ValidateLoopMoves(moveContext, body);
 
+        HashSet<VariableSymbol> afterIteration = CloneDefinitelyAssigned();
+        HashSet<MovePlace> movedAfterIteration = CloneMovedPlaces();
+        var arraysAfterIteration = CloneArrayState();
+        afterCondition.IntersectWith(afterIteration);
+        movedAfterCondition.UnionWith(movedAfterIteration);
         RestoreDefinitelyAssigned(afterCondition);
-        RestoreArrayState(MergeArrayState(arraysAfterCondition, CloneArrayState()));
+        RestoreMovedPlaces(movedAfterCondition);
+        RestoreArrayState(MergeArrayState(arraysAfterCondition, arraysAfterIteration));
         (int forEnd, bool includeForEnd) = GetStatementEnd(syntax.Body);
         RecordScope(
             syntax.ForKeyword.Location.Source,
@@ -403,17 +482,20 @@ internal sealed class FunctionBodyBinder
         var values = new HashSet<System.Numerics.BigInteger>();
         bool hasDefault = false;
         var sections = ImmutableArray.CreateBuilder<BoundSwitchSection>();
-        var assignedBefore = new HashSet<LocalVariableSymbol>(_definitelyAssigned);
-        var exits = new List<HashSet<LocalVariableSymbol>>();
+        var assignedBefore = new HashSet<VariableSymbol>(_definitelyAssigned);
+        var movedBefore = CloneMovedPlaces();
+        var exits = new List<HashSet<VariableSymbol>>();
+        var movedExits = new List<HashSet<MovePlace>>();
         var arraysBefore = CloneArrayState();
         var arrayExits = new List<Dictionary<LocalVariableSymbol, ArrayState>>();
-        _switchExits.Push((_loopDepth, exits, arrayExits));
+        _switchExits.Push((_loopDepth, exits, movedExits, arrayExits));
         _switchDepth++;
         for (int sectionIndex = 0; sectionIndex < syntax.Sections.Length; sectionIndex++)
         {
             SwitchSectionSyntax section = syntax.Sections[sectionIndex];
             _definitelyAssigned.Clear();
             _definitelyAssigned.UnionWith(assignedBefore);
+            RestoreMovedPlaces(movedBefore);
             RestoreArrayState(arraysBefore);
             BoundExpression? value = null;
             if (section.Value is null)
@@ -473,15 +555,20 @@ internal sealed class FunctionBodyBinder
         if (!hasDefault)
         {
             exits.Add(assignedBefore);
+            movedExits.Add(movedBefore);
             arrayExits.Add(arraysBefore);
         }
         if (exits.Count > 0)
         {
-            assignedBefore = new HashSet<LocalVariableSymbol>(exits[0]);
+            assignedBefore = new HashSet<VariableSymbol>(exits[0]);
             foreach (var exit in exits.Skip(1)) assignedBefore.IntersectWith(exit);
         }
         _definitelyAssigned.Clear();
         _definitelyAssigned.UnionWith(assignedBefore);
+        HashSet<MovePlace> movedAfter = movedExits.Count == 0
+            ? movedBefore
+            : movedExits.SelectMany(state => state).ToHashSet();
+        RestoreMovedPlaces(movedAfter);
         RestoreArrayState(arrayExits.Count == 0 ? arraysBefore : arrayExits.Aggregate(MergeArrayState));
         if (sections.Count > 0 && sections[^1].Body.Statements.IsEmpty)
             _diagnostics.Report(syntax.Sections[^1].Label.Location, "final case requires an explicitly terminated body",
@@ -495,7 +582,8 @@ internal sealed class FunctionBodyBinder
     {
         if (_switchExits.TryPeek(out var context) && context.LoopDepth == _loopDepth)
         {
-            context.Exits.Add(new HashSet<LocalVariableSymbol>(_definitelyAssigned));
+            context.Exits.Add(new HashSet<VariableSymbol>(_definitelyAssigned));
+            context.MovedExits.Add(CloneMovedPlaces());
             context.ArrayExits.Add(CloneArrayState());
         }
         if (_loopDepth == 0 && _switchDepth == 0)
@@ -559,7 +647,7 @@ internal sealed class FunctionBodyBinder
 
         var variable = new LocalVariableSymbol(syntax.IdentifierToken.Text, type, _function, isConstant || syntax.Type.IsBindingReadonly(), syntax);
         _semanticInfo.Declarations[syntax] = variable;
-        if (type is StructTypeSymbol structure && structure.FindDestructor() is { } destructor)
+        if (TypeFacts.GetDropFunction(type) is { } destructor)
         {
             variable.Destructor = destructor;
             _function.HasScalarCleanup = true;
@@ -590,7 +678,7 @@ internal sealed class FunctionBodyBinder
         }
         if (initializer is not null)
         {
-            initializer = ContextualizeConversion(initializer, type);
+            initializer = ContextualizeConversion(initializer, type, GetLocation(syntax.Initializer!));
             SetConvertedType(syntax.Initializer!, initializer.Type);
         }
 
@@ -634,7 +722,7 @@ internal sealed class FunctionBodyBinder
         BoundExpression? expression = syntax.Expression is null ? null : BindExpression(syntax.Expression);
         if (expression is not null)
         {
-            expression = ContextualizeConversion(expression, _function.ReturnType);
+            expression = ContextualizeConversion(expression, _function.ReturnType, GetLocation(syntax.Expression!));
             SetConvertedType(syntax.Expression!, expression.Type);
         }
 
@@ -669,28 +757,45 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindExpression(ExpressionSyntax syntax)
     {
         _cancellationToken.ThrowIfCancellationRequested();
-        BoundExpression expression = syntax switch
+        bool validatePlaceUse = syntax switch
         {
-            MissingExpressionSyntax => new BoundErrorExpression(),
-            LiteralExpressionSyntax literal => BindLiteralExpression(literal),
-            NameExpressionSyntax name => BindNameExpression(name),
-            ThisExpressionSyntax @this => BindThisExpression(@this),
-            ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
-            UnaryExpressionSyntax unary => BindUnaryExpression(unary),
-            PostfixUnaryExpressionSyntax postfix => BindPostfixUnaryExpression(postfix),
-            BinaryExpressionSyntax binary => BindBinaryExpression(binary),
-            AssignmentExpressionSyntax assignment => BindAssignmentExpression(assignment),
-            CallExpressionSyntax call => BindCallExpression(call),
-            MemberAccessExpressionSyntax member => BindMemberAccessExpression(member),
-            IndexExpressionSyntax index => BindIndexExpression(index),
-            StructPositionalConstructionExpressionSyntax construction => BindStructPositionalConstructionExpression(construction),
-            StackArrayCreationExpressionSyntax stackArray => BindStackArrayCreationExpression(stackArray),
-            NewExpressionSyntax @new => BindNewExpression(@new),
-            FreeExpressionSyntax free => BindFreeExpression(free),
-            TypeLayoutExpressionSyntax layout => BindTypeLayoutExpression(layout),
-            CastExpressionSyntax cast => BindCastExpression(cast),
-            _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
+            NameExpressionSyntax => _memberAccessBindingDepth == 0,
+            MemberAccessExpressionSyntax => _memberAccessBindingDepth == 0,
+            _ => false,
         };
+        bool isMemberAccess = syntax is MemberAccessExpressionSyntax;
+        if (isMemberAccess) _memberAccessBindingDepth++;
+        BoundExpression expression;
+        try
+        {
+            expression = syntax switch
+            {
+                MissingExpressionSyntax => new BoundErrorExpression(),
+                LiteralExpressionSyntax literal => BindLiteralExpression(literal),
+                NameExpressionSyntax name => BindNameExpression(name),
+                ThisExpressionSyntax @this => BindThisExpression(@this),
+                ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
+                MoveExpressionSyntax move => BindMoveExpression(move),
+                UnaryExpressionSyntax unary => BindUnaryExpression(unary),
+                PostfixUnaryExpressionSyntax postfix => BindPostfixUnaryExpression(postfix),
+                BinaryExpressionSyntax binary => BindBinaryExpression(binary),
+                AssignmentExpressionSyntax assignment => BindAssignmentExpression(assignment),
+                CallExpressionSyntax call => BindCallExpression(call),
+                MemberAccessExpressionSyntax member => BindMemberAccessExpression(member),
+                IndexExpressionSyntax index => BindIndexExpression(index),
+                StructPositionalConstructionExpressionSyntax construction => BindStructPositionalConstructionExpression(construction),
+                StackArrayCreationExpressionSyntax stackArray => BindStackArrayCreationExpression(stackArray),
+                NewExpressionSyntax @new => BindNewExpression(@new),
+                FreeExpressionSyntax free => BindFreeExpression(free),
+                TypeLayoutExpressionSyntax layout => BindTypeLayoutExpression(layout),
+                CastExpressionSyntax cast => BindCastExpression(cast),
+                _ => throw new InvalidOperationException($"Unexpected expression syntax '{syntax.Kind}'."),
+            };
+        }
+        finally
+        {
+            if (isMemberAccess) _memberAccessBindingDepth--;
+        }
         _semanticInfo.Types[syntax] = new TypeInfo(expression.Type, expression.Type);
         if (GetReferencedSymbol(expression) is { } referenced)
         {
@@ -713,10 +818,12 @@ internal sealed class FunctionBodyBinder
         _expressionLocations[expression] = GetLocation(syntax);
         if (expression is BoundThisExpression && !ReferenceEquals(syntax, _fieldReceiverSyntax))
             ValidateRequiredFields(GetLocation(syntax));
-        if (!ReferenceEquals(syntax, _initializationTarget) && expression is BoundMemberAccessExpression { Receiver: BoundThisExpression } fieldRead &&
+        if (!IsInitializationTargetSyntax(syntax) && expression is BoundMemberAccessExpression { Receiver: BoundThisExpression } fieldRead &&
             _requiredFields.TryGetValue(fieldRead.Field, out var required) && !_definitelyAssigned.Contains(required))
             _diagnostics.Report(GetLocation(syntax), $"field '{fieldRead.Field.Name}' is used before it is initialized",
                 DiagnosticIds.DefiniteAssignment);
+        if (validatePlaceUse && !IsInitializationTargetSyntax(syntax) && TryGetMovePlace(expression, out MovePlace place))
+            ValidateMovedPlaceUse(place, GetLocation(syntax));
         BoundExpression result = DereferenceReference(expression);
         _expressionLocations[result] = GetLocation(syntax);
         _semanticInfo.Receivers[syntax] = new ReceiverInfo(
@@ -779,14 +886,17 @@ internal sealed class FunctionBodyBinder
         {
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(variable);
             if (variable is LocalVariableSymbol { ConstantValue: not null } localConstant) return localConstant.ConstantValue;
-            if (requireDefinitelyAssigned &&
-                variable is LocalVariableSymbol local &&
+            if (requireDefinitelyAssigned && variable is LocalVariableSymbol local &&
                 !_definitelyAssigned.Contains(local))
             {
-                _diagnostics.Report(
-                    syntax.IdentifierToken.Location,
-                    $"local variable '{local.Name}' is used before it is initialized",
-                    DiagnosticIds.DefiniteAssignment);
+                if (_movedPlaces.Contains(new MovePlace(local, [])))
+                    _diagnostics.Report(syntax.IdentifierToken.Location,
+                        $"cannot use '{local.Name}' because it has been moved",
+                        DiagnosticIds.UseAfterMove);
+                else
+                    _diagnostics.Report(syntax.IdentifierToken.Location,
+                        $"local variable '{local.Name}' is used before it is initialized",
+                        DiagnosticIds.DefiniteAssignment);
             }
 
             return new BoundVariableExpression(variable);
@@ -883,6 +993,115 @@ internal sealed class FunctionBodyBinder
         return BindUnaryExpression(syntax.OperatorToken, operand, isPostfix: false);
     }
 
+    private BoundExpression BindMoveExpression(MoveExpressionSyntax syntax)
+    {
+        BoundExpression source = BindExpression(syntax.Operand);
+        if (!TryGetMovePlace(source, out MovePlace place) ||
+            place.RootVariable is null && place.Fields.IsEmpty ||
+            source.Type is ReferenceTypeSymbol ||
+            source.Type is ArrayTypeSymbol ||
+            !IsWritable(source))
+        {
+            if (!TypeIdentity.AreSame(source.Type, BuiltinTypes.Error))
+                _diagnostics.Report(syntax.MoveKeyword.Location,
+                    "'move' requires a writable local storage location",
+                    DiagnosticIds.InvalidMoveSource);
+            return new BoundErrorExpression();
+        }
+
+        if (place.RootVariable is { } rootVariable && !_definitelyAssigned.Contains(rootVariable) ||
+            TryFindMoveConflict(place, out _))
+            return new BoundErrorExpression();
+
+        if (FindPartialMoveDestructorOwner(place) is StructTypeSymbol destructorOwner)
+        {
+            _diagnostics.Report(syntax.MoveKeyword.Location,
+                $"cannot partially move '{place.DisplayName}' because '{destructorOwner.Name}' has a user-defined destructor; move the entire '{destructorOwner.Name}' value instead",
+                DiagnosticIds.PartialMoveWithDestructor);
+            return new BoundErrorExpression();
+        }
+
+        if (place.Fields.IsEmpty && place.RootVariable is { } movedVariable)
+            _definitelyAssigned.Remove(movedVariable);
+        _movedPlaces.Add(place);
+        if (_loopMoveContexts.TryPeek(out var context))
+            context.Sites.TryAdd(place, syntax.MoveKeyword.Location);
+        return new BoundMoveExpression(source);
+    }
+
+    private bool TryGetMovePlace(BoundExpression expression, out MovePlace place)
+    {
+        if (expression is BoundVariableExpression variable &&
+            variable.Variable is LocalVariableSymbol or ParameterSymbol)
+        {
+            place = new MovePlace(variable.Variable, []);
+            return true;
+        }
+        if (expression is BoundThisExpression @this)
+        {
+            place = new MovePlace(_function, @this.ContainingType, "this", []);
+            return true;
+        }
+        if (expression is BoundMemberAccessExpression member &&
+            (!member.IsPointerAccess || member.Receiver is BoundThisExpression) &&
+            TryGetMovePlace(member.Receiver, out MovePlace receiverPlace))
+        {
+            place = new MovePlace(receiverPlace.Root, receiverPlace.RootType, receiverPlace.RootName,
+                receiverPlace.Fields.Add(member.Field));
+            return true;
+        }
+        place = null!;
+        return false;
+    }
+
+    private static bool IsPlacePrefixOf(MovePlace prefix, MovePlace place)
+    {
+        if (!ReferenceEquals(prefix.Root, place.Root) || prefix.Fields.Length > place.Fields.Length) return false;
+        for (int i = 0; i < prefix.Fields.Length; i++)
+            if (!ReferenceEquals(prefix.Fields[i], place.Fields[i])) return false;
+        return true;
+    }
+
+    private bool TryFindMoveConflict(MovePlace place, out MovePlace? moved)
+    {
+        moved = _movedPlaces.FirstOrDefault(candidate =>
+            IsPlacePrefixOf(candidate, place) || IsPlacePrefixOf(place, candidate));
+        return moved is not null;
+    }
+
+    private void ValidateMovedPlaceUse(MovePlace place, TextLocation location)
+    {
+        MovePlace? movedAncestor = _movedPlaces.FirstOrDefault(candidate => IsPlacePrefixOf(candidate, place));
+        if (movedAncestor is not null)
+        {
+            // A whole-local move is already diagnosed while binding the root name.
+            if (!movedAncestor.Fields.IsEmpty)
+                _diagnostics.Report(location,
+                    $"cannot use '{place.DisplayName}' because '{movedAncestor.DisplayName}' has been moved",
+                    DiagnosticIds.UseAfterMove);
+            return;
+        }
+
+        MovePlace? movedDescendant = _movedPlaces.FirstOrDefault(candidate => IsPlacePrefixOf(place, candidate));
+        if (movedDescendant is not null)
+            _diagnostics.Report(location,
+                $"cannot use '{place.DisplayName}' as a complete value because field '{movedDescendant.DisplayName}' has been moved",
+                DiagnosticIds.PartiallyMovedUse);
+    }
+
+    private static StructTypeSymbol? FindPartialMoveDestructorOwner(MovePlace place)
+    {
+        if (place.Fields.IsEmpty) return null;
+        TypeSymbol containingType = place.RootType;
+        foreach (FieldSymbol field in place.Fields)
+        {
+            if (containingType is StructTypeSymbol aggregate && aggregate.FindDestructor() is not null)
+                return aggregate;
+            containingType = field.Type;
+        }
+        return null;
+    }
+
     private BoundExpression BindPostfixUnaryExpression(PostfixUnaryExpressionSyntax syntax)
     {
         BoundExpression operand = BindExpression(syntax.Operand);
@@ -954,11 +1173,11 @@ internal sealed class FunctionBodyBinder
 
         if (syntax.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken)
         {
-            if (left.Type is PointerTypeSymbol)
+            if (left.Type is PointerTypeSymbol or SharedTypeSymbol)
             {
                 right = ContextualizeNull(right, left.Type);
             }
-            else if (right.Type is PointerTypeSymbol)
+            else if (right.Type is PointerTypeSymbol or SharedTypeSymbol)
             {
                 left = ContextualizeNull(left, right.Type);
             }
@@ -1018,11 +1237,18 @@ internal sealed class FunctionBodyBinder
     {
         bool isSimpleAssignment = syntax.OperatorToken.Kind == SyntaxKind.EqualsToken;
         ExpressionFlow beforeTarget = CaptureExpressionFlow();
-        BoundExpression? indexerAssignment = TryBindIndexerAssignment(syntax, isSimpleAssignment);
+        ExpressionSyntax? speculativePreviousTarget = _initializationTarget;
+        _initializationTarget = isSimpleAssignment ? syntax.Target : null;
+        BoundExpression? indexerAssignment;
+        try { indexerAssignment = TryBindIndexerAssignment(syntax, isSimpleAssignment); }
+        finally { _initializationTarget = speculativePreviousTarget; }
         if (indexerAssignment is not null)
             return indexerAssignment;
         RestoreExpressionFlow(beforeTarget);
-        BoundExpression? propertyAssignment = TryBindPropertyAssignment(syntax, isSimpleAssignment);
+        _initializationTarget = isSimpleAssignment ? syntax.Target : null;
+        BoundExpression? propertyAssignment;
+        try { propertyAssignment = TryBindPropertyAssignment(syntax, isSimpleAssignment); }
+        finally { _initializationTarget = speculativePreviousTarget; }
         if (propertyAssignment is not null)
             return propertyAssignment;
         RestoreExpressionFlow(beforeTarget);
@@ -1041,10 +1267,15 @@ internal sealed class FunctionBodyBinder
         bool initializesField = isSimpleAssignment && rawTarget is BoundMemberAccessExpression { Receiver: BoundThisExpression } fieldTarget &&
             _function.FunctionKind == FunctionKind.Constructor && TypeIdentity.AreSame(fieldTarget.Field.ContainingType, _function.ContainingType);
         target = initializesField ? rawTarget : DereferenceReference(target);
+        MovePlace? assignedPlace = isSimpleAssignment && TryGetMovePlace(target, out MovePlace targetPlace)
+            ? targetPlace
+            : null;
+        bool assignmentIsInsideMovedPlace = assignedPlace is not null && _movedPlaces.Any(moved =>
+            moved.Fields.Length < assignedPlace.Fields.Length && IsPlacePrefixOf(moved, assignedPlace));
         BoundExpression expression = BindExpression(syntax.Expression);
         if (isSimpleAssignment)
         {
-            expression = ContextualizeConversion(expression, target.Type);
+            expression = ContextualizeConversion(expression, target.Type, GetLocation(syntax.Expression));
             SetConvertedType(syntax.Expression, expression.Type);
         }
 
@@ -1094,24 +1325,86 @@ internal sealed class FunctionBodyBinder
             }
         }
 
-        if (isSimpleAssignment && target is BoundVariableExpression { Variable: LocalVariableSymbol assignedLocal })
+        if (isSimpleAssignment && assignedPlace is not null)
         {
-            ValidateDestructorAccess(assignedLocal.Destructor, syntax.OperatorToken.Location);
-            _definitelyAssigned.Add(assignedLocal);
+            if (expression is BoundMoveExpression move &&
+                TryGetMovePlace(move.Source, out MovePlace sourcePlace) &&
+                sourcePlace.Equals(assignedPlace))
+                _diagnostics.Report(syntax.OperatorToken.Location,
+                    $"cannot move '{assignedPlace.DisplayName}' into itself",
+                    DiagnosticIds.SelfMove);
+            if (assignedPlace.Fields.IsEmpty)
+            {
+                ValidateDestructorAccess(assignedPlace.Root is LocalVariableSymbol local
+                    ? local.Destructor
+                    : (assignedPlace.RootType as StructTypeSymbol)?.DropFunction,
+                    syntax.OperatorToken.Location);
+                if (assignedPlace.RootVariable is { } assignedVariable)
+                    _definitelyAssigned.Add(assignedVariable);
+            }
+            if (!assignmentIsInsideMovedPlace)
+                _movedPlaces.RemoveWhere(moved => IsPlacePrefixOf(assignedPlace, moved));
         }
         if (initializesField && target is BoundMemberAccessExpression assignedField && _requiredFields.TryGetValue(assignedField.Field, out var requiredField))
             _definitelyAssigned.Add(requiredField);
 
-        return new BoundAssignmentExpression(target, syntax.OperatorToken.Kind, expression);
+        return new BoundAssignmentExpression(target, syntax.OperatorToken.Kind, expression)
+        {
+            IsInitialization = initializesField,
+        };
     }
 
-    private HashSet<LocalVariableSymbol> CloneDefinitelyAssigned() => [.. _definitelyAssigned];
+    private bool IsInitializationTargetSyntax(ExpressionSyntax syntax)
+    {
+        for (ExpressionSyntax? current = _initializationTarget; current is not null;)
+        {
+            if (ReferenceEquals(current, syntax)) return true;
+            current = current switch
+            {
+                MemberAccessExpressionSyntax member => member.Receiver,
+                ParenthesizedExpressionSyntax parenthesized => parenthesized.Expression,
+                _ => null,
+            };
+        }
+        return false;
+    }
 
-    private void RestoreDefinitelyAssigned(IEnumerable<LocalVariableSymbol> variables)
+    private HashSet<VariableSymbol> CloneDefinitelyAssigned() => [.. _definitelyAssigned];
+
+    private HashSet<MovePlace> CloneMovedPlaces() => [.. _movedPlaces];
+
+    private void RestoreDefinitelyAssigned(IEnumerable<VariableSymbol> variables)
     {
         _definitelyAssigned.Clear();
         _definitelyAssigned.UnionWith(variables);
     }
+
+    private void RestoreMovedPlaces(IEnumerable<MovePlace> places)
+    {
+        _movedPlaces.Clear();
+        _movedPlaces.UnionWith(places);
+    }
+
+    private void ValidateLoopMoves(
+        (HashSet<VariableSymbol> Entry, Dictionary<MovePlace, TextLocation> Sites) context,
+        BoundStatement body)
+    {
+        if (GuaranteesLoopExit(body)) return;
+        foreach (var (place, location) in context.Sites)
+            if ((place.RootVariable is null || context.Entry.Contains(place.RootVariable)) && _movedPlaces.Contains(place))
+                _diagnostics.Report(location,
+                    $"cannot move '{place.DisplayName}' across a loop back-edge because it may already be moved on the next iteration",
+                    DiagnosticIds.MoveAcrossLoopBackedge);
+    }
+
+    private static bool GuaranteesLoopExit(BoundStatement statement) => statement switch
+    {
+        BoundReturnStatement or BoundBreakStatement => true,
+        BoundIfStatement { ElseStatement: not null } conditional =>
+            GuaranteesLoopExit(conditional.ThenStatement) && GuaranteesLoopExit(conditional.ElseStatement),
+        BoundBlockStatement block => block.Statements.Any(GuaranteesLoopExit),
+        _ => false,
+    };
 
     private BoundExpression BindMemberAccessExpression(MemberAccessExpressionSyntax syntax)
     {
@@ -1191,7 +1484,16 @@ internal sealed class FunctionBodyBinder
         }
 
         BoundExpression receiver = BindFieldReceiver(syntax.Receiver);
-        if (receiver.Type is ArrayTypeSymbol array && syntax.OperatorToken.Kind == SyntaxKind.DotToken && syntax.MemberToken.Text is "Length" or "Rank")
+        ArrayTypeSymbol? receiverArray = receiver.Type as ArrayTypeSymbol ??
+            (receiver.Type as OwnershipTypeSymbol)?.ElementType as ArrayTypeSymbol;
+        if (receiver.Type is WeakTypeSymbol)
+        {
+            _diagnostics.Report(syntax.MemberToken.Location,
+                $"cannot access a value through '{receiver.Type.ToDisplayString()}' directly; call 'Lock()' and check the returned shared owner first",
+                DiagnosticIds.WeakDirectAccess);
+            return new BoundErrorExpression();
+        }
+        if (receiverArray is { } array && syntax.OperatorToken.Kind == SyntaxKind.DotToken && syntax.MemberToken.Text is "Length" or "Rank")
         {
             SyntheticMemberSymbol member = _semanticInfo.GetArrayMembers(array)
                 .Single(candidate => candidate.Name == syntax.MemberToken.Text);
@@ -1200,12 +1502,16 @@ internal sealed class FunctionBodyBinder
         }
         bool pointerAccess = syntax.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
         if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
+        {
+            ValidateProjectedReceiverMove(receiver, syntax.MemberToken.Location);
             return BindGenericMemberGet(syntax, receiver, genericParameter, pointerAccess);
+        }
         InterfaceTypeSymbol? interfaceType = pointerAccess
             ? (receiver.Type as PointerTypeSymbol)?.ElementType as InterfaceTypeSymbol
             : receiver.Type as InterfaceTypeSymbol;
         if (interfaceType is not null)
         {
+            ValidateProjectedReceiverMove(receiver, syntax.MemberToken.Location);
             InterfacePropertySymbol? interfaceProperty = interfaceType.FindProperty(syntax.MemberToken.Text);
             if (interfaceProperty is null)
             {
@@ -1232,7 +1538,13 @@ internal sealed class FunctionBodyBinder
         }
 
         DeclaredTypeSymbol? structType = pointerAccess
-            ? (receiver.Type as PointerTypeSymbol)?.ElementType as DeclaredTypeSymbol
+            ? receiver.Type switch
+            {
+                PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
+                UniqueTypeSymbol unique => unique.ElementType as DeclaredTypeSymbol,
+                SharedTypeSymbol shared => shared.ElementType as DeclaredTypeSymbol,
+                _ => null,
+            }
             : receiver.Type as DeclaredTypeSymbol;
 
         if (structType is null)
@@ -1307,8 +1619,11 @@ internal sealed class FunctionBodyBinder
             receiver = BindFieldReceiver(member.Receiver);
             pointerAccess = member.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
             if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
+            {
+                ValidateAssignmentReceiverMove(receiver, member.MemberToken.Location);
                 return TryBindGenericPropertyAssignment(syntax, member, receiver, genericParameter,
                     pointerAccess, isSimpleAssignment);
+            }
             InterfaceTypeSymbol? interfaceType = pointerAccess
                 ? (receiver.Type as PointerTypeSymbol)?.ElementType as InterfaceTypeSymbol
                 : receiver.Type as InterfaceTypeSymbol;
@@ -1317,6 +1632,7 @@ internal sealed class FunctionBodyBinder
                 InterfacePropertySymbol? interfaceProperty = interfaceType.FindProperty(member.MemberToken.Text);
                 if (interfaceProperty is null)
                     return null;
+                ValidateAssignmentReceiverMove(receiver, member.MemberToken.Location);
                 RecordSymbolAndType(syntax.Target, interfaceProperty, interfaceProperty.Type);
                 _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(interfaceProperty);
                 location = member.MemberToken.Location;
@@ -1371,10 +1687,17 @@ internal sealed class FunctionBodyBinder
             }
 
             DeclaredTypeSymbol? structType = pointerAccess
-                ? (receiver.Type as PointerTypeSymbol)?.ElementType as DeclaredTypeSymbol
+                ? receiver.Type switch
+                {
+                    PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
+                    UniqueTypeSymbol unique => unique.ElementType as DeclaredTypeSymbol,
+                    SharedTypeSymbol shared => shared.ElementType as DeclaredTypeSymbol,
+                    _ => null,
+                }
                 : receiver.Type as DeclaredTypeSymbol;
             if (structType is null || (property = structType.FindMember<PropertySymbol>(member.MemberToken.Text)) is null)
                 return null;
+            ValidateAssignmentReceiverMove(receiver, member.MemberToken.Location);
             RecordSymbolAndType(syntax.Target, property, property.Type);
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(property);
             location = member.MemberToken.Location;
@@ -1468,6 +1791,7 @@ internal sealed class FunctionBodyBinder
         bool receiverIsReadonly,
         TextLocation location)
     {
+        ValidateProjectedReceiverMove(receiver, location);
         if (receiver is BoundThisExpression) ValidateRequiredFields(location);
         if (!property.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, property.ContainingType))
             _diagnostics.Report(location, $"property '{property.Name}' is private in struct '{property.ContainingType.Name}'",
@@ -1486,6 +1810,18 @@ internal sealed class FunctionBodyBinder
         }
 
         return new BoundMethodCallExpression(receiver, getter, [], isPointerAccess);
+    }
+
+    private void ValidateProjectedReceiverMove(BoundExpression receiver, TextLocation location)
+    {
+        if (TryGetMovePlace(receiver, out MovePlace place))
+            ValidateMovedPlaceUse(place, location);
+    }
+
+    private void ValidateAssignmentReceiverMove(BoundExpression receiver, TextLocation location)
+    {
+        if (TryGetMovePlace(receiver, out MovePlace place))
+            ValidateMovedPlaceUse(place, location);
     }
 
     private BoundExpression BindTypeLayoutExpression(TypeLayoutExpressionSyntax syntax)
@@ -1594,7 +1930,10 @@ internal sealed class FunctionBodyBinder
             return new BoundInterfaceMethodCallExpression(receiver, interfaceType, getter, arguments, IsPointerAccess: false);
         }
 
-        int requiredRank = receiver.Type is ArrayTypeSymbol rankedArray ? rankedArray.Rank : 1;
+        ArrayTypeSymbol? ownedArray = receiver.Type is OwnershipTypeSymbol { ElementType: ArrayTypeSymbol ownershipArray }
+            and not WeakTypeSymbol ? ownershipArray
+            : null;
+        int requiredRank = receiver.Type is ArrayTypeSymbol rankedArray ? rankedArray.Rank : ownedArray?.Rank ?? 1;
         if (arguments.Length != requiredRank)
         {
             _diagnostics.Report(syntax.OpenBracketToken.Location, $"array or pointer indexing requires {requiredRank} index value(s)",
@@ -1614,6 +1953,8 @@ internal sealed class FunctionBodyBinder
         {
             ArrayTypeSymbol array => array.ElementType,
             PointerTypeSymbol pointer => pointer.ElementType,
+            UniqueTypeSymbol { ElementType: ArrayTypeSymbol array } => array.ElementType,
+            SharedTypeSymbol { ElementType: ArrayTypeSymbol array } => array.ElementType,
             _ => null,
         };
 
@@ -1865,8 +2206,7 @@ internal sealed class FunctionBodyBinder
         if (storage == ArrayStorageKind.Stack)
         {
             _function.HasStackArrays = true;
-            if (elementType is StructTypeSymbol structure)
-                ValidateDestructorAccess(structure.FindDestructor(), allocationLocation);
+            ValidateDestructorAccess(TypeFacts.GetDropFunction(elementType), allocationLocation);
             if (elementType is ArrayTypeSymbol)
                 _diagnostics.Report(elementLocation, "stack arrays cannot contain array elements",
                     DiagnosticIds.NestedStackArrayElement);
@@ -1908,6 +2248,25 @@ internal sealed class FunctionBodyBinder
 
         if (syntax.Target is MemberAccessExpressionSyntax memberTarget)
         {
+            if (memberTarget.OperatorToken.Kind == SyntaxKind.DotToken &&
+                memberTarget.MemberToken.Text == "Lock")
+            {
+                BoundExpression weak = BindExpression(memberTarget.Receiver);
+                if (weak.Type is WeakTypeSymbol weakType)
+                {
+                    if (!arguments.IsEmpty)
+                    {
+                        _diagnostics.Report(memberTarget.MemberToken.Location,
+                            "weak Lock() does not accept arguments", DiagnosticIds.WrongArity);
+                        return new BoundErrorExpression();
+                    }
+                    ValidateProjectedReceiverMove(weak, memberTarget.MemberToken.Location);
+                    SharedTypeSymbol sharedType = _fileScope.TypeFactory.SharedOf(weakType.ElementType);
+                    _fileScope.TypeFactory.EnsureOwnershipDropFunction(
+                        sharedType, _fileScope.GlobalNamespace, memberTarget);
+                    return new BoundWeakLockExpression(weak, sharedType);
+                }
+            }
             if (TryBindStaticMethodCall(memberTarget, arguments, syntax.Arguments, syntax) is BoundExpression staticCall)
                 return staticCall;
             BoundExpression? qualifiedCall = TryBindQualifiedCallExpression(
@@ -2377,7 +2736,9 @@ internal sealed class FunctionBodyBinder
         BoundExpression receiver = BindExpression(target.Receiver);
         bool incomplete = callSyntax.CloseParenthesisToken.IsMissing;
         int completedArgumentCount = GetCompletedArgumentCount(argumentSyntax, incomplete);
-        if (receiver.Type is ArrayTypeSymbol array && target.OperatorToken.Kind == SyntaxKind.DotToken && target.MemberToken.Text == "GetLength")
+        ArrayTypeSymbol? receiverArray = receiver.Type as ArrayTypeSymbol ??
+            (receiver.Type as OwnershipTypeSymbol)?.ElementType as ArrayTypeSymbol;
+        if (receiverArray is { } array && target.OperatorToken.Kind == SyntaxKind.DotToken && target.MemberToken.Text == "GetLength")
         {
             SyntheticMemberSymbol member = _semanticInfo.GetArrayMembers(array)
                 .Single(candidate => candidate.Name == "GetLength");
@@ -2404,6 +2765,13 @@ internal sealed class FunctionBodyBinder
             return new BoundArrayMetadataExpression(receiver, "GetLength", arguments[0]);
         }
         bool pointerAccess = target.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
+        if (receiver.Type is WeakTypeSymbol)
+        {
+            _diagnostics.Report(target.MemberToken.Location,
+                $"cannot access a value through '{receiver.Type.ToDisplayString()}' directly; call 'Lock()' and check the returned shared owner first",
+                DiagnosticIds.WeakDirectAccess);
+            return new BoundErrorExpression();
+        }
         if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
             return BindGenericMethodCall(target, receiver, genericParameter, arguments, argumentSyntax,
                 pointerAccess, incomplete, completedArgumentCount);
@@ -2430,7 +2798,13 @@ internal sealed class FunctionBodyBinder
             return new BoundInterfaceMethodCallExpression(receiver, interfaceType, interfaceMethod, arguments, pointerAccess);
         }
         DeclaredTypeSymbol? structType = pointerAccess
-            ? (receiver.Type as PointerTypeSymbol)?.ElementType as DeclaredTypeSymbol
+            ? receiver.Type switch
+            {
+                PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
+                UniqueTypeSymbol unique => unique.ElementType as DeclaredTypeSymbol,
+                SharedTypeSymbol shared => shared.ElementType as DeclaredTypeSymbol,
+                _ => null,
+            }
             : receiver.Type as DeclaredTypeSymbol;
 
         if (structType is null)
@@ -2610,12 +2984,12 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.FreeThroughReadonlyPointer);
             if (pointerType.ElementType is StructTypeSymbol structType)
             {
-                destructor = structType.FindDestructor();
+                destructor = structType.DropFunction;
             }
         }
         else if (pointer.Type is ArrayTypeSymbol arrayType)
         {
-            if (arrayType.ElementType is StructTypeSymbol structure) destructor = structure.FindDestructor();
+            destructor = TypeFacts.GetDropFunction(arrayType.ElementType);
         }
         else if (!TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Error))
         {
@@ -2632,6 +3006,7 @@ internal sealed class FunctionBodyBinder
 
     private void ValidateDestructorAccess(FunctionSymbol? destructor, TextLocation location)
     {
+        if (destructor?.FunctionKind == FunctionKind.OwnershipDrop) return;
         if (destructor is { IsPublic: false } && !TypeIdentity.AreSame(_function.ContainingType, destructor.ContainingType))
             _diagnostics.Report(location, $"destructor '{destructor.ContainingType!.Name}' is private",
                 DiagnosticIds.InaccessibleSymbol);
@@ -2660,7 +3035,7 @@ internal sealed class FunctionBodyBinder
         {
             FieldSymbol field = fields[index];
             TypeSymbol fieldType = field.Type;
-            BoundExpression argument = ContextualizeConversion(arguments[index], fieldType);
+            BoundExpression argument = ContextualizeConversion(arguments[index], fieldType, GetLocation(argumentSyntax[index]));
             convertedArguments[index] = argument;
             SetConvertedType(argumentSyntax[index], argument.Type);
 
@@ -2740,7 +3115,7 @@ internal sealed class FunctionBodyBinder
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
-            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType);
+            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType, GetLocation(argumentSyntax[index]));
             convertedArguments[index] = argument;
             SetConvertedType(argumentSyntax[index], argument.Type);
 
@@ -3016,18 +3391,85 @@ internal sealed class FunctionBodyBinder
     {
         if (expression is BoundLiteralExpression { Value: null } &&
             TypeIdentity.AreSame(expression.Type, BuiltinTypes.Null) &&
-            targetType is PointerTypeSymbol pointerType)
+            targetType is PointerTypeSymbol or SharedTypeSymbol)
         {
-            return new BoundLiteralExpression(null, pointerType);
+            return new BoundLiteralExpression(null, targetType);
         }
 
         return expression;
     }
 
-    private BoundExpression ContextualizeConversion(BoundExpression expression, TypeSymbol targetType)
+    private BoundExpression ContextualizeConversion(
+        BoundExpression expression,
+        TypeSymbol targetType,
+        TextLocation copyLocation)
     {
+        if (targetType is UniqueTypeSymbol uniqueType)
+        {
+            if (TypeIdentity.AreSame(expression.Type, uniqueType))
+                return ApplyCopySemantics(expression, copyLocation);
+
+            bool compatibleFreshAllocation = expression switch
+            {
+                BoundNewExpression @new => TypeIdentity.AreSame(@new.Type, uniqueType.StorageType),
+                BoundArrayCreationExpression { Storage: ArrayStorageKind.Heap } array =>
+                    TypeIdentity.AreSame(array.Type, uniqueType.StorageType),
+                _ => false,
+            };
+            if (compatibleFreshAllocation)
+                return new BoundUniqueAdoptionExpression(expression, uniqueType);
+
+            if (TypeIdentity.AreSame(expression.Type, uniqueType.StorageType) &&
+                !TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
+                _diagnostics.Report(copyLocation,
+                    $"a raw value of type '{expression.Type.ToDisplayString()}' cannot be adopted by '{uniqueType.ToDisplayString()}'; only a fresh 'new' allocation may be adopted",
+                    DiagnosticIds.UniqueRequiresFreshAllocation);
+            return expression;
+        }
+
+        if (targetType is SharedTypeSymbol sharedType)
+        {
+            expression = ContextualizeNull(expression, targetType);
+            if (TypeIdentity.AreSame(expression.Type, sharedType))
+                return ApplyCopySemantics(expression, copyLocation);
+
+            bool compatibleFreshAllocation = expression switch
+            {
+                BoundNewExpression @new => TypeIdentity.AreSame(@new.Type, sharedType.StorageType),
+                BoundArrayCreationExpression { Storage: ArrayStorageKind.Heap } array =>
+                    TypeIdentity.AreSame(array.Type, sharedType.StorageType),
+                _ => false,
+            };
+            if (compatibleFreshAllocation)
+                return new BoundSharedAdoptionExpression(expression, sharedType);
+
+            if (TypeIdentity.AreSame(expression.Type, sharedType.StorageType) &&
+                !TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
+                _diagnostics.Report(copyLocation,
+                    $"a raw value of type '{expression.Type.ToDisplayString()}' cannot be adopted by '{sharedType.ToDisplayString()}'; only a fresh 'new' allocation may be adopted",
+                    DiagnosticIds.SharedRequiresFreshAllocation);
+            return expression;
+        }
+
+        if (targetType is WeakTypeSymbol weakType)
+        {
+            if (TypeIdentity.AreSame(expression.Type, weakType))
+                return ApplyCopySemantics(expression, copyLocation);
+            if (expression.Type is SharedTypeSymbol shared &&
+                TypeIdentity.AreSame(shared.ElementType, weakType.ElementType) &&
+                expression is not BoundMoveExpression)
+                return new BoundWeakConversionExpression(expression, weakType);
+            if (!TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
+                _diagnostics.Report(copyLocation,
+                    $"'{weakType.ToDisplayString()}' can only be created from a live matching shared owner",
+                    DiagnosticIds.WeakRequiresSharedOwner);
+            return expression;
+        }
+
         if (targetType is ReferenceTypeSymbol referenceType)
         {
+            if (expression is BoundMoveExpression)
+                return expression;
             if (expression is BoundThisExpression @this)
             {
                 if (@this.PointerType.IsReadonly && !referenceType.IsReadonly)
@@ -3054,10 +3496,44 @@ internal sealed class FunctionBodyBinder
         }
 
         expression = ContextualizeNull(expression, targetType);
-        return targetType is InterfaceTypeSymbol @interface && expression.Type is StructTypeSymbol source && source.Implements(@interface)
+        expression = targetType is InterfaceTypeSymbol @interface && expression.Type is StructTypeSymbol source && source.Implements(@interface)
             ? new BoundInterfaceConversionExpression(expression, source, @interface)
             : expression;
+        return ApplyCopySemantics(expression, copyLocation);
     }
+
+    private BoundExpression ApplyCopySemantics(BoundExpression expression, TextLocation location)
+    {
+        if (expression is BoundMoveExpression || !IsValueCopySource(expression)) return expression;
+        CopyabilityFailure? failure = TypeFacts.GetCopyabilityFailure(expression.Type);
+        if (failure is not null)
+        {
+            string path = failure.FieldPath.IsEmpty ? string.Empty
+                : $" through field '{string.Join('.', failure.FieldPath.Select(field => field.Name))}'";
+            string reason = failure.Kind == Copyability.NotGuaranteed
+                ? $"copyability of generic type '{failure.Type.ToDisplayString()}' is not guaranteed{path}"
+                : $"type '{expression.Type.ToDisplayString()}' cannot be copied{path}";
+            _diagnostics.Report(location, $"{reason}; use 'move' when ownership transfer is intended",
+                DiagnosticIds.ValueNotCopyable);
+            return expression;
+        }
+
+        return expression.Type is StructTypeSymbol or SharedTypeSymbol or WeakTypeSymbol
+            ? new BoundCopyExpression(expression)
+            : expression;
+    }
+
+    private static bool IsValueCopySource(BoundExpression expression) => expression switch
+    {
+        BoundVariableExpression => true,
+        BoundMemberAccessExpression => true,
+        BoundStaticFieldExpression => true,
+        BoundIndexExpression => true,
+        BoundReferenceDereferenceExpression => true,
+        BoundAssignmentExpression => true,
+        BoundInterfaceConversionExpression conversion => IsValueCopySource(conversion.Source),
+        _ => false,
+    };
 
     private void ValidateArrayElementType(TypeSymbol elementType, TextLocation location)
     {
@@ -3135,6 +3611,8 @@ internal sealed class FunctionBodyBinder
     {
         BoundArrayCreationExpression array => array.Storage,
         BoundVariableExpression { Variable: LocalVariableSymbol local } => local.ArrayStorage,
+        BoundCopyExpression copy => GetArrayStorage(copy.Source),
+        BoundMoveExpression move => GetArrayStorage(move.Source),
         BoundAssignmentExpression assignment => GetArrayStorage(assignment.Expression),
         _ => ArrayStorageKind.Unknown,
     };
@@ -3143,6 +3621,8 @@ internal sealed class FunctionBodyBinder
     {
         BoundArrayCreationExpression { Storage: ArrayStorageKind.Stack } => _scope,
         BoundVariableExpression { Variable: LocalVariableSymbol local } => _stackArrayScopes.GetValueOrDefault(local),
+        BoundCopyExpression copy => GetStackArrayScope(copy.Source),
+        BoundMoveExpression move => GetStackArrayScope(move.Source),
         BoundAssignmentExpression assignment => GetStackArrayScope(assignment.Expression),
         _ => null,
     };
@@ -3298,6 +3778,7 @@ internal sealed class FunctionBodyBinder
         NameExpressionSyntax name => name.IdentifierToken.Location,
         ThisExpressionSyntax @this => @this.ThisKeyword.Location,
         ParenthesizedExpressionSyntax parenthesized => parenthesized.OpenParenthesisToken.Location,
+        MoveExpressionSyntax move => move.MoveKeyword.Location,
         UnaryExpressionSyntax unary => unary.OperatorToken.Location,
         PostfixUnaryExpressionSyntax postfix => postfix.OperatorToken.Location,
         BinaryExpressionSyntax binary => binary.OperatorToken.Location,
@@ -3382,6 +3863,8 @@ internal sealed class FunctionBodyBinder
     private static Symbol? GetReferencedSymbol(BoundExpression expression) => expression switch
     {
         BoundVariableExpression variable => variable.Variable,
+        BoundCopyExpression copy => GetReferencedSymbol(copy.Source),
+        BoundMoveExpression move => GetReferencedSymbol(move.Source),
         BoundMemberAccessExpression member => member.Field,
         BoundStaticFieldExpression field => field.Field,
         BoundCallExpression call => call.Function,
@@ -3737,7 +4220,7 @@ internal sealed class FunctionBodyBinder
         var converted = arguments.ToBuilder();
         for (int index = 0; index < Math.Min(suppliedCount, parameterTypes.Length); index++)
         {
-            BoundExpression argument = ContextualizeConversion(arguments[index], parameterTypes[index]);
+            BoundExpression argument = ContextualizeConversion(arguments[index], parameterTypes[index], GetLocation(argumentSyntax[index]));
             converted[index] = argument;
             SetConvertedType(argumentSyntax[index], argument.Type);
             if (!TypeFacts.CanAssign(parameterTypes[index], argument.Type))
@@ -3750,6 +4233,8 @@ internal sealed class FunctionBodyBinder
     {
         GenericParameterSymbol parameter when !pointerAccess => parameter,
         PointerTypeSymbol { ElementType: GenericParameterSymbol parameter } when pointerAccess => parameter,
+        UniqueTypeSymbol { ElementType: GenericParameterSymbol parameter } when pointerAccess => parameter,
+        SharedTypeSymbol { ElementType: GenericParameterSymbol parameter } when pointerAccess => parameter,
         _ => null,
     };
 
@@ -3805,6 +4290,12 @@ internal sealed class FunctionBodyBinder
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) when left.Rank == right.Rank =>
+                TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (UniqueTypeSymbol left, UniqueTypeSymbol right) =>
+                TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (SharedTypeSymbol left, SharedTypeSymbol right) =>
+                TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (WeakTypeSymbol left, WeakTypeSymbol right) =>
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
             (StructTypeSymbol { GenericDefinition: not null } left,
                 StructTypeSymbol { GenericDefinition: not null } right)

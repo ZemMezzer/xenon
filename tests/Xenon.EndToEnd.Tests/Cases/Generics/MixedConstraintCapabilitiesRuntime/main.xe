@@ -7,14 +7,14 @@ template Advanced { int Run(); int State(); }
 struct Required<T> where T : Advanced
 {
     public T value;
-    public Required(T value) { this.value = value; }
+    public Required(T value) { this.value = move value; }
     public int Execute() { return value.Run() + value.State(); }
 }
 
 struct Outer<T> where T : BaseRunnable, IStateful
 {
     public Required<T> required;
-    public Outer(T value) { required = Required<T>(value); }
+    public Outer(T value) { required = Required<T>(move value); }
     public int Execute() { return required.Execute(); }
 }
 

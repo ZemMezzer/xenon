@@ -380,8 +380,35 @@ internal sealed class GenericStructSpecializer
         PointerTypeSymbol pointer => _types.PointerTo(Substitute(pointer.ElementType, substitutions, origin), pointer.IsReadonly),
         ReferenceTypeSymbol reference => _types.ReferenceTo(Substitute(reference.ElementType, substitutions, origin), reference.IsReadonly),
         ArrayTypeSymbol array => _types.ArrayOf(Substitute(array.ElementType, substitutions, origin), array.Rank),
+        UniqueTypeSymbol unique => SubstituteUnique(unique, substitutions, origin),
+        SharedTypeSymbol shared => SubstituteOwnership(shared, substitutions, origin),
+        WeakTypeSymbol weak => SubstituteOwnership(weak, substitutions, origin),
         _ => type,
     };
+
+    private TypeSymbol SubstituteUnique(UniqueTypeSymbol unique,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
+    {
+        UniqueTypeSymbol result = _types.UniqueOf(Substitute(unique.ElementType, substitutions, origin));
+        if (unique.DropFunction is { } sourceDrop)
+            _types.EnsureUniqueDropFunction(result, sourceDrop.ContainingNamespace, sourceDrop.Declaration);
+        return result;
+    }
+
+    private TypeSymbol SubstituteOwnership(OwnershipTypeSymbol ownership,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
+    {
+        TypeSymbol element = Substitute(ownership.ElementType, substitutions, origin);
+        OwnershipTypeSymbol result = ownership switch
+        {
+            SharedTypeSymbol => _types.SharedOf(element),
+            WeakTypeSymbol => _types.WeakOf(element),
+            _ => throw new InvalidOperationException(),
+        };
+        if (ownership.DropFunction is { } sourceDrop)
+            _types.EnsureOwnershipDropFunction(result, sourceDrop.ContainingNamespace, sourceDrop.Declaration);
+        return result;
+    }
 
     private TypeSymbol SubstituteConstructed(StructTypeSymbol constructed,
         IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)

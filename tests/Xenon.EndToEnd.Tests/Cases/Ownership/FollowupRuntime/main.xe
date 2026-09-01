@@ -1,0 +1,162 @@
+namespace Ownership.FollowupRuntime;
+
+struct Log
+{
+    public static int Drops;
+    public static int Sum;
+}
+
+struct Resource
+{
+    public int Value;
+    public Resource(int value) { Value = value; }
+    public ~Resource() { Log.Drops = Log.Drops + 1; Log.Sum = Log.Sum + Value; }
+}
+
+struct Holder
+{
+    public unique<Resource> Value;
+    public Holder(unique<Resource> value) { Value = move value; }
+    public unique<Resource> Take() { return move Value; }
+    public unique<Resource> TakeExplicit() { return move this.Value; }
+    public unique<Resource> TakeAndRestore(int replacement)
+    {
+        unique<Resource> old = move this.Value;
+        this.Value = new Resource(replacement);
+        return move old;
+    }
+    public int Read() { return Value->Value; }
+}
+
+struct Owned
+{
+    public unique<Resource> Value;
+    public Owned(unique<Resource> value) { Value = move value; }
+}
+
+struct Box<T>
+{
+    public T Value;
+    public Box(T value) { Value = move value; }
+}
+
+struct SharedBox
+{
+    public shared<Resource> Value;
+    public SharedBox(shared<Resource> value) { Value = value; }
+}
+
+struct WeakBox
+{
+    public weak<Resource> Value;
+    public WeakBox(weak<Resource> value) { Value = value; }
+}
+
+T Transfer<T>(T value) { return move value; }
+unique<T> PassUnique<T>(unique<T> value) { return move value; }
+shared<T> PassShared<T>(shared<T> value) { return move value; }
+weak<T> PassWeak<T>(weak<T> value) { return move value; }
+
+int Main()
+{
+    if (sizeof(shared<Resource>) != sizeof(nint) || alignof(shared<Resource>) != alignof(nint)) return 16;
+    if (sizeof(weak<Resource>) != sizeof(nint) || alignof(weak<Resource>) != alignof(nint)) return 17;
+
+    Log.Drops = 0;
+    Log.Sum = 0;
+    {
+        unique<Resource> firstValue = new Resource(1);
+        Holder first = Holder(move firstValue);
+        unique<Resource> taken = first.Take();
+        if (taken->Value != 1) return 1;
+        unique<Resource> secondValue = new Resource(2);
+        Holder second = Holder(move secondValue);
+        unique<Resource> explicitTaken = second.TakeExplicit();
+        if (explicitTaken->Value != 2) return 2;
+        unique<Resource> restoredValue = new Resource(3);
+        Holder restored = Holder(move restoredValue);
+        unique<Resource> old = restored.TakeAndRestore(4);
+        if (old->Value != 3 || restored.Read() != 4) return 3;
+    }
+    if (Log.Drops != 4 || Log.Sum != 10) return 4;
+
+    Log.Drops = 0;
+    Log.Sum = 0;
+    {
+        unique<Resource> inferenceSource = new Resource(5);
+        unique<Resource> inferred = PassUnique(move inferenceSource);
+        unique<Resource> ownedValue = new Resource(6);
+        Owned owned = Owned(move ownedValue);
+        Owned transferred = Transfer(move owned);
+        if (inferred->Value != 5 || transferred.Value->Value != 6) return 5;
+    }
+    if (Log.Drops != 2 || Log.Sum != 11) return 6;
+
+    Log.Drops = 0;
+    Log.Sum = 0;
+    {
+        shared<Resource> first = new Resource(7);
+        shared<Resource> copy = first;
+        shared<Resource> moved = move copy;
+        shared<Resource> inferred = PassShared(first);
+        if (first->Value != 7 || moved->Value != 7 || inferred->Value != 7) return 7;
+        first = first;
+
+        shared<Resource> replacement = new Resource(8);
+        replacement = first;
+        shared<Resource> moveTarget = new Resource(9);
+        shared<Resource> moveSource = first;
+        moveTarget = move moveSource;
+
+        SharedBox box = SharedBox(first);
+        SharedBox boxCopy = box;
+        SharedBox partial = SharedBox(first);
+        shared<Resource> extracted = move partial.Value;
+        Box<shared<Resource>> generic = Box<shared<Resource>>(first);
+        Box<shared<Resource>> genericCopy = generic;
+        if (boxCopy.Value->Value != 7 || extracted->Value != 7 || genericCopy.Value->Value != 7) return 8;
+
+        shared<shared<Resource>[]> list = new shared<Resource>[2];
+        list[0] = first;
+        list[1] = first;
+        if (list.Length != 2 || list[1]->Value != 7) return 9;
+
+        shared<Resource> conditional = first;
+        if (true)
+        {
+            shared<Resource> branch = move conditional;
+            if (branch->Value != 7) return 10;
+        }
+    }
+    if (Log.Drops != 3 || Log.Sum != 24) return 11;
+
+    Log.Drops = 0;
+    Log.Sum = 0;
+    weak<Resource> expiredObserver;
+    {
+        shared<Resource> strong = new Resource(10);
+        weak<Resource> observer = strong;
+        weak<Resource> observerCopy = observer;
+        weak<Resource> observerMoved = move observerCopy;
+        weak<Resource> inferredWeak = PassWeak(observerMoved);
+        shared<Resource> locked = inferredWeak.Lock();
+        if (locked == null || locked->Value != 10) return 12;
+        WeakBox box = WeakBox(observer);
+        WeakBox boxCopy = box;
+        weak<Resource> extractedObserver = move boxCopy.Value;
+        Box<weak<Resource>> generic = Box<weak<Resource>>(observer);
+        Box<weak<Resource>> genericCopy = generic;
+        shared<Resource> fromBox = extractedObserver.Lock();
+        shared<Resource> fromGeneric = genericCopy.Value.Lock();
+        if (fromBox == null || fromGeneric == null) return 13;
+        expiredObserver = observer;
+    }
+    if (Log.Drops != 1 || Log.Sum != 10) return 14;
+    shared<Resource> expired = expiredObserver.Lock();
+    if (expired != null) return 15;
+    shared<Resource> empty = null;
+    shared<Resource> movedEmpty = move empty;
+    if (movedEmpty != null) return 18;
+
+    return 0;
+}

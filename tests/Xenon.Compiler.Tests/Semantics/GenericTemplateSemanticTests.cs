@@ -18,9 +18,9 @@ public sealed class GenericTemplateSemanticTests
             struct Box<T>
             {
                 T value;
-                public T GetValue() { return value; }
+                public T GetValue() { return move value; }
             }
-            T Identity<T>(T value) { return value; }
+            T Identity<T>(T value) { return move value; }
             """);
 
         Assert.Empty(compilation.Diagnostics);
@@ -118,7 +118,7 @@ public sealed class GenericTemplateSemanticTests
     {
         Compilation compilation = Create("""
             namespace Example;
-            T Identity<T>(T value) { return value; }
+            T Identity<T>(T value) { return move value; }
             int Main() { return Identity<int>(42) + Identity(1); }
             """);
 
@@ -264,7 +264,7 @@ public sealed class GenericTemplateSemanticTests
             template Equalable { bool Equals(Equalable other); }
             bool Same<T>(T left, T right) where T : Equalable
             {
-                return left.Equals(right);
+                return left.Equals(move right);
             }
             """);
 
@@ -339,8 +339,8 @@ public sealed class GenericTemplateSemanticTests
             struct Box<T>
             {
                 T value;
-                public Box(T initial) { value = initial; }
-                public T Get() { return value; }
+                public Box(T initial) { value = move initial; }
+                public T Get() { return move value; }
             }
             struct UsesBox { Box<int> item; }
             Box<int>* Create() { return new Box<int>(42); }
@@ -385,8 +385,8 @@ public sealed class GenericTemplateSemanticTests
             struct Box<T>
             {
                 T value;
-                public Box(T initial) { value = initial; }
-                public T Get() { T local = value; return local; }
+                public Box(T initial) { value = move initial; }
+                public T Get() { T local = move value; return move local; }
             }
             int ReadInt(int value) { return Box<int>(value).Get(); }
             float ReadFloat(float value) { return Box<float>(value).Get(); }
@@ -527,7 +527,7 @@ public sealed class GenericTemplateSemanticTests
         Compilation compilation = Create("""
             namespace Example;
             struct Box<T> { T value; }
-            Box<T> IdentityBox<T>(Box<T> value) { return value; }
+            Box<T> IdentityBox<T>(Box<T> value) { return move value; }
             Box<int> Use(Box<int> value) { return IdentityBox(value); }
             """);
 
@@ -595,8 +595,8 @@ public sealed class GenericTemplateSemanticTests
             {
                 T first;
                 T second;
-                public Pair(T left, T right) { first = left; second = right; }
-                public bool Same() { return first.Equals(second); }
+                public Pair(T left, T right) { first = move left; second = move right; }
+                public bool Same() { return first.Equals(move second); }
             }
             struct Container<T> where T : Equalable { Pair<T> pair; }
             struct Uses { Container<First> first; Container<Second> second; }
@@ -621,8 +621,8 @@ public sealed class GenericTemplateSemanticTests
             {
                 T value;
                 Node<T>* next;
-                public Node(T value) { this.value = value; next = null; }
-                public T GetValue() { return value; }
+                public Node(T value) { this.value = move value; next = null; }
+                public T GetValue() { return move value; }
             }
             int Use() { Node<int> node = Node<int>(42); return node.GetValue(); }
             """);
@@ -693,8 +693,8 @@ public sealed class GenericTemplateSemanticTests
     {
         Compilation compilation = Create("""
             namespace Example;
-            struct Box<T> { public T value; public Box(T value) { this.value = value; } }
-            struct Wrapper<T> { public T value; public Wrapper(T value) { this.value = value; } }
+            struct Box<T> { public T value; public Box(T value) { this.value = move value; } }
+            struct Wrapper<T> { public T value; public Wrapper(T value) { this.value = move value; } }
             template Processor { int Process(Wrapper<Box<Processor>> value); }
             struct Worker
             {
@@ -703,7 +703,7 @@ public sealed class GenericTemplateSemanticTests
                 public int Process(Wrapper<Box<Worker>> input) { return input.value.value.value; }
             }
             int Execute<T>(T worker, Wrapper<Box<T>> value) where T : Processor
-            { return worker.Process(value); }
+            { return worker.Process(move value); }
             int Use()
             {
                 Worker worker = Worker(42);

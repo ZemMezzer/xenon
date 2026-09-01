@@ -76,6 +76,10 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 return literal.Value is not null && ContainsAccess(literal.Type) ? [_hidden] : [];
             case BoundVariableExpression variable:
                 return Read([Root(variable.Variable)], variable.Type);
+            case BoundMoveExpression move:
+                return Evaluate(move.Source);
+            case BoundCopyExpression copy:
+                return Evaluate(copy.Source);
             case BoundThisExpression:
                 return _initializerReceiver is { } receiver ? [receiver] : new(_context.Receiver);
             case BoundStaticFieldExpression field:
@@ -192,6 +196,26 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 return Read([Root(construction)], construction.Type);
             case BoundBaseLifecycleCallExpression call:
                 return ContextualCall(call.Function, call.Arguments, _context.Receiver, call);
+            case BoundDropFieldsExpression drop:
+            {
+                foreach (FieldSymbol field in drop.StructType.Fields.Reverse())
+                    if (TypeFacts.GetDropFunction(field.Type) is { } fieldDrop)
+                        ContextualCall(fieldDrop, Array.Empty<HashSet<object>>(),
+                            Project(_context.Receiver, field), drop);
+                if (drop.StructType.BaseType?.DropFunction is { } baseDrop)
+                    ContextualCall(baseDrop, Array.Empty<HashSet<object>>(), _context.Receiver, drop);
+                return [];
+            }
+            case BoundOwnershipDropExpression:
+                return [];
+            case BoundUniqueAdoptionExpression adoption:
+                return Evaluate(adoption.Allocation);
+            case BoundSharedAdoptionExpression adoption:
+                return Evaluate(adoption.Allocation);
+            case BoundWeakConversionExpression conversion:
+                return Evaluate(conversion.Shared);
+            case BoundWeakLockExpression weakLock:
+                return Evaluate(weakLock.Weak);
             case BoundStructConstructionExpression construction:
                 Initialize(construction.StructType, construction.Arguments, construction);
                 return Read([Root(construction)], construction.Type);
@@ -212,12 +236,13 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     _loopDepth++;
                     try { Initialize(element, [], allocation); }
                     finally { _loopDepth--; }
-                    if (allocation.Storage == ArrayStorageKind.Stack && element.FindDestructor() is { } destructor)
-                    {
-                        object root = Root(allocation);
-                        if (_cleanupScopes.TryPeek(out var cleanups))
-                            RegisterCleanup(cleanups, new(root, destructor, allocation));
-                    }
+                }
+                if (allocation.Storage == ArrayStorageKind.Stack &&
+                    TypeFacts.GetDropFunction(allocation.ElementType) is { } elementDestructor)
+                {
+                    object root = Root(allocation);
+                    if (_cleanupScopes.TryPeek(out var cleanups))
+                        RegisterCleanup(cleanups, new(root, elementDestructor, allocation));
                 }
                 InitializeArrayElements(allocation);
                 return [Root(allocation)];
@@ -257,7 +282,11 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             {
                 HashSet<object> receiver = Evaluate(index.Receiver);
                 foreach (BoundExpression argument in index.Indices) Evaluate(argument);
-                return index.Receiver.Type is ArrayTypeSymbol ? ArrayElements(receiver, index.Indices) : Uncertain(receiver);
+                return index.Receiver.Type is ArrayTypeSymbol or
+                    UniqueTypeSymbol { ElementType: ArrayTypeSymbol } or
+                    SharedTypeSymbol { ElementType: ArrayTypeSymbol }
+                    ? ArrayElements(receiver, index.Indices)
+                    : Uncertain(receiver);
             }
             default:
                 // A reference may bind to a materialized struct/interface value.
@@ -352,7 +381,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private HashSet<object> ContextualDispatch(FunctionSymbol callee,
         HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site, HashSet<StructTypeSymbol>? interfaceTypes = null)
     {
-        if (callee.FunctionKind == FunctionKind.Destructor) CheckWrite(receiver, site);
+        if (callee.FunctionKind is FunctionKind.Destructor or FunctionKind.DropGlue or FunctionKind.OwnershipDrop)
+            CheckWrite(receiver, site);
         var targets = new HashSet<FunctionSymbol>();
         HashSet<StructTypeSymbol>? known = callee.ContainingInterface is null ? KnownReceiverTypes(receiver) : interfaceTypes;
         IEnumerable<StructTypeSymbol> receiverTypes = known is not null ? known : types;
@@ -368,7 +398,10 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             foreach (StructTypeSymbol type in receiverTypes)
             {
                 if (type.IsAbstract || !IsDerivedFrom(type, declaringType) || slot >= type.VirtualMethods.Length) continue;
-                targets.Add(type.VirtualMethods[slot]);
+                FunctionSymbol target = type.VirtualMethods[slot];
+                targets.Add(target.FunctionKind == FunctionKind.Destructor
+                    ? type.DropFunction ?? target
+                    : target);
             }
         }
         else targets.Add(callee);
@@ -711,6 +744,9 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         PointerTypeSymbol pointer => pointer.ElementType,
         ReferenceTypeSymbol reference => reference.ElementType,
         ArrayTypeSymbol array => array.ElementType,
+        UniqueTypeSymbol unique => unique.ElementType,
+        SharedTypeSymbol shared => shared.ElementType,
+        WeakTypeSymbol weak => weak.ElementType,
         _ => null,
     };
 
@@ -865,7 +901,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private static bool ContainsAccess(TypeSymbol type, HashSet<TypeSymbol> visited) => type switch
     {
-        PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or InterfaceTypeSymbol => true,
+        PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol or InterfaceTypeSymbol => true,
         IFieldStorageTypeSymbol structure when visited.Add(type) => structure.AllInstanceFields.Any(field => ContainsAccess(field.Type, visited)),
         _ => false,
     };
@@ -880,6 +916,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             PointerTypeSymbol pointer => !pointer.IsReadonly || ExposesWritableAccess(pointer.ElementType, visited),
             ReferenceTypeSymbol reference => !reference.IsReadonly || ExposesWritableAccess(reference.ElementType, visited),
             ArrayTypeSymbol or InterfaceTypeSymbol => true,
+            UniqueTypeSymbol or SharedTypeSymbol => true,
             IFieldStorageTypeSymbol structure => structure.AllInstanceFields.Any(field => ExposesWritableAccess(field.Type, visited)),
             _ => false,
         };

@@ -28,6 +28,63 @@ public sealed record BoundUnaryExpression(
     public override BoundKind Kind => BoundKind.UnaryExpression;
 }
 
+public sealed record BoundMoveExpression(
+    BoundExpression Source) : BoundExpression(Source.Type)
+{
+    public override BoundKind Kind => BoundKind.MoveExpression;
+}
+
+/// <summary>A semantic by-value copy. Fresh temporaries and explicit moves bypass this node.</summary>
+public sealed record BoundCopyExpression(
+    BoundExpression Source) : BoundExpression(Source.Type)
+{
+    public override BoundKind Kind => BoundKind.CopyExpression;
+}
+
+/// <summary>Compiler-generated finalization after a user destructor body: own fields, then base.</summary>
+public sealed record BoundDropFieldsExpression(
+    StructTypeSymbol StructType) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.DropFieldsExpression;
+}
+
+/// <summary>Compiler-generated drop of the unique handle passed to an ownership helper.</summary>
+public sealed record BoundOwnershipDropExpression(
+    OwnershipTypeSymbol OwnershipType,
+    FunctionSymbol? ElementDrop) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.OwnershipDropExpression;
+}
+
+/// <summary>A fresh heap result adopted directly into its first and only owner.</summary>
+public sealed record BoundUniqueAdoptionExpression(
+    BoundExpression Allocation,
+    UniqueTypeSymbol UniqueType) : BoundExpression(UniqueType)
+{
+    public override BoundKind Kind => BoundKind.UniqueAdoptionExpression;
+}
+
+public sealed record BoundSharedAdoptionExpression(
+    BoundExpression Allocation,
+    SharedTypeSymbol SharedType) : BoundExpression(SharedType)
+{
+    public override BoundKind Kind => BoundKind.SharedAdoptionExpression;
+}
+
+public sealed record BoundWeakConversionExpression(
+    BoundExpression Shared,
+    WeakTypeSymbol WeakType) : BoundExpression(WeakType)
+{
+    public override BoundKind Kind => BoundKind.WeakConversionExpression;
+}
+
+public sealed record BoundWeakLockExpression(
+    BoundExpression Weak,
+    SharedTypeSymbol SharedType) : BoundExpression(SharedType)
+{
+    public override BoundKind Kind => BoundKind.WeakLockExpression;
+}
+
 public sealed record BoundBinaryExpression(
     BoundExpression Left,
     SyntaxKind OperatorKind,
@@ -43,6 +100,7 @@ public sealed record BoundAssignmentExpression(
     BoundExpression Expression) : BoundExpression(Target.Type)
 {
     public override BoundKind Kind => BoundKind.AssignmentExpression;
+    public bool IsInitialization { get; init; }
 }
 
 public sealed record BoundCompoundAccessorAssignmentExpression(

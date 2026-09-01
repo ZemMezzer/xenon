@@ -4,8 +4,8 @@ struct Node<T>
 {
     public T value;
     public Node<T>* next;
-    public Node(T value) { this.value = value; next = null; }
-    public T GetValue() { return value; }
+    public Node(T value) { this.value = move value; next = null; }
+    public T GetValue() { return move value; }
 }
 
 struct A<T> { public T value; public B<T>* b; }

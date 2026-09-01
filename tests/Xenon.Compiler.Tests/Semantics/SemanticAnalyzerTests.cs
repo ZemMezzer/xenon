@@ -1,3 +1,4 @@
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
@@ -3623,6 +3624,89 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("hidden", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Analyzer_DerivesRecursiveDropGlueWithoutTreatingItAsAUserDestructor()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Leaf { public int Id; public ~Leaf() {} }
+            struct Inner { public Leaf First; public Leaf Second; }
+            struct Outer { public Inner Inner; public Leaf Last; }
+            void Main() { Outer value = Outer(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces)
+            .Structs.ToDictionary(type => type.Name);
+        Assert.NotNull(types["Leaf"].Destructor);
+        Assert.Same(types["Leaf"].Destructor, types["Leaf"].DropFunction);
+        Assert.Null(types["Inner"].Destructor);
+        Assert.Null(types["Outer"].Destructor);
+        Assert.Equal(FunctionKind.DropGlue, types["Inner"].DropFunction!.FunctionKind);
+        Assert.Equal(FunctionKind.DropGlue, types["Outer"].DropFunction!.FunctionKind);
+        Assert.Contains(compilation.SemanticModel.Functions, function =>
+            ReferenceEquals(function.Symbol, types["Outer"].DropFunction) &&
+            Assert.IsType<BoundExpressionStatement>(Assert.Single(function.Body.Statements)).Expression is BoundDropFieldsExpression);
+    }
+
+    [Fact]
+    public void Analyzer_BindsValueCopiesAndTracksDependentGenericCopies()
+    {
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+            struct Pair { public int Left; public int Right; }
+            void Use()
+            {
+                Pair source = Pair { 1, 2 };
+                Pair destination = source;
+            }
+            T Transfer<T>(T value) { return move value; }
+            """);
+
+        Assert.Empty(valid.Diagnostics);
+        BoundFunction use = valid.SemanticModel.Functions.Single(function => function.Symbol.Name == "Use");
+        var declaration = Assert.IsType<BoundVariableDeclarationStatement>(use.Body.Statements[1]);
+        Assert.IsType<BoundCopyExpression>(declaration.Initializer);
+
+        Compilation generic = CreateCompilation("""
+            namespace Example;
+            T Duplicate<T>(T value)
+            {
+                T second = value;
+                return second;
+            }
+            """);
+
+        Assert.Equal(2, generic.Diagnostics.Count(diagnostic => diagnostic.Id == DiagnosticIds.ValueNotCopyable));
+        FunctionSymbol duplicate = Assert.Single(Assert.Single(generic.SemanticModel.GlobalNamespace.Namespaces)
+            .Functions.Where(function => function.Name == "Duplicate"));
+        Assert.Equal(Copyability.NotGuaranteed, Assert.Single(duplicate.TypeParameters).Copyability);
+    }
+
+    [Fact]
+    public void Analyzer_ComputesCopyabilityAfterGenericStructSpecialization()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Box<T> { public T Value; public Box(T value) { Value = move value; } }
+            void Use()
+            {
+                Box<int> first = Box<int>(42);
+                Box<int> second = first;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        var structs = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces).Structs;
+        StructTypeSymbol definition = structs.Single(type => type.IsGenericDefinition && type.Name == "Box");
+        StructTypeSymbol specialization = structs.Single(type => type.IsGenericSpecialization && type.Name == "Box<int>");
+        Assert.Equal(Copyability.NotGuaranteed, definition.Copyability);
+        Assert.Equal(Copyability.Copyable, specialization.Copyability);
+        BoundFunction use = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Use");
+        var declaration = Assert.IsType<BoundVariableDeclarationStatement>(use.Body.Statements[1]);
+        Assert.IsType<BoundCopyExpression>(declaration.Initializer);
+    }
+
     [Theory]
     [InlineData("void readonly M() { int local = 0; int* p = State.Hidden; *p = (p = &local)[0]; }")]
     [InlineData("int* readonly M() { int local = 0; int* p = State.Hidden; p += (p = &local)[0]; return p; }")]
@@ -3964,6 +4048,341 @@ public sealed class SemanticAnalyzerTests
             """ + body + " }");
         Assert.Equal(rejected, compilation.HasErrors);
         if (rejected) Assert.Contains(compilation.Diagnostics, d => d.Message == "destructor 'Resource' is private");
+    }
+
+    [Fact]
+    public void Analyzer_BindsMoveAndTracksConditionalUseAfterMove()
+    {
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+            struct Value { public int Number; public Value(int number) { Number = number; } }
+            int Main()
+            {
+                Value source = Value(1);
+                Value destination = move source;
+                source = Value(2);
+                return source.Number + destination.Number;
+            }
+            """);
+        Assert.Empty(valid.Diagnostics);
+        BoundFunction main = valid.SemanticModel.Functions.Single(function => function.Symbol.Name == "Main");
+        var declaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[1]);
+        Assert.IsType<BoundMoveExpression>(declaration.Initializer);
+
+        Compilation conditional = CreateCompilation("""
+            namespace Example;
+            struct Value { public int Number; public Value(int number) { Number = number; } }
+            int Read(bool take)
+            {
+                Value source = Value(1);
+                Value destination;
+                if (take) destination = move source;
+                return source.Number;
+            }
+            """);
+        Assert.Contains(conditional.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UseAfterMove &&
+            diagnostic.Message == "cannot use 'source' because it has been moved");
+    }
+
+    [Fact]
+    public void Analyzer_TracksPartialAndNestedMovesAndFieldRestoration()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Point { public int X; public int Y; public Point(int x, int y) { X = x; Y = y; } }
+            struct Transform { public Point Position; public int Scale; public Transform(Point position, int scale) { Position = position; Scale = scale; } }
+            struct State { public Transform Transform; public int Count; public State(Transform transform, int count) { Transform = transform; Count = count; } }
+            int Main()
+            {
+                State state = State(Transform(Point(1, 2), 3), 4);
+                Point position = move state.Transform.Position;
+                int liveSibling = state.Transform.Scale + state.Count;
+                state.Transform.Position = Point(5, 6);
+                State restored = state;
+                return position.X + liveSibling + restored.Transform.Position.Y;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsMovedFieldAndWholePartiallyMovedValue()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Pair
+            {
+                public int Left;
+                public int Right;
+                public int Total { get { return Left + Right; } }
+                public Pair(int left, int right) { Left = left; Right = right; }
+                public int Sum() { return Left + Right; }
+            }
+            int Read(Pair value) { return value.Left; }
+            int Main()
+            {
+                Pair pair = Pair(1, 2);
+                int left = move pair.Left;
+                int movedField = pair.Left;
+                return Read(pair) + pair.Sum() + pair.Total + movedField + left;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UseAfterMove &&
+            diagnostic.Message == "cannot use 'pair.Left' because 'pair.Left' has been moved");
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.PartiallyMovedUse &&
+            diagnostic.Message == "cannot use 'pair' as a complete value because field 'pair.Left' has been moved");
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPartialMoveThroughUserDestructorAncestors()
+    {
+        Compilation direct = CreateCompilation("""
+            namespace Example;
+            struct Resource { public int Value; }
+            struct State { public Resource Resource; public State(Resource resource) { Resource = resource; } public ~State() {} }
+            void Main() { State state = State(Resource()); Resource resource = move state.Resource; }
+            """);
+        Assert.Contains(direct.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.PartialMoveWithDestructor &&
+            diagnostic.Message.Contains("'State' has a user-defined destructor", StringComparison.Ordinal));
+
+        Compilation nested = CreateCompilation("""
+            namespace Example;
+            struct Resource { public int Value; }
+            struct Inner { public Resource Resource; public Inner(Resource resource) { Resource = resource; } public ~Inner() {} }
+            struct Outer { public Inner Inner; public Outer(Inner inner) { Inner = inner; } }
+            void Main() { Outer outer = Outer(Inner(Resource())); Resource resource = move outer.Inner.Resource; }
+            """);
+        Assert.Contains(nested.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.PartialMoveWithDestructor &&
+            diagnostic.Message.Contains("'Inner' has a user-defined destructor", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_BindsUniqueAdoptionAccessMoveFieldsAndGenericSubstitution()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; }
+            }
+            struct Holder<T>
+            {
+                public unique<T> Value;
+                public Holder(unique<T> value) { Value = move value; }
+            }
+            struct Box<T> { public T Value; }
+            int Main()
+            {
+                unique<Resource> resource = new Resource(3);
+                resource->Value = resource->Value + 1;
+                unique<Resource> transferred = move resource;
+                Holder<Resource> holder = Holder<Resource>(move transferred);
+                unique<Resource> result = move holder.Value;
+                Box<unique<Resource>> nested;
+                return result->Value;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction main = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Main");
+        var declaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[0]);
+        var adoption = Assert.IsType<BoundUniqueAdoptionExpression>(declaration.Initializer);
+        Assert.Equal("unique<Resource>", adoption.Type.ToDisplayString());
+
+        StructTypeSymbol holder = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces)
+            .Structs.Single(type => type.Name == "Holder<Example.Resource>");
+        var fieldType = Assert.IsType<UniqueTypeSymbol>(Assert.Single(holder.Fields).Type);
+        Assert.Equal("Resource", fieldType.ElementType.Name);
+        Assert.Equal(Copyability.NonCopyable, holder.Copyability);
+        StructTypeSymbol nested = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces)
+            .Structs.Single(type => type.Name == "Box<unique<Example.Resource>>");
+        Assert.IsType<UniqueTypeSymbol>(Assert.Single(nested.Fields).Type);
+        Assert.Equal(Copyability.NonCopyable, nested.Copyability);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsUniqueCopiesRawAdoptionAndNativeAbi()
+    {
+        Compilation copies = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder { public unique<Resource> Value; }
+            void Main()
+            {
+                unique<Resource> first = new Resource();
+                unique<Resource> second = first;
+                Holder holder = Holder(move first);
+                Holder copied = holder;
+            }
+            """);
+        Assert.Equal(2, copies.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.ValueNotCopyable));
+        Assert.Contains(copies.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.ValueNotCopyable &&
+            diagnostic.Message.Contains("through field 'Value'", StringComparison.Ordinal));
+
+        Compilation raw = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            void Main()
+            {
+                Resource* pointer = new Resource();
+                unique<Resource> owner = pointer;
+                free(pointer);
+            }
+            """);
+        Assert.Contains(raw.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UniqueRequiresFreshAllocation);
+
+        Compilation abi = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            extern unique<Resource> Take();
+            export void Give(unique<Resource> value) {}
+            """);
+        Assert.Equal(2, abi.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UnsupportedNativeOwnershipType));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsUnconstrainedGenericCopyButAllowsMove()
+    {
+        Compilation invalid = CreateCompilation("""
+            namespace Example;
+            T Duplicate<T>(T value) { T copy = value; return copy; }
+            """);
+        Assert.Equal(2, invalid.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.ValueNotCopyable &&
+            diagnostic.Message.Contains("not guaranteed", StringComparison.Ordinal)));
+
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+            T Transfer<T>(T value) { return move value; }
+            """);
+        Assert.Empty(valid.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_BindsThisRootedMoveAndRestoration()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder
+            {
+                unique<Resource> Value;
+                public unique<Resource> TakeAndRestore()
+                {
+                    unique<Resource> old = move this.Value;
+                    this.Value = new Resource();
+                    return move old;
+                }
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+
+        Compilation guarded = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder
+            {
+                unique<Resource> Value;
+                public ~Holder() {}
+                public unique<Resource> Take() { return move Value; }
+            }
+            """);
+        Assert.Contains(guarded.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.PartialMoveWithDestructor &&
+            diagnostic.Message.Contains("this.Value", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_MatchesTemplateSelfRecursivelyThroughOwnershipWrappers()
+    {
+        Compilation valid = CreateCompilation("""
+            namespace Example;
+            template OwnerLike
+            {
+                void SetUnique(unique<OwnerLike> value);
+                void SetShared(shared<OwnerLike> value);
+                void SetWeak(weak<OwnerLike> value);
+            }
+            struct Resource
+            {
+                public void SetUnique(unique<Resource> value) {}
+                public void SetShared(shared<Resource> value) {}
+                public void SetWeak(weak<Resource> value) {}
+            }
+            void Use<T>(T value) where T : OwnerLike {}
+            void Main() { Resource value = Resource(); Use(value); }
+            """);
+        Assert.Empty(valid.Diagnostics);
+
+        Compilation mismatch = CreateCompilation("""
+            namespace Example;
+            template OwnerLike { void Set(unique<OwnerLike> value); }
+            struct Resource { public void Set(shared<Resource> value) {} }
+            void Use<T>(T value) where T : OwnerLike {}
+            void Main() { Resource value = Resource(); Use(value); }
+            """);
+        Assert.NotEmpty(mismatch.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_TemplateImplicationNormalizesOwnershipWrappedSelf()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            template Owner
+            {
+                void SetUnique(unique<Owner> value);
+                void SetShared(shared<Owner> value);
+                void SetWeak(weak<Owner> value);
+            }
+            template AdvancedOwner
+            {
+                void SetUnique(unique<AdvancedOwner> value);
+                void SetShared(shared<AdvancedOwner> value);
+                void SetWeak(weak<AdvancedOwner> value);
+                int Extra();
+            }
+            struct Required<T> where T : Owner { public T Value; }
+            struct Stronger<T> where T : AdvancedOwner { public Required<T> Value; }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_InternsSharedAndWeakAndPropagatesGenericTypeFacts()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Box<T> { public T Value; }
+            void Main()
+            {
+                shared<Resource> strong = new Resource();
+                weak<Resource> observer = strong;
+                Box<shared<Resource>> sharedBox;
+                Box<weak<Resource>> weakBox;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+        NamespaceSymbol ns = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        StructTypeSymbol sharedBox = ns.Structs.Single(type => type.Name == "Box<shared<Example.Resource>>");
+        StructTypeSymbol weakBox = ns.Structs.Single(type => type.Name == "Box<weak<Example.Resource>>");
+        Assert.Equal(Copyability.Copyable, sharedBox.Copyability);
+        Assert.Equal(Copyability.Copyable, weakBox.Copyability);
+        Assert.True(TypeFacts.RequiresDrop(sharedBox));
+        Assert.True(TypeFacts.RequiresDrop(weakBox));
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(

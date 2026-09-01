@@ -1,0 +1,9 @@
+namespace InvalidMoveSource;
+struct Value { public int Number; public Value(int number) { Number = number; } }
+int Main()
+{
+    Value value = move Value(1);
+    int[] values = int[2];
+    int[] transferred = move values;
+    return value.Number;
+}

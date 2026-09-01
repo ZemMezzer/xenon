@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
 
@@ -11,6 +12,9 @@ public sealed class TypeFactory
     private readonly ConcurrentDictionary<(TypeSymbol Element, bool Readonly), PointerTypeSymbol> _pointers = new();
     private readonly ConcurrentDictionary<(TypeSymbol Element, bool Readonly), ReferenceTypeSymbol> _references = new();
     private readonly ConcurrentDictionary<(TypeSymbol Element, int Rank), ArrayTypeSymbol> _arrays = new();
+    private readonly ConcurrentDictionary<TypeSymbol, UniqueTypeSymbol> _unique = new(TypeIdentity.Comparer);
+    private readonly ConcurrentDictionary<TypeSymbol, SharedTypeSymbol> _shared = new(TypeIdentity.Comparer);
+    private readonly ConcurrentDictionary<TypeSymbol, WeakTypeSymbol> _weak = new(TypeIdentity.Comparer);
 
     public PointerTypeSymbol PointerTo(TypeSymbol elementType, bool isReadonly = false) =>
         _pointers.GetOrAdd((Intern(elementType), isReadonly), static key => new PointerTypeSymbol(key.Element, key.Readonly));
@@ -24,6 +28,50 @@ public sealed class TypeFactory
         return _arrays.GetOrAdd((Intern(elementType), rank), static key => new ArrayTypeSymbol(key.Element, key.Rank));
     }
 
+    public UniqueTypeSymbol UniqueOf(TypeSymbol elementType)
+    {
+        TypeSymbol element = Intern(elementType);
+        return _unique.GetOrAdd(element, value => new UniqueTypeSymbol(
+            value,
+            value is ArrayTypeSymbol ? value : PointerTo(value)));
+    }
+
+    public SharedTypeSymbol SharedOf(TypeSymbol elementType)
+    {
+        TypeSymbol element = Intern(elementType);
+        return _shared.GetOrAdd(element, value => new SharedTypeSymbol(
+            value, value is ArrayTypeSymbol ? value : PointerTo(value)));
+    }
+
+    public WeakTypeSymbol WeakOf(TypeSymbol elementType)
+    {
+        TypeSymbol element = Intern(elementType);
+        return _weak.GetOrAdd(element, value => new WeakTypeSymbol(
+            value, value is ArrayTypeSymbol ? value : PointerTo(value)));
+    }
+
+    internal IReadOnlyCollection<OwnershipTypeSymbol> OwnershipTypes =>
+        [.. _unique.Values, .. _shared.Values, .. _weak.Values];
+
+    internal void EnsureOwnershipDropFunction(
+        OwnershipTypeSymbol type,
+        NamespaceSymbol globalNamespace,
+        SyntaxNode declaration)
+    {
+        if (type.DropFunction is not null) return;
+        lock (type)
+        {
+            type.DropFunction ??= new FunctionSymbol(
+                type,
+                globalNamespace,
+                PointerTo(type),
+                declaration);
+        }
+    }
+
+    internal void EnsureUniqueDropFunction(UniqueTypeSymbol type, NamespaceSymbol globalNamespace, SyntaxNode declaration) =>
+        EnsureOwnershipDropFunction(type, globalNamespace, declaration);
+
     // Normalize incoming derived types, including those built with another factory.
     // Dictionary keys then use canonical element references, never display strings.
     public TypeSymbol Intern(TypeSymbol type)
@@ -34,6 +82,9 @@ public sealed class TypeFactory
             PointerTypeSymbol pointer => PointerTo(pointer.ElementType, pointer.IsReadonly),
             ReferenceTypeSymbol reference => ReferenceTo(reference.ElementType, reference.IsReadonly),
             ArrayTypeSymbol array => ArrayOf(array.ElementType, array.Rank),
+            UniqueTypeSymbol unique => UniqueOf(unique.ElementType),
+            SharedTypeSymbol shared => SharedOf(shared.ElementType),
+            WeakTypeSymbol weak => WeakOf(weak.ElementType),
             _ => type,
         };
     }

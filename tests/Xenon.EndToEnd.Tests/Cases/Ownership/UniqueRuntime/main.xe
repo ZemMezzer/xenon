@@ -1,0 +1,97 @@
+namespace Ownership.UniqueRuntime;
+
+struct Log
+{
+    public static int Trace;
+}
+
+struct Item
+{
+    public int Id;
+    public Item(int id) { Id = id; }
+    public ~Item() { Log.Trace = Log.Trace * 10 + Id; }
+}
+
+struct Holder
+{
+    public unique<Item> Item;
+    public Holder(unique<Item> item) { Item = move item; }
+}
+
+struct Box<T>
+{
+    public T Value;
+    public Box(T value) { Value = move value; }
+}
+
+unique<Item> Make(int id) { return new Item(id); }
+unique<Item> Forward(unique<Item> item) { return move item; }
+
+int Main()
+{
+    if (sizeof(unique<Item>) != sizeof(nint) || alignof(unique<Item>) != alignof(nint)) return 12;
+
+    Log.Trace = 0;
+    {
+        unique<Item> first = new Item(3);
+        if (first->Id != 3) return 1;
+        unique<Item> second = move first;
+        second->Id = 4;
+    }
+    if (Log.Trace != 4) return 2;
+
+    Log.Trace = 0;
+    {
+        unique<Item[]> values = new Item[3];
+        values[0].Id = 1;
+        values[1].Id = 2;
+        values[2].Id = 3;
+        if (values.Length != 3 || values.GetLength(0) != 3) return 3;
+        unique<Item[]> moved = move values;
+        moved[1].Id = 5;
+    }
+    if (Log.Trace != 351) return 4;
+
+    Log.Trace = 0;
+    {
+        unique<Item> item = new Item(7);
+        Holder holder = Holder(move item);
+        unique<Item> extracted = move holder.Item;
+        if (extracted->Id != 7) return 5;
+    }
+    if (Log.Trace != 7) return 6;
+
+    Log.Trace = 0;
+    {
+        unique<Item> destination = new Item(8);
+        destination = new Item(9);
+    }
+    if (Log.Trace != 89) return 7;
+
+    Log.Trace = 0;
+    {
+        unique<Item> destination = new Item(1);
+        unique<Item> source = new Item(2);
+        destination = move source;
+    }
+    if (Log.Trace != 12) return 8;
+
+    Log.Trace = 0;
+    {
+        unique<Item>[] owners = new unique<Item>[2];
+        owners[0] = new Item(1);
+        owners[1] = new Item(2);
+        free(owners);
+    }
+    if (Log.Trace != 21) return 9;
+
+    Log.Trace = 0;
+    {
+        unique<Item> item = Forward(Make(6));
+        Box<unique<Item>> box = Box<unique<Item>>(move item);
+        if (box.Value->Id != 6) return 10;
+    }
+    if (Log.Trace != 6) return 11;
+
+    return 42;
+}
