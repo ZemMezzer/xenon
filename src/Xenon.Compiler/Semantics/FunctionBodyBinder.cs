@@ -1927,11 +1927,13 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        StructTypeSymbol? structType = _fileScope.ResolveType(
+        TypeSymbol? callTargetType = _fileScope.ResolveType(
             name.IdentifierToken.Text,
             name.IdentifierToken.Location,
-            _diagnostics) as StructTypeSymbol;
-        if (structType is not null)
+            _diagnostics);
+        if (callTargetType is GenericParameterSymbol genericParameter)
+            return BindGenericConstructionExpression(syntax, genericParameter, arguments);
+        if (callTargetType is StructTypeSymbol structType)
         {
             if (structType.IsAbstract)
             {
@@ -3648,6 +3650,34 @@ internal sealed class FunctionBodyBinder
             syntax.CloseDelimiterToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordSymbolAndType(syntax, constructor.Symbol, _fileScope.TypeFactory.PointerTo(parameter));
         return new BoundDeferredConstantExpression(_fileScope.TypeFactory.PointerTo(parameter));
+    }
+
+    private BoundExpression BindGenericConstructionExpression(CallExpressionSyntax syntax,
+        GenericParameterSymbol parameter, ImmutableArray<BoundExpression> arguments)
+    {
+        GenericConstructorMember[] candidates = GenericConstraintMemberLookup
+            .GetConstructors(parameter, _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
+            .DistinctBy(constructor => string.Join(",", constructor.ParameterTypes.Select(type =>
+                type.ToDisplayString(TypeDisplayFormat.FullyQualified))))
+            .ToArray();
+        bool incomplete = syntax.CloseParenthesisToken.IsMissing;
+        GenericConstructorMember? constructor = ResolveGenericCandidate(candidates,
+            candidate => candidate.Symbol, candidate => candidate.ParameterTypes, arguments,
+            GetLocation(syntax.Target), $"constructor for '{parameter.Name}'", syntax.Target,
+            incomplete ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        if (constructor is null)
+        {
+            if (candidates.Length == 0)
+                _diagnostics.Report(GetLocation(syntax.Target),
+                    $"constraints for '{parameter.Name}' do not guarantee this construction",
+                    DiagnosticIds.GenericConstructorNotGuaranteed);
+            return new BoundErrorExpression();
+        }
+        _ = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
+            GetLocation(syntax.Target),
+            incomplete ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        RecordSymbolAndType(syntax.Target, constructor.Symbol, parameter);
+        return new BoundDeferredConstantExpression(parameter);
     }
 
     private T? ResolveGenericCandidate<T>(IEnumerable<T> source, Func<T, Symbol> getSymbol,

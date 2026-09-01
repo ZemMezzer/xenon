@@ -20,6 +20,11 @@ T* MakeVector<T>(float x, float y, float z) where T : VectorLike
     return new T(x, y, z);
 }
 
+T MakeVectorValue<T>(float x, float y, float z) where T : VectorLike
+{
+    return T(x, y, z);
+}
+
 template Constructible
 {
     Constructible();
@@ -46,12 +51,14 @@ T* MakePlain<T>() where T : DefaultConstructible { return new T(); }
 int Main()
 {
     Vector3* vector = MakeVector<Vector3>(10.0f, 12.0f, 20.0f);
+    Vector3 valueVector = MakeVectorValue<Vector3>(10.0f, 12.0f, 20.0f);
     Value* first = MakeDefault<Value>();
     Value* second = MakeOne<Value>(10);
     Value* third = MakeTwo<Value>(12, 30);
     Plain* plain = MakePlain<Plain>();
 
     if (vector->x + vector->y + vector->z != 42.0f) return 1;
+    if (valueVector.x + valueVector.y + valueVector.z != 42.0f) return 4;
     if (first->value != 1 || second->value != 10 || third->value != 42) return 2;
     if (plain->value != 0) return 3;
 
