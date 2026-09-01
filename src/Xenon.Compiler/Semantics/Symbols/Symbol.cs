@@ -17,7 +17,9 @@ public abstract class Symbol
 
     public SymbolKind Kind { get; }
 
-    public Symbol? ContainingSymbol { get; }
+    public Symbol? ContainingSymbol { get; private set; }
+
+    protected void SetContainingSymbol(Symbol containingSymbol) => ContainingSymbol = containingSymbol;
 
     /// <summary>Explicit declarations only; built-ins and synthesized symbols have no references.</summary>
     public virtual ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [];

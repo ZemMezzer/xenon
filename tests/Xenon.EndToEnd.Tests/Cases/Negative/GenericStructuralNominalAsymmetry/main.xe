@@ -1,0 +1,15 @@
+namespace NegativeGenericStructuralNominalAsymmetry;
+
+template Runnable { int Run(); }
+interface IRunnable { int Run(); }
+struct Base { public int Run() { return 0; } }
+struct InterfaceRequired<T> where T : IRunnable { public T value; }
+struct BaseRequired<T> where T : Base { public T value; }
+
+struct InvalidOuter<T> where T : Runnable
+{
+    public InterfaceRequired<T> interfaceValue;
+    public BaseRequired<T> baseValue;
+}
+
+int Main() { return 0; }

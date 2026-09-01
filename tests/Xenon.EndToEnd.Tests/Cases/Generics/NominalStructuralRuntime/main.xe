@@ -1,0 +1,68 @@
+namespace GenericNominalStructuralRuntime;
+
+template Runnable { int Run(); }
+
+struct RunRequired<T> where T : Runnable
+{
+    public T value;
+    public RunRequired(T value) { this.value = value; }
+    public int Execute() { return value.Run(); }
+}
+
+struct BaseRunnable { public int Run() { return 42; } }
+struct Derived : BaseRunnable { }
+
+struct BaseOuter<T> where T : BaseRunnable
+{
+    public RunRequired<T> required;
+    public BaseOuter(T value) { required = RunRequired<T>(value); }
+    public int Execute() { return required.Execute(); }
+}
+
+interface IRunnable { int Run(); }
+struct InterfaceWorker : IRunnable { public int Run() { return 42; } }
+
+struct InterfaceOuter<T> where T : IRunnable
+{
+    public RunRequired<T> required;
+    public InterfaceOuter(T value) { required = RunRequired<T>(value); }
+    public int Execute() { return required.Execute(); }
+}
+
+interface IReadValue { int Value { get; } }
+template Readable { int Value { get; } }
+
+struct ReadRequired<T> where T : Readable
+{
+    public T value;
+    public ReadRequired(T value) { this.value = value; }
+    public int Read() { return value.Value; }
+}
+
+struct ReadOuter<T> where T : IReadValue
+{
+    public ReadRequired<T> required;
+    public ReadOuter(T value) { required = ReadRequired<T>(value); }
+    public int Read() { return required.Read(); }
+}
+
+struct ValueWorker : IReadValue
+{
+    public int stored;
+    public ValueWorker(int value) { stored = value; }
+    public int Value { get { return stored; } }
+}
+
+int Main()
+{
+    BaseOuter<Derived> fromBase = BaseOuter<Derived>(Derived());
+    if (fromBase.Execute() != 42) return 1;
+
+    InterfaceOuter<InterfaceWorker> fromInterface =
+        InterfaceOuter<InterfaceWorker>(InterfaceWorker());
+    if (fromInterface.Execute() != 42) return 2;
+
+    ReadOuter<ValueWorker> property = ReadOuter<ValueWorker>(ValueWorker(42));
+    if (property.Read() != 42) return 3;
+    return 0;
+}

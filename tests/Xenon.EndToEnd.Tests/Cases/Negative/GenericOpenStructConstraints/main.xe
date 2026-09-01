@@ -1,0 +1,17 @@
+namespace NegativeGenericOpenStructConstraints;
+
+template Runnable { void Run(); }
+struct StructuralRequired<T> where T : Runnable { public T value; }
+struct MissingStructural<T> { public StructuralRequired<T> value; }
+
+interface IBase { int Get(); }
+interface IUnrelated { int Get(); }
+struct InterfaceRequired<T> where T : IBase { public T value; }
+struct MissingInterface<T> where T : IUnrelated { public InterfaceRequired<T> value; }
+
+struct Base { }
+struct Unrelated { }
+struct BaseRequired<T> where T : Base { public T value; }
+struct MissingBase<T> where T : Unrelated { public BaseRequired<T> value; }
+
+int Main() { return 0; }

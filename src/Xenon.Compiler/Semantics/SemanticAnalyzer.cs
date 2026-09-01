@@ -20,17 +20,24 @@ internal sealed class SemanticAnalyzer
     private readonly Dictionary<FunctionDeclarationSyntax, FunctionSymbol> _functionSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StructDeclarationSyntax, StructTypeSymbol> _structSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<InterfaceDeclarationSyntax, InterfaceTypeSymbol> _interfaceSymbols = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<TemplateDeclarationSyntax, TemplateSymbol> _templateSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StructDeclarationSyntax, FileSymbolScope> _structScopes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<TemplateDeclarationSyntax, FileSymbolScope> _templateScopes = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<ConstantSymbol, FileSymbolScope> _constantScopes = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<ConstantSymbol> _evaluatingConstants = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<ConstantSymbol> _failedConstants = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<EnumDeclarationSyntax, (EnumTypeSymbol Type, SyntaxTree Tree)> _enums = [];
     private readonly Dictionary<ConstantSymbol, (EnumTypeSymbol Type, ConstantSymbol? Previous, bool Automatic)> _enumMembers = [];
     private readonly List<(FunctionSymbol Symbol, BlockStatementSyntax Body, FileSymbolScope Scope)> _functionBodies = [];
     private readonly List<BoundFunction> _synthesizedFunctions = [];
+    private readonly HashSet<StructTypeSymbol> _boundSpecializedInstanceInitializers = [];
+    private readonly HashSet<FieldSymbol> _boundSpecializedStaticInitializers = [];
+    private readonly HashSet<StructTypeSymbol> _validatedGenericLayouts = [];
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
     private readonly SemanticInfoStore _semanticInfo = new();
     private readonly CancellationToken _cancellationToken;
     private readonly ImmutableArray<NamespaceSymbol> _referencedNamespaces;
+    private GenericStructSpecializer? _genericStructSpecializer;
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
         ImmutableArray<NamespaceSymbol> referencedNamespaces, ITargetTypeLayout? targetLayout,
@@ -58,10 +65,14 @@ internal sealed class SemanticAnalyzer
         foreach (NamespaceSymbol referencedNamespace in _referencedNamespaces)
             _globalNamespace.ImportPublicMembers(referencedNamespace);
         DeclareNamespaces();
+        DeclareTemplates();
         DeclareStructs();
         DeclareInterfaces();
         DeclareEnums();
         BindUsingDirectives();
+        BindStructGenericConstraints();
+        InitializeGenericStructSpecializer();
+        DeclareTemplateMembers();
         BindTypeInheritance();
         ValidateInheritanceCycles();
         MarkVirtualDispatchRequirements();
@@ -69,12 +80,14 @@ internal sealed class SemanticAnalyzer
         ValidateInheritedInterfaceMembers();
         AssignInterfaceMethodSlots();
         BindStructFields();
+        _genericStructSpecializer!.CompleteFields();
         ValidateStructLayouts();
         DeclareConstants();
         DeclareEnumMembers();
         // Invalid by-value layouts must not be queried through a native ABI provider.
         if (_diagnostics.Count != 0) _constants.TargetLayout = null;
         EvaluateConstants();
+        _genericStructSpecializer!.CompleteConstants();
         BindStaticFieldInitializers();
         DeclareStructProperties();
         DeclareStructIndexers();
@@ -87,19 +100,32 @@ internal sealed class SemanticAnalyzer
                     DiagnosticIds.InaccessibleSymbol);
         BuildVirtualMethodTables();
         ValidateInterfaceImplementations();
+        _genericStructSpecializer!.CompleteMembers();
         DeclareFunctions();
         ValidateAbstractValueStorage();
         BindInstanceFieldInitializers();
         ValidateNativeSymbols();
 
+        var genericDefinitions = _functionBodies
+            .Where(entry => entry.Symbol.FunctionKind == FunctionKind.Ordinary && !entry.Symbol.TypeParameters.IsEmpty)
+            .ToDictionary(entry => entry.Symbol, entry => (entry.Body, entry.Scope));
+        var genericSpecializer = new GenericFunctionSpecializer(genericDefinitions, _typeFactory,
+            _diagnostics, _constants, _genericStructSpecializer!, _cancellationToken);
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
         {
             _cancellationToken.ThrowIfCancellationRequested();
-            var binder = new FunctionBodyBinder(symbol, scope, _diagnostics, _constants, _semanticInfo, _cancellationToken);
-            functions.Add(new BoundFunction(symbol, binder.BindBody(body)));
+            var binder = new FunctionBodyBinder(symbol, scope, _diagnostics, _constants, _semanticInfo,
+                genericSpecializer, _cancellationToken);
+            BoundBlockStatement boundBody = binder.BindBody(body);
+            // Generic definitions are checked now, but only concrete specializations may
+            // enter the emitted function set.
+            if (!symbol.IsGenericDefinition)
+                functions.Add(new BoundFunction(symbol, boundBody));
             foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
         }
+        BindSpecializedStructFunctions(functions, genericSpecializer);
+        functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
 
         // Lifecycle/accessor checks need all bodies, including declarations that
@@ -109,6 +135,7 @@ internal sealed class SemanticAnalyzer
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, _) in _functionBodies)
         {
             _cancellationToken.ThrowIfCancellationRequested();
+            if (symbol.IsGenericDefinition) continue;
             if (symbol.IsReadonly)
                 new ReadonlyEffectAnalyzer(symbol, _diagnostics, _expressionLocations,
                     body.OpenBraceToken.Location, bodies, types, _cancellationToken).Analyze(bodies[symbol]);
@@ -119,10 +146,124 @@ internal sealed class SemanticAnalyzer
             _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
     }
 
+    private void InitializeGenericStructSpecializer()
+    {
+        _genericStructSpecializer = new GenericStructSpecializer(
+            _typeFactory, _diagnostics, EvaluateSpecializedConstants);
+        foreach (FileSymbolScope scope in _treeScopes.Values.Concat(_structScopes.Values)
+            .Concat(_templateScopes.Values).Distinct())
+            scope.SetGenericStructSpecializer(_genericStructSpecializer);
+    }
+
+    private void BindSpecializedStructFunctions(ImmutableArray<BoundFunction>.Builder functions,
+        GenericFunctionSpecializer genericFunctionSpecializer)
+    {
+        if (_genericStructSpecializer is null) return;
+        Dictionary<FunctionSymbol, (BlockStatementSyntax Body, FileSymbolScope Scope)> sources =
+            _functionBodies.ToDictionary(entry => entry.Symbol, entry => (entry.Body, entry.Scope));
+        var bound = new HashSet<FunctionSymbol>(ReferenceEqualityComparer.Instance);
+        while (true)
+        {
+            int specializationCountBefore = _genericStructSpecializer.SpecializationCount;
+            bool changed = _genericStructSpecializer.CompletePendingConstraints();
+            changed |= BindPendingSpecializedInitializers(functions, genericFunctionSpecializer);
+            changed |= ValidatePendingGenericSpecializationLayouts();
+            SpecializedStructFunction[] pending = _genericStructSpecializer.SpecializedFunctions
+                .Where(entry => entry.Owner.IsConcreteType && !bound.Contains(entry.Specialized)).ToArray();
+            foreach (SpecializedStructFunction entry in pending)
+            {
+                changed = true;
+                FunctionSymbol definition = entry.Definition;
+                FunctionSymbol specialized = entry.Specialized;
+                bound.Add(specialized);
+                if (!sources.TryGetValue(definition, out var source)) continue;
+                StructTypeSymbol owner = specialized.ContainingStruct!;
+                var semanticInfo = new SemanticInfoStore();
+                FileSymbolScope scope = source.Scope.WithTypeSubstitutions(
+                    _genericStructSpecializer.GetSubstitutions(owner), semanticInfo);
+                var binder = new FunctionBodyBinder(specialized, scope, _diagnostics, _constants,
+                    semanticInfo, genericFunctionSpecializer, _cancellationToken);
+                functions.Add(new BoundFunction(specialized, binder.BindBody(source.Body)));
+            }
+            if (_genericStructSpecializer.SpecializationCount != specializationCountBefore)
+                changed = true;
+            if (!changed) break;
+        }
+        _genericStructSpecializer.ReportUnresolvedConstraints();
+    }
+
+    private bool ValidatePendingGenericSpecializationLayouts()
+    {
+        if (_genericStructSpecializer is null) return false;
+        StructTypeSymbol[] pending = _genericStructSpecializer.Specializations
+            .Where(type => type.IsConcreteType && _validatedGenericLayouts.Add(type)).ToArray();
+        foreach (StructTypeSymbol type in pending)
+        {
+            foreach (FieldSymbol field in type.StaticFields)
+                if (field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type))
+                    _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+                        $"static field '{field.Name}' contains a reference and requires explicit initialization",
+                        DiagnosticIds.ReferenceRequiresInitializer);
+            foreach (FieldSymbol field in type.Fields)
+            {
+                if (ContainsStructByValue(field.Type, type, []))
+                    _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+                        $"struct '{type.Name}' has a recursive by-value field '{field.Name}'; use a pointer or array handle instead",
+                        DiagnosticIds.RecursiveValueLayout);
+                if (field.Type is StructTypeSymbol { IsAbstract: true } abstractType)
+                    _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+                        $"abstract struct '{abstractType.Name}' cannot be stored in field '{field.Name}'",
+                        DiagnosticIds.AbstractValueStorage);
+            }
+        }
+        return pending.Length > 0;
+    }
+
+    private bool BindPendingSpecializedInitializers(ImmutableArray<BoundFunction>.Builder functions,
+        GenericFunctionSpecializer genericFunctionSpecializer)
+    {
+        if (_genericStructSpecializer is null) return false;
+        bool changed = false;
+        foreach (StructTypeSymbol type in _genericStructSpecializer.Specializations
+            .Where(type => type.IsConcreteType).ToArray())
+        {
+            StructTypeSymbol definition = type.GenericDefinition!;
+            FileSymbolScope sourceScope = _structScopes[definition.Declaration];
+            var semanticInfo = new SemanticInfoStore();
+            FileSymbolScope scope = sourceScope.WithTypeSubstitutions(
+                _genericStructSpecializer.GetSubstitutions(type), semanticInfo);
+
+            if (type.Fields.Any(field => field.Declaration.Initializer is not null) &&
+                _boundSpecializedInstanceInitializers.Add(type))
+            {
+                changed = true;
+                var initializer = new FunctionSymbol(FunctionKind.InstanceInitializer, type, [],
+                    type.Declaration, Accessibility.Private);
+                type.SetInstanceInitializer(initializer);
+                var binder = new FunctionBodyBinder(initializer, scope, _diagnostics, _constants,
+                    semanticInfo, genericFunctionSpecializer, _cancellationToken);
+                foreach (FieldSymbol field in type.Fields)
+                    if (binder.BindFieldInitializer(field) is BoundExpression boundInitializer)
+                        field.SetInitializer(boundInitializer);
+                functions.Add(new BoundFunction(initializer,
+                    new BoundBlockStatement(binder.CreateInstanceFieldInitializerStatements(type))));
+            }
+
+            foreach (FieldSymbol field in type.StaticFields.Where(field =>
+                field.Declaration.Initializer is not null && _boundSpecializedStaticInitializers.Add(field)))
+            {
+                changed = true;
+                BindStaticFieldInitializer(field, type, scope);
+            }
+        }
+        return changed;
+    }
+
     private void BindInstanceFieldInitializers()
     {
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
         {
+            if (type.IsGenericDefinition) continue;
             if (!type.Fields.Any(field => field.Declaration.Initializer is not null))
                 continue;
 
@@ -180,6 +321,7 @@ internal sealed class SemanticAnalyzer
             foreach (StructDeclarationSyntax declaration in tree.Root.Members.OfType<StructDeclarationSyntax>())
             {
                 var type = new StructTypeSymbol(declaration.IdentifierToken.Text, @namespace, declaration);
+                type.SetTypeParameters(CreateGenericParameters(declaration.TypeParameters, type));
                 if (!@namespace.TryDeclareType(type))
                 {
                     DeclaredTypeSymbol? previous = @namespace.FindAnyType(type.Name);
@@ -198,6 +340,26 @@ internal sealed class SemanticAnalyzer
                         Math.Max(declaration.OpenBraceToken.Location.Span.Start, declaration.CloseBraceToken.Location.Span.End)),
                     type,
                     declaration.CloseBraceToken.IsMissing));
+            }
+        }
+    }
+
+    private void DeclareTemplates()
+    {
+        foreach (SyntaxTree tree in _syntaxTrees)
+        {
+            NamespaceSymbol @namespace = _treeNamespaces[tree];
+            foreach (TemplateDeclarationSyntax declaration in tree.Root.Members.OfType<TemplateDeclarationSyntax>())
+            {
+                var template = new TemplateSymbol(declaration.IdentifierToken.Text, @namespace, declaration);
+                if (!@namespace.TryDeclareTemplate(template))
+                {
+                    _diagnostics.Report(declaration.IdentifierToken.Location,
+                        $"type or template '{@namespace.FullName}.{template.Name}' is already declared",
+                        DiagnosticIds.DuplicateDeclaration);
+                    continue;
+                }
+                _templateSymbols.Add(declaration, template);
             }
         }
     }
@@ -367,11 +529,106 @@ internal sealed class SemanticAnalyzer
             {
                 if (_structSymbols.ContainsKey(declaration))
                 {
-                    _structScopes.Add(declaration, scope);
+                    _structScopes.Add(declaration, scope.WithTypeParameters(_structSymbols[declaration].TypeParameters));
                 }
             }
+
+            foreach (TemplateDeclarationSyntax declaration in tree.Root.Members.OfType<TemplateDeclarationSyntax>())
+                if (_templateSymbols.TryGetValue(declaration, out TemplateSymbol? template))
+                    _templateScopes.Add(declaration, scope.WithTemplateSelf(template));
         }
     }
+
+    private void BindStructGenericConstraints()
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+            BindGenericConstraints(declaration.WhereClauses, type.TypeParameters, _structScopes[declaration]);
+    }
+
+    private void DeclareTemplateMembers()
+    {
+        foreach ((TemplateDeclarationSyntax declaration, TemplateSymbol template) in _templateSymbols)
+        {
+            FileSymbolScope scope = _templateScopes[declaration];
+            var members = ImmutableArray.CreateBuilder<TemplateMemberRequirementSymbol>();
+            foreach (TypeMemberDeclarationSyntax member in declaration.Members)
+            {
+                switch (member)
+                {
+                    case MethodDeclarationSyntax method:
+                    {
+                        if (method.IsStatic)
+                        {
+                            _diagnostics.Report(method.StaticKeyword!.Location,
+                                "static structural template requirements are not supported yet",
+                                DiagnosticIds.InvalidTemplateMember);
+                            break;
+                        }
+                        TypeSymbol returnType = ResolveTemplateType(method.ReturnType, scope);
+                        ImmutableArray<ParameterSymbol> parameters = BindTemplateParameters(method.Parameters, scope);
+                        members.Add(new TemplateMethodRequirementSymbol(template, returnType, parameters,
+                            TemplateAccessibility(method.AccessModifierToken), method));
+                        break;
+                    }
+                    case PropertyDeclarationSyntax property:
+                        if (property.IsStatic)
+                        {
+                            _diagnostics.Report(property.StaticKeyword!.Location,
+                                "static structural template requirements are not supported yet",
+                                DiagnosticIds.InvalidTemplateMember);
+                            break;
+                        }
+                        members.Add(new TemplatePropertyRequirementSymbol(template,
+                            ResolveTemplateType(property.Type, scope),
+                            TemplateAccessibility(property.AccessModifierToken), property));
+                        break;
+                    case IndexerDeclarationSyntax indexer:
+                        if (indexer.IsStatic)
+                        {
+                            _diagnostics.Report(indexer.StaticKeyword!.Location,
+                                "static structural template requirements are not supported yet",
+                                DiagnosticIds.InvalidTemplateMember);
+                            break;
+                        }
+                        members.Add(new TemplateIndexerRequirementSymbol(template,
+                            ResolveTemplateType(indexer.Type, scope),
+                            BindTemplateParameters(indexer.Parameters, scope),
+                            TemplateAccessibility(indexer.AccessModifierToken), indexer));
+                        break;
+                    case TemplateConstructorDeclarationSyntax constructor:
+                        members.Add(new TemplateConstructorRequirementSymbol(template,
+                            BindTemplateParameters(constructor.Parameters, scope),
+                            TemplateAccessibility(constructor.AccessModifierToken), constructor));
+                        break;
+                }
+            }
+            template.SetMembers(members.ToImmutable());
+        }
+    }
+
+    private TypeSymbol ResolveTemplateType(TypeSyntax syntax, FileSymbolScope scope)
+        => TypeResolver.Resolve(syntax, scope, _diagnostics);
+
+    private ImmutableArray<ParameterSymbol> BindTemplateParameters(
+        ImmutableArray<ParameterSyntax> parameterSyntax, FileSymbolScope scope)
+    {
+        var parameters = ImmutableArray.CreateBuilder<ParameterSymbol>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        for (int index = 0; index < parameterSyntax.Length; index++)
+        {
+            ParameterSyntax syntax = parameterSyntax[index];
+            TypeSymbol type = ResolveTemplateType(syntax.Type, scope);
+            if (!names.Add(syntax.IdentifierToken.Text))
+                _diagnostics.Report(syntax.IdentifierToken.Location,
+                    $"parameter '{syntax.IdentifierToken.Text}' is already declared", DiagnosticIds.DuplicateDeclaration);
+            parameters.Add(new ParameterSymbol(syntax.IdentifierToken.Text, type, index,
+                syntax.Type.IsBindingReadonly(), declaration: syntax));
+        }
+        return parameters.ToImmutable();
+    }
+
+    private static Accessibility TemplateAccessibility(SyntaxToken? modifier) =>
+        modifier?.Kind == SyntaxKind.PrivateKeyword ? Accessibility.Private : Accessibility.Public;
 
     private void BindStructFields()
     {
@@ -425,31 +682,35 @@ internal sealed class SemanticAnalyzer
     private void BindStaticFieldInitializers()
     {
         // Layout queries are safe only after every struct's fields and layout are known.
-        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in
+            _structSymbols.Where(entry => !entry.Value.IsGenericDefinition))
         foreach (FieldSymbol field in type.StaticFields.Where(field => field.Declaration.Initializer is not null))
+            BindStaticFieldInitializer(field, type, _structScopes[declaration]);
+    }
+
+    private void BindStaticFieldInitializer(FieldSymbol field, StructTypeSymbol type, FileSymbolScope scope)
+    {
+        FieldDeclarationSyntax syntax = field.Declaration;
+        var context = new ConstantSymbol(field.Name, field.Type, type, syntax.Initializer!, syntax);
+        _constantScopes.Add(context, scope);
+        BoundExpression? initializer = BindConstantExpression(syntax.Initializer!, context);
+        _constantScopes.Remove(context);
+        object? value = null;
+        ConstantFoldStatus status = initializer is null ? ConstantFoldStatus.Invalid : _constants.Fold(initializer, out value);
+        TypeSymbol constantType = initializer?.Type ?? BuiltinTypes.Error;
+        if (status == ConstantFoldStatus.Invalid)
+            _diagnostics.Report(syntax.IdentifierToken.Location, "static field initializers must be compile-time constants",
+                DiagnosticIds.ConstantValueRequired);
+        else if (TypeIdentity.AreSame(constantType, BuiltinTypes.Error) || !TypeFacts.CanAssign(field.Type, constantType))
+            _diagnostics.Report(syntax.IdentifierToken.Location, $"cannot implicitly convert '{constantType.Name}' to '{field.Type.ToDisplayString()}'",
+                DiagnosticIds.TypeMismatch);
+        else if (!IsSupportedStaticInitializer(field.Type, value))
+            _diagnostics.Report(syntax.IdentifierToken.Location, $"static field type '{field.Type.ToDisplayString()}' does not support this constant initializer",
+                DiagnosticIds.StaticInitializerTypeUnsupported);
+        else
         {
-            FieldDeclarationSyntax syntax = field.Declaration;
-            var context = new ConstantSymbol(field.Name, field.Type, type, syntax.Initializer!, syntax);
-            _constantScopes.Add(context, _structScopes[declaration]);
-            BoundExpression? initializer = BindConstantExpression(syntax.Initializer!, context);
-            _constantScopes.Remove(context);
-            object? value = null;
-            ConstantFoldStatus status = initializer is null ? ConstantFoldStatus.Invalid : _constants.Fold(initializer, out value);
-            TypeSymbol constantType = initializer?.Type ?? BuiltinTypes.Error;
-            if (status == ConstantFoldStatus.Invalid)
-                _diagnostics.Report(syntax.IdentifierToken.Location, "static field initializers must be compile-time constants",
-                    DiagnosticIds.ConstantValueRequired);
-            else if (TypeIdentity.AreSame(constantType, BuiltinTypes.Error) || !TypeFacts.CanAssign(field.Type, constantType))
-                _diagnostics.Report(syntax.IdentifierToken.Location, $"cannot implicitly convert '{constantType.Name}' to '{field.Type.ToDisplayString()}'",
-                    DiagnosticIds.TypeMismatch);
-            else if (!IsSupportedStaticInitializer(field.Type, value))
-                _diagnostics.Report(syntax.IdentifierToken.Location, $"static field type '{field.Type.ToDisplayString()}' does not support this constant initializer",
-                    DiagnosticIds.StaticInitializerTypeUnsupported);
-            else
-            {
-                SetConvertedType(syntax.Initializer!, field.Type);
-                field.SetConstantValue(value);
-            }
+            SetConvertedType(syntax.Initializer!, field.Type);
+            field.SetConstantValue(value);
         }
     }
 
@@ -494,19 +755,47 @@ internal sealed class SemanticAnalyzer
 
     private void EvaluateConstants()
     {
-        IEnumerable<ConstantSymbol> constants = _constantScopes.Keys;
+        ConstantSymbol[] constants = _constantScopes.Keys.ToArray();
         foreach (ConstantSymbol constant in constants)
+            if (constant.ContainingType is not StructTypeSymbol { GenericDefinition: not null })
+                EvaluateConstant(constant);
+    }
+
+    private void EvaluateSpecializedConstants(StructTypeSymbol specialization)
+    {
+        if (!specialization.IsConcreteType || specialization.Constants.IsEmpty ||
+            _genericStructSpecializer is null)
+            return;
+
+        StructTypeSymbol definition = specialization.GenericDefinition!;
+        if (definition.Constants.Any(_failedConstants.Contains))
+        {
+            foreach (ConstantSymbol constant in specialization.Constants)
+                _failedConstants.Add(constant);
+            return;
+        }
+        FileSymbolScope scope = _structScopes[definition.Declaration].WithTypeSubstitutions(
+            _genericStructSpecializer.GetSubstitutions(specialization), _semanticInfo);
+        foreach (ConstantSymbol constant in specialization.Constants)
+            _constantScopes.TryAdd(constant, scope);
+
+        foreach (ConstantSymbol constant in specialization.Constants)
+        {
             EvaluateConstant(constant);
+        }
     }
 
     private bool EvaluateConstant(ConstantSymbol constant)
     {
         if (constant.HasValue)
             return true;
+        if (_failedConstants.Contains(constant))
+            return false;
         if (!_evaluatingConstants.Add(constant))
         {
-            _diagnostics.Report(constant.IdentifierToken.Location, $"circular constant dependency involving '{constant.Name}'",
-                DiagnosticIds.ConstantCycle);
+            if (_failedConstants.Add(constant))
+                _diagnostics.Report(constant.IdentifierToken.Location,
+                    $"circular constant dependency involving '{constant.Name}'", DiagnosticIds.ConstantCycle);
             return false;
         }
         try
@@ -516,8 +805,10 @@ internal sealed class SemanticAnalyzer
             BoundExpression? value = BindConstantExpression(constant.Initializer, constant);
             if (value is null)
             {
-                _diagnostics.Report(constant.IdentifierToken.Location, $"initializer of constant '{constant.Name}' is not a compile-time constant",
-                    DiagnosticIds.ConstantValueRequired);
+                if (_failedConstants.Add(constant))
+                    _diagnostics.Report(constant.IdentifierToken.Location,
+                        $"initializer of constant '{constant.Name}' is not a compile-time constant",
+                        DiagnosticIds.ConstantValueRequired);
                 return false;
             }
             if (!TypeFacts.CanAssign(constant.Type, value.Type))
@@ -526,21 +817,27 @@ internal sealed class SemanticAnalyzer
                     value = new BoundCastExpression(value, constant.Type);
                 else
                 {
-                    _diagnostics.Report(constant.IdentifierToken.Location, $"cannot implicitly convert '{value.Type.ToDisplayString()}' to '{constant.Type.ToDisplayString()}'",
-                        DiagnosticIds.TypeMismatch);
+                    if (_failedConstants.Add(constant))
+                        _diagnostics.Report(constant.IdentifierToken.Location,
+                            $"cannot implicitly convert '{value.Type.ToDisplayString()}' to '{constant.Type.ToDisplayString()}'",
+                            DiagnosticIds.TypeMismatch);
                     return false;
                 }
             }
 
             SetConvertedType(constant.Initializer, value.Type);
 
-            ConstantFoldStatus foldStatus = _constants.Fold(value, out object? foldedValue);
+            object? foldedValue;
+            ConstantFoldStatus foldStatus = constant.ContainingType is StructTypeSymbol { IsGenericDefinition: true }
+                ? FoldConstantExpression(value, out foldedValue, _constants.TargetLayout)
+                : _constants.Fold(value, out foldedValue);
             if (foldStatus == ConstantFoldStatus.Invalid)
             {
-                _diagnostics.Report(
-                    constant.IdentifierToken.Location,
-                    $"initializer of constant '{constant.Name}' contains an invalid compile-time operation",
-                    DiagnosticIds.InvalidConstantOperation);
+                if (_failedConstants.Add(constant))
+                    _diagnostics.Report(
+                        constant.IdentifierToken.Location,
+                        $"initializer of constant '{constant.Name}' contains an invalid compile-time operation",
+                        DiagnosticIds.InvalidConstantOperation);
                 return false;
             }
 
@@ -719,7 +1016,7 @@ internal sealed class SemanticAnalyzer
                 value = null;
                 return ConstantFoldStatus.TargetDependent;
             case BoundTypeLayoutExpression layout:
-                if (targetLayout is null)
+                if (targetLayout is null || GenericTypeFacts.ContainsGenericParameter(layout.TargetType))
                 {
                     value = null;
                     return ConstantFoldStatus.TargetDependent;
@@ -1960,6 +2257,10 @@ internal sealed class SemanticAnalyzer
             FileSymbolScope scope = _treeScopes[tree];
             foreach (FunctionDeclarationSyntax declaration in tree.Root.Members.OfType<FunctionDeclarationSyntax>())
             {
+                ImmutableArray<GenericParameterSymbol> typeParameters =
+                    CreateGenericParameters(declaration.TypeParameters, @namespace);
+                FileSymbolScope declarationScope = scope.WithTypeParameters(typeParameters);
+                BindGenericConstraints(declaration.WhereClauses, typeParameters, declarationScope);
                 if (declaration.IsExtern && declaration.IdentifierToken.Text is "malloc" or "calloc" or "free")
                 {
                     _diagnostics.Report(
@@ -1968,14 +2269,22 @@ internal sealed class SemanticAnalyzer
                         DiagnosticIds.ReservedNativeSymbol);
                 }
 
-                TypeSymbol returnType = TypeResolver.ResolveReturnType(declaration.ReturnType, scope, _diagnostics);
-                ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration.Parameters, scope);
+                TypeSymbol returnType = TypeResolver.ResolveReturnType(declaration.ReturnType, declarationScope, _diagnostics);
+                ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration.Parameters, declarationScope);
                 var function = new FunctionSymbol(
                     declaration.IdentifierToken.Text,
                     @namespace,
                     returnType,
                     parameters,
-                    declaration);
+                    declaration,
+                    typeParameters);
+                foreach (GenericParameterSymbol parameter in typeParameters)
+                    parameter.SetDeclaringSymbol(function);
+
+                if (!typeParameters.IsEmpty && (declaration.IsExtern || declaration.IsExport))
+                    _diagnostics.Report(declaration.IdentifierToken.Location,
+                        "generic declarations cannot be exposed through the C ABI before a concrete specialization exists",
+                        DiagnosticIds.GenericSpecializationNotImplemented);
 
                 ValidateExternalStructAbi(declaration, function);
 
@@ -1993,7 +2302,7 @@ internal sealed class SemanticAnalyzer
                 _functionSymbols.Add(declaration, function);
                 if (declaration.Body is not null)
                 {
-                    _functionBodies.Add((function, declaration.Body, scope));
+                    _functionBodies.Add((function, declaration.Body, declarationScope));
                 }
             }
         }
@@ -2003,7 +2312,8 @@ internal sealed class SemanticAnalyzer
     {
         var symbols = new Dictionary<string, FunctionSymbol>(StringComparer.Ordinal);
         IEnumerable<FunctionSymbol> functions = _functionSymbols.Values.Concat(_structSymbols.Values.SelectMany(type =>
-            type.Methods.Concat(type.Constructors).Concat(new[] { type.Destructor, type.InstanceInitializer }.OfType<FunctionSymbol>())));
+            type.Methods.Concat(type.Constructors).Concat(new[] { type.Destructor, type.InstanceInitializer }.OfType<FunctionSymbol>())))
+            .Where(function => !function.IsGenericDefinition);
         foreach (FunctionSymbol function in functions)
         {
             string name = NativeSymbolNames.Get(function);
@@ -2105,6 +2415,78 @@ internal sealed class SemanticAnalyzer
         return parameters.ToImmutable();
     }
 
+    private static ImmutableArray<GenericParameterSymbol> CreateGenericParameters(
+        GenericParameterListSyntax? syntax, Symbol containingSymbol)
+    {
+        if (syntax is null) return [];
+        return syntax.Parameters.Select((parameter, ordinal) =>
+            new GenericParameterSymbol(parameter.IdentifierToken.Text, ordinal, containingSymbol, parameter)).ToImmutableArray();
+    }
+
+    private void BindGenericConstraints(ImmutableArray<WhereClauseSyntax> clauses,
+        ImmutableArray<GenericParameterSymbol> parameters, FileSymbolScope scope)
+    {
+        var constraints = parameters.ToDictionary(
+            parameter => parameter,
+            _ => ImmutableArray.CreateBuilder<GenericConstraintSymbol>());
+        foreach (WhereClauseSyntax clause in clauses)
+        {
+            GenericParameterSymbol? parameter = parameters.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, clause.TypeParameterToken.Text, StringComparison.Ordinal));
+            if (parameter is null)
+            {
+                _diagnostics.Report(clause.TypeParameterToken.Location,
+                    $"where clause references unknown generic parameter '{clause.TypeParameterToken.Text}'",
+                    DiagnosticIds.UnknownConstraintTypeParameter);
+                continue;
+            }
+
+            foreach (GenericConstraintSyntax constraintSyntax in clause.Constraints)
+            {
+                TypeSyntax syntax = constraintSyntax.Type;
+                if (syntax is not NamedTypeSyntax named || named.TypeArguments is not null)
+                {
+                    _diagnostics.Report(syntax.NameToken.Location,
+                        "a generic constraint must name a struct, interface, or structural template",
+                        DiagnosticIds.InvalidGenericConstraint);
+                    continue;
+                }
+
+                string[] parts = named.NameParts.Select(part => part.Text).ToArray();
+                Symbol? target = scope.ResolveConstraintTarget(parts, named.NameToken.Location, _diagnostics);
+                GenericConstraintKind kind = target switch
+                {
+                    StructTypeSymbol => GenericConstraintKind.BaseStruct,
+                    InterfaceTypeSymbol => GenericConstraintKind.Interface,
+                    TemplateSymbol => GenericConstraintKind.StructuralTemplate,
+                    _ => GenericConstraintKind.StructuralTemplate,
+                };
+
+                if (target is not (StructTypeSymbol or InterfaceTypeSymbol or TemplateSymbol))
+                {
+                    _diagnostics.Report(named.NameToken.Location,
+                        $"unknown or invalid generic constraint '{named.Name}'",
+                        DiagnosticIds.InvalidGenericConstraint);
+                    continue;
+                }
+                if (constraints[parameter].Any(existing => ReferenceEquals(existing.Target, target)))
+                {
+                    _diagnostics.Report(named.NameToken.Location,
+                        $"constraint '{named.Name}' is already specified for '{parameter.Name}'",
+                        DiagnosticIds.DuplicateGenericConstraint);
+                    continue;
+                }
+
+                constraints[parameter].Add(new GenericConstraintSymbol(kind, target, constraintSyntax));
+                _semanticInfo.Symbols[constraintSyntax] = SymbolInfo.FromSymbol(target);
+                _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(target);
+            }
+        }
+
+        foreach (GenericParameterSymbol parameter in parameters)
+            parameter.SetConstraints(constraints[parameter].ToImmutable());
+    }
+
     private void RecordDeclarations(Symbol symbol)
     {
         _cancellationToken.ThrowIfCancellationRequested();
@@ -2113,9 +2495,14 @@ internal sealed class SemanticAnalyzer
 
         IEnumerable<Symbol> children = symbol switch
         {
-            NamespaceSymbol ns => ns.Namespaces.Cast<Symbol>().Concat(ns.Types).Concat(ns.Functions).Concat(ns.Constants),
+            NamespaceSymbol ns => ns.Namespaces.Cast<Symbol>().Concat(ns.Types).Concat(ns.Templates).Concat(ns.Functions).Concat(ns.Constants),
+            StructTypeSymbol type => type.TypeParameters.Cast<Symbol>().Concat(type.GetMembers()),
             DeclaredTypeSymbol type => type.GetMembers(),
-            FunctionSymbol function => function.Parameters,
+            FunctionSymbol function => function.TypeParameters.Cast<Symbol>().Concat(function.Parameters),
+            TemplateSymbol template => template.Members,
+            TemplateMethodRequirementSymbol method => method.Parameters,
+            TemplateConstructorRequirementSymbol constructor => constructor.Parameters,
+            TemplateIndexerRequirementSymbol indexer => indexer.Parameters,
             PropertySymbol property => new[] { property.Getter, property.Setter }.OfType<Symbol>(),
             IndexerSymbol indexer => indexer.Parameters.Cast<Symbol>()
                 .Concat(new[] { indexer.Getter, indexer.Setter }.OfType<Symbol>()),

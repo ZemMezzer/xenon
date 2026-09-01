@@ -1,0 +1,36 @@
+namespace GenericDeferredStructuralRuntime;
+
+template Runnable { int Run(); }
+
+struct Required<T> where T : Runnable
+{
+    public T* value;
+}
+
+struct Node<T>
+{
+    public Required<Node<T>>* metadata;
+    public int Run() { return 42; }
+}
+
+struct A<T>
+{
+    public Required<B<T>>* metadata;
+    public int Run() { return 20; }
+}
+
+struct B<T>
+{
+    public Required<A<T>>* metadata;
+    public int Run() { return 22; }
+}
+
+int Main()
+{
+    Node<int> node = Node<int>();
+    A<int> a = A<int>();
+    B<int> b = B<int>();
+    if (node.Run() != 42) return 1;
+    if (a.Run() + b.Run() != 42) return 2;
+    return 0;
+}

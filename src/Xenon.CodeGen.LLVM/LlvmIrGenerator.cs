@@ -96,6 +96,7 @@ public sealed class LlvmIrGenerator
         void AddTypeExports(NamespaceSymbol @namespace)
         {
             foreach (StructTypeSymbol type in @namespace.Structs
+                .Where(type => type.IsConcreteType)
                 .Where(compilation.IsSymbolDefinedHere))
             {
                 foreach (FieldSymbol field in type.StaticFields.Where(field => field.IsPublic))
@@ -205,6 +206,10 @@ public sealed class LlvmIrGenerator
             DeclareInterfaceTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareStructTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
+            foreach (BoundFunction specialization in compilation.SemanticModel.Functions
+                .Where(function => function.Symbol.IsGenericSpecialization))
+                if (!_functions.ContainsKey(specialization.Symbol))
+                    DeclareFunction(specialization.Symbol);
             DeclareInterfaceTables(compilation.SemanticModel.GlobalNamespace);
             DeclareVirtualTables(compilation.SemanticModel.GlobalNamespace);
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
@@ -410,7 +415,7 @@ public sealed class LlvmIrGenerator
 
     private void DeclareVirtualTables(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.HasVirtualDispatch))
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType && type.HasVirtualDispatch))
         {
             LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)type.VirtualMethods.Length + 1);
@@ -437,7 +442,7 @@ public sealed class LlvmIrGenerator
 
     private void DeclareInterfaceTables(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Structs)
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
         {
             var tables = new Dictionary<InterfaceTypeSymbol, (LlvmVTable Table, FunctionSymbol[] Implementations)>();
             bool owned = _compilation.IsSymbolDefinedHere(type);
@@ -501,7 +506,7 @@ public sealed class LlvmIrGenerator
 
     private void DeclareStaticFields(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Structs)
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
         {
             foreach (FieldSymbol field in type.StaticFields)
             {
@@ -573,7 +578,7 @@ public sealed class LlvmIrGenerator
 
     private static void CollectStructTypes(NamespaceSymbol @namespace, ICollection<StructTypeSymbol> types)
     {
-        foreach (StructTypeSymbol type in @namespace.Structs)
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
         {
             types.Add(type);
         }
@@ -588,14 +593,16 @@ public sealed class LlvmIrGenerator
     {
         foreach (FunctionSymbol function in @namespace.Functions)
         {
-            DeclareFunction(function);
+            if (!function.IsGenericDefinition)
+                DeclareFunction(function);
         }
 
-        foreach (StructTypeSymbol type in @namespace.Structs)
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
         {
             foreach (FunctionSymbol method in type.Methods)
             {
-                DeclareFunction(method);
+                if (!method.IsGenericDefinition)
+                    DeclareFunction(method);
             }
 
             foreach (FunctionSymbol constructor in type.Constructors)

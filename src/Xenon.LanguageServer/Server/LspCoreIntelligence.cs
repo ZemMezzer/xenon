@@ -18,6 +18,7 @@ internal static class LspCoreIntelligence
     [
         "namespace", "type", "interface", "enum", "enumMember", "function", "method",
         "constructor", "property", "field", "parameter", "variable", "constant",
+        "typeParameter",
     ];
     internal static readonly string[] SemanticTokenModifiers = ["declaration", "definition", "static", "readonly"];
 
@@ -502,13 +503,14 @@ internal static class LspCoreIntelligence
         EditorSymbolKind.Field => 5,
         EditorSymbolKind.LocalVariable or EditorSymbolKind.Parameter => 6,
         EditorSymbolKind.Type => 7,
-        EditorSymbolKind.Interface => 8,
+        EditorSymbolKind.Interface or EditorSymbolKind.Template => 8,
         EditorSymbolKind.Namespace => 9,
         EditorSymbolKind.Property => 10,
         EditorSymbolKind.Enum => 13,
         EditorSymbolKind.EnumMember => 20,
         EditorSymbolKind.Constant => 21,
         EditorSymbolKind.Struct => 22,
+        EditorSymbolKind.TypeParameter => 25,
         _ => 1,
     };
 
@@ -516,7 +518,7 @@ internal static class LspCoreIntelligence
     {
         EditorSymbolKind.Namespace => 3,
         EditorSymbolKind.Struct => 23,
-        EditorSymbolKind.Interface => 11,
+        EditorSymbolKind.Interface or EditorSymbolKind.Template => 11,
         EditorSymbolKind.Enum => 10,
         EditorSymbolKind.EnumMember => 22,
         EditorSymbolKind.Function => 12,
@@ -526,6 +528,7 @@ internal static class LspCoreIntelligence
         EditorSymbolKind.Field => 8,
         EditorSymbolKind.Constant => 14,
         EditorSymbolKind.Parameter or EditorSymbolKind.LocalVariable => 13,
+        EditorSymbolKind.TypeParameter => 26,
         _ => 5,
     };
 
@@ -533,7 +536,7 @@ internal static class LspCoreIntelligence
     {
         EditorSymbolKind.Namespace => 0,
         EditorSymbolKind.Type or EditorSymbolKind.Struct => 1,
-        EditorSymbolKind.Interface => 2,
+        EditorSymbolKind.Interface or EditorSymbolKind.Template => 2,
         EditorSymbolKind.Enum => 3,
         EditorSymbolKind.EnumMember => 4,
         EditorSymbolKind.Function => 5,
@@ -544,6 +547,7 @@ internal static class LspCoreIntelligence
         EditorSymbolKind.Parameter => 10,
         EditorSymbolKind.LocalVariable => 11,
         EditorSymbolKind.Constant => 12,
+        EditorSymbolKind.TypeParameter => 13,
         _ => -1,
     };
 

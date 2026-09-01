@@ -54,6 +54,7 @@ public sealed record AssignmentExpressionSyntax(
 
 public sealed record CallExpressionSyntax(
     ExpressionSyntax Target,
+    TypeArgumentListSyntax? TypeArguments,
     SyntaxToken OpenParenthesisToken,
     ImmutableArray<ExpressionSyntax> Arguments,
     ImmutableArray<SyntaxToken> CommaTokens,

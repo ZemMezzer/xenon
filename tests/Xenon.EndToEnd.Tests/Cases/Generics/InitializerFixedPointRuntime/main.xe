@@ -1,0 +1,25 @@
+namespace GenericInitializerFixedPointRuntime;
+
+struct Inner<T>
+{
+    public int value = 42;
+}
+
+int ReadInitializedInner<T>()
+{
+    Inner<T> inner = Inner<T>();
+    return inner.value;
+}
+
+struct Outer<T>
+{
+    // Inner<int> is first requested while this specialized initializer is bound.
+    public int observed = ReadInitializedInner<T>();
+}
+
+int Main()
+{
+    Outer<int> outer = Outer<int>();
+    if (outer.observed != 42) return 1;
+    return 0;
+}

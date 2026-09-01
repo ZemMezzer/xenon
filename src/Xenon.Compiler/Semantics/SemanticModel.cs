@@ -303,6 +303,15 @@ public sealed class SemanticModel
         if (receiverType is ArrayTypeSymbol array)
             return options.AccessKind == MemberAccessKind.Static ? [] : _semanticInfo.GetArrayMembers(array).Cast<Symbol>()
                 .OrderBy(member => member.Name, StringComparer.Ordinal).ToImmutableArray();
+        if (receiverType is GenericParameterSymbol genericParameter)
+            return GenericConstraintMemberLookup.GetMembers(genericParameter)
+                .Where(member => member.IsUserVisible)
+                .Where(member => IsApplicableMember(member, options))
+                .Where(member => options.IncludeInaccessible || IsAccessible(member, GetContainingTypeAtPosition(position)))
+                .DistinctBy(member => member.ToDisplayString(SymbolDisplayFormat.Signature))
+                .OrderBy(member => member.Name, StringComparer.Ordinal)
+                .ThenBy(member => member.ToDisplayString(SymbolDisplayFormat.Signature), StringComparer.Ordinal)
+                .ToImmutableArray();
 
         DeclaredTypeSymbol? type = receiverType switch
         {
@@ -522,6 +531,14 @@ public sealed class SemanticModel
             (!options.IsReadonlyReceiver || indexer.Getter?.IsReadonly == true),
         InterfaceIndexerSymbol indexer => options.AccessKind != MemberAccessKind.Static &&
             (!options.IsReadonlyReceiver || indexer.Getter?.IsReadonly == true),
+        TemplateMethodRequirementSymbol method =>
+            (options.AccessKind == MemberAccessKind.Any || (options.AccessKind == MemberAccessKind.Static) == method.IsStatic) &&
+            (!options.IsReadonlyReceiver || method.IsReadonly),
+        TemplatePropertyRequirementSymbol property =>
+            (options.AccessKind == MemberAccessKind.Any || (options.AccessKind == MemberAccessKind.Static) == property.IsStatic) &&
+            property.HasGetter && (!options.IsReadonlyReceiver || property.IsReadonly),
+        TemplateIndexerRequirementSymbol indexer => options.AccessKind != MemberAccessKind.Static &&
+            indexer.HasGetter && (!options.IsReadonlyReceiver || indexer.IsReadonly),
         _ => false,
     };
 
@@ -531,6 +548,7 @@ public sealed class SemanticModel
         FunctionSymbol function => function.IsPublic || ReferenceEquals(function.ContainingType, withinType),
         PropertySymbol property => property.IsPublic || ReferenceEquals(property.ContainingType, withinType),
         IndexerSymbol indexer => indexer.IsPublic || ReferenceEquals(indexer.ContainingType, withinType),
+        TemplateMemberRequirementSymbol requirement => requirement.IsPublic,
         _ => true,
     };
 

@@ -12,4 +12,6 @@ public enum SymbolKind
     LocalVariable,
     Error,
     Alias,
+    Template,
+    TypeParameter,
 }

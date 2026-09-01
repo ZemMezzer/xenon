@@ -1,0 +1,51 @@
+namespace GenericConstraintsRuntime;
+
+struct BaseEntity
+{
+    public int id;
+    public int BaseMethod() { return 3; }
+    public int BaseValue { get { return 4; } }
+    public int this[int index] { get { return index; } }
+}
+
+interface IEntity { int InterfaceValue(); }
+template Runnable { int Run(); }
+
+struct Entity : BaseEntity, IEntity
+{
+    public int InterfaceValue() { return 5; }
+    public int Run() { return 19; }
+}
+
+int Combined<T>(T value) where T : BaseEntity, IEntity, Runnable
+{
+    return value.id + value.BaseMethod() + value.BaseValue + value[1]
+        + value.InterfaceValue() + value.Run();
+}
+
+struct Runner<T>
+{
+    public T value;
+    public int result;
+    public Runner(T value, int result) { this.value = value; this.result = result; }
+    public int Run() { return result; }
+}
+
+struct Wrapper<T> where T : Runnable
+{
+    public T value;
+    public Wrapper(T value) { this.value = value; }
+    public int Execute() { return value.Run(); }
+}
+
+int Main()
+{
+    Entity entity = Entity();
+    entity.id = 10;
+    if (Combined<Entity>(entity) != 42) return 1;
+
+    Runner<int> runner = Runner<int>(7, 42);
+    Wrapper<Runner<int>> wrapper = Wrapper<Runner<int>>(runner);
+    if (wrapper.Execute() != 42) return 2;
+    return 0;
+}

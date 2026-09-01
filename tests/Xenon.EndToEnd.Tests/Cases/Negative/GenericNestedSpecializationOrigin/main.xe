@@ -1,0 +1,12 @@
+namespace NegativeGenericNestedSpecializationOrigin;
+
+template Runnable { void Run(); }
+struct Inner<T> where T : Runnable { }
+struct Outer<T> where T : Runnable { public Inner<T> value; }
+struct Bad { }
+
+int Main()
+{
+    Outer<Bad> value = Outer<Bad>();
+    return 0;
+}
