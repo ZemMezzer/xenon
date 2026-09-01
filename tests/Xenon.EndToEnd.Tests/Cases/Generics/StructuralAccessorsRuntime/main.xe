@@ -1,0 +1,57 @@
+namespace GenericStructuralAccessorsRuntime;
+
+template Readable { int Value { get; } }
+
+struct Data
+{
+    public int backing;
+    public int Value
+    {
+        get { return backing; }
+        set { backing = value; }
+    }
+}
+
+int Read<T>(T value) where T : Readable { return value.Value; }
+
+template CollectionLike { int this[int index] { get; } }
+
+struct Grid
+{
+    public int backing;
+    public int this[int index]
+    {
+        get { return backing + index; }
+        set { backing = value - index; }
+    }
+}
+
+int ReadAt<T>(T value, int index) where T : CollectionLike { return value[index]; }
+
+template Equalable { bool Equals(Equalable other); }
+
+struct Number
+{
+    public int value;
+    public Number(int value) { this.value = value; }
+    public bool Equals(Number other) { return value == other.value; }
+}
+
+bool Same<T>(T left, T right) where T : Equalable { return left.Equals(right); }
+
+int Main()
+{
+    Data data = Data();
+    data.Value = 42;
+    if (Read<Data>(data) != 42) return 1;
+
+    Grid grid = Grid();
+    grid[2] = 42;
+    if (ReadAt<Grid>(grid, 2) != 42) return 2;
+
+    Number first = Number(42);
+    Number same = Number(42);
+    Number different = Number(41);
+    if (!Same<Number>(first, same) || Same<Number>(first, different)) return 3;
+    return 0;
+}

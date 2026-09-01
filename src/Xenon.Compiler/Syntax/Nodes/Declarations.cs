@@ -44,6 +44,35 @@ public sealed record ParameterSyntax(
     public override SyntaxKind Kind => SyntaxKind.Parameter;
 }
 
+public sealed record GenericParameterSyntax(SyntaxToken IdentifierToken) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.GenericParameter;
+}
+
+public sealed record GenericParameterListSyntax(
+    SyntaxToken LessToken,
+    ImmutableArray<GenericParameterSyntax> Parameters,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken GreaterToken) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.GenericParameterList;
+}
+
+public sealed record GenericConstraintSyntax(TypeSyntax Type) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.GenericConstraint;
+}
+
+public sealed record WhereClauseSyntax(
+    SyntaxToken WhereKeyword,
+    SyntaxToken TypeParameterToken,
+    SyntaxToken ColonToken,
+    ImmutableArray<GenericConstraintSyntax> Constraints,
+    ImmutableArray<SyntaxToken> CommaTokens) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.WhereClause;
+}
+
 public sealed record EnumDeclarationSyntax(
     SyntaxToken EnumKeyword,
     SyntaxToken IdentifierToken,
@@ -213,6 +242,7 @@ public sealed record ConstructorDeclarationSyntax(
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;
 
     public bool IsPrivate => !IsPublic;
+    public bool HasThisInitializer => BaseKeyword?.Kind == SyntaxKind.ThisKeyword;
 }
 
 public sealed record DestructorDeclarationSyntax(
@@ -238,9 +268,11 @@ public sealed record DestructorDeclarationSyntax(
 public sealed record StructDeclarationSyntax(
     SyntaxToken StructKeyword,
     SyntaxToken IdentifierToken,
+    GenericParameterListSyntax? TypeParameters,
     SyntaxToken? ColonToken,
     ImmutableArray<TypeSyntax> BaseTypes,
     ImmutableArray<SyntaxToken> BaseCommaTokens,
+    ImmutableArray<WhereClauseSyntax> WhereClauses,
     SyntaxToken OpenBraceToken,
     ImmutableArray<TypeMemberDeclarationSyntax> Members,
     SyntaxToken CloseBraceToken) : TypeDeclarationSyntax(IdentifierToken)
@@ -269,6 +301,42 @@ public sealed record StructDeclarationSyntax(
 
     public DestructorDeclarationSyntax? Destructor =>
         Members.OfType<DestructorDeclarationSyntax>().FirstOrDefault();
+}
+
+public sealed record TemplateConstructorDeclarationSyntax(
+    SyntaxToken? AccessModifierToken,
+    SyntaxToken IdentifierToken,
+    SyntaxToken OpenParenthesisToken,
+    ImmutableArray<ParameterSyntax> Parameters,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken CloseParenthesisToken,
+    BlockStatementSyntax? Body,
+    SyntaxToken? SemicolonToken) : TypeMemberDeclarationSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.TemplateConstructorDeclaration;
+    public bool IsPublic => AccessModifierToken?.Kind != SyntaxKind.PrivateKeyword;
+}
+
+public sealed record TemplateDeclarationSyntax(
+    SyntaxToken TemplateKeyword,
+    SyntaxToken IdentifierToken,
+    SyntaxToken OpenBraceToken,
+    ImmutableArray<TypeMemberDeclarationSyntax> Members,
+    SyntaxToken CloseBraceToken) : TypeDeclarationSyntax(IdentifierToken)
+{
+    public override SyntaxKind Kind => SyntaxKind.TemplateDeclaration;
+
+    public ImmutableArray<MethodDeclarationSyntax> Methods =>
+        Members.OfType<MethodDeclarationSyntax>().ToImmutableArray();
+
+    public ImmutableArray<PropertyDeclarationSyntax> Properties =>
+        Members.OfType<PropertyDeclarationSyntax>().ToImmutableArray();
+
+    public ImmutableArray<IndexerDeclarationSyntax> Indexers =>
+        Members.OfType<IndexerDeclarationSyntax>().ToImmutableArray();
+
+    public ImmutableArray<TemplateConstructorDeclarationSyntax> Constructors =>
+        Members.OfType<TemplateConstructorDeclarationSyntax>().ToImmutableArray();
 }
 
 public sealed record InterfaceMethodDeclarationSyntax(
@@ -337,10 +405,12 @@ public sealed record FunctionDeclarationSyntax(
     SyntaxToken? AbiModifierToken,
     TypeSyntax ReturnType,
     SyntaxToken IdentifierToken,
+    GenericParameterListSyntax? TypeParameters,
     SyntaxToken OpenParenthesisToken,
     ImmutableArray<ParameterSyntax> Parameters,
     ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseParenthesisToken,
+    ImmutableArray<WhereClauseSyntax> WhereClauses,
     BlockStatementSyntax? Body,
     SyntaxToken? SemicolonToken) : MemberDeclarationSyntax
 {

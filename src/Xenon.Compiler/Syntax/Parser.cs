@@ -46,6 +46,7 @@ internal sealed class Parser
                     SyntaxKind.StructKeyword or SyntaxKind.AbstractKeyword => ParseStructDeclaration(),
                     SyntaxKind.EnumKeyword => ParseEnumDeclaration(),
                     SyntaxKind.InterfaceKeyword => ParseInterfaceDeclaration(),
+                    SyntaxKind.TemplateKeyword => ParseTemplateDeclaration(),
                     SyntaxKind.ConstKeyword => ParseModuleConstantDeclaration(),
                     _ => ParseFunctionDeclaration(),
                 });
@@ -135,7 +136,9 @@ internal sealed class Parser
         }
         SyntaxToken structKeyword = MatchToken(SyntaxKind.StructKeyword);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
+        GenericParameterListSyntax? typeParameters = ParseGenericParameterList();
         (SyntaxToken? colon, ImmutableArray<TypeSyntax> bases, ImmutableArray<SyntaxToken> baseCommas) = ParseBaseTypeList();
+        ImmutableArray<WhereClauseSyntax> whereClauses = ParseWhereClauses();
         SyntaxToken openBrace = MatchToken(SyntaxKind.OpenBraceToken);
         var members = ImmutableArray.CreateBuilder<TypeMemberDeclarationSyntax>();
 
@@ -212,12 +215,153 @@ internal sealed class Parser
         return new StructDeclarationSyntax(
             structKeyword,
             identifier,
+            typeParameters,
             colon,
             bases,
             baseCommas,
+            whereClauses,
             openBrace,
             members.ToImmutable(),
             closeBrace) { AbstractKeyword = abstractKeyword };
+    }
+
+    private TemplateDeclarationSyntax ParseTemplateDeclaration()
+    {
+        SyntaxToken templateKeyword = MatchToken(SyntaxKind.TemplateKeyword);
+        SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
+        SyntaxToken openBrace = MatchToken(SyntaxKind.OpenBraceToken);
+        var members = ImmutableArray.CreateBuilder<TypeMemberDeclarationSyntax>();
+
+        while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
+        {
+            int start = _position;
+            var (access, @static, @virtual, @override, @abstract, @readonly) = ParseStructMemberModifiers();
+            SyntaxToken?[] modifiers = [access, @static, @virtual, @override, @abstract, @readonly];
+
+            if (Current.Kind == SyntaxKind.IdentifierToken && Peek(1).Kind == SyntaxKind.OpenParenthesisToken)
+            {
+                ValidateMemberModifiers("template constructor", modifiers,
+                    SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword);
+                members.Add(ParseTemplateConstructorDeclaration(access, identifier));
+            }
+            else
+            {
+                ValidateMemberModifiers("template member", modifiers,
+                    SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword,
+                    SyntaxKind.ReadonlyKeyword);
+                TypeSyntax type = ParseType();
+                SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
+                if (Current.Kind == SyntaxKind.ThisKeyword)
+                {
+                    ValidateAccessorReturnBinding(type);
+                    IndexerDeclarationSyntax indexer = ParseIndexerDeclaration(
+                        access, @static, null, null, null, @readonly, type);
+                    ReportTemplateAccessorBodies(indexer.Accessors);
+                    members.Add(indexer);
+                    continue;
+                }
+
+                SyntaxToken memberIdentifier = MatchToken(SyntaxKind.IdentifierToken);
+                if (Current.Kind == SyntaxKind.OpenParenthesisToken)
+                {
+                    (type, methodReadonly) = FinishMethodReturnType(type, @readonly, methodReadonly);
+                    members.Add(ParseTemplateMethodDeclaration(access, @static, methodReadonly, type, memberIdentifier));
+                }
+                else if (Current.Kind == SyntaxKind.OpenBraceToken)
+                {
+                    ValidateAccessorReturnBinding(type);
+                    PropertyDeclarationSyntax property = ParsePropertyDeclaration(
+                        access, @static, null, null, null, @readonly, type, memberIdentifier);
+                    ReportTemplateAccessorBodies(property.Accessors);
+                    members.Add(property);
+                }
+                else
+                {
+                    Diagnostics.Report(memberIdentifier.Location,
+                        "structural templates may contain only method, property, indexer and constructor requirements",
+                        DiagnosticIds.InvalidTemplateMember);
+                    SyntaxToken? equals = Current.Kind == SyntaxKind.EqualsToken ? NextToken() : null;
+                    ExpressionSyntax? initializer = equals is null ? null : ParseExpression();
+                    members.Add(new FieldDeclarationSyntax(
+                        access, @static, @readonly, type, memberIdentifier, equals, initializer,
+                        MatchToken(SyntaxKind.SemicolonToken)));
+                }
+            }
+
+            if (_position == start) NextToken();
+        }
+
+        return new TemplateDeclarationSyntax(
+            templateKeyword,
+            identifier,
+            openBrace,
+            members.ToImmutable(),
+            MatchToken(SyntaxKind.CloseBraceToken));
+    }
+
+    private TemplateConstructorDeclarationSyntax ParseTemplateConstructorDeclaration(
+        SyntaxToken? accessModifier,
+        SyntaxToken templateIdentifier)
+    {
+        SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
+        if (!string.Equals(identifier.Text, templateIdentifier.Text, StringComparison.Ordinal))
+            Diagnostics.Report(identifier.Location,
+                $"template constructor must be named '{templateIdentifier.Text}'",
+                DiagnosticIds.InvalidTemplateConstructorName);
+        SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        (ImmutableArray<ParameterSyntax> parameters, ImmutableArray<SyntaxToken> commas) = ParseParameterList();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        BlockStatementSyntax? body = null;
+        SyntaxToken? semicolon = null;
+        if (Current.Kind == SyntaxKind.OpenBraceToken)
+        {
+            Diagnostics.Report(Current.Location, "template constructor requirements cannot have a body",
+                DiagnosticIds.TemplateMemberBodyNotAllowed);
+            body = ParseBlockStatement();
+        }
+        else
+        {
+            semicolon = MatchToken(SyntaxKind.SemicolonToken);
+        }
+
+        return new TemplateConstructorDeclarationSyntax(
+            accessModifier, identifier, openParenthesis, parameters, commas, closeParenthesis, body, semicolon);
+    }
+
+    private MethodDeclarationSyntax ParseTemplateMethodDeclaration(
+        SyntaxToken? accessModifier,
+        SyntaxToken? @static,
+        SyntaxToken? @readonly,
+        TypeSyntax returnType,
+        SyntaxToken identifier)
+    {
+        SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        (ImmutableArray<ParameterSyntax> parameters, ImmutableArray<SyntaxToken> commas) = ParseParameterList();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        BlockStatementSyntax? body = null;
+        SyntaxToken? semicolon = null;
+        if (Current.Kind == SyntaxKind.OpenBraceToken)
+        {
+            Diagnostics.Report(Current.Location, "template method requirements cannot have a body",
+                DiagnosticIds.TemplateMemberBodyNotAllowed);
+            body = ParseBlockStatement();
+        }
+        else
+        {
+            semicolon = MatchToken(SyntaxKind.SemicolonToken);
+        }
+
+        return new MethodDeclarationSyntax(
+            accessModifier, @static, null, null, null, @readonly, returnType, identifier,
+            openParenthesis, parameters, commas, closeParenthesis, body, semicolon);
+    }
+
+    private void ReportTemplateAccessorBodies(IEnumerable<PropertyAccessorDeclarationSyntax> accessors)
+    {
+        foreach (PropertyAccessorDeclarationSyntax accessor in accessors.Where(accessor => accessor.Body is not null))
+            Diagnostics.Report(accessor.Body!.OpenBraceToken.Location,
+                "template property and indexer requirements cannot have accessor bodies",
+                DiagnosticIds.TemplateMemberBodyNotAllowed);
     }
 
     private ModuleConstantDeclarationSyntax ParseModuleConstantDeclaration()
@@ -385,7 +529,9 @@ internal sealed class Parser
         if (Current.Kind == SyntaxKind.ColonToken)
         {
             colon = NextToken();
-            baseKeyword = MatchToken(SyntaxKind.BaseKeyword);
+            baseKeyword = Current.Kind is SyntaxKind.BaseKeyword or SyntaxKind.ThisKeyword
+                ? NextToken()
+                : MatchToken(SyntaxKind.BaseKeyword);
             baseOpen = MatchToken(SyntaxKind.OpenParenthesisToken);
             (baseArguments, baseCommas) = ParseExpressionList(SyntaxKind.CloseParenthesisToken);
             baseClose = MatchToken(SyntaxKind.CloseParenthesisToken);
@@ -423,6 +569,51 @@ internal sealed class Parser
             commas.Add(NextToken());
         } while (true);
         return (colon, bases.ToImmutable(), commas.ToImmutable());
+    }
+
+    private GenericParameterListSyntax? ParseGenericParameterList()
+    {
+        if (Current.Kind != SyntaxKind.LessToken) return null;
+
+        SyntaxToken less = NextToken();
+        var parameters = ImmutableArray.CreateBuilder<GenericParameterSyntax>();
+        var commas = ImmutableArray.CreateBuilder<SyntaxToken>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        do
+        {
+            SyntaxToken name = MatchToken(SyntaxKind.IdentifierToken);
+            parameters.Add(new GenericParameterSyntax(name));
+            if (!name.IsMissing && !names.Add(name.Text))
+                Diagnostics.Report(name.Location, $"generic parameter '{name.Text}' is already declared",
+                    DiagnosticIds.DuplicateGenericParameter);
+            if (Current.Kind != SyntaxKind.CommaToken) break;
+            commas.Add(NextToken());
+        } while (Current.Kind != SyntaxKind.EndOfFileToken);
+
+        return new GenericParameterListSyntax(
+            less, parameters.ToImmutable(), commas.ToImmutable(), MatchTypeGreaterToken());
+    }
+
+    private ImmutableArray<WhereClauseSyntax> ParseWhereClauses()
+    {
+        var clauses = ImmutableArray.CreateBuilder<WhereClauseSyntax>();
+        while (Current.Kind == SyntaxKind.WhereKeyword)
+        {
+            SyntaxToken whereKeyword = NextToken();
+            SyntaxToken typeParameter = MatchToken(SyntaxKind.IdentifierToken);
+            SyntaxToken colon = MatchToken(SyntaxKind.ColonToken);
+            var constraints = ImmutableArray.CreateBuilder<GenericConstraintSyntax>();
+            var commas = ImmutableArray.CreateBuilder<SyntaxToken>();
+            do
+            {
+                constraints.Add(new GenericConstraintSyntax(ParseType(allowArraySuffix: false)));
+                if (Current.Kind != SyntaxKind.CommaToken) break;
+                commas.Add(NextToken());
+            } while (Current.Kind != SyntaxKind.EndOfFileToken);
+            clauses.Add(new WhereClauseSyntax(
+                whereKeyword, typeParameter, colon, constraints.ToImmutable(), commas.ToImmutable()));
+        }
+        return clauses.ToImmutable();
     }
 
     private InterfaceDeclarationSyntax ParseInterfaceDeclaration()
@@ -635,9 +826,11 @@ internal sealed class Parser
         SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
         (returnType, methodReadonly) = FinishMethodReturnType(returnType, null, methodReadonly);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
+        GenericParameterListSyntax? typeParameters = ParseGenericParameterList();
         SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
         (ImmutableArray<ParameterSyntax> parameters, ImmutableArray<SyntaxToken> commaTokens) = ParseParameterList();
         SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        ImmutableArray<WhereClauseSyntax> whereClauses = ParseWhereClauses();
         BlockStatementSyntax? body = null;
         SyntaxToken? semicolon = null;
 
@@ -655,10 +848,12 @@ internal sealed class Parser
             abiModifier,
             returnType,
             identifier,
+            typeParameters,
             openParenthesis,
             parameters,
             commaTokens,
             closeParenthesis,
+            whereClauses,
             body,
             semicolon) { ReadonlyKeyword = methodReadonly };
     }
@@ -1112,7 +1307,14 @@ internal sealed class Parser
         {
             if (Current.Kind == SyntaxKind.OpenParenthesisToken)
             {
-                expression = ParseCallExpression(expression);
+                expression = ParseCallExpression(expression, null);
+                continue;
+            }
+
+            if (Current.Kind == SyntaxKind.LessToken && IsTypeArgumentListFollowedByCall())
+            {
+                TypeArgumentListSyntax typeArguments = ParseTypeArgumentList();
+                expression = ParseCallExpression(expression, typeArguments);
                 continue;
             }
 
@@ -1145,7 +1347,7 @@ internal sealed class Parser
         return expression;
     }
 
-    private CallExpressionSyntax ParseCallExpression(ExpressionSyntax target)
+    private CallExpressionSyntax ParseCallExpression(ExpressionSyntax target, TypeArgumentListSyntax? typeArguments)
     {
         SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
         (ImmutableArray<ExpressionSyntax> arguments, ImmutableArray<SyntaxToken> commas) =
@@ -1153,10 +1355,41 @@ internal sealed class Parser
         SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
         return new CallExpressionSyntax(
             target,
+            typeArguments,
             openParenthesis,
             arguments,
             commas,
             closeParenthesis);
+    }
+
+    private bool IsTypeArgumentListFollowedByCall()
+    {
+        int depth = 0;
+        for (int offset = 0; ; offset++)
+        {
+            SyntaxKind kind = Peek(offset).Kind;
+            if (kind == SyntaxKind.EndOfFileToken) return false;
+            if (kind == SyntaxKind.LessToken)
+            {
+                depth++;
+                continue;
+            }
+            if (kind == SyntaxKind.GreaterToken)
+            {
+                depth--;
+            }
+            else if (kind == SyntaxKind.GreaterGreaterToken)
+            {
+                depth -= 2;
+            }
+            else
+            {
+                continue;
+            }
+
+            if (depth == 0) return Peek(offset + 1).Kind == SyntaxKind.OpenParenthesisToken;
+            if (depth < 0) return false;
+        }
     }
 
     private (ImmutableArray<ExpressionSyntax> Arguments, ImmutableArray<SyntaxToken> Commas) ParseExpressionList(

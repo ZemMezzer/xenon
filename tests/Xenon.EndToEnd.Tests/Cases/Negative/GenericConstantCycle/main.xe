@@ -1,0 +1,14 @@
+namespace NegativeGenericConstantCycle;
+
+struct Data<T>
+{
+    const int A = B;
+    const int B = A;
+    public int Get() { return A; }
+}
+
+int Main()
+{
+    Data<int> value = Data<int>();
+    return value.Get();
+}

@@ -1,0 +1,9 @@
+namespace NegativeGenericConstraintLocation;
+template Runnable { void Run(); }
+struct Bad { }
+struct Wrapper<T> where T : Runnable { public T value; }
+int Main()
+{
+    Wrapper<Bad> value = Wrapper<Bad>();
+    return 0;
+}

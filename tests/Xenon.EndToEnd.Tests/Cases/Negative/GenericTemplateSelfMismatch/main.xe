@@ -1,0 +1,11 @@
+namespace NegativeGenericTemplateSelfMismatch;
+struct Box<T> { public T value; }
+template Processor { void Process(Box<Processor> value); }
+struct Wrong { public void Process(Box<int> value) { } }
+void Execute<T>(T value) where T : Processor { }
+int Main()
+{
+    Wrong value = Wrong();
+    Execute<Wrong>(value);
+    return 0;
+}

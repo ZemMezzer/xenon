@@ -303,6 +303,15 @@ public sealed class SemanticModel
         if (receiverType is ArrayTypeSymbol array)
             return options.AccessKind == MemberAccessKind.Static ? [] : _semanticInfo.GetArrayMembers(array).Cast<Symbol>()
                 .OrderBy(member => member.Name, StringComparer.Ordinal).ToImmutableArray();
+        if (receiverType is GenericParameterSymbol genericParameter)
+            return GenericConstraintMemberLookup.GetMembers(genericParameter)
+                .Where(member => member.IsUserVisible)
+                .Where(member => IsApplicableMember(member, options))
+                .Where(member => options.IncludeInaccessible || IsAccessible(member, GetContainingTypeAtPosition(position)))
+                .DistinctBy(member => member.ToDisplayString(SymbolDisplayFormat.Signature))
+                .OrderBy(member => member.Name, StringComparer.Ordinal)
+                .ThenBy(member => member.ToDisplayString(SymbolDisplayFormat.Signature), StringComparer.Ordinal)
+                .ToImmutableArray();
 
         DeclaredTypeSymbol? type = receiverType switch
         {
@@ -355,6 +364,8 @@ public sealed class SemanticModel
     /// <summary>
     /// Returns only successfully bound source occurrences. Candidate-only, ambiguous and
     /// unresolved nodes are deliberately excluded so tooling never treats spelling as identity.
+    /// Compiler-provided setter value parameters are included because their references are
+    /// explicit source tokens even though the parameter itself has no declaration token.
     /// </summary>
     public ImmutableArray<ResolvedSymbolReference> GetResolvedReferences(
         CancellationToken cancellationToken = default)
@@ -365,7 +376,7 @@ public sealed class SemanticModel
         foreach ((SyntaxNode syntax, SymbolInfo info) in _semanticInfo.Symbols)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (info.Symbol is not { IsSourceDefined: true } symbol ||
+            if (info.Symbol is not { } symbol || !IsReferenceableSourceSymbol(symbol) ||
                 !TryGetReferenceLocation(syntax, out TextLocation location) ||
                 _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source) ||
                 !seen.Add((symbol, location.Source.FileId, location.Span)))
@@ -389,6 +400,15 @@ public sealed class SemanticModel
         return result.OrderBy(item => item.Location.Source.Path, StringComparer.Ordinal)
             .ThenBy(item => item.Location.Span.Start).ThenBy(item => item.Location.Span.Length)
             .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+    }
+
+    private static bool IsReferenceableSourceSymbol(Symbol symbol)
+    {
+        if (symbol.IsSourceDefined) return true;
+        if (symbol is not ParameterSymbol { Name: "value", ContainingSymbol: FunctionSymbol accessor })
+            return false;
+        return ReferenceEquals(accessor.ContainingProperty?.Setter, accessor) ||
+               ReferenceEquals(accessor.ContainingIndexer?.Setter, accessor);
     }
 
     /// <summary>The semantic type associated with a symbol for editor navigation.</summary>
@@ -522,6 +542,14 @@ public sealed class SemanticModel
             (!options.IsReadonlyReceiver || indexer.Getter?.IsReadonly == true),
         InterfaceIndexerSymbol indexer => options.AccessKind != MemberAccessKind.Static &&
             (!options.IsReadonlyReceiver || indexer.Getter?.IsReadonly == true),
+        TemplateMethodRequirementSymbol method =>
+            (options.AccessKind == MemberAccessKind.Any || (options.AccessKind == MemberAccessKind.Static) == method.IsStatic) &&
+            (!options.IsReadonlyReceiver || method.IsReadonly),
+        TemplatePropertyRequirementSymbol property =>
+            (options.AccessKind == MemberAccessKind.Any || (options.AccessKind == MemberAccessKind.Static) == property.IsStatic) &&
+            property.HasGetter && (!options.IsReadonlyReceiver || property.IsReadonly),
+        TemplateIndexerRequirementSymbol indexer => options.AccessKind != MemberAccessKind.Static &&
+            indexer.HasGetter && (!options.IsReadonlyReceiver || indexer.IsReadonly),
         _ => false,
     };
 
@@ -531,6 +559,7 @@ public sealed class SemanticModel
         FunctionSymbol function => function.IsPublic || ReferenceEquals(function.ContainingType, withinType),
         PropertySymbol property => property.IsPublic || ReferenceEquals(property.ContainingType, withinType),
         IndexerSymbol indexer => indexer.IsPublic || ReferenceEquals(indexer.ContainingType, withinType),
+        TemplateMemberRequirementSymbol requirement => requirement.IsPublic,
         _ => true,
     };
 
@@ -638,6 +667,9 @@ public sealed class SemanticModel
                 case PointerTypeSymbol pointer: type = pointer.ElementType; continue;
                 case ReferenceTypeSymbol reference: type = reference.ElementType; continue;
                 case ArrayTypeSymbol array: type = array.ElementType; continue;
+                case StructTypeSymbol { GenericDefinition: { } definition }:
+                    declared = definition;
+                    return true;
                 case DeclaredTypeSymbol result: declared = result; return true;
                 default: declared = null!; return false;
             }

@@ -1,0 +1,32 @@
+namespace GenericInitializationRuntime;
+
+struct Data<T>
+{
+    const int Size = 16;
+    const nuint Width = sizeof(T);
+    public int version = 42;
+    public nuint width = sizeof(T);
+    public T value;
+    public static int state = 7;
+
+    public int GetSize() { return Size; }
+    public nuint GetWidth() { return Width; }
+    public int GetState() { return Data.state; }
+    public void SetState(int value) { Data.state = value; }
+}
+
+int Main()
+{
+    Data<int> first = Data<int>();
+    Data<float> second = Data<float>();
+    Data<long> third = Data<long>();
+    if (first.version != 42 || second.version != 42 || third.version != 42) return 1;
+    if (first.width != sizeof(int) || second.width != sizeof(float) || third.width != sizeof(long)) return 2;
+    if (first.GetSize() != 16 || second.GetSize() != 16 || third.GetSize() != 16) return 3;
+    if (first.GetWidth() != sizeof(int) || second.GetWidth() != sizeof(float) || third.GetWidth() != sizeof(long)) return 6;
+    if (first.GetState() != 7 || second.GetState() != 7) return 4;
+    first.SetState(10);
+    second.SetState(20);
+    if (first.GetState() != 10 || second.GetState() != 20) return 5;
+    return 0;
+}

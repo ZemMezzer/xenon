@@ -1,0 +1,7 @@
+namespace NegativeGenericRecursiveValue;
+struct Recursive<T> { public Recursive<T> value; }
+int Main()
+{
+    Recursive<int> value = Recursive<int>();
+    return 0;
+}

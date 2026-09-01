@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
@@ -27,6 +28,10 @@ internal static class TypeResolver
                 DiagnosticIds.DeprecatedConstTypeQualifier);
         TypeSymbol result = ResolveCore(syntax, scope, diagnostics);
         scope.SemanticInfo?.RecordType(syntax, result);
+        if (result is GenericParameterSymbol parameter)
+            scope.SemanticInfo?.Symbols[syntax] = SymbolInfo.FromSymbol(parameter);
+        else if (result is TemplateSelfTypeSymbol selfType)
+            scope.SemanticInfo?.Symbols[syntax] = SymbolInfo.FromSymbol(selfType.Template);
         return result;
     }
 
@@ -58,16 +63,41 @@ internal static class TypeResolver
             }
             case NamedTypeSyntax named:
             {
-                if (named.TypeArguments is { } arguments)
-                {
-                    diagnostics.Report(arguments.LessToken.Location, "generic type arguments are not supported by semantic analysis yet",
-                        DiagnosticIds.GenericTypeArgumentsNotSupported);
-                    return BuiltinTypes.Error;
-                }
                 TypeSymbol? type = named.NameParts.Length == 1
                     ? BuiltinTypes.FromSyntaxKind(named.NameToken.Kind) ?? scope.ResolveType(named.Name, named.NameToken.Location, diagnostics)
                     : scope.ResolveQualifiedType(named.NameParts.Select(part => part.Text).ToArray());
+                if (named.TypeArguments is { } arguments)
+                {
+                    if (type is not StructTypeSymbol structure)
+                    {
+                        diagnostics.Report(arguments.LessToken.Location,
+                            $"type '{named.Name}' is not a generic struct",
+                            DiagnosticIds.GenericTypeArgumentsNotSupported);
+                        return BuiltinTypes.Error;
+                    }
+                    if (scope.GenericStructSpecializer is null)
+                    {
+                        diagnostics.Report(arguments.LessToken.Location,
+                            "generic struct specialization is not available in this declaration context yet",
+                            DiagnosticIds.GenericSpecializationNotImplemented);
+                        return BuiltinTypes.Error;
+                    }
+                    ImmutableArray<TypeSymbol> typeArguments = arguments.Arguments
+                        .Select(argument => ResolveCore(argument, scope, diagnostics)).ToImmutableArray();
+                    return (TypeSymbol?)scope.GenericStructSpecializer.GetOrCreate(structure, typeArguments,
+                        arguments.LessToken.Location) ?? BuiltinTypes.Error;
+                }
                 if (type is not null) return type;
+                TemplateSymbol? template = named.NameParts.Length == 1
+                    ? scope.ResolveTemplate(named.Name, named.NameToken.Location, diagnostics)
+                    : scope.ResolveQualifiedTemplate(named.NameParts.Select(part => part.Text).ToArray());
+                if (template is not null)
+                {
+                    diagnostics.Report(named.NameToken.Location,
+                        $"template '{template.Name}' is a compile-time constraint and cannot be used as a runtime type",
+                        DiagnosticIds.TemplateCannotBeUsedAsType);
+                    return BuiltinTypes.Error;
+                }
                 diagnostics.Report(named.NameToken.Location, $"unknown type '{named.Name}'", DiagnosticIds.UnknownType);
                 return BuiltinTypes.Error;
             }

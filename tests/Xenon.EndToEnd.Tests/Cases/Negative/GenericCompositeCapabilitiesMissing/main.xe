@@ -1,0 +1,13 @@
+namespace NegativeGenericCompositeCapabilitiesMissing;
+
+template Runnable { int Run(); }
+template Stateful { int State(); }
+template Advanced { int Run(); int State(); int Serialize(); }
+struct Required<T> where T : Advanced { public T value; }
+
+struct InvalidOuter<T> where T : Runnable, Stateful
+{
+    public Required<T> required;
+}
+
+int Main() { return 0; }

@@ -1,0 +1,38 @@
+namespace NegativeGenericStructuralSignatures;
+
+template ReturnsInt { int Get(); }
+struct WrongReturn { public float Get() { return 1.0f; } }
+void NeedReturn<T>(T value) where T : ReturnsInt { }
+
+template TakesInt { int Get(int value); }
+struct WrongParameter { public int Get(float value) { return cast<int>(value); } }
+void NeedParameter<T>(T value) where T : TakesInt { }
+
+template MutableCall { void Set(int& value); }
+struct WrongRef { public void Set(int value) { } }
+void NeedRef<T>(T value) where T : MutableCall { }
+
+template Readable { int Value { get; } }
+struct SetterOnly { public int Value { set { } } }
+void NeedGetter<T>(T value) where T : Readable { }
+
+template Writable { int Value { set; } }
+struct GetterOnly { public int Value { get { return 1; } } }
+void NeedSetter<T>(T value) where T : Writable { }
+
+template IntConstructible { IntConstructible(int value); }
+struct WrongConstructor { public WrongConstructor(float value) { } }
+void NeedConstructor<T>(T value) where T : IntConstructible { }
+
+void InvalidConstraint<T>(T value) where T : int { }
+
+int Main()
+{
+    NeedReturn<WrongReturn>(WrongReturn());
+    NeedParameter<WrongParameter>(WrongParameter());
+    NeedRef<WrongRef>(WrongRef());
+    NeedGetter<SetterOnly>(SetterOnly());
+    NeedSetter<GetterOnly>(GetterOnly());
+    NeedConstructor<WrongConstructor>(WrongConstructor(1.0f));
+    return 0;
+}

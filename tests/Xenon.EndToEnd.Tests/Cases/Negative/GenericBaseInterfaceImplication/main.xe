@@ -1,0 +1,12 @@
+namespace NegativeGenericBaseInterfaceImplication;
+
+interface IRunnable { int Run(); }
+struct Unrelated { }
+struct Required<T> where T : IRunnable { public T value; }
+
+struct InvalidOuter<T> where T : Unrelated
+{
+    public Required<T> required;
+}
+
+int Main() { return 0; }

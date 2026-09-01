@@ -1,3 +1,4 @@
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xunit;
@@ -896,6 +897,107 @@ public sealed class ParserTests
         Assert.Empty(tree.Diagnostics);
         var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
         Assert.IsType<ExpressionStatementSyntax>(Assert.Single(function.Body!.Statements));
+    }
+
+    [Fact]
+    public void Parser_ParsesGenericFunctionsStructsAndIndependentWhereClauses()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            struct Pair<TKey, TValue>
+                where TKey : Hashable, Equalable
+                where TValue : IEntity
+            {
+                TKey key;
+                TValue value;
+            }
+
+            TResult Convert<TSource, TResult>(TSource value)
+                where TSource : BaseEntity, IEntity
+                where TResult : Constructible
+            {
+                TResult result;
+                return result;
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var pair = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        Assert.Equal(["TKey", "TValue"], pair.TypeParameters!.Parameters.Select(parameter => parameter.IdentifierToken.Text));
+        Assert.Equal(2, pair.WhereClauses.Length);
+        Assert.Equal(2, pair.WhereClauses[0].Constraints.Length);
+        Assert.Equal("Hashable", pair.WhereClauses[0].Constraints[0].Type.Name);
+
+        var convert = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        Assert.Equal(["TSource", "TResult"], convert.TypeParameters!.Parameters.Select(parameter => parameter.IdentifierToken.Text));
+        Assert.Equal(2, convert.WhereClauses.Length);
+        Assert.Equal("TResult", convert.WhereClauses[1].TypeParameterToken.Text);
+    }
+
+    [Fact]
+    public void Parser_ParsesStructuralTemplateRequirements()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+
+            template VectorLike
+            {
+                VectorLike();
+                VectorLike(float x, float y, float z);
+                float readonly Length();
+                float X { get; }
+                float this[int index] { get; set; }
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var template = Assert.IsType<TemplateDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.Equal("VectorLike", template.IdentifierToken.Text);
+        Assert.Equal(2, template.Constructors.Length);
+        Assert.Equal(3, template.Constructors[1].Parameters.Length);
+        Assert.True(Assert.Single(template.Methods).IsReadonly);
+        Assert.Single(template.Properties);
+        Assert.Single(template.Indexers);
+    }
+
+    [Fact]
+    public void Parser_RejectsTemplateImplementationsAndIncorrectConstructorNames()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+            template ExampleTemplate
+            {
+                WrongName(int value);
+                void Execute() { }
+                int Value { get { return 1; } }
+            }
+            """);
+
+        Assert.Contains(tree.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.InvalidTemplateConstructorName);
+        Assert.Equal(2, tree.Diagnostics.Count(diagnostic => diagnostic.Id == DiagnosticIds.TemplateMemberBodyNotAllowed));
+    }
+
+    [Fact]
+    public void Parser_ReportsDuplicateGenericParameters()
+    {
+        SyntaxTree tree = Parse("namespace Example; void Apply<T, T>(T value) { }");
+
+        Assert.Contains(tree.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.DuplicateGenericParameter);
+    }
+
+    [Fact]
+    public void Parser_ParsesExplicitGenericFunctionCallsWithoutChangingNestedTypeArguments()
+    {
+        SyntaxTree tree = Parse("namespace Example; void Test() { Identity<int>(1); Convert<Box<int>, Pair<int, float>>(value); }");
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var first = Assert.IsType<CallExpressionSyntax>(Assert.IsType<ExpressionStatementSyntax>(function.Body!.Statements[0]).Expression);
+        Assert.Equal("int", Assert.Single(first.TypeArguments!.Arguments).Name);
+        var second = Assert.IsType<CallExpressionSyntax>(Assert.IsType<ExpressionStatementSyntax>(function.Body.Statements[1]).Expression);
+        Assert.Equal(2, second.TypeArguments!.Arguments.Length);
+        Assert.NotNull(Assert.IsType<NamedTypeSyntax>(second.TypeArguments.Arguments[1]).TypeArguments);
     }
 
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));

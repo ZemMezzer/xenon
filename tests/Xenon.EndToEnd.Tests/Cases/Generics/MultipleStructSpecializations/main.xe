@@ -1,0 +1,33 @@
+namespace MultipleStructSpecializations;
+
+struct Box<T>
+{
+    T value;
+
+    public Box(T initial)
+    {
+        value = initial;
+    }
+
+    public T Get()
+    {
+        T local = value;
+        return local;
+    }
+}
+
+int ReadInt(int value) { return Box<int>(value).Get(); }
+float ReadFloat(float value) { return Box<float>(value).Get(); }
+long ReadLong(long value) { return Box<long>(value).Get(); }
+T Identity<T>(T value) { return value; }
+
+int Main()
+{
+    int integer = ReadInt(10);
+    float floating = ReadFloat(20.0f);
+    long wide = ReadLong(cast<long>(12));
+    if (Identity<int>(integer) != 10) return 1;
+    if (Identity<float>(floating) != 20.0f) return 2;
+    if (Identity<long>(wide) != cast<long>(12)) return 3;
+    return integer + cast<int>(floating) + cast<int>(wide);
+}

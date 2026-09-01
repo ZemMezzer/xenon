@@ -14,11 +14,19 @@ struct Base
 struct Derived : Base { public Derived(float value) : base(value) { } }
 struct DefaultBase { public int Value; public DefaultBase() { Value = 42; } }
 struct ImplicitDerived : DefaultBase { public int Extra; }
+struct Chained
+{
+    public int Value;
+    public Chained() { Value = 42; }
+    public Chained(int ignored) : this() { }
+}
 int Main()
 {
     Box exact = Box(42); Box alternate = Box(41.0f); Derived derived = Derived(41.0f);
     if (exact.Value != 42 || alternate.Value != 42 || derived.Value != 42) return 1;
     ImplicitDerived implicit = ImplicitDerived();
     if (implicit.Value != 42 || implicit.Extra != 0) return 2;
+    Chained chained = Chained(0);
+    if (chained.Value != 42) return 3;
     return 42;
 }
