@@ -130,6 +130,12 @@ internal static class GenericConstraintMemberLookup
             SubstituteTemplateSelf(reference.ElementType, template, parameter, types, specializer), reference.IsReadonly),
         ArrayTypeSymbol array => types.ArrayOf(
             SubstituteTemplateSelf(array.ElementType, template, parameter, types, specializer), array.Rank),
+        UniqueTypeSymbol unique => types.UniqueOf(
+            SubstituteTemplateSelf(unique.ElementType, template, parameter, types, specializer)),
+        SharedTypeSymbol shared => types.SharedOf(
+            SubstituteTemplateSelf(shared.ElementType, template, parameter, types, specializer)),
+        WeakTypeSymbol weak => types.WeakOf(
+            SubstituteTemplateSelf(weak.ElementType, template, parameter, types, specializer)),
         _ => type,
     };
 

@@ -144,6 +144,12 @@ internal sealed class GenericFunctionSpecializer
                 TryInfer(left.ElementType, right.ElementType, inferred),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) when left.Rank == right.Rank =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
+            (UniqueTypeSymbol left, UniqueTypeSymbol right) =>
+                TryInfer(left.ElementType, right.ElementType, inferred),
+            (SharedTypeSymbol left, SharedTypeSymbol right) =>
+                TryInfer(left.ElementType, right.ElementType, inferred),
+            (WeakTypeSymbol left, WeakTypeSymbol right) =>
+                TryInfer(left.ElementType, right.ElementType, inferred),
             (StructTypeSymbol { GenericDefinition: not null } left,
                 StructTypeSymbol { GenericDefinition: not null } right)
                 when ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&

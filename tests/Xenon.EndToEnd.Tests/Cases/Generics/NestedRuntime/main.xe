@@ -4,32 +4,32 @@ struct Pair<TKey, TValue>
 {
     public TKey key;
     public TValue value;
-    public Pair(TKey key, TValue value) { this.key = key; this.value = value; }
+    public Pair(TKey key, TValue value) { this.key = move key; this.value = move value; }
 }
 
 struct Container<T>
 {
     public Pair<T, T> pair;
-    public Container(T first, T second) { pair = Pair<T, T>(first, second); }
-    public T GetFirst() { return pair.key; }
+    public Container(T first, T second) { pair = Pair<T, T>(move first, move second); }
+    public T GetFirst() { return move pair.key; }
 }
 
 struct Wrapper<T>
 {
     public Pair<int, T> pair;
-    public Wrapper(int key, T value) { pair = Pair<int, T>(key, value); }
+    public Wrapper(int key, T value) { pair = Pair<int, T>(key, move value); }
 }
 
 struct Middle<T>
 {
     public Pair<T, T> pair;
-    public Middle(T first, T second) { pair = Pair<T, T>(first, second); }
+    public Middle(T first, T second) { pair = Pair<T, T>(move first, move second); }
 }
 
 struct Outer<T>
 {
     public Middle<T> middle;
-    public Outer(T first, T second) { middle = Middle<T>(first, second); }
+    public Outer(T first, T second) { middle = Middle<T>(move first, move second); }
 }
 
 int Main()

@@ -1,0 +1,44 @@
+namespace PartialMoveRuntime;
+
+struct Point
+{
+    public int X;
+    public int Y;
+    public Point(int x, int y) { X = x; Y = y; }
+}
+
+struct Transform
+{
+    public Point Position;
+    public int Scale;
+    public Transform(Point position, int scale) { Position = position; Scale = scale; }
+}
+
+struct State
+{
+    public Transform Transform;
+    public int Count;
+    public State(Transform transform, int count) { Transform = transform; Count = count; }
+}
+
+int ConditionalSibling(bool take)
+{
+    State state = State(Transform(Point(10, 20), 3), 4);
+    Point position;
+    if (take) position = move state.Transform.Position;
+    return state.Transform.Scale + state.Count;
+}
+
+int Main()
+{
+    State state = State(Transform(Point(1, 2), 3), 4);
+    Point position = move state.Transform.Position;
+    if (position.X != 1 || position.Y != 2) return 1;
+    if (state.Transform.Scale != 3 || state.Count != 4) return 2;
+
+    state.Transform.Position = Point(5, 6);
+    State restored = state;
+    if (restored.Transform.Position.X != 5 || restored.Transform.Position.Y != 6) return 3;
+    if (ConditionalSibling(false) != 7 || ConditionalSibling(true) != 7) return 4;
+    return 42;
+}

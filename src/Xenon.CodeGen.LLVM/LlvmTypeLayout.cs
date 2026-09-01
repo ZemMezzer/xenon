@@ -90,7 +90,7 @@ internal sealed class LlvmTypeLayout : ITargetTypeLayout
     private AbiValueLayout GetLayout(TypeSymbol type, HashSet<StructTypeSymbol> building)
     {
         if (type is EnumTypeSymbol enumeration) return GetLayout(enumeration.UnderlyingType, building);
-        if (type is PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol) return _pointer;
+        if (type is PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol) return _pointer;
         if (TypeIdentity.AreSame(type, BuiltinTypes.Bool)) return _bool;
         if (TypeIdentity.AreSame(type, BuiltinTypes.Float)) return _float;
         if (TypeIdentity.AreSame(type, BuiltinTypes.Double)) return _double;

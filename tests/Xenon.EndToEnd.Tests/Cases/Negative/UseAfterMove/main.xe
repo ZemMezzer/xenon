@@ -1,0 +1,41 @@
+namespace UseAfterMove;
+struct Value
+{
+    public int Number;
+    public Value(int number) { Number = number; }
+}
+
+void MoveTwice()
+{
+    Value first = Value(2);
+    Value second = move first;
+    Value third = move first;
+}
+
+void MoveUninitialized()
+{
+    Value empty;
+    Value destination = move empty;
+}
+
+void MoveIntoSelf()
+{
+    Value value = Value(3);
+    value = move value;
+}
+
+void MoveAcrossLoop()
+{
+    Value source = Value(4);
+    for (int i = 0; i < 2; i++)
+    {
+        Value destination = move source;
+    }
+}
+
+int Main()
+{
+    Value source = Value(1);
+    Value destination = move source;
+    return source.Number;
+}

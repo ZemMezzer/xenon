@@ -1,0 +1,13 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2215", "message": "cannot use 'first' because it has been moved" },
+    { "id": "XE2201", "message": "local variable 'empty' is used before it is initialized" },
+    { "id": "XE2216", "message": "cannot move 'value' into itself" },
+    { "id": "XE2217", "message": "cannot move 'source' across a loop back-edge because it may already be moved on the next iteration" },
+    { "id": "XE2215", "message": "cannot use 'source' because it has been moved" }
+  ]
+}

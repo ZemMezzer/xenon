@@ -19,6 +19,9 @@ public static class TypeIdentity
             (PointerTypeSymbol a, PointerTypeSymbol b) => a.IsReadonly == b.IsReadonly && AreSame(a.ElementType, b.ElementType),
             (ReferenceTypeSymbol a, ReferenceTypeSymbol b) => a.IsReadonly == b.IsReadonly && AreSame(a.ElementType, b.ElementType),
             (ArrayTypeSymbol a, ArrayTypeSymbol b) => a.Rank == b.Rank && AreSame(a.ElementType, b.ElementType),
+            (UniqueTypeSymbol a, UniqueTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
+            (SharedTypeSymbol a, SharedTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
+            (WeakTypeSymbol a, WeakTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
             _ => false,
         };
     }
@@ -31,6 +34,9 @@ public static class TypeIdentity
             PointerTypeSymbol pointer => HashCode.Combine(1, GetHashCode(pointer.ElementType), pointer.IsReadonly),
             ReferenceTypeSymbol reference => HashCode.Combine(2, GetHashCode(reference.ElementType), reference.IsReadonly),
             ArrayTypeSymbol array => HashCode.Combine(3, GetHashCode(array.ElementType), array.Rank),
+            UniqueTypeSymbol unique => HashCode.Combine(4, GetHashCode(unique.ElementType)),
+            SharedTypeSymbol shared => HashCode.Combine(5, GetHashCode(shared.ElementType)),
+            WeakTypeSymbol weak => HashCode.Combine(6, GetHashCode(weak.ElementType)),
             _ => RuntimeHelpers.GetHashCode(type),
         };
     }

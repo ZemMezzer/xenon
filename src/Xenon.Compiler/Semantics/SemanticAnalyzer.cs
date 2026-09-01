@@ -127,6 +127,7 @@ internal sealed class SemanticAnalyzer
         BindSpecializedStructFunctions(functions, genericSpecializer);
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
+        AddGeneratedDropFunctions(functions);
 
         // Lifecycle/accessor checks need all bodies, including declarations that
         // occur after the readonly caller and synthesized field initializers.
@@ -144,6 +145,43 @@ internal sealed class SemanticAnalyzer
         RecordDeclarations(_globalNamespace);
         return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), [.. _diagnostics],
             _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
+    }
+
+    private void AddGeneratedDropFunctions(ImmutableArray<BoundFunction>.Builder functions)
+    {
+        var existing = functions.Select(function => function.Symbol).ToHashSet(ReferenceEqualityComparer.Instance);
+        void Visit(NamespaceSymbol @namespace)
+        {
+            foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
+            {
+                Symbol root = type;
+                while (root.ContainingSymbol is not null) root = root.ContainingSymbol;
+                if (!ReferenceEquals(root, _globalNamespace)) continue;
+                if (type.DropFunction is not { FunctionKind: FunctionKind.DropGlue } drop || !existing.Add(drop))
+                    continue;
+                functions.Add(new BoundFunction(drop, new BoundBlockStatement([
+                    new BoundExpressionStatement(new BoundDropFieldsExpression(type)),
+                ])));
+            }
+            foreach (NamespaceSymbol child in @namespace.Namespaces) Visit(child);
+        }
+        Visit(_globalNamespace);
+
+        foreach (OwnershipTypeSymbol ownership in _typeFactory.OwnershipTypes)
+        {
+            if (GenericTypeFacts.ContainsGenericParameter(ownership) ||
+                ownership.DropFunction is not { } drop ||
+                !existing.Add(drop))
+                continue;
+            FunctionSymbol? elementDrop = ownership is WeakTypeSymbol ? null : ownership.ElementType switch
+            {
+                ArrayTypeSymbol array => TypeFacts.GetDropFunction(array.ElementType),
+                _ => TypeFacts.GetDropFunction(ownership.ElementType),
+            };
+            functions.Add(new BoundFunction(drop, new BoundBlockStatement([
+                new BoundExpressionStatement(new BoundOwnershipDropExpression(ownership, elementDrop)),
+            ])));
+        }
     }
 
     private void InitializeGenericStructSpecializer()
@@ -2347,6 +2385,14 @@ internal sealed class SemanticAnalyzer
             return;
         }
 
+        if (function.ReturnType is OwnershipTypeSymbol returnOwnership)
+        {
+            _diagnostics.Report(
+                declaration.ReturnType.NameToken.Location,
+                $"external ABI does not support ownership type '{returnOwnership.OwnershipKind}'; use a raw pointer instead",
+                DiagnosticIds.UnsupportedNativeOwnershipType);
+        }
+
         if (function.ReturnType is StructTypeSymbol returnStruct)
         {
             _diagnostics.Report(
@@ -2366,7 +2412,14 @@ internal sealed class SemanticAnalyzer
         for (int index = 0; index < function.Parameters.Length; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
-            if (parameterType is StructTypeSymbol parameterStruct)
+            if (parameterType is OwnershipTypeSymbol parameterOwnership)
+            {
+                _diagnostics.Report(
+                    declaration.Parameters[index].Type.NameToken.Location,
+                    $"external ABI does not support ownership type '{parameterOwnership.OwnershipKind}'; use a raw pointer instead",
+                    DiagnosticIds.UnsupportedNativeOwnershipType);
+            }
+            else if (parameterType is StructTypeSymbol parameterStruct)
             {
                 _diagnostics.Report(
                     declaration.Parameters[index].Type.NameToken.Location,

@@ -1,0 +1,158 @@
+namespace DropGlueRuntime;
+
+struct Log
+{
+    public static int Trace;
+}
+
+struct Leaf
+{
+    public int Id;
+    public Leaf(int id) { Id = id; }
+    public ~Leaf() { Log.Trace = Log.Trace * 10 + Id; }
+}
+
+struct Inner
+{
+    public Leaf First;
+    public Leaf Second;
+    public Inner(int first, int second)
+    {
+        First = Leaf(first);
+        Second = Leaf(second);
+    }
+}
+
+struct Container
+{
+    public Leaf First;
+    public Inner Inner;
+    public Leaf Last;
+    public Container(int first, int innerFirst, int innerSecond, int last)
+    {
+        First = Leaf(first);
+        Inner = Inner(innerFirst, innerSecond);
+        Last = Leaf(last);
+    }
+}
+
+struct Pair
+{
+    public Leaf Left;
+    public Leaf Right;
+    public Pair(int left, int right)
+    {
+        Left = Leaf(left);
+        Right = Leaf(right);
+    }
+}
+
+struct Guarded
+{
+    public Leaf Child;
+    public Guarded(int id) { Child = Leaf(id); }
+    public ~Guarded() { Log.Trace = Log.Trace * 10 + 9; }
+}
+
+struct Wrapper
+{
+    public Leaf Item;
+}
+
+struct Box<T>
+{
+    public T Value;
+}
+
+struct Base
+{
+    public Leaf BaseField;
+    public Base(int id) { BaseField = Leaf(id); }
+    public virtual ~Base() { Log.Trace = Log.Trace * 10 + 9; }
+}
+
+struct Derived : Base
+{
+    public Leaf DerivedField;
+    public Derived(int baseId, int derivedId) : base(baseId)
+    {
+        DerivedField = Leaf(derivedId);
+    }
+}
+
+void Consume(Leaf value) {}
+
+void ConditionalPartial(bool take)
+{
+    Pair pair = Pair(4, 5);
+    Leaf moved;
+    if (take) moved = move pair.Left;
+}
+
+int Main()
+{
+    Log.Trace = 0;
+    { Container value = Container(1, 2, 3, 4); }
+    if (Log.Trace != 4321) return 1;
+
+    Log.Trace = 0;
+    { Guarded value = Guarded(5); }
+    if (Log.Trace != 95) return 2;
+
+    Log.Trace = 0;
+    { Pair pair = Pair(1, 2); Leaf left = move pair.Left; }
+    if (Log.Trace != 12) return 3;
+
+    Log.Trace = 0;
+    { Pair pair = Pair(1, 2); Leaf left = move pair.Left; pair.Left = Leaf(3); }
+    if (Log.Trace != 123) return 4;
+
+    Log.Trace = 0;
+    ConditionalPartial(false);
+    if (Log.Trace != 54) return 5;
+    Log.Trace = 0;
+    ConditionalPartial(true);
+    if (Log.Trace != 45) return 6;
+
+    Log.Trace = 0;
+    { Leaf source = Leaf(6); Consume(move source); }
+    if (Log.Trace != 6) return 7;
+
+    Log.Trace = 0;
+    {
+        Wrapper[] values = Wrapper[2];
+        values[0].Item.Id = 7;
+        values[1].Item.Id = 8;
+    }
+    if (Log.Trace != 87) return 8;
+
+    Log.Trace = 0;
+    Wrapper[] values = new Wrapper[2];
+    values[0].Item.Id = 7;
+    values[1].Item.Id = 8;
+    free(values);
+    if (Log.Trace != 87) return 9;
+
+    Log.Trace = 0;
+    Derived* derived = new Derived(1, 2);
+    Base* baseValue = derived;
+    free(baseValue);
+    if (Log.Trace != 291) return 10;
+
+    Log.Trace = 0;
+    {
+        Pair destination = Pair(1, 2);
+        Pair source = Pair(3, 4);
+        destination.Left = move source.Left;
+    }
+    if (Log.Trace != 1423) return 11;
+
+    Log.Trace = 0;
+    {
+        Box<Leaf> box = Box<Leaf>();
+        box.Value.Id = 6;
+    }
+    if (Log.Trace != 6) return 12;
+
+    return 42;
+}

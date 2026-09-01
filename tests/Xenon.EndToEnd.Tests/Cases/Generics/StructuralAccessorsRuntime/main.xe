@@ -37,7 +37,7 @@ struct Number
     public bool Equals(Number other) { return value == other.value; }
 }
 
-bool Same<T>(T left, T right) where T : Equalable { return left.Equals(right); }
+bool Same<T>(T left, T right) where T : Equalable { return left.Equals(move right); }
 
 int Main()
 {

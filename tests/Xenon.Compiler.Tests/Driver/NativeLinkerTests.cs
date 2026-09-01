@@ -1963,9 +1963,7 @@ public sealed class NativeLinkerTests
             {
                 Pair local = Pair(&State.Value, output, input);
                 *local.Output = *local.Input;
-                Outer value = Outer();
-                value.Left = Pair(&State.Value, &State.Value, input);
-                value.Right = local;
+                Outer value = Outer { Pair(&State.Value, output, input), local };
                 Outer copy = value;
                 Pair& alias = copy.Right;
                 alias.Destination = output;
@@ -1986,8 +1984,9 @@ public sealed class NativeLinkerTests
                 int output = 0;
                 Process(&output, &input);
                 if (State.Value != 7 || input != 38) return 1;
-                // Accessor + heap + two array elements + the scalar local.
-                if (output != 43) return 2;
+                // Accessor + heap + two array elements + scalar local + four
+                // compiler-dropped Pair fields in value/copy.
+                if (output != 47) return 2;
                 return 42;
             }
             """, optimization));
@@ -3388,7 +3387,7 @@ public sealed class NativeLinkerTests
                 if (Log.Trace != 231) return 5;
                 Log.Trace = 0; Conditional(false); if (Log.Trace != 0) return 6;
                 Conditional(true); if (Log.Trace != 1) return 7;
-                Log.Trace = 0; { R a; a = R(1); a = R(2); } if (Log.Trace != 2) return 8;
+                Log.Trace = 0; { R a; a = R(1); a = R(2); } if (Log.Trace != 12) return 8;
                 Log.Trace = 0; Ordered(true); if (Log.Trace != 21) return 9;
                 Log.Trace = 0; Ordered(false); if (Log.Trace != 12) return 10;
                 return 42;

@@ -5,14 +5,14 @@ template Runnable { int Run(); }
 struct StructuralRequired<T> where T : Runnable
 {
     public T value;
-    public StructuralRequired(T value) { this.value = value; }
+    public StructuralRequired(T value) { this.value = move value; }
     public int Execute() { return value.Run(); }
 }
 
 struct StructuralOuter<T> where T : Runnable
 {
     public StructuralRequired<T> wrapped;
-    public StructuralOuter(T value) { wrapped = StructuralRequired<T>(value); }
+    public StructuralOuter(T value) { wrapped = StructuralRequired<T>(move value); }
     public int Execute() { return wrapped.Execute(); }
 }
 
@@ -24,14 +24,14 @@ interface IDerived : IBase { }
 struct InterfaceRequired<T> where T : IBase
 {
     public T value;
-    public InterfaceRequired(T value) { this.value = value; }
+    public InterfaceRequired(T value) { this.value = move value; }
     public int Read() { return value.Get(); }
 }
 
 struct InterfaceOuter<T> where T : IDerived
 {
     public InterfaceRequired<T> wrapped;
-    public InterfaceOuter(T value) { wrapped = InterfaceRequired<T>(value); }
+    public InterfaceOuter(T value) { wrapped = InterfaceRequired<T>(move value); }
     public int Read() { return wrapped.Read(); }
 }
 
@@ -51,14 +51,14 @@ struct DerivedValue : BaseValue
 struct BaseRequired<T> where T : BaseValue
 {
     public T value;
-    public BaseRequired(T value) { this.value = value; }
+    public BaseRequired(T value) { this.value = move value; }
     public int Read() { return value.Get(); }
 }
 
 struct BaseOuter<T> where T : DerivedValue
 {
     public BaseRequired<T> wrapped;
-    public BaseOuter(T value) { wrapped = BaseRequired<T>(value); }
+    public BaseOuter(T value) { wrapped = BaseRequired<T>(move value); }
     public int Read() { return wrapped.Read(); }
 }
 

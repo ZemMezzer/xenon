@@ -27,14 +27,14 @@ struct Runner<T>
 {
     public T value;
     public int result;
-    public Runner(T value, int result) { this.value = value; this.result = result; }
+    public Runner(T value, int result) { this.value = move value; this.result = result; }
     public int Run() { return result; }
 }
 
 struct Wrapper<T> where T : Runnable
 {
     public T value;
-    public Wrapper(T value) { this.value = value; }
+    public Wrapper(T value) { this.value = move value; }
     public int Execute() { return value.Run(); }
 }
 

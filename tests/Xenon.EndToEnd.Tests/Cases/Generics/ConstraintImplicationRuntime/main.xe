@@ -16,14 +16,14 @@ struct Derived : Base
 struct InterfaceRequired<T> where T : IRunnable
 {
     public T value;
-    public InterfaceRequired(T value) { this.value = value; }
+    public InterfaceRequired(T value) { this.value = move value; }
     public int Execute() { return value.Run(); }
 }
 
 struct BaseOuter<T> where T : Base
 {
     public InterfaceRequired<T> required;
-    public BaseOuter(T value) { required = InterfaceRequired<T>(value); }
+    public BaseOuter(T value) { required = InterfaceRequired<T>(move value); }
     public int Execute() { return required.Execute(); }
 }
 
@@ -33,14 +33,14 @@ template AdvancedRunnable { int Run(); int State(); }
 struct RunnableRequired<T> where T : Runnable
 {
     public T value;
-    public RunnableRequired(T value) { this.value = value; }
+    public RunnableRequired(T value) { this.value = move value; }
     public int Execute() { return value.Run(); }
 }
 
 struct AdvancedOuter<T> where T : AdvancedRunnable
 {
     public RunnableRequired<T> required;
-    public AdvancedOuter(T value) { required = RunnableRequired<T>(value); }
+    public AdvancedOuter(T value) { required = RunnableRequired<T>(move value); }
     public int Execute() { return required.Execute(); }
 }
 
@@ -56,15 +56,15 @@ template HashEqualable { bool Equals(HashEqualable other); int Hash(); }
 struct EqualableRequired<T> where T : Equalable
 {
     public T value;
-    public EqualableRequired(T value) { this.value = value; }
-    public bool Same(T other) { return value.Equals(other); }
+    public EqualableRequired(T value) { this.value = move value; }
+    public bool Same(T other) { return value.Equals(move other); }
 }
 
 struct HashOuter<T> where T : HashEqualable
 {
     public EqualableRequired<T> required;
-    public HashOuter(T value) { required = EqualableRequired<T>(value); }
-    public bool Same(T other) { return required.Same(other); }
+    public HashOuter(T value) { required = EqualableRequired<T>(move value); }
+    public bool Same(T other) { return required.Same(move other); }
 }
 
 struct HashWorker

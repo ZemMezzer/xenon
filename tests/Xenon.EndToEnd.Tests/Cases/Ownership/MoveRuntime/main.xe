@@ -1,0 +1,104 @@
+namespace MoveRuntime;
+
+struct Log
+{
+    public static int Trace;
+    public static int Freed;
+}
+
+struct Tracked
+{
+    public int Id;
+    public Tracked(int id) { Id = id; }
+    public ~Tracked() { Log.Trace = Log.Trace * 10 + Id; }
+}
+
+struct Pair
+{
+    public int X;
+    public int Y;
+    public Pair(int x, int y) { X = x; Y = y; }
+}
+
+struct Buffer
+{
+    public Tracked* Pointer;
+    public Buffer(int id) { Pointer = new Tracked(id); }
+    public ~Buffer() { free(Pointer); Log.Freed++; }
+}
+
+Tracked MakeTracked(int id)
+{
+    Tracked value = Tracked(id);
+    return move value;
+}
+
+Buffer MakeBuffer(int id)
+{
+    Buffer value = Buffer(id);
+    return move value;
+}
+
+int Consume(Pair value) { return value.X * 10 + value.Y; }
+
+void ConditionalMove(bool take)
+{
+    Tracked source = Tracked(9);
+    Tracked destination;
+    if (take) destination = move source;
+}
+
+void LoopMove()
+{
+    for (int i = 1; i <= 2; i++)
+    {
+        Tracked source = Tracked(i);
+        Tracked destination = move source;
+    }
+}
+
+int Main()
+{
+    Pair first = Pair(1, 2);
+    Pair second = move first;
+    if (second.X != 1 || second.Y != 2) return 1;
+
+    Pair argument = Pair(3, 4);
+    if (Consume(move argument) != 34) return 2;
+
+    Log.Trace = 0;
+    { Tracked source = Tracked(1); Tracked destination = move source; }
+    if (Log.Trace != 1) return 3;
+
+    Log.Trace = 0;
+    { Tracked destination; { Tracked source = Tracked(2); destination = move source; } }
+    if (Log.Trace != 2) return 4;
+
+    Log.Trace = 0;
+    { Tracked destination = Tracked(3); Tracked source = Tracked(4); destination = move source; }
+    if (Log.Trace != 34) return 5;
+
+    Log.Trace = 0;
+    { Tracked source = Tracked(5); Tracked destination = move source; source = Tracked(6); }
+    if (Log.Trace != 56) return 6;
+
+    Log.Trace = 0;
+    { Tracked returned = MakeTracked(7); }
+    if (Log.Trace != 7) return 7;
+
+    Log.Trace = 0;
+    Log.Freed = 0;
+    { Buffer returned = MakeBuffer(8); }
+    if (Log.Trace != 8 || Log.Freed != 1) return 8;
+
+    Log.Trace = 0;
+    ConditionalMove(false);
+    ConditionalMove(true);
+    if (Log.Trace != 99) return 9;
+
+    Log.Trace = 0;
+    LoopMove();
+    if (Log.Trace != 12) return 10;
+
+    return 42;
+}

@@ -13,6 +13,8 @@ public enum FunctionKind
     Constructor,
     InstanceInitializer,
     Destructor,
+    DropGlue,
+    OwnershipDrop,
 }
 
 public enum ArrayStorageKind
