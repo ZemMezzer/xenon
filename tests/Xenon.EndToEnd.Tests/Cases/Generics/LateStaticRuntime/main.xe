@@ -1,0 +1,40 @@
+namespace GenericLateStaticRuntime;
+
+struct Inner<T>
+{
+    public static int state = 42;
+    public int GetState() { return Inner.state; }
+    public void SetState(int value) { Inner.state = value; }
+}
+
+int ReadInner<T>()
+{
+    Inner<T> inner = Inner<T>();
+    return inner.GetState();
+}
+
+void SetInner<T>(int value)
+{
+    Inner<T> inner = Inner<T>();
+    inner.SetState(value);
+}
+
+struct Outer<T>
+{
+    public int observed = ReadInner<T>();
+}
+
+int Main()
+{
+    // Inner<int> and Inner<float> are first discovered while binding these
+    // specialized Outer<T> field initializers.
+    Outer<int> first = Outer<int>();
+    Outer<float> second = Outer<float>();
+    if (first.observed != 42 || second.observed != 42) return 1;
+
+    SetInner<int>(10);
+    SetInner<float>(20);
+    if (ReadInner<int>() != 10) return 2;
+    if (ReadInner<float>() != 20) return 3;
+    return 0;
+}

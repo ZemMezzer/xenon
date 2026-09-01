@@ -1,0 +1,45 @@
+namespace GenericNestedRuntime;
+
+struct Pair<TKey, TValue>
+{
+    public TKey key;
+    public TValue value;
+    public Pair(TKey key, TValue value) { this.key = key; this.value = value; }
+}
+
+struct Container<T>
+{
+    public Pair<T, T> pair;
+    public Container(T first, T second) { pair = Pair<T, T>(first, second); }
+    public T GetFirst() { return pair.key; }
+}
+
+struct Wrapper<T>
+{
+    public Pair<int, T> pair;
+    public Wrapper(int key, T value) { pair = Pair<int, T>(key, value); }
+}
+
+struct Middle<T>
+{
+    public Pair<T, T> pair;
+    public Middle(T first, T second) { pair = Pair<T, T>(first, second); }
+}
+
+struct Outer<T>
+{
+    public Middle<T> middle;
+    public Outer(T first, T second) { middle = Middle<T>(first, second); }
+}
+
+int Main()
+{
+    Container<int> integers = Container<int>(10, 20);
+    Container<float> floats = Container<float>(20.0f, 22.0f);
+    Wrapper<float> mixed = Wrapper<float>(12, 30.0f);
+    Outer<int> deep = Outer<int>(19, 23);
+    if (integers.GetFirst() != 10 || floats.GetFirst() != 20.0f) return 1;
+    if (mixed.pair.key + cast<int>(mixed.pair.value) != 42) return 2;
+    if (deep.middle.pair.key + deep.middle.pair.value != 42) return 3;
+    return 0;
+}

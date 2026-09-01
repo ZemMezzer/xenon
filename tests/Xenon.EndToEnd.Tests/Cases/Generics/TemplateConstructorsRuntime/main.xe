@@ -1,0 +1,64 @@
+namespace GenericTemplateConstructorsRuntime;
+
+template VectorLike { VectorLike(float x, float y, float z); }
+
+struct Vector2
+{
+    public float x;
+    public float y;
+    public Vector2(float x, float y) { this.x = x; this.y = y; }
+}
+
+struct Vector3 : Vector2
+{
+    public float z;
+    public Vector3(float x, float y, float z) : base(x, y) { this.z = z; }
+}
+
+T* MakeVector<T>(float x, float y, float z) where T : VectorLike
+{
+    return new T(x, y, z);
+}
+
+template Constructible
+{
+    Constructible();
+    Constructible(int value);
+    Constructible(int left, int right);
+}
+
+struct Value
+{
+    public int value;
+    public Value() { value = 1; }
+    public Value(int value) : this() { this.value = this.value + value - 1; }
+    public Value(int left, int right) { value = left + right; }
+}
+
+T* MakeDefault<T>() where T : Constructible { return new T(); }
+T* MakeOne<T>(int value) where T : Constructible { return new T(value); }
+T* MakeTwo<T>(int left, int right) where T : Constructible { return new T(left, right); }
+
+template DefaultConstructible { DefaultConstructible(); }
+struct Plain { public int value; }
+T* MakePlain<T>() where T : DefaultConstructible { return new T(); }
+
+int Main()
+{
+    Vector3* vector = MakeVector<Vector3>(10.0f, 12.0f, 20.0f);
+    Value* first = MakeDefault<Value>();
+    Value* second = MakeOne<Value>(10);
+    Value* third = MakeTwo<Value>(12, 30);
+    Plain* plain = MakePlain<Plain>();
+
+    if (vector->x + vector->y + vector->z != 42.0f) return 1;
+    if (first->value != 1 || second->value != 10 || third->value != 42) return 2;
+    if (plain->value != 0) return 3;
+
+    free(vector);
+    free(first);
+    free(second);
+    free(third);
+    free(plain);
+    return 0;
+}

@@ -33,6 +33,11 @@ public static class SymbolDisplay
                 ? $"{(declared is StructTypeSymbol { IsAbstract: true } ? "abstract " : "")}{declared.DeclarationKind} {display}"
                 : display;
         }
+        if (symbol is TemplateSymbol template)
+        {
+            string display = qualified ? template.QualifiedName : template.Name;
+            return format == SymbolDisplayFormat.Declaration ? $"template {display}" : display;
+        }
 
         string name = GetName(symbol, qualified);
         if (format is SymbolDisplayFormat.ShortName or SymbolDisplayFormat.QualifiedName) return name;
@@ -46,6 +51,11 @@ public static class SymbolDisplay
             FieldSymbol field => diagnostic ? name : $"{VariableType(field.Type, field.IsReadonly, typeFormat)} {name}",
             PropertySymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
             InterfacePropertySymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
+            TemplateMethodRequirementSymbol method => TemplateMethod(method, name, typeFormat, diagnostic),
+            TemplateConstructorRequirementSymbol constructor =>
+                $"{name}({Parameters(constructor.Parameters, typeFormat, !diagnostic)})",
+            TemplatePropertyRequirementSymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
+            TemplateIndexerRequirementSymbol indexer => Indexer(indexer.Type, indexer.Parameters, name, typeFormat, diagnostic),
             SyntheticMemberSymbol { MemberKind: SyntheticMemberKind.Method } member =>
                 SyntheticMethod(member, name, typeFormat, diagnostic),
             SyntheticMemberSymbol member => diagnostic ? name : $"{member.Type.ToDisplayString(typeFormat)} {name}",
@@ -72,6 +82,8 @@ public static class SymbolDisplay
 
     private static string Function(FunctionSymbol function, string name, TypeDisplayFormat format, bool diagnostic)
     {
+        if (!function.TypeParameters.IsEmpty)
+            name += $"<{string.Join(", ", function.TypeParameters.Select(parameter => parameter.Name))}>";
         string signature = $"{name}({Parameters(function.Parameters, format, !diagnostic)})";
         if (diagnostic) return signature;
         if (function.FunctionKind is not (FunctionKind.Constructor or FunctionKind.Destructor))
@@ -92,6 +104,13 @@ public static class SymbolDisplay
     {
         string signature = $"{name}({Parameters(member.Parameters, format, !diagnostic)})";
         return diagnostic ? signature : $"{member.ReturnType.ToDisplayString(format)} {signature}";
+    }
+
+    private static string TemplateMethod(TemplateMethodRequirementSymbol method, string name,
+        TypeDisplayFormat format, bool diagnostic)
+    {
+        string signature = $"{name}({Parameters(method.Parameters, format, !diagnostic)})";
+        return diagnostic ? signature : $"{method.ReturnType.ToDisplayString(format)} {signature}";
     }
 
     private static string Parameters(ImmutableArray<ParameterSymbol> parameters, TypeDisplayFormat format, bool includeNames) =>
@@ -124,6 +143,8 @@ public static class SymbolDisplay
             + (indexer.Declaration.IsReadonly ? "readonly " : ""),
         InterfacePropertySymbol property => "public abstract " + (property.Declaration.IsReadonly ? "readonly " : ""),
         InterfaceIndexerSymbol indexer => "public abstract " + (indexer.Declaration.IsReadonly ? "readonly " : ""),
+        TemplateMemberRequirementSymbol requirement =>
+            MemberModifiers(requirement.Accessibility, requirement.IsStatic) + (requirement.IsReadonly ? "readonly " : ""),
         _ => "",
     };
 

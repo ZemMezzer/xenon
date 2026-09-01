@@ -29,6 +29,8 @@ public static class SyntaxFacts
             ["readonly"] = SyntaxKind.ReadonlyKeyword,
             ["struct"] = SyntaxKind.StructKeyword,
             ["interface"] = SyntaxKind.InterfaceKeyword,
+            ["template"] = SyntaxKind.TemplateKeyword,
+            ["where"] = SyntaxKind.WhereKeyword,
             ["static"] = SyntaxKind.StaticKeyword,
             ["virtual"] = SyntaxKind.VirtualKeyword,
             ["override"] = SyntaxKind.OverrideKeyword,

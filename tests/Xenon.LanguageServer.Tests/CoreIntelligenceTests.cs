@@ -9,6 +9,83 @@ namespace Xenon.LanguageServer.Tests;
 public sealed class CoreIntelligenceTests
 {
     [Fact]
+    public async Task GenericTemplateSyntaxFlowsThroughHoverDefinitionCompletionAndSemanticTokens()
+    {
+        const string source = """
+            namespace Game;
+            template Contract { void Run(); }
+            struct Box<T> where T : Contract { T value; }
+            void Invoke<T>(T value) where T : Contract { value.Run(); value. }
+            T Identity<T>(T value) { return value; }
+            int UseIdentity() { return Identity<int>(1); }
+            struct GenericBox<T> { public T value; public T Get() { return value; } }
+            void UseBox(GenericBox<int> box) { box. }
+            struct Pair<T> { public T first; }
+            struct Container<T> { public Pair<T> pair; }
+            void UseContainer(Container<int> container) { container. }
+            void Test() { }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("templates.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        int fieldType = source.LastIndexOf("T value", StringComparison.Ordinal);
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, fieldType);
+        Assert.Contains("T", hover.GetProperty("contents").GetProperty("value").GetString());
+        JsonElement definition = await RequestAtAsync(session, "textDocument/definition", uri, source, fieldType);
+        Assert.Single(definition.EnumerateArray());
+
+        int completionPosition = source.IndexOf("{ }", StringComparison.Ordinal) + 1;
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source, completionPosition);
+        string[] labels = completion.GetProperty("items").EnumerateArray()
+            .Select(item => item.GetProperty("label").GetString() ?? string.Empty).ToArray();
+        Assert.Contains("template", labels);
+        Assert.Contains("where", labels);
+
+        int genericMemberPosition = source.LastIndexOf("value.", StringComparison.Ordinal) + "value.".Length;
+        JsonElement genericMemberCompletion = await RequestAtAsync(session, "textDocument/completion", uri,
+            source, genericMemberPosition);
+        string[] genericMemberLabels = genericMemberCompletion.GetProperty("items").EnumerateArray()
+            .Select(item => item.GetProperty("label").GetString() ?? string.Empty).ToArray();
+        Assert.Contains("Run", genericMemberLabels);
+
+        int genericCall = source.LastIndexOf("Identity<int>", StringComparison.Ordinal);
+        JsonElement genericCallHover = await RequestAtAsync(session, "textDocument/hover", uri, source, genericCall);
+        Assert.Contains("Identity<int>", genericCallHover.GetProperty("contents").GetProperty("value").GetString());
+        JsonElement genericCallDefinition = await RequestAtAsync(session, "textDocument/definition", uri, source,
+            genericCall);
+        Assert.Single(genericCallDefinition.EnumerateArray());
+
+        int genericStructMemberPosition = source.LastIndexOf("box.", StringComparison.Ordinal) + "box.".Length;
+        JsonElement genericStructCompletion = await RequestAtAsync(session, "textDocument/completion", uri,
+            source, genericStructMemberPosition);
+        string[] genericStructLabels = genericStructCompletion.GetProperty("items").EnumerateArray()
+            .Select(item => item.GetProperty("label").GetString() ?? string.Empty).ToArray();
+        Assert.Contains("value", genericStructLabels);
+        Assert.Contains("Get", genericStructLabels);
+
+        int nestedGenericPosition = source.LastIndexOf("container.", StringComparison.Ordinal) + "container.".Length;
+        JsonElement nestedGenericCompletion = await RequestAtAsync(session, "textDocument/completion", uri,
+            source, nestedGenericPosition);
+        Assert.Contains(nestedGenericCompletion.GetProperty("items").EnumerateArray(), item =>
+            item.GetProperty("label").GetString() == "pair");
+
+        JsonElement semanticTokens = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        int[] data = semanticTokens.GetProperty("data").EnumerateArray().Select(item => item.GetInt32()).ToArray();
+        Assert.Contains(data.Chunk(5), token => token[3] == 13); // typeParameter
+        Assert.Contains(data.Chunk(5), token => token[3] == 2); // structural template uses interface coloring
+    }
+
+    [Fact]
     public async Task CoreRequestsUseSemanticModelAndWorkspaceIndexes()
     {
         const string source = """

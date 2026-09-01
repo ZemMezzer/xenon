@@ -1,0 +1,12 @@
+namespace NegativeGenericTemplateSubsumption;
+
+template Runnable { int Run(); }
+template AdvancedRunnable { int Run(); int State(); }
+struct AdvancedRequired<T> where T : AdvancedRunnable { public T value; }
+
+struct InvalidOuter<T> where T : Runnable
+{
+    public AdvancedRequired<T> required;
+}
+
+int Main() { return 0; }

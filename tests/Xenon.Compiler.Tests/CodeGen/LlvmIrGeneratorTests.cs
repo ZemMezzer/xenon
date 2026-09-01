@@ -1,13 +1,114 @@
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler.Diagnostics;
+using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
+using System.Text;
 using Xunit;
 
 namespace Xenon.Compiler.Tests.CodeGen;
 
 public sealed class LlvmIrGeneratorTests
 {
+    [Fact]
+    public void Generator_EmitsConcreteGenericFunctionSpecializations()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct UnusedBox<T> { T value; }
+            T Identity<T>(T value) { return value; }
+            T Forward<T>(T value) { return Identity(value); }
+            int Use() { return Identity<int>(42) + Identity(1) + Forward(2); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Equal(2, compilation.SemanticModel.Functions.Count(
+            function => function.Symbol.IsGenericSpecialization));
+        string ir = new LlvmIrGenerator().Generate(compilation, "generic-functions");
+
+        Assert.Contains("define internal i32", ir, StringComparison.Ordinal);
+        Assert.Contains("call i32", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_RebindsStructuralTemplateCallsForConcreteSpecializations()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            template ValueSource { int Get(); }
+            int Evaluate<T>(T value) where T : ValueSource { return value.Get(); }
+            struct Item { public int Get() { return 42; } }
+            int Use() { Item item = Item { }; return Evaluate<Item>(item); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Single(compilation.SemanticModel.Functions,
+            function => function.Symbol.IsGenericSpecialization);
+        string ir = new LlvmIrGenerator().Generate(compilation, "constrained-generics");
+
+        Assert.Contains("call i32", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsConcreteGenericStructLayoutAndMembers()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Box<T>
+            {
+                T value;
+                public Box(T initial) { value = initial; }
+                public T Get() { return value; }
+            }
+            int Use()
+            {
+                Box<int>* box = new Box<int>(42);
+                int value = box->Get();
+                free(box);
+                return value;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(),
+            "generic-structs");
+
+        Assert.Contains("type { i32 }", ir, StringComparison.Ordinal);
+        Assert.Contains("call i32", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsDistinctBodiesForMultipleGenericStructSpecializations()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Box<T>
+            {
+                T value;
+                public Box(T initial) { value = initial; }
+                public T Get() { return value; }
+            }
+            int ReadInt(int value) { return Box<int>(value).Get(); }
+            float ReadFloat(float value) { return Box<float>(value).Get(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NamespaceSymbol ns = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces);
+        StructTypeSymbol[] boxes = ns.Structs.Where(type => type.IsGenericSpecialization).ToArray();
+        Assert.Equal(2, boxes.Length);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(),
+            "generic-struct-specializations");
+
+        Assert.Contains("type { i32 }", ir, StringComparison.Ordinal);
+        Assert.Contains("type { float }", ir, StringComparison.Ordinal);
+        foreach (StructTypeSymbol box in boxes)
+        {
+            FunctionSymbol get = box.Methods.Single(method => method.Name == "Get");
+            string encodedIdentity = Convert.ToHexString(Encoding.UTF8.GetBytes(get.FullName));
+            Assert.Contains(encodedIdentity, ir, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Generator_RespectsRuntimeCheckCompilationOption()
     {

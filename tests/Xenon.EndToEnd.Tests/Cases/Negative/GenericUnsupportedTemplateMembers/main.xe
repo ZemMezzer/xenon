@@ -1,0 +1,4 @@
+namespace NegativeGenericUnsupportedTemplateMembers;
+template FieldContract { int value; }
+template StaticContract { static int Create(); }
+int Main() { return 0; }

@@ -1,0 +1,30 @@
+namespace GenericRecursiveRuntime;
+
+struct Node<T>
+{
+    public T value;
+    public Node<T>* next;
+    public Node(T value) { this.value = value; next = null; }
+    public T GetValue() { return value; }
+}
+
+struct A<T> { public T value; public B<T>* b; }
+struct B<T> { public T value; public A<T>* a; }
+
+int Main()
+{
+    Node<int> first = Node<int>(10);
+    Node<int> second = Node<int>(42);
+    first.next = &second;
+    if (first.GetValue() != 10) return 1;
+    if (first.next->value != 42) return 2;
+
+    A<int> a = A<int>();
+    B<int> b = B<int>();
+    a.value = 12;
+    b.value = 30;
+    a.b = &b;
+    b.a = &a;
+    if (a.b->value + b.a->value != 42) return 3;
+    return 0;
+}

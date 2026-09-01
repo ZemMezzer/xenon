@@ -19,6 +19,8 @@ public enum EditorSymbolKind
     Parameter,
     LocalVariable,
     Type,
+    Template,
+    TypeParameter,
 }
 
 public static class EditorSymbolClassifier
@@ -31,6 +33,8 @@ public static class EditorSymbolClassifier
             NamespaceSymbol => EditorSymbolKind.Namespace,
             StructTypeSymbol => EditorSymbolKind.Struct,
             InterfaceTypeSymbol => EditorSymbolKind.Interface,
+            TemplateSymbol => EditorSymbolKind.Template,
+            GenericParameterSymbol => EditorSymbolKind.TypeParameter,
             EnumTypeSymbol => EditorSymbolKind.Enum,
             ConstantSymbol { ContainingSymbol: EnumTypeSymbol } => EditorSymbolKind.EnumMember,
             ConstantSymbol => EditorSymbolKind.Constant,
@@ -40,6 +44,9 @@ public static class EditorSymbolClassifier
             FieldSymbol => EditorSymbolKind.Field,
             PropertySymbol or InterfacePropertySymbol or IndexerSymbol or InterfaceIndexerSymbol =>
                 EditorSymbolKind.Property,
+            TemplateMethodRequirementSymbol => EditorSymbolKind.Method,
+            TemplateConstructorRequirementSymbol => EditorSymbolKind.Constructor,
+            TemplatePropertyRequirementSymbol or TemplateIndexerRequirementSymbol => EditorSymbolKind.Property,
             ParameterSymbol => EditorSymbolKind.Parameter,
             LocalVariableSymbol => EditorSymbolKind.LocalVariable,
             DeclaredTypeSymbol => EditorSymbolKind.Type,

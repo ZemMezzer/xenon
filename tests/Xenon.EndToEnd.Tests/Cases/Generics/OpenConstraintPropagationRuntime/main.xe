@@ -1,0 +1,78 @@
+namespace GenericOpenConstraintPropagationRuntime;
+
+template Runnable { int Run(); }
+
+struct StructuralRequired<T> where T : Runnable
+{
+    public T value;
+    public StructuralRequired(T value) { this.value = value; }
+    public int Execute() { return value.Run(); }
+}
+
+struct StructuralOuter<T> where T : Runnable
+{
+    public StructuralRequired<T> wrapped;
+    public StructuralOuter(T value) { wrapped = StructuralRequired<T>(value); }
+    public int Execute() { return wrapped.Execute(); }
+}
+
+struct Runner { public int Run() { return 42; } }
+
+interface IBase { int Get(); }
+interface IDerived : IBase { }
+
+struct InterfaceRequired<T> where T : IBase
+{
+    public T value;
+    public InterfaceRequired(T value) { this.value = value; }
+    public int Read() { return value.Get(); }
+}
+
+struct InterfaceOuter<T> where T : IDerived
+{
+    public InterfaceRequired<T> wrapped;
+    public InterfaceOuter(T value) { wrapped = InterfaceRequired<T>(value); }
+    public int Read() { return wrapped.Read(); }
+}
+
+struct InterfaceValue : IDerived { public int Get() { return 20; } }
+
+struct BaseValue
+{
+    public int value;
+    public int Get() { return value; }
+}
+
+struct DerivedValue : BaseValue
+{
+    public DerivedValue(int value) { this.value = value; }
+}
+
+struct BaseRequired<T> where T : BaseValue
+{
+    public T value;
+    public BaseRequired(T value) { this.value = value; }
+    public int Read() { return value.Get(); }
+}
+
+struct BaseOuter<T> where T : DerivedValue
+{
+    public BaseRequired<T> wrapped;
+    public BaseOuter(T value) { wrapped = BaseRequired<T>(value); }
+    public int Read() { return wrapped.Read(); }
+}
+
+int Main()
+{
+    StructuralOuter<Runner> structural = StructuralOuter<Runner>(Runner());
+    if (structural.Execute() != 42) return 1;
+
+    InterfaceOuter<InterfaceValue> nominalInterface =
+        InterfaceOuter<InterfaceValue>(InterfaceValue());
+    if (nominalInterface.Read() != 20) return 2;
+
+    BaseOuter<DerivedValue> nominalBase =
+        BaseOuter<DerivedValue>(DerivedValue(30));
+    if (nominalBase.Read() != 30) return 3;
+    return 0;
+}

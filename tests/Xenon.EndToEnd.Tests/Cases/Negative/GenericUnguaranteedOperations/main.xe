@@ -1,0 +1,4 @@
+namespace NegativeGenericUnguaranteedOperations;
+int ReadMissing<T>(T value) { return value.Missing(); }
+T* ConstructMissing<T>() { return new T(42); }
+int Main() { return 0; }

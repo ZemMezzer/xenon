@@ -1,0 +1,10 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE1014" },
+    { "id": "XE1014" }
+  ]
+}
