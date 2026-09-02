@@ -90,11 +90,11 @@ public sealed record BoundWeakConversionExpression(
     public override BoundKind Kind => BoundKind.WeakConversionExpression;
 }
 
-public sealed record BoundWeakLockExpression(
+public sealed record BoundLockExpression(
     BoundExpression Weak,
     SharedTypeSymbol SharedType) : BoundExpression(SharedType)
 {
-    public override BoundKind Kind => BoundKind.WeakLockExpression;
+    public override BoundKind Kind => BoundKind.LockExpression;
 }
 
 public sealed record BoundBinaryExpression(

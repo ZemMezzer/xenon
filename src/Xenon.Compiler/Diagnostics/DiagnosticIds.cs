@@ -196,5 +196,8 @@ public static class DiagnosticIds
     public const string ReferenceDestructionOrder = "XE2241";
     public const string ReferenceProvenanceMutation = "XE2242";
     public const string FreeWhileBorrowed = "XE2243";
+    public const string HeapPointeeExplicitDestruction = "XE2244";
+    public const string StorageValueLifetimeMutation = "XE2245";
+    public const string InvalidLockOperand = "XE2246";
     public const string RecursiveValueLayout = "XE2600";
 }

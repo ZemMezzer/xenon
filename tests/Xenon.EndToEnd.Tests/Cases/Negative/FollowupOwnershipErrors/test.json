@@ -16,10 +16,11 @@
     { "id": "XE2003", "message": "cannot implicitly convert 'Resource*' to 'shared<Resource>'" },
     { "id": "XE2225", "message": "'weak<Resource>' can only be created from a live matching shared owner" },
     { "id": "XE2003", "message": "cannot implicitly convert 'Resource*' to 'weak<Resource>'" },
-    { "id": "XE2226", "message": "cannot access a value through 'weak<Resource>' directly; call 'Lock()' and check the returned shared owner first" },
+    { "id": "XE2226", "message": "cannot access a value through 'weak<Resource>' directly; use 'lock value' and check the returned shared owner first" },
     { "id": "XE2098", "message": "'free' requires a heap pointer or heap array, but has type 'shared<Resource>'" },
     { "id": "XE2098", "message": "'free' requires a heap pointer or heap array, but has type 'weak<Resource>'" },
     { "id": "XE2215", "message": "cannot use 'strong' because it has been moved" },
-    { "id": "XE2215", "message": "cannot use 'observer' because it has been moved" }
+    { "id": "XE2215", "message": "cannot use 'observer' because it has been moved" },
+    { "id": "XE2226", "message": "cannot access a value through 'weak<Resource>' directly; use 'lock value' and check the returned shared owner first" }
   ]
 }

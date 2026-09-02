@@ -1278,6 +1278,12 @@ internal sealed class Parser
             ExpressionSyntax operand = ParseBinaryExpression(12);
             left = new MoveExpressionSyntax(moveKeyword, operand);
         }
+        else if (Current.Kind == SyntaxKind.LockKeyword && 12 >= parentPrecedence)
+        {
+            SyntaxToken lockKeyword = NextToken();
+            ExpressionSyntax operand = ParseBinaryExpression(12);
+            left = new LockExpressionSyntax(lockKeyword, operand);
+        }
         else if (unaryPrecedence != 0 && unaryPrecedence >= parentPrecedence)
         {
             SyntaxToken operatorToken = NextToken();

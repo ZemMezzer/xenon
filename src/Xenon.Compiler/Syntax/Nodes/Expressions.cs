@@ -136,6 +136,13 @@ public sealed record MoveExpressionSyntax(
     public override SyntaxKind Kind => SyntaxKind.MoveExpression;
 }
 
+public sealed record LockExpressionSyntax(
+    SyntaxToken LockKeyword,
+    ExpressionSyntax Operand) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.LockExpression;
+}
+
 public sealed record ParenthesizedExpressionSyntax(
     SyntaxToken OpenParenthesisToken,
     ExpressionSyntax Expression,

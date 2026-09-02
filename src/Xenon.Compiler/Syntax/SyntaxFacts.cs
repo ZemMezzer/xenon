@@ -65,6 +65,7 @@ public static class SyntaxFacts
             ["new"] = SyntaxKind.NewKeyword,
             ["free"] = SyntaxKind.FreeKeyword,
             ["move"] = SyntaxKind.MoveKeyword,
+            ["lock"] = SyntaxKind.LockKeyword,
             ["unique"] = SyntaxKind.UniqueKeyword,
             ["shared"] = SyntaxKind.SharedKeyword,
             ["weak"] = SyntaxKind.WeakKeyword,

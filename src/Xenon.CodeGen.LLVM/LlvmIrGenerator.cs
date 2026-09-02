@@ -1734,7 +1734,7 @@ public sealed class LlvmIrGenerator
             BoundUniqueAdoptionExpression adoption => EmitExpression(adoption.Allocation),
             BoundSharedAdoptionExpression adoption => EmitSharedAdoption(adoption),
             BoundWeakConversionExpression conversion => EmitWeakConversion(conversion),
-            BoundWeakLockExpression weakLock => EmitWeakLock(weakLock),
+            BoundLockExpression @lock => EmitWeakLock(@lock),
             BoundBinaryExpression binary => EmitBinary(binary),
             BoundAssignmentExpression assignment => EmitAssignment(assignment),
             BoundCompoundAccessorAssignmentExpression assignment => EmitCompoundAccessorAssignment(assignment),
@@ -2097,7 +2097,7 @@ public sealed class LlvmIrGenerator
             return control;
         }
 
-        private LLVMValueRef EmitWeakLock(BoundWeakLockExpression expression)
+        private LLVMValueRef EmitWeakLock(BoundLockExpression expression)
         {
             LLVMValueRef control = EmitExpression(expression.Weak);
             LLVMValueRef nullControl = LLVMValueRef.CreateConstPointerNull(control.TypeOf);

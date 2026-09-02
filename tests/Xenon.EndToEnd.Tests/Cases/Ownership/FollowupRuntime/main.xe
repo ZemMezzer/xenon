@@ -139,20 +139,20 @@ int Main()
         weak<Resource> observerCopy = observer;
         weak<Resource> observerMoved = move observerCopy;
         weak<Resource> inferredWeak = PassWeak(observerMoved);
-        shared<Resource> locked = inferredWeak.Lock();
+        shared<Resource> locked = lock inferredWeak;
         if (locked == null || locked->Value != 10) return 12;
         WeakBox box = WeakBox(observer);
         WeakBox boxCopy = box;
         weak<Resource> extractedObserver = move boxCopy.Value;
         Box<weak<Resource>> generic = Box<weak<Resource>>(observer);
         Box<weak<Resource>> genericCopy = generic;
-        shared<Resource> fromBox = extractedObserver.Lock();
-        shared<Resource> fromGeneric = genericCopy.Value.Lock();
+        shared<Resource> fromBox = lock extractedObserver;
+        shared<Resource> fromGeneric = lock genericCopy.Value;
         if (fromBox == null || fromGeneric == null) return 13;
         expiredObserver = observer;
     }
     if (Log.DestructorCalls != 1 || Log.Sum != 10) return 14;
-    shared<Resource> expired = expiredObserver.Lock();
+    shared<Resource> expired = lock expiredObserver;
     if (expired != null) return 15;
     shared<Resource> empty = null;
     shared<Resource> movedEmpty = move empty;
