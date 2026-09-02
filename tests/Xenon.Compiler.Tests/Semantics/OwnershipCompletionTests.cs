@@ -1536,6 +1536,255 @@ public sealed class OwnershipCompletionTests
     }
 
     [Fact]
+    public void Analyzer_RejectsPersistentReceiverLifetimeEffectsThroughStorage()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Child { public int Value; public ~Child() {} }
+            struct Parent
+            {
+                public Child Child;
+                public Child TakeChild() { return move Child; }
+                public void DestroyChild() { destruct(Child); }
+                public void UpdateChild() { Child.Value = 10; }
+                public void RestoreChild()
+                {
+                    Child temporary = move Child;
+                    Child = move temporary;
+                }
+            }
+            void MoveThroughMethod()
+            {
+                storage<Parent> value = Parent();
+                Child child = value.TakeChild();
+            }
+            void DestructThroughMethod()
+            {
+                storage<Parent> value = Parent();
+                value.DestroyChild();
+            }
+            void AllowedMethods()
+            {
+                storage<Parent> value = Parent();
+                value.UpdateChild();
+                value.RestoreChild();
+            }
+            """);
+
+        Assert.Equal(2, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.PartialStorageLifetimeOperation));
+        Assert.Equal(2, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_ReferenceParametersProvideAccessButOnlyStorageReferencesProvideLifetimeAuthority()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Child { public int Value; public ~Child() {} }
+            struct Resource { public int Value; public ~Resource() {} }
+            struct Parent
+            {
+                public Child Child;
+                public void DestroyChild() { destruct(Child); }
+            }
+            void Modify(Resource& resource)
+            {
+                resource.Value = 10;
+            }
+            void Kill(Resource& resource)
+            {
+                destruct(resource);
+            }
+            Resource Take(Resource& resource)
+            {
+                return move resource;
+            }
+            void KillChild(Parent& parent)
+            {
+                destruct(parent.Child);
+            }
+            Child TakeChild(Parent& parent)
+            {
+                return move parent.Child;
+            }
+            void KillChildIndirectly(Parent& parent)
+            {
+                parent.DestroyChild();
+            }
+            void KillStorage(storage<Resource>& value)
+            {
+                destruct(value);
+            }
+            void ResetStorage(storage<Resource>& value)
+            {
+                destruct(value);
+                value = Resource();
+            }
+            void Caller()
+            {
+                storage<Resource> value = Resource();
+                ResetStorage(value);
+                value.Value = 42;
+            }
+            """);
+
+        Assert.Equal(5, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.ReferenceParameterLifetimeMutation));
+        Assert.Equal(5, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsLifetimeOperationsWithoutOneAuthoritativeReferenceOwner()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public int Value; public ~Resource() {} }
+            struct Child { public ~Child() {} }
+            struct Parent
+            {
+                public Child Child;
+                public void DestroyChild() { destruct(Child); }
+            }
+            Resource& Forward(Resource& value) { return value; }
+            Parent& ForwardParent(Parent& value) { return value; }
+            T& ForwardGeneric<T>(T& value) { return value; }
+            Resource& Select(bool condition, Resource& first, Resource& second)
+            {
+                if (condition) return first;
+                return second;
+            }
+            interface ISource { Resource& Get(); }
+            struct View
+            {
+                public Resource& Resource;
+                public void Kill() { destruct(Resource); }
+                public Resource Take() { return move Resource; }
+                public Resource& Get() { return Resource; }
+            }
+            struct Inner { public Resource& Resource; }
+            struct Outer
+            {
+                public Inner Inner;
+                public void Kill() { destruct(Inner.Resource); }
+            }
+            struct ParentView
+            {
+                public Parent& Parent;
+                public void Kill() { Parent.DestroyChild(); }
+            }
+            void KillForwardedParameter(Resource& value)
+            {
+                destruct(Forward(value));
+            }
+            Resource MoveForwardedParameter(Resource& value)
+            {
+                return move Forward(value);
+            }
+            void KillGenericForwardedParameter(Resource& value)
+            {
+                destruct(ForwardGeneric<Resource>(value));
+            }
+            void KillThroughForwardedParameterMethod(Parent& value)
+            {
+                ForwardParent(value).DestroyChild();
+            }
+            void KillReturnedReferenceField(Resource& resource)
+            {
+                View view = View { resource };
+                destruct(view.Get());
+            }
+            void KillForwardedStorageValue()
+            {
+                storage<Resource> value = Resource();
+                destruct(Forward(value));
+            }
+            void KillForwardedStorageChild()
+            {
+                storage<Parent> value = Parent();
+                ForwardParent(value).DestroyChild();
+            }
+            void KillUnknownReturn(ISource& source)
+            {
+                destruct(source.Get());
+            }
+            void KillSelected(bool condition)
+            {
+                Resource first = Resource();
+                Resource second = Resource();
+                destruct(Select(condition, first, second));
+            }
+            """);
+
+        Assert.Equal(4, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.ReferenceParameterLifetimeMutation));
+        Assert.Equal(7, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnresolvedLifetimeOwner));
+        Assert.Equal(1, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.StorageValueLifetimeMutation));
+        Assert.Equal(1, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.PartialStorageLifetimeOperation));
+        Assert.Equal(13, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_UpdatesTheResolvedAuthoritativeOwnerForLocalAndStorageReferences()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public int Value; public ~Resource() {} }
+            Resource& Forward(Resource& value) { return value; }
+            T& ForwardGeneric<T>(T& value) { return value; }
+            storage<Resource>& ForwardStorage(storage<Resource>& value) { return value; }
+            struct Owner
+            {
+                public Resource Value;
+                public Resource& Get() { return Value; }
+            }
+            void LocalAlias()
+            {
+                Resource value = Resource();
+                Resource& reference = value;
+                destruct(reference);
+            }
+            void ForwardedLocal()
+            {
+                Resource value = Resource();
+                destruct(Forward(value));
+            }
+            void ForwardedLocalAlias()
+            {
+                Resource value = Resource();
+                Resource& reference = value;
+                destruct(Forward(reference));
+            }
+            Resource MoveForwardedLocal()
+            {
+                Resource value = Resource();
+                return move Forward(value);
+            }
+            void GenericForwardedLocal()
+            {
+                Resource value = Resource();
+                destruct(ForwardGeneric<Resource>(value));
+            }
+            void ForwardedStorage()
+            {
+                storage<Resource> value = Resource();
+                destruct(ForwardStorage(value));
+                value = Resource();
+            }
+            void ReturnedOwnedField()
+            {
+                Owner owner = Owner();
+                destruct(owner.Get());
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
     public void Analyzer_DoesNotConvertSharedOwnershipToBool()
     {
         Compilation compilation = Create("""

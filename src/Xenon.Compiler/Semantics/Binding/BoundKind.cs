@@ -19,7 +19,7 @@ public enum BoundKind
     UnaryExpression,
     MoveExpression,
     LockExpression,
-    DiscardExpression,
+    FullExpression,
     CopyExpression,
     BinaryExpression,
     AssignmentExpression,

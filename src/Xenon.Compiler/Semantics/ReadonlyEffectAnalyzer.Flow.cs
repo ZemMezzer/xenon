@@ -224,8 +224,12 @@ internal sealed partial class ReadonlyEffectAnalyzer
         finally { _loopDepth--; }
     }
 
-    private static bool? BooleanConstant(BoundExpression expression) =>
-        expression is BoundLiteralExpression { Value: bool value } ? value : null;
+    private static bool? BooleanConstant(BoundExpression expression) => expression switch
+    {
+        BoundFullExpression fullExpression => BooleanConstant(fullExpression.Expression),
+        BoundLiteralExpression { Value: bool value } => value,
+        _ => null,
+    };
 
     private Flow InScope(Func<Flow> visit, BoundExpression? exitCleanup = null)
     {
