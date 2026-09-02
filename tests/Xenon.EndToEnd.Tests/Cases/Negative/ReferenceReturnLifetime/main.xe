@@ -1,0 +1,57 @@
+namespace Negative.ReferenceReturnLifetime;
+
+struct Data
+{
+    public int Value;
+}
+
+struct Inner
+{
+    public int Number;
+}
+
+struct Outer
+{
+    public Inner Inner;
+}
+
+int& BadLocal()
+{
+    int value = 42;
+    return value;
+}
+
+readonly int& BadReadonlyLocal()
+{
+    int value = 42;
+    return value;
+}
+
+int& BadField()
+{
+    Data data = Data();
+    return data.Value;
+}
+
+int& BadNestedField()
+{
+    Outer value = Outer();
+    return value.Inner.Number;
+}
+
+int& BadParameter(int value)
+{
+    return value;
+}
+
+int& BadAlias()
+{
+    int value = 42;
+    int& alias = value;
+    return alias;
+}
+
+readonly Data& BadTemporary()
+{
+    return Data();
+}

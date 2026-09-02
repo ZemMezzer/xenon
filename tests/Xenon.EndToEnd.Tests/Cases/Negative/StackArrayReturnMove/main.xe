@@ -1,0 +1,13 @@
+namespace Negative.StackArrayReturnMove;
+
+int[] RuntimeSized(int count)
+{
+    int[] values = int[count];
+    return move values;
+}
+
+int[] ConstantSized()
+{
+    int[] values = int[10];
+    return move values;
+}

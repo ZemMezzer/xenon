@@ -1,0 +1,10 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2227", "message": "method 'Holder.Take' has caller-visible receiver move effects that are not compatible with virtual method contract 'Holder.Take'; incompatible receiver place: 'this.Value'" },
+    { "id": "XE2227", "message": "method 'Derived.Take' has caller-visible receiver move effects that are not compatible with virtual method 'Base.Take'; incompatible receiver place: 'this.Value'" }
+  ]
+}

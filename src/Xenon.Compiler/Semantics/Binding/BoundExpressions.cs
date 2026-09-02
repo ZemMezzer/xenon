@@ -31,6 +31,11 @@ public sealed record BoundUnaryExpression(
 public sealed record BoundMoveExpression(
     BoundExpression Source) : BoundExpression(Source.Type)
 {
+    // The semantic place is retained because a reference expression may have
+    // been dereferenced in the bound tree.  Lowering uses this identity to
+    // transfer the original place's drop responsibility.
+    public VariableSymbol? TrackedVariable { get; init; }
+    public ImmutableArray<FieldSymbol> TrackedPath { get; init; } = [];
     public override BoundKind Kind => BoundKind.MoveExpression;
 }
 
@@ -101,6 +106,7 @@ public sealed record BoundAssignmentExpression(
 {
     public override BoundKind Kind => BoundKind.AssignmentExpression;
     public bool IsInitialization { get; init; }
+    public bool ReinitializesMovedPlace { get; init; }
 }
 
 public sealed record BoundCompoundAccessorAssignmentExpression(

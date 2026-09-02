@@ -1,0 +1,9 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2227", "message": "method 'Base.Take' has caller-visible receiver move effects that are not compatible with interface method 'IHolder.Take'; incompatible receiver place: 'this.Value'" }
+  ]
+}

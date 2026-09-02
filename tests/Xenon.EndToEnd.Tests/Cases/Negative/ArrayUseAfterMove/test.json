@@ -1,0 +1,11 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2215", "message": "cannot use 'first' because it has been moved" },
+    { "id": "XE2215", "message": "cannot use 'first' because it has been moved" },
+    { "id": "XE2215", "message": "cannot use 'second' because it has been moved" }
+  ]
+}

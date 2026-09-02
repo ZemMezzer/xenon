@@ -1,0 +1,39 @@
+namespace References.ReferenceReturnRuntime;
+
+struct Data
+{
+    public int Value;
+}
+
+int& Forward(int& value)
+{
+    return value;
+}
+
+readonly int& ForwardReadonly(readonly int& value)
+{
+    return value;
+}
+
+int& GetValue(Data& data)
+{
+    return data.Value;
+}
+
+int Main()
+{
+    int number = 10;
+    int& forwarded = Forward(number);
+    forwarded = 42;
+    if (number != 42) return 1;
+
+    readonly int& readable = ForwardReadonly(number);
+    if (readable != 42) return 2;
+
+    Data data = Data();
+    int& field = GetValue(data);
+    field = 73;
+    if (data.Value != 73) return 3;
+
+    return 0;
+}

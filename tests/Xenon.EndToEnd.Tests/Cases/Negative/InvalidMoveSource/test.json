@@ -4,7 +4,6 @@
   "compileOnly": true,
   "expectedBuildSuccess": false,
   "expectedDiagnostics": [
-    { "id": "XE2214", "message": "'move' requires a writable local storage location" },
     { "id": "XE2214", "message": "'move' requires a writable local storage location" }
   ]
 }
