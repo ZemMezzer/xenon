@@ -47,6 +47,8 @@ public static class EditorSymbolClassifier
             TemplateMethodRequirementSymbol => EditorSymbolKind.Method,
             TemplateConstructorRequirementSymbol => EditorSymbolKind.Constructor,
             TemplatePropertyRequirementSymbol or TemplateIndexerRequirementSymbol => EditorSymbolKind.Property,
+            SyntheticMemberSymbol { MemberKind: SyntheticMemberKind.Method } => EditorSymbolKind.Method,
+            SyntheticMemberSymbol => EditorSymbolKind.Property,
             ParameterSymbol => EditorSymbolKind.Parameter,
             LocalVariableSymbol => EditorSymbolKind.LocalVariable,
             DeclaredTypeSymbol => EditorSymbolKind.Type,
@@ -57,7 +59,7 @@ public static class EditorSymbolClassifier
     public static bool IsEditorVisible(Symbol symbol)
     {
         ArgumentNullException.ThrowIfNull(symbol);
-        return symbol.IsUserVisible && !symbol.IsCompilerGenerated;
+        return symbol.IsUserVisible && (!symbol.IsCompilerGenerated || symbol is SyntheticMemberSymbol);
     }
 
     public static bool CanRename(Symbol symbol)

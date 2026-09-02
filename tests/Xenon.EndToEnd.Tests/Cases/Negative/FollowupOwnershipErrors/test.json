@@ -1,0 +1,26 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2221", "message": "type 'shared<Resource>' cannot be owned by 'unique'; ownership wrappers cannot directly wrap pointers, references, void, or another ownership wrapper" },
+    { "id": "XE2221", "message": "type 'unique<Resource>' cannot be owned by 'shared'; ownership wrappers cannot directly wrap pointers, references, void, or another ownership wrapper" },
+    { "id": "XE2221", "message": "type 'shared<Resource>' cannot be owned by 'weak'; ownership wrappers cannot directly wrap pointers, references, void, or another ownership wrapper" },
+    { "id": "XE2222", "message": "external ABI does not support ownership type 'shared'; use a raw pointer instead" },
+    { "id": "XE2222", "message": "external ABI does not support ownership type 'weak'; use a raw pointer instead" },
+    { "id": "XE2219", "message": "cannot partially move 'this.Value' because 'Guarded' has a user-defined destructor; move the entire 'Guarded' value instead" },
+    { "id": "XE2220", "message": "copyability of generic type 'T' is not guaranteed; use 'move' when ownership transfer is intended" },
+    { "id": "XE2220", "message": "copyability of generic type 'T' is not guaranteed; use 'move' when ownership transfer is intended" },
+    { "id": "XE2224", "message": "a raw value of type 'Resource*' cannot be adopted by 'shared<Resource>'; only a fresh 'new' allocation may be adopted" },
+    { "id": "XE2003", "message": "cannot implicitly convert 'Resource*' to 'shared<Resource>'" },
+    { "id": "XE2225", "message": "'weak<Resource>' can only be created from a live matching shared owner" },
+    { "id": "XE2003", "message": "cannot implicitly convert 'Resource*' to 'weak<Resource>'" },
+    { "id": "XE2226", "message": "cannot access a value through 'weak<Resource>' directly; use 'lock value' and check the returned shared owner first" },
+    { "id": "XE2098", "message": "'free' requires a heap pointer or heap array, but has type 'shared<Resource>'" },
+    { "id": "XE2098", "message": "'free' requires a heap pointer or heap array, but has type 'weak<Resource>'" },
+    { "id": "XE2215", "message": "cannot use 'strong' because it has been moved" },
+    { "id": "XE2215", "message": "cannot use 'observer' because it has been moved" },
+    { "id": "XE2226", "message": "cannot access a value through 'weak<Resource>' directly; use 'lock value' and check the returned shared owner first" }
+  ]
+}

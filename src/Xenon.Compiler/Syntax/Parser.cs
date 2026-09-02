@@ -1272,7 +1272,19 @@ internal sealed class Parser
         ExpressionSyntax left;
         int unaryPrecedence = SyntaxFacts.GetUnaryOperatorPrecedence(Current.Kind);
 
-        if (unaryPrecedence != 0 && unaryPrecedence >= parentPrecedence)
+        if (Current.Kind == SyntaxKind.MoveKeyword && 12 >= parentPrecedence)
+        {
+            SyntaxToken moveKeyword = NextToken();
+            ExpressionSyntax operand = ParseBinaryExpression(12);
+            left = new MoveExpressionSyntax(moveKeyword, operand);
+        }
+        else if (Current.Kind == SyntaxKind.LockKeyword && 12 >= parentPrecedence)
+        {
+            SyntaxToken lockKeyword = NextToken();
+            ExpressionSyntax operand = ParseBinaryExpression(12);
+            left = new LockExpressionSyntax(lockKeyword, operand);
+        }
+        else if (unaryPrecedence != 0 && unaryPrecedence >= parentPrecedence)
         {
             SyntaxToken operatorToken = NextToken();
             ExpressionSyntax operand = ParseBinaryExpression(unaryPrecedence);

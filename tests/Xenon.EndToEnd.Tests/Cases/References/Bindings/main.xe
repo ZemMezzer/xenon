@@ -5,20 +5,17 @@ struct Holder { public int& Value; public Holder(int& value) { Value = value; } 
 struct DerivedHolder : Holder
 {
     public readonly int& Other;
-    public DerivedHolder(int& value) : base(value) { this.Other = value; }
+    public DerivedHolder(int& value, readonly int& other) : base(value) { this.Other = other; }
 }
 struct Outer { public Holder Inner; public Outer(int& value) { Inner = Holder(value); } }
 int Main()
 {
     int value = 20;
-    int& alias = value;
+    int other = 30;
+    { int& alias = value; Increment(alias); }
+    { DerivedHolder holder = DerivedHolder(value, other); holder.Value = 22; if (holder.Other != 30) return 1; }
+    { Outer outer = Outer(value); outer.Inner.Value = 42; }
+    { Holder positional = Holder { value }; if (positional.Value != 42) return 1; }
     readonly int& view = value;
-    Increment(alias);
-    DerivedHolder holder = DerivedHolder(value);
-    holder.Value = 22;
-    Outer outer = Outer(value);
-    outer.Inner.Value = 42;
-    Holder positional = Holder { value };
-    if (view != 42 || holder.Other != 42 || positional.Value != 42) return 1;
     return Read(view);
 }

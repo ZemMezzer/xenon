@@ -1,0 +1,28 @@
+namespace Negative.HiddenVirtualMoveEffect;
+
+struct Resource {}
+
+struct Holder
+{
+    public unique<Resource> Value;
+
+    public virtual unique<Resource> Take()
+    {
+        return move Value;
+    }
+}
+
+abstract struct Base
+{
+    public abstract unique<Resource> Take();
+}
+
+struct Derived : Base
+{
+    public unique<Resource> Value;
+
+    public override unique<Resource> Take()
+    {
+        return move Value;
+    }
+}

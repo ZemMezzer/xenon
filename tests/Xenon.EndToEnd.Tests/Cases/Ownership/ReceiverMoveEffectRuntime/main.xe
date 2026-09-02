@@ -1,0 +1,67 @@
+namespace Ownership.ReceiverMoveEffectRuntime;
+
+struct Log
+{
+    public static int DestructorCalls;
+    public static int Sum;
+}
+
+struct Resource
+{
+    public int Value;
+    public Resource(int value) { Value = value; }
+    public ~Resource()
+    {
+        Log.DestructorCalls = Log.DestructorCalls + 1;
+        Log.Sum = Log.Sum + Value;
+    }
+}
+
+struct Holder
+{
+    public unique<Resource> Value;
+    public int Untouched;
+
+    public Holder(unique<Resource> value, int untouched)
+    {
+        Value = move value;
+        Untouched = untouched;
+    }
+
+    public unique<Resource> Take()
+    {
+        return move Value;
+    }
+
+    public unique<Resource> Replace(int replacement)
+    {
+        unique<Resource> previous = move Value;
+        Value = new Resource(replacement);
+        return move previous;
+    }
+
+    public int Read()
+    {
+        return Value->Value;
+    }
+}
+
+int Main()
+{
+    Log.DestructorCalls = 0;
+    Log.Sum = 0;
+    {
+        unique<Resource> firstValue = new Resource(1);
+        Holder first = Holder(move firstValue, 17);
+        unique<Resource> taken = first.Take();
+        if (taken->Value != 1 || first.Untouched != 17) return 1;
+
+        unique<Resource> secondValue = new Resource(2);
+        Holder second = Holder(move secondValue, 23);
+        unique<Resource> previous = second.Replace(3);
+        if (previous->Value != 2 || second.Read() != 3 || second.Untouched != 23) return 2;
+    }
+
+    if (Log.DestructorCalls != 3 || Log.Sum != 6) return 3;
+    return 0;
+}

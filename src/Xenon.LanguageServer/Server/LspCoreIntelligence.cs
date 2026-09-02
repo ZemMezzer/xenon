@@ -18,7 +18,7 @@ internal static class LspCoreIntelligence
     [
         "namespace", "type", "interface", "enum", "enumMember", "function", "method",
         "constructor", "property", "field", "parameter", "variable", "constant",
-        "typeParameter", "modifier",
+        "typeParameter", "modifier", "keyword",
     ];
     internal static readonly string[] SemanticTokenModifiers = ["declaration", "definition", "static", "readonly"];
 
@@ -37,7 +37,7 @@ internal static class LspCoreIntelligence
                 referenceContext.TryGetProperty("includeDeclaration", out JsonElement include) && include.GetBoolean()),
             "textDocument/implementation" => await ImplementationsAsync(context, position),
             "textDocument/documentSymbol" => await DocumentSymbolsAsync(context),
-            "textDocument/completion" => await CompletionAsync(context, position),
+            "textDocument/completion" => await CompletionAsync(context, position, parameters),
             "textDocument/signatureHelp" => await SignatureHelpAsync(context, position),
             "textDocument/semanticTokens/full" => await SemanticTokensAsync(context),
             "textDocument/prepareRename" => await PrepareRenameAsync(context, position),
@@ -91,7 +91,22 @@ internal static class LspCoreIntelligence
     {
         (SemanticModel model, int position) = await ModelAndPositionAsync(context, lspPosition);
         Symbol? symbol = FindSymbol(model, context.Document.SyntaxTree, position);
-        if (symbol is null) return null;
+        if (symbol is null)
+        {
+            LockExpressionSyntax? @lock = SyntaxNavigator.DescendantNodesAndSelf(context.Document.SyntaxTree.Root)
+                .OfType<LockExpressionSyntax>()
+                .Where(candidate => position >= candidate.LockKeyword.Location.Span.Start &&
+                    position <= candidate.LockKeyword.Location.Span.End)
+                .OrderBy(candidate => SyntaxNavigator.GetSpan(candidate).Length).FirstOrDefault();
+            if (@lock is null) return null;
+            TypeSymbol type = model.GetTypeInfo(@lock, context.CancellationToken).Type;
+            if (type is ErrorTypeSymbol) return null;
+            return new
+            {
+                contents = new { kind = "markdown", value = $"```xenon\n{type.ToDisplayString()}\n```" },
+                range = ToRange(context.Document.EffectiveText, @lock.LockKeyword.Location.Span),
+            };
+        }
         symbol = UnwrapAlias(symbol);
         string display = HoverDisplay(symbol);
         return new
@@ -219,9 +234,13 @@ internal static class LspCoreIntelligence
     }
 
     private static async Task<object?> CompletionAsync(LanguageServerAnalysisContext context,
-        LspPosition lspPosition)
+        LspPosition lspPosition, JsonElement parameters)
     {
         (SemanticModel model, int position) = await ModelAndPositionAsync(context, lspPosition);
+        if (IsTriggerCharacter(parameters, ">") &&
+            (position < 2 || context.Document.EffectiveText[position - 2] != '-' ||
+             context.Document.EffectiveText[position - 1] != '>'))
+            return new { isIncomplete = false, items = Array.Empty<object>() };
         MemberAccessExpressionSyntax? access = SyntaxNavigator.DescendantNodesAndSelf(context.Document.SyntaxTree.Root)
             .OfType<MemberAccessExpressionSyntax>()
             .Where(candidate => candidate.OperatorToken.Location.Span.End <= position &&
@@ -255,7 +274,8 @@ internal static class LspCoreIntelligence
         SymbolInfo info = model.GetSymbolInfo(call, context.CancellationToken);
         var seenCandidates = new HashSet<Symbol>(ReferenceEqualityComparer.Instance);
         Symbol[] candidates = new[] { info.Symbol }.OfType<Symbol>().Concat(info.CandidateSymbols)
-            .Where(symbol => symbol is FunctionSymbol or IndexerSymbol or InterfaceIndexerSymbol)
+            .Where(symbol => symbol is FunctionSymbol or IndexerSymbol or InterfaceIndexerSymbol or
+                SyntheticMemberSymbol { MemberKind: SyntheticMemberKind.Method })
             .Where(seenCandidates.Add).ToArray();
         if (candidates.Length == 0) return null;
         int activeParameter = Commas(call).Count(token => token.Location.Span.Start < position);
@@ -276,19 +296,28 @@ internal static class LspCoreIntelligence
     {
         SemanticModel model = await context.Project.GetSemanticModelAsync(context.Document.Id,
             context.CancellationToken).ConfigureAwait(false);
-        var tokens = new List<(TextSpan Span, Symbol Symbol, bool Declaration)>();
+        var tokens = new List<(TextSpan Span, int Type, int Modifiers, int Priority)>();
         foreach (Symbol symbol in model.GetDeclaredSymbols(context.CancellationToken)
                      .Where(EditorSymbolClassifier.IsEditorVisible))
             foreach (TextLocation location in symbol.Locations.Where(location =>
                          location.Source.FileId == context.Document.SourceFileId))
-                tokens.Add((location.Span, symbol, true));
+            {
+                int type = SemanticTokenType(symbol, declaration: true);
+                if (type >= 0)
+                    tokens.Add((location.Span, type, SemanticModifiers(symbol, declaration: true), 2));
+            }
         foreach (ResolvedSymbolReference reference in model.GetResolvedReferences(context.CancellationToken))
             if (EditorSymbolClassifier.IsEditorVisible(reference.Symbol) &&
                 reference.Location.Source.FileId == context.Document.SourceFileId)
-                tokens.Add((reference.Location.Span, reference.Symbol, false));
-        var ordered = tokens.Where(item => item.Span.Length > 0 &&
-                SemanticTokenType(item.Symbol, item.Declaration) >= 0)
-            .GroupBy(item => item.Span).Select(group => group.OrderByDescending(item => item.Declaration).First())
+            {
+                int type = SemanticTokenType(reference.Symbol, declaration: false);
+                if (type >= 0)
+                    tokens.Add((reference.Location.Span, type,
+                        SemanticModifiers(reference.Symbol, declaration: false), 1));
+            }
+        AddOwnershipLanguageTokens(context.Document.SyntaxTree, tokens);
+        var ordered = tokens.Where(item => item.Span.Length > 0)
+            .GroupBy(item => item.Span).Select(group => group.OrderByDescending(item => item.Priority).First())
             .OrderBy(item => item.Span.Start).ToArray();
         var data = new List<int>(ordered.Length * 5);
         int previousLine = 0, previousCharacter = 0;
@@ -299,11 +328,36 @@ internal static class LspCoreIntelligence
             int deltaLine = range.Start.Line - previousLine;
             int deltaCharacter = deltaLine == 0 ? range.Start.Character - previousCharacter : range.Start.Character;
             data.Add(deltaLine); data.Add(deltaCharacter); data.Add(range.End.Character - range.Start.Character);
-            data.Add(SemanticTokenType(item.Symbol, item.Declaration));
-            data.Add(SemanticModifiers(item.Symbol, item.Declaration));
+            data.Add(item.Type);
+            data.Add(item.Modifiers);
             previousLine = range.Start.Line; previousCharacter = range.Start.Character;
         }
         return new { data = data.ToArray() };
+    }
+
+    private static void AddOwnershipLanguageTokens(SyntaxTree tree,
+        List<(TextSpan Span, int Type, int Modifiers, int Priority)> tokens)
+    {
+        const int keywordType = 15;
+        foreach (SyntaxToken token in tree.Tokens.Where(token => token.Kind is
+                     SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
+                     SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword))
+            tokens.Add((token.Location.Span, keywordType, 0, 3));
+
+        foreach (MoveExpressionSyntax move in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
+                     .OfType<MoveExpressionSyntax>())
+            tokens.Add((move.MoveKeyword.Location.Span, keywordType, 0, 3));
+        foreach (LockExpressionSyntax @lock in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
+                     .OfType<LockExpressionSyntax>())
+            tokens.Add((@lock.LockKeyword.Location.Span, keywordType, 0, 3));
+        foreach (FreeExpressionSyntax free in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
+                     .OfType<FreeExpressionSyntax>())
+            tokens.Add((free.FreeKeyword.Location.Span, keywordType, 0, 3));
+        foreach (CallExpressionSyntax call in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
+                     .OfType<CallExpressionSyntax>())
+            if (call.TypeArguments is null && call.Target is NameExpressionSyntax name &&
+                name.IdentifierToken.Text == "destruct")
+                tokens.Add((name.IdentifierToken.Location.Span, keywordType, 0, 3));
     }
 
     private static async Task<object?> PrepareRenameAsync(LanguageServerAnalysisContext context,
@@ -590,8 +644,15 @@ internal static class LspCoreIntelligence
         FunctionSymbol function => function.Parameters,
         IndexerSymbol indexer => indexer.Parameters,
         InterfaceIndexerSymbol indexer => indexer.Parameters,
+        SyntheticMemberSymbol member => member.Parameters,
         _ => [],
     };
+
+    private static bool IsTriggerCharacter(JsonElement parameters, string character) =>
+        parameters.TryGetProperty("context", out JsonElement context) &&
+        context.TryGetProperty("triggerKind", out JsonElement kind) && kind.GetInt32() == 2 &&
+        context.TryGetProperty("triggerCharacter", out JsonElement trigger) &&
+        trigger.GetString() == character;
 
     private static IEnumerable<SyntaxToken> Commas(SyntaxNode node) => node switch
     {

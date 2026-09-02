@@ -1,0 +1,11 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2215", "message": "cannot use 'pair.Left' because 'pair.Left' has been moved" },
+    { "id": "XE2218", "message": "cannot use 'pair' as a complete value because field 'pair.Left' has been moved" },
+    { "id": "XE2219", "message": "cannot partially move 'guarded.Pair' because 'Guarded' has a user-defined destructor; move the entire 'Guarded' value instead" }
+  ]
+}

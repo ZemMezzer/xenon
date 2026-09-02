@@ -100,7 +100,7 @@ public sealed class SemanticModel
                     .Select(reference => (Info: SymbolInfo.FromSymbol(pair.Value), Span: reference.Span)))
                 .Where(item => IsPositionMatch(item.Span, position)))
             .Concat(_semanticInfo.Types
-                .Where(pair => pair.Key is TypeSyntax &&
+                .Where(pair => pair.Key is TypeSyntax && !IsLifetimeOrOwnershipModifierSyntax(pair.Key) &&
                     TryGetDeclaredType(pair.Value.Type, out _) &&
                     TryGetReferenceLocation(pair.Key, out TextLocation location) &&
                     location.Source.FileId == tree.Source.FileId &&
@@ -257,8 +257,16 @@ public sealed class SemanticModel
         if (receiver.Type is null) return [];
         if (receiver.Kind == CompletionReceiverKind.Value &&
             _semanticInfo.Receivers.TryGetValue(access.Receiver, out ReceiverInfo value))
+        {
+            TypeSymbol sourceType = GetTypeInfo(access.Receiver, cancellationToken).Type;
+            bool requiresArrow = sourceType is PointerTypeSymbol or UniqueTypeSymbol or SharedTypeSymbol;
+            if (access.OperatorToken.Kind == SyntaxKind.ArrowToken != requiresArrow)
+                return [];
+            if (sourceType is WeakTypeSymbol && access.OperatorToken.Kind != SyntaxKind.DotToken)
+                return [];
             return LookupMembers(value.Type, position, new MemberLookupOptions(MemberAccessKind.Instance,
                 IncludeInaccessible: false, IsReadonlyReceiver: value.IsReadonly), cancellationToken);
+        }
         return receiver.Kind == CompletionReceiverKind.Type
             ? LookupMembers(receiver.Type, position, new MemberLookupOptions(MemberAccessKind.Static), cancellationToken)
             : [];
@@ -317,6 +325,9 @@ public sealed class SemanticModel
         {
             PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
             ReferenceTypeSymbol reference => reference.ElementType as DeclaredTypeSymbol,
+            OwnershipTypeSymbol ownership when ownership is not WeakTypeSymbol =>
+                ownership.ElementType as DeclaredTypeSymbol,
+            LifetimeModifierTypeSymbol modifier => modifier.ElementType as DeclaredTypeSymbol,
             DeclaredTypeSymbol declared => declared,
             _ => null,
         };
@@ -390,7 +401,8 @@ public sealed class SemanticModel
         foreach ((SyntaxNode syntax, TypeInfo info) in _semanticInfo.Types)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (syntax is not TypeSyntax || !TryGetDeclaredType(info.Type, out DeclaredTypeSymbol symbol) ||
+            if (syntax is not TypeSyntax || IsLifetimeOrOwnershipModifierSyntax(syntax) ||
+                !TryGetDeclaredType(info.Type, out DeclaredTypeSymbol symbol) ||
                 !TryGetReferenceLocation(syntax, out TextLocation location) ||
                 _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source) ||
                 !seen.Add((symbol, location.Source.FileId, location.Span)))
@@ -405,6 +417,7 @@ public sealed class SemanticModel
     private static bool IsReferenceableSourceSymbol(Symbol symbol)
     {
         if (symbol.IsSourceDefined) return true;
+        if (symbol is SyntheticMemberSymbol) return true;
         if (symbol is not ParameterSymbol { Name: "value", ContainingSymbol: FunctionSymbol accessor })
             return false;
         return ReferenceEquals(accessor.ContainingProperty?.Setter, accessor) ||
@@ -667,6 +680,8 @@ public sealed class SemanticModel
                 case PointerTypeSymbol pointer: type = pointer.ElementType; continue;
                 case ReferenceTypeSymbol reference: type = reference.ElementType; continue;
                 case ArrayTypeSymbol array: type = array.ElementType; continue;
+                case OwnershipTypeSymbol ownership: type = ownership.ElementType; continue;
+                case LifetimeModifierTypeSymbol modifier: type = modifier.ElementType; continue;
                 case StructTypeSymbol { GenericDefinition: { } definition }:
                     declared = definition;
                     return true;
@@ -675,6 +690,10 @@ public sealed class SemanticModel
             }
         }
     }
+
+    private static bool IsLifetimeOrOwnershipModifierSyntax(SyntaxNode syntax) => syntax is
+        NamedTypeSyntax { NameToken.Kind: SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or
+            SyntaxKind.WeakKeyword or SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword };
 
     private sealed class ResolvedReferenceIdentityComparer :
         IEqualityComparer<(Symbol Symbol, SourceFileId File, TextSpan Span)>

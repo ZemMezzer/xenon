@@ -45,6 +45,11 @@ internal static class GenericTypeFacts
         PointerTypeSymbol pointer => ContainsGenericParameter(pointer.ElementType),
         ReferenceTypeSymbol reference => ContainsGenericParameter(reference.ElementType),
         ArrayTypeSymbol array => ContainsGenericParameter(array.ElementType),
+        UniqueTypeSymbol unique => ContainsGenericParameter(unique.ElementType),
+        SharedTypeSymbol shared => ContainsGenericParameter(shared.ElementType),
+        WeakTypeSymbol weak => ContainsGenericParameter(weak.ElementType),
+        StorageTypeSymbol storage => ContainsGenericParameter(storage.ElementType),
+        PinTypeSymbol pin => ContainsGenericParameter(pin.ElementType),
         _ => false,
     };
 }

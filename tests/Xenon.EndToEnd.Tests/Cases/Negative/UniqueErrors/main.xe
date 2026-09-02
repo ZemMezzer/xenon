@@ -1,0 +1,32 @@
+namespace Negative.UniqueErrors;
+
+struct Resource {}
+struct Holder
+{
+    public unique<Resource> Value;
+    public Holder(unique<Resource> value) { Value = move value; }
+}
+
+extern unique<Resource> Receive();
+export void Send(unique<Resource> value) {}
+
+void Copies()
+{
+    unique<Resource> first = new Resource();
+    unique<Resource> second = first;
+    Holder holder = Holder(move first);
+    Holder copied = holder;
+}
+
+void RawAdoption()
+{
+    Resource* pointer = new Resource();
+    unique<Resource> owner = pointer;
+    free(pointer);
+}
+
+void ManualFree()
+{
+    unique<Resource> owner = new Resource();
+    free(owner);
+}

@@ -1,0 +1,14 @@
+namespace Ownership.PublicDestructorOwnershipRuntime;
+
+struct State { public static int DestructorCalls; }
+struct Resource { public ~Resource() { State.DestructorCalls++; } }
+
+int Main()
+{
+    {
+        unique<Resource> uniqueValue = new Resource();
+        shared<Resource> sharedValue = new Resource();
+    }
+    if (State.DestructorCalls != 2) return 1;
+    return 0;
+}

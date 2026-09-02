@@ -1,0 +1,13 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2004", "message": "destructor 'PrivateResource' is private" },
+    { "id": "XE2004", "message": "destructor 'PrivateResource' is private" },
+    { "id": "XE2004", "message": "destructor 'PrivateResource' is private" },
+    { "id": "XE2004", "message": "destructor 'PrivateResource' is private" },
+    { "id": "XE2004", "message": "destructor 'PrivateResource' is private" }
+  ]
+}

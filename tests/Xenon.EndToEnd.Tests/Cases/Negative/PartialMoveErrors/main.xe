@@ -1,0 +1,37 @@
+namespace PartialMoveErrors;
+
+struct Pair
+{
+    public int Left;
+    public int Right;
+    public Pair(int left, int right) { Left = left; Right = right; }
+}
+
+struct Guarded
+{
+    public Pair Pair;
+    public Guarded(Pair pair) { Pair = pair; }
+    public ~Guarded() {}
+}
+
+int Read(Pair pair) { return pair.Left; }
+
+void UseMovedField()
+{
+    Pair pair = Pair(1, 2);
+    int left = move pair.Left;
+    int invalid = pair.Left;
+}
+
+void UseWholePartial()
+{
+    Pair pair = Pair(1, 2);
+    int left = move pair.Left;
+    int invalid = Read(pair);
+}
+
+void MoveFromDestructorAggregate()
+{
+    Guarded guarded = Guarded(Pair(1, 2));
+    Pair pair = move guarded.Pair;
+}

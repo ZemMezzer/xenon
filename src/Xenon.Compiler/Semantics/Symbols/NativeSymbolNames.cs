@@ -15,6 +15,7 @@ public static class NativeSymbolNames
     private static string? AbiType(TypeSymbol type, ITargetTypeLayout? layout) => type switch
     {
         PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol => "ptr",
+        OwnershipTypeSymbol => null,
         EnumTypeSymbol enumeration => AbiType(enumeration.UnderlyingType, layout),
         PrimitiveTypeSymbol { IsInteger: true } integer =>
             (integer.BitWidth ?? layout?.GetIntegerBitWidth(integer)) is int width ? $"i{width}" : null,

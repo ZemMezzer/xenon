@@ -820,9 +820,9 @@ public sealed class NativeLinkerTests
             {
                 Container value = Container { 7 };
                 Container& mutable = value;
-                readonly Container& readOnly = mutable;
                 int& writable = mutable.Get();
                 writable = 42;
+                readonly Container& readOnly = mutable;
                 readonly int& readable = readOnly.Get();
                 return readable;
             }
@@ -1963,9 +1963,7 @@ public sealed class NativeLinkerTests
             {
                 Pair local = Pair(&State.Value, output, input);
                 *local.Output = *local.Input;
-                Outer value = Outer();
-                value.Left = Pair(&State.Value, &State.Value, input);
-                value.Right = local;
+                Outer value = Outer { Pair(&State.Value, output, input), local };
                 Outer copy = value;
                 Pair& alias = copy.Right;
                 alias.Destination = output;
@@ -1986,8 +1984,9 @@ public sealed class NativeLinkerTests
                 int output = 0;
                 Process(&output, &input);
                 if (State.Value != 7 || input != 38) return 1;
-                // Accessor + heap + two array elements + the scalar local.
-                if (output != 43) return 2;
+                // Accessor + heap + two array elements + scalar local + four
+                // compiler-destroyed Pair fields in value/copy.
+                if (output != 47) return 2;
                 return 42;
             }
             """, optimization));
@@ -2152,12 +2151,12 @@ public sealed class NativeLinkerTests
             {
                 int number = 10;
                 Value value = Value { &number, 0 };
+                readonly int* view = value.Touch();
+                if (*view != 1) return 1;
                 readonly Value& receiver = value;
                 int* pointer = receiver.GetPointer(&number);
                 *pointer = 40;
                 pointer = &number;
-                readonly int* view = value.Touch();
-                if (*view != 1) return 1;
                 view = receiver.GetView();
                 if (*view != 40) return 2;
                 readonly IValue& contract = value;
@@ -2730,11 +2729,12 @@ public sealed class NativeLinkerTests
                 Prefix* prefix = pointer;
                 if (&prefix->Guard != &leaf.Guard || cast<int>(prefix->Guard) != 123 || cast<int>(prefix->Tag) != 7) return 2;
                 IValue view = *pointer;
-                IValue& reference = leaf;
                 pointer->Current = 20;
                 if (leaf.Value != 22 || view.Current != 24 || ViaReference(leaf) != 24) return 3;
                 view.Current += 1;
-                if (leaf.Value != 27 || reference.Read() != 29) return 4;
+                if (leaf.Value != 27) return 4;
+                IValue& reference = leaf;
+                if (reference.Read() != 29) return 4;
                 leaf[2] = 30;
                 view[3] += 1;
                 if (leaf.Value != 39 || pointer->Read() != 41 || view[1] != 40) return 5;
@@ -3130,7 +3130,7 @@ public sealed class NativeLinkerTests
     {
         Assert.Equal(42, RunIterationFourProgram("""
             struct H { public int& Value; public H(int& value) { Value = value; } }
-            struct D : H { public readonly int& Other; public D(int& v) : base(v) { this.Other = v; } }
+            struct D : H { public readonly int& Other; public D(int& v, readonly int& other) : base(v) { this.Other = other; } }
             struct Outer { public H Inner; public Outer(int& v) { Inner = H(v); } }
             abstract struct A { public abstract int Read(); }
             struct C : A { public override int Read() { return 42; } }
@@ -3142,12 +3142,14 @@ public sealed class NativeLinkerTests
             }
             int Main()
             {
-                int value = 20; D d = D(value); d.Value = 21;
-                Outer outer = Outer(value); outer.Inner.Value = 42;
-                H positional = H { value };
-                if (value != 42 || d.Other != 42 || positional.Value != 42) return 1;
-                C c = C(); A& view = c; A* pointer = &c;
-                if (view.Read() != 42 || pointer->Read() != 42) return 2;
+                int value = 20; int other = 30;
+                { D d = D(value, other); d.Value = 21; if (d.Value != 21 || d.Other != 30) return 1; }
+                { Outer outer = Outer(value); outer.Inner.Value = 42; if (value != 42) return 1; }
+                { H positional = H { value }; if (positional.Value != 42) return 1; }
+                C c = C(); A& view = c;
+                if (view.Read() != 42) return 2;
+                A* pointer = &c;
+                if (pointer->Read() != 42) return 2;
                 Resource* r = new Resource(); Resource.Destroy(r);
                 if (Resource.Count != 1) return 3;
                 return 42;
@@ -3388,7 +3390,7 @@ public sealed class NativeLinkerTests
                 if (Log.Trace != 231) return 5;
                 Log.Trace = 0; Conditional(false); if (Log.Trace != 0) return 6;
                 Conditional(true); if (Log.Trace != 1) return 7;
-                Log.Trace = 0; { R a; a = R(1); a = R(2); } if (Log.Trace != 2) return 8;
+                Log.Trace = 0; { R a; a = R(1); a = R(2); } if (Log.Trace != 12) return 8;
                 Log.Trace = 0; Ordered(true); if (Log.Trace != 21) return 9;
                 Log.Trace = 0; Ordered(false); if (Log.Trace != 12) return 10;
                 return 42;
@@ -3499,11 +3501,731 @@ public sealed class NativeLinkerTests
             struct D : C { public override int M(int x) { return x + 40; } }
             int Main()
             {
-                D d = D(); A& a = d; B& b = d;
-                if (a.M(2) != 42 || d.M(2) != 42 || b.M(1.0f) != 2) return 1;
+                D d = D(); A& a = d;
+                if (a.M(2) != 42) return 1;
+                if (d.M(2) != 42) return 1;
+                B& b = d;
+                if (b.M(1.0f) != 2) return 1;
                 return 42;
             }
             """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RunsAdvancedLifetimeCoreTypes(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct Resource
+            {
+                public int* Destroyed;
+                public Resource(int* destroyed) { Destroyed = destroyed; }
+                public void Touch() { *Destroyed += 0; }
+                public ~Resource() { (*Destroyed)++; }
+            }
+            int Main()
+            {
+                int destroyed = 0;
+                if (sizeof(storage<Resource>) <= sizeof(Resource) || alignof(storage<Resource>) < alignof(Resource)) return 4;
+                if (sizeof(pin<Resource>) != sizeof(Resource) || alignof(pin<Resource>) != alignof(Resource)) return 5;
+                {
+                    storage<Resource> slot;
+                    slot = Resource(&destroyed);
+                    slot.Touch();
+                    destruct(slot);
+                    slot = Resource(&destroyed);
+                    Resource live = move slot;
+
+                    pin<Resource> fixedValue = Resource(&destroyed);
+                    Resource* before = &fixedValue;
+                    fixedValue.Touch();
+                    Resource* after = &fixedValue;
+                    if (before != after) return 1;
+
+                    storage<Resource>[] slots = new storage<Resource>[4];
+                    slots[0] = Resource(&destroyed);
+                    slots[1] = Resource(&destroyed);
+                    destruct(slots[0]);
+                    destruct(slots[1]);
+                    free(slots);
+
+                    unique<Resource> owned = new Resource(&destroyed);
+                    storage<unique<Resource>> uniqueSlot;
+                    uniqueSlot = move owned;
+                    destruct(uniqueSlot);
+
+                    shared<Resource> strong = new Resource(&destroyed);
+                    storage<shared<Resource>> sharedSlot;
+                    sharedSlot = strong;
+                    destruct(sharedSlot);
+
+                    pin<storage<Resource>> pinnedSlot;
+                    pinnedSlot = Resource(&destroyed);
+                    pinnedSlot.Touch();
+                    destruct(pinnedSlot);
+                }
+                if (destroyed != 8) return 2;
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_DestroysDiscardedNonTrivialCallResultsAtFullExpressionEnd(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Destroyed; }
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; }
+                public ~Resource() { State.Destroyed += Value; }
+            }
+            struct Bundle
+            {
+                public Resource Value;
+                public Bundle(int value) { Value = Resource(value); }
+            }
+            struct Factory
+            {
+                public Resource Make(int value) { return Resource(value); }
+            }
+            Resource MakeResource(int value) { return Resource(value); }
+            Bundle MakeBundle(int value) { return Bundle(value); }
+            unique<Resource> MakeUnique(int value) { return new Resource(value); }
+            shared<Resource> MakeShared(int value) { return new Resource(value); }
+            int GetInt() { return 42; }
+            int Main()
+            {
+                State.Destroyed = 0;
+
+                GetInt();
+                if (State.Destroyed != 0) return 1;
+                MakeResource(1);
+                if (State.Destroyed != 1) return 2;
+                MakeUnique(2);
+                if (State.Destroyed != 3) return 3;
+                MakeShared(4);
+                if (State.Destroyed != 7) return 4;
+                MakeBundle(8);
+                if (State.Destroyed != 15) return 5;
+
+                {
+                    Resource consumed = MakeResource(16);
+                    if (State.Destroyed != 15) return 6;
+                }
+                if (State.Destroyed != 31) return 7;
+
+                {
+                    unique<Resource> consumed = MakeUnique(32);
+                    if (State.Destroyed != 31) return 8;
+                }
+                if (State.Destroyed != 63) return 9;
+
+                Factory factory = Factory();
+                factory.Make(64);
+                if (State.Destroyed != 127) return 10;
+
+                {
+                    shared<Resource> consumed = MakeShared(128);
+                    if (State.Destroyed != 127) return 11;
+                }
+                if (State.Destroyed != 255) return 12;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_DestroysNestedFullExpressionTemporariesInReverseConstructionOrder(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State
+            {
+                public static int Destroyed;
+                public static int Used;
+                public static int Order;
+            }
+            interface IReadable { int readonly Read(); }
+            struct Resource : IReadable
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public void Use() { State.Used += Id; }
+                public int readonly Read() { return Id; }
+                public ~Resource()
+                {
+                    State.Destroyed += 1;
+                    State.Order = State.Order * 10 + Id;
+                }
+            }
+            Resource CreateResource(int id) { return Resource(id); }
+            shared<Resource> GetShared(int id) { return new Resource(id); }
+            int Add(int left, int right) { return left + right; }
+            int ReadBorrowed(readonly Resource& value) { return value.Read(); }
+            int ReadInterface(IReadable value) { return value.Read(); }
+            struct FieldHolder
+            {
+                public int Value = CreateResource(8).Read();
+            }
+            struct BaseHolder
+            {
+                public int Value;
+                public BaseHolder(readonly Resource& value) { Value = value.Read(); }
+            }
+            struct DerivedHolder : BaseHolder
+            {
+                public DerivedHolder() : base(CreateResource(9)) {}
+            }
+            int Main()
+            {
+                State.Destroyed = 0;
+                State.Used = 0;
+                State.Order = 0;
+
+                GetShared(1)->Use();
+                if (State.Used != 1 || State.Destroyed != 1) return 1;
+
+                CreateResource(2).Use();
+                if (State.Used != 3 || State.Destroyed != 2) return 2;
+
+                {
+                    shared<Resource> owner = new Resource(3);
+                    weak<Resource> observer = owner;
+                    bool alive = (lock observer) != null;
+                    if (!alive) return 3;
+                    destruct(owner);
+                    if (State.Destroyed != 3) return 4;
+                }
+
+                State.Order = 0;
+                int total = Add(CreateResource(4).Read(), CreateResource(5).Read());
+                if (total != 9) return 5;
+                if (State.Destroyed != 5 || State.Order != 54) return 6;
+
+                if (ReadBorrowed(CreateResource(6)) != 6) return 7;
+                if (State.Destroyed != 6 || State.Order != 546) return 8;
+                if (ReadInterface(CreateResource(7)) != 7) return 9;
+                if (State.Destroyed != 7 || State.Order != 5467) return 10;
+
+                FieldHolder fieldHolder = FieldHolder();
+                if (fieldHolder.Value != 8) return 11;
+                if (State.Destroyed != 8 || State.Order != 54678) return 12;
+
+                DerivedHolder derivedHolder = DerivedHolder();
+                if (derivedHolder.Value != 9) return 13;
+                if (State.Destroyed != 9 || State.Order != 546789) return 14;
+
+                State.Order = 0;
+                {
+                    storage<Resource> direct = Resource(ReadBorrowed(CreateResource(10)));
+                    if (direct.Id != 10) return 15;
+                    if (State.Destroyed != 10 || State.Order != 10) return 16;
+                }
+                if (State.Destroyed != 11 || State.Order != 110) return 17;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_PreservesStorageRuntimeStateAcrossMutableStorageReferenceCalls(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Destroyed; }
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; }
+                public void SetValue(int value) { Value = value; }
+                public ~Resource() { State.Destroyed += 1; }
+            }
+            void Reset(storage<Resource>& value, int next)
+            {
+                destruct(value);
+                value = Resource(next);
+            }
+            int Main()
+            {
+                State.Destroyed = 0;
+                {
+                    storage<Resource> value = Resource(1);
+                    Reset(value, 2);
+                    value.SetValue(3);
+                    if (value.Value != 3) return 1;
+                }
+                if (State.Destroyed != 2) return 2;
+
+                {
+                    storage<Resource> value = Resource(4);
+                    value.SetValue(5);
+                    if (value.Value != 5) return 3;
+                }
+                if (State.Destroyed != 3) return 4;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_UsesResolvedReferenceOwnersForExactlyOnceLifetimeOperations(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Destroyed; }
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource() { State.Destroyed += 1; }
+            }
+            struct Owner
+            {
+                public Resource Value;
+                public Resource& Get() { return Value; }
+            }
+            Resource& Forward(Resource& value) { return value; }
+            storage<Resource>& ForwardStorage(storage<Resource>& value) { return value; }
+            int Main()
+            {
+                State.Destroyed = 0;
+                {
+                    Resource value = Resource(1);
+                    destruct(Forward(value));
+                    if (State.Destroyed != 1) return 1;
+                }
+                if (State.Destroyed != 1) return 2;
+
+                {
+                    Resource value = Resource(2);
+                    Resource result = move Forward(value);
+                    if (result.Id != 2 || State.Destroyed != 1) return 3;
+                }
+                if (State.Destroyed != 2) return 4;
+
+                {
+                    storage<Resource> value = Resource(3);
+                    destruct(ForwardStorage(value));
+                    if (State.Destroyed != 3) return 5;
+                    value = Resource(4);
+                }
+                if (State.Destroyed != 4) return 6;
+
+                {
+                    Owner owner = Owner { Resource(5) };
+                    destruct(owner.Get());
+                    if (State.Destroyed != 5) return 7;
+                }
+                if (State.Destroyed != 5) return 8;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_PreservesWholeObjectDestructionAtUserDestructorBoundaries(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State
+            {
+                public static int ParentDestroyed;
+                public static int ChildDestroyed;
+                public static int Order;
+            }
+            struct Child
+            {
+                public ~Child()
+                {
+                    State.ChildDestroyed += 1;
+                    State.Order = State.Order * 10 + 2;
+                }
+            }
+            struct Parent
+            {
+                public Child Child;
+                public ~Parent()
+                {
+                    State.ParentDestroyed += 1;
+                    State.Order = State.Order * 10 + 1;
+                }
+            }
+            int Main()
+            {
+                State.ParentDestroyed = 0;
+                State.ChildDestroyed = 0;
+                State.Order = 0;
+                {
+                    Parent parent = Parent();
+                    destruct(parent);
+                    if (State.ParentDestroyed != 1 || State.ChildDestroyed != 1) return 1;
+                    if (State.Order != 12) return 2;
+                }
+                if (State.ParentDestroyed != 1 || State.ChildDestroyed != 1) return 3;
+                {
+                    Parent parent = Parent();
+                }
+                if (State.ParentDestroyed != 2 || State.ChildDestroyed != 2) return 4;
+                if (State.Order != 1212) return 5;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ConstructsDirectlyInsideStorageAndPinnedStorage(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Constructors; public static int Destructors; }
+            struct SelfReference
+            {
+                public SelfReference* Self;
+                public SelfReference() { Self = this; }
+            }
+            struct Container
+            {
+                public pin<SelfReference> Value;
+                public Container() { Value = SelfReference(); }
+            }
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; State.Constructors += 1; }
+                public ~Resource() { State.Destructors += 1; }
+            }
+            int Main()
+            {
+                storage<SelfReference> ordinary = SelfReference();
+                bool ordinaryValid = ordinary.Self == &ordinary;
+                destruct(ordinary);
+                if (!ordinaryValid) return 1;
+
+                pin<SelfReference> direct = SelfReference();
+                if (direct.Self != &direct) return 2;
+
+                Container container = Container();
+                if (container.Value.Self != &container.Value) return 3;
+
+                pin<storage<SelfReference>> pinned;
+                pinned = SelfReference();
+                bool pinnedValid = pinned.Self == &pinned;
+                destruct(pinned);
+                if (!pinnedValid) return 4;
+
+                {
+                    storage<Resource> reusable = Resource(10);
+                    bool firstValid = reusable.Value == 10;
+                    destruct(reusable);
+                    if (!firstValid) return 5;
+                    reusable = Resource(20);
+                    bool secondValid = reusable.Value == 20;
+                    if (!secondValid) return 6;
+                }
+                if (State.Constructors != 2 || State.Destructors != 2) return 5;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_TracksConditionalStorageCleanupAndMoveResponsibility(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Constructors; public static int Destructors; }
+            struct Resource
+            {
+                public Resource() { State.Constructors++; }
+                public ~Resource() { State.Destructors++; }
+            }
+            void ConditionalConstruction(bool condition)
+            {
+                storage<Resource> value;
+                if (condition) value = Resource();
+            }
+            void ConditionalDestruction(bool condition)
+            {
+                storage<Resource> value = Resource();
+                if (condition) destruct(value);
+            }
+            void BalancedReconstruction(bool condition)
+            {
+                storage<Resource> value = Resource();
+                if (condition) destruct(value);
+                else destruct(value);
+                value = Resource();
+            }
+            int Main()
+            {
+                ConditionalConstruction(false);
+                if (State.Destructors != 0) return 1;
+                ConditionalConstruction(true);
+                if (State.Destructors != 1) return 2;
+                ConditionalDestruction(false);
+                ConditionalDestruction(true);
+                if (State.Destructors != 3) return 3;
+                BalancedReconstruction(true);
+                BalancedReconstruction(false);
+                if (State.Destructors != 7) return 4;
+                {
+                    storage<Resource> source = Resource();
+                    Resource destination = move source;
+                }
+                if (State.Destructors != 8) return 5;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_PersistsStorageStateInFieldsHeapAggregatesAndArrays(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Constructors; public static int Destructors; }
+            struct Resource
+            {
+                public Resource() { State.Constructors++; }
+                public Resource* Address() { return this; }
+                public void Touch() {}
+                public ~Resource() { State.Destructors++; }
+            }
+            struct Holder
+            {
+                public storage<Resource> Value;
+                public void Create() { Value = Resource(); }
+                public void Destroy() { destruct(Value); }
+            }
+            struct DestructorHolder
+            {
+                public storage<Resource> Value;
+                public bool DestroyExplicitly;
+                public DestructorHolder(bool destroyExplicitly)
+                {
+                    DestroyExplicitly = destroyExplicitly;
+                    Value = Resource();
+                }
+                public ~DestructorHolder()
+                {
+                    if (DestroyExplicitly) destruct(Value);
+                }
+            }
+            void StoreAndDestroy<T>(T value)
+            {
+                storage<T> slot;
+                slot = move value;
+                destruct(slot);
+            }
+            void Reset() { State.Constructors = 0; State.Destructors = 0; }
+            int Main()
+            {
+                Reset();
+                { Holder holder = Holder(); }
+                if (State.Destructors != 0) return 1;
+
+                Reset();
+                { Holder holder = Holder(); holder.Value = Resource(); }
+                if (State.Constructors != 1 || State.Destructors != 1) return 2;
+
+                Reset();
+                { Holder holder = Holder(); holder.Value = Resource(); destruct(holder.Value); }
+                if (State.Constructors != 1 || State.Destructors != 1) return 3;
+
+                Reset();
+                {
+                    Holder holder = Holder();
+                    holder.Value = Resource();
+                    destruct(holder.Value);
+                    holder.Value = Resource();
+                }
+                if (State.Constructors != 2 || State.Destructors != 2) return 4;
+
+                Reset();
+                { Holder holder = Holder(); holder.Create(); holder.Destroy(); }
+                if (State.Constructors != 1 || State.Destructors != 1) return 5;
+                Reset();
+                { Holder holder = Holder(); holder.Create(); }
+                if (State.Constructors != 1 || State.Destructors != 1) return 6;
+
+                Reset();
+                {
+                    DestructorHolder explicitHolder = DestructorHolder(true);
+                    DestructorHolder automaticHolder = DestructorHolder(false);
+                }
+                if (State.Constructors != 2 || State.Destructors != 2) return 16;
+
+                Reset();
+                storage<Resource>* empty = new storage<Resource>();
+                free(empty);
+                if (State.Destructors != 0) return 7;
+
+                Reset();
+                storage<Resource>* initialized = new storage<Resource>();
+                *initialized = Resource();
+                free(initialized);
+                if (State.Constructors != 1 || State.Destructors != 1) return 8;
+
+                Reset();
+                storage<Resource>* ended = new storage<Resource>();
+                *ended = Resource();
+                destruct(*ended);
+                free(ended);
+                if (State.Constructors != 1 || State.Destructors != 1) return 9;
+
+                Reset();
+                storage<Resource>* reused = new storage<Resource>();
+                *reused = Resource();
+                Resource* firstAddress = (*reused).Address();
+                destruct(*reused);
+                *reused = Resource();
+                Resource* secondAddress = (*reused).Address();
+                if (firstAddress != secondAddress) return 10;
+                free(reused);
+                if (State.Constructors != 2 || State.Destructors != 2) return 11;
+
+                Reset();
+                {
+                    storage<Resource>* moved = new storage<Resource>();
+                    *moved = Resource();
+                    Resource value = move *moved;
+                    free(moved);
+                    if (State.Destructors != 0) return 12;
+                }
+                if (State.Destructors != 1) return 13;
+
+                Reset();
+                {
+                    Holder first = Holder();
+                    first.Value = Resource();
+                    Holder second = move first;
+                }
+                if (State.Constructors != 1 || State.Destructors != 1) return 14;
+
+                Reset();
+                storage<Resource>[] values = new storage<Resource>[4];
+                values[0] = Resource();
+                values[3] = Resource();
+                free(values);
+                if (State.Constructors != 2 || State.Destructors != 2) return 15;
+
+                Reset();
+                StoreAndDestroy(Resource());
+                if (State.Constructors != 1 || State.Destructors != 1) return 17;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ReusesStorageThroughMutableReferenceWithExactlyOnceDestruction(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Constructors; public static int Destructors; }
+            struct Resource
+            {
+                public Resource() { State.Constructors++; }
+                public ~Resource() { State.Destructors++; }
+            }
+            int Main()
+            {
+                {
+                    storage<Resource> slot;
+                    storage<Resource>& reference = slot;
+                    reference = Resource();
+                    destruct(reference);
+                    reference = Resource();
+                }
+                if (State.Constructors != 2 || State.Destructors != 2) return 1;
+
+                State.Constructors = 0;
+                State.Destructors = 0;
+                storage<Resource>* value = new storage<Resource>();
+                storage<Resource>& reference = *value;
+                reference = Resource();
+                destruct(reference);
+                reference = Resource();
+                free(value);
+                if (State.Constructors != 2 || State.Destructors != 2) return 2;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ReusesIndexedStoragePointerWithExactlyOnceDestruction(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Constructors; public static int Destructors; }
+            struct Resource
+            {
+                public Resource() { State.Constructors++; }
+                public ~Resource() { State.Destructors++; }
+            }
+            int Main()
+            {
+                {
+                    storage<Resource>* pointer = new storage<Resource>();
+                    int index = 0;
+                    pointer[index] = Resource();
+                    destruct(pointer[index]);
+                    pointer[index] = Resource();
+                    Resource value = move pointer[index];
+                    free(pointer);
+                    if (State.Constructors != 2 || State.Destructors != 1) return 1;
+                }
+                if (State.Constructors != 2 || State.Destructors != 2) return 2;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData("construct", 0)]
+    [InlineData("construct", 2)]
+    [InlineData("destruct", 0)]
+    [InlineData("destruct", 2)]
+    [InlineData("access", 0)]
+    [InlineData("access", 2)]
+    public void Linker_TrapsInvalidIndirectStorageLifetimeOperations(string operation, int optimization)
+    {
+        string action = operation switch
+        {
+            "construct" => "Initialize(value); Initialize(value);",
+            "destruct" => "Destroy(value);",
+            "access" => "Read(value);",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+        int exit = RunIterationFourProgram($$"""
+            struct Resource { public void Touch() {} }
+            void Initialize(storage<Resource>* value) { *value = Resource(); }
+            void Destroy(storage<Resource>* value) { destruct(*value); }
+            void Read(storage<Resource>* value) { (*value).Touch(); }
+            int Main()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                {{action}}
+                return 42;
+            }
+            """, optimization);
+        Assert.NotEqual(0, exit);
+        Assert.NotEqual(42, exit);
     }
 
     private static int RunIterationFourProgram(string source, int optimization)

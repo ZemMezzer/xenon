@@ -691,6 +691,32 @@ public sealed class SemanticModelTests
     }
 
     [Fact]
+    public void LockExpressionHasSharedResultTypeAndWeakHasNoProjectedMembers()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public void Use() {} }
+            void Test(shared<Resource> owner)
+            {
+                weak<Resource> observer = owner;
+                shared<Resource> locked = lock observer;
+                locked->Use();
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+        SyntaxTree tree = compilation.SyntaxTrees[0];
+        SemanticModel model = compilation.GetSemanticModel(tree);
+        LockExpressionSyntax @lock = SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
+            .OfType<LockExpressionSyntax>().Single();
+        Assert.Equal("shared<Resource>", model.GetTypeInfo(@lock).Type.ToDisplayString());
+        Assert.Equal("weak<Resource>", model.GetTypeInfo(@lock.Operand).Type.ToDisplayString());
+        Assert.Empty(model.LookupMembers(model.GetTypeInfo(@lock.Operand).Type,
+            @lock.LockKeyword.Location.Span.Start));
+        Assert.Equal("observer", Assert.IsType<LocalVariableSymbol>(
+            model.GetSymbolInfo(@lock.Operand).Symbol).Name);
+    }
+
+    [Fact]
     public void ExpressionMemberLookupFiltersStaticAndReadonlyReceiverMembers()
     {
         Compilation compilation = Create("""

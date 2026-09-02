@@ -5,7 +5,7 @@ template Runnable { int Run(); }
 struct RunRequired<T> where T : Runnable
 {
     public T value;
-    public RunRequired(T value) { this.value = value; }
+    public RunRequired(T value) { this.value = move value; }
     public int Execute() { return value.Run(); }
 }
 
@@ -15,7 +15,7 @@ struct Derived : BaseRunnable { }
 struct BaseOuter<T> where T : BaseRunnable
 {
     public RunRequired<T> required;
-    public BaseOuter(T value) { required = RunRequired<T>(value); }
+    public BaseOuter(T value) { required = RunRequired<T>(move value); }
     public int Execute() { return required.Execute(); }
 }
 
@@ -25,7 +25,7 @@ struct InterfaceWorker : IRunnable { public int Run() { return 42; } }
 struct InterfaceOuter<T> where T : IRunnable
 {
     public RunRequired<T> required;
-    public InterfaceOuter(T value) { required = RunRequired<T>(value); }
+    public InterfaceOuter(T value) { required = RunRequired<T>(move value); }
     public int Execute() { return required.Execute(); }
 }
 
@@ -35,14 +35,14 @@ template Readable { int Value { get; } }
 struct ReadRequired<T> where T : Readable
 {
     public T value;
-    public ReadRequired(T value) { this.value = value; }
+    public ReadRequired(T value) { this.value = move value; }
     public int Read() { return value.Value; }
 }
 
 struct ReadOuter<T> where T : IReadValue
 {
     public ReadRequired<T> required;
-    public ReadOuter(T value) { required = ReadRequired<T>(value); }
+    public ReadOuter(T value) { required = ReadRequired<T>(move value); }
     public int Read() { return required.Read(); }
 }
 

@@ -111,6 +111,7 @@ internal sealed class SemanticAnalyzer
             .ToDictionary(entry => entry.Symbol, entry => (entry.Body, entry.Scope));
         var genericSpecializer = new GenericFunctionSpecializer(genericDefinitions, _typeFactory,
             _diagnostics, _constants, _genericStructSpecializer!, _cancellationToken);
+        StabilizeConstructorReferenceSummaries();
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
         {
@@ -124,9 +125,12 @@ internal sealed class SemanticAnalyzer
                 functions.Add(new BoundFunction(symbol, boundBody));
             foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
         }
+        StabilizeCallableSummaries();
         BindSpecializedStructFunctions(functions, genericSpecializer);
+        ValidateCallableMoveEffects();
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
+        AddGeneratedDestructorFunctions(functions);
 
         // Lifecycle/accessor checks need all bodies, including declarations that
         // occur after the readonly caller and synthesized field initializers.
@@ -142,8 +146,228 @@ internal sealed class SemanticAnalyzer
         }
 
         RecordDeclarations(_globalNamespace);
-        return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), [.. _diagnostics],
+        return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), _diagnostics.ToImmutableArray(),
             _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
+    }
+
+    private void StabilizeCallableSummaries()
+    {
+        DiagnosticBag lastDiagnostics = new();
+        for (int round = 0; round <= _functionBodies.Count; round++)
+        {
+            PropagateGenericStructCallableSummaries();
+            string before = GetCallableSummaryFingerprint();
+            var diagnostics = new DiagnosticBag();
+            foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                var binder = new FunctionBodyBinder(symbol, scope, diagnostics, _constants,
+                    new SemanticInfoStore(), _cancellationToken);
+                _ = binder.BindBody(body);
+            }
+            PropagateGenericStructCallableSummaries();
+            lastDiagnostics = diagnostics;
+            string after = GetCallableSummaryFingerprint();
+            if (string.Equals(before, after, StringComparison.Ordinal)) break;
+        }
+
+        HashSet<string> callableSummaryDiagnosticIds =
+            [DiagnosticIds.UseAfterMove, DiagnosticIds.PartiallyMovedUse,
+                DiagnosticIds.InconsistentReceiverMoveEffect, DiagnosticIds.EscapingLocalReference];
+        foreach (Diagnostic diagnostic in lastDiagnostics.Where(diagnostic => callableSummaryDiagnosticIds.Contains(diagnostic.Id)))
+        {
+            bool duplicate = _diagnostics.Any(existing =>
+                existing.Id == diagnostic.Id && existing.Message == diagnostic.Message &&
+                existing.Location.Span.Equals(diagnostic.Location.Span));
+            if (!duplicate) _diagnostics.AddRange([diagnostic]);
+        }
+    }
+
+    private void StabilizeConstructorReferenceSummaries()
+    {
+        var constructors = _functionBodies
+            .Where(entry => entry.Symbol.FunctionKind == FunctionKind.Constructor &&
+                            entry.Symbol.ContainingStruct is { } owner &&
+                            TypeFacts.ContainsReferenceStorage(owner))
+            .ToArray();
+        for (int round = 0; round <= constructors.Length; round++)
+        {
+            PropagateGenericStructCallableSummaries();
+            string before = string.Join('|', constructors.Select(entry => string.Join(';',
+                entry.Symbol.ReferenceFieldOrigins.Select(origin =>
+                    $"{string.Join(',', origin.FieldOrdinals)}:{(int)origin.Origin.Kind}:" +
+                    $"{origin.Origin.ParameterOrdinal}:{string.Join(',', origin.Origin.FieldOrdinals)}:{origin.IsReadonly}"))));
+            foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in constructors)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                var binder = new FunctionBodyBinder(symbol, scope, new DiagnosticBag(), _constants,
+                    new SemanticInfoStore(), _cancellationToken);
+                _ = binder.BindBody(body);
+            }
+            PropagateGenericStructCallableSummaries();
+            string after = string.Join('|', constructors.Select(entry => string.Join(';',
+                entry.Symbol.ReferenceFieldOrigins.Select(origin =>
+                    $"{string.Join(',', origin.FieldOrdinals)}:{(int)origin.Origin.Kind}:" +
+                    $"{origin.Origin.ParameterOrdinal}:{string.Join(',', origin.Origin.FieldOrdinals)}:{origin.IsReadonly}"))));
+            if (string.Equals(before, after, StringComparison.Ordinal)) break;
+        }
+    }
+
+    private string GetCallableSummaryFingerprint() => string.Join('|', _functionBodies.Select(entry =>
+        $"{string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect => string.Join(',', effect.FieldOrdinals)))}" +
+        $"/{string.Join(';', entry.Symbol.ReferenceReturnOrigins.Select(origin =>
+            $"{(int)origin.Kind}:{origin.ParameterOrdinal}:{string.Join(',', origin.FieldOrdinals)}"))}" +
+        $"/{string.Join(';', entry.Symbol.ReferenceFieldOrigins.Select(origin =>
+            $"{string.Join(',', origin.FieldOrdinals)}:{(int)origin.Origin.Kind}:" +
+            $"{origin.Origin.ParameterOrdinal}:{string.Join(',', origin.Origin.FieldOrdinals)}:{origin.IsReadonly}"))}"));
+
+    private void PropagateGenericStructCallableSummaries()
+    {
+        if (_genericStructSpecializer is null) return;
+        foreach (SpecializedStructFunction entry in _genericStructSpecializer.SpecializedFunctions)
+        {
+            entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
+            entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+            entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
+        }
+    }
+
+    private void ValidateCallableMoveEffects()
+    {
+        IEnumerable<StructTypeSymbol> types = _structSymbols.Values;
+        if (_genericStructSpecializer is not null)
+            types = types.Concat(_genericStructSpecializer.Specializations);
+
+        var validated = new HashSet<(FunctionSymbol Contract, FunctionSymbol Implementation)>();
+        foreach (StructTypeSymbol type in types.Distinct())
+        {
+            foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces)
+            {
+                foreach (FunctionSymbol contract in @interface.AllMethods)
+                {
+                    FunctionSymbol? implementation = type.FindInterfaceImplementation(contract);
+                    if (implementation is null || !validated.Add((contract, implementation))) continue;
+                    ValidateMoveEffectContract(contract, implementation,
+                        $"interface method '{@interface.Name}.{contract.Name}'",
+                        contract.ReceiverMoveEffects);
+                }
+            }
+
+            foreach (FunctionSymbol implementation in type.Methods.Where(method => method.IsOverride))
+            {
+                FunctionSymbol? contract = type.BaseType?.VirtualMethods.FirstOrDefault(candidate =>
+                    candidate.VTableSlot == implementation.VTableSlot && candidate.HasSameSignature(implementation));
+                if (contract is null || !validated.Add((contract, implementation))) continue;
+                ValidateMoveEffectContract(contract, implementation,
+                    $"virtual method '{contract.ContainingType!.Name}.{contract.Name}'",
+                    contract.ReceiverMoveEffects);
+            }
+
+            // Until source-level effect declarations exist, a virtual method's
+            // dispatch contract declares no destructive receiver effect.  Keep
+            // the inferred summary intact, but validate it against that empty
+            // public contract in the same centralized compatibility routine.
+            foreach (FunctionSymbol implementation in type.Methods.Where(method =>
+                         method.IsVirtual && !method.IsOverride))
+            {
+                if (!validated.Add((implementation, implementation))) continue;
+                ValidateMoveEffectContract(implementation, implementation,
+                    $"virtual method contract '{implementation.ContainingType!.Name}.{implementation.Name}'", []);
+            }
+        }
+    }
+
+    private void ValidateMoveEffectContract(
+        FunctionSymbol contract,
+        FunctionSymbol implementation,
+        string contractDisplay,
+        ImmutableArray<ReceiverMoveEffect> contractEffects)
+    {
+        ImmutableArray<ReceiverMoveEffect> implementationEffects = implementation.ReceiverMoveEffects;
+        if (AreMoveEffectsCompatible(contractEffects, implementationEffects)) return;
+
+        ReceiverMoveEffect? incompatible = implementationEffects.FirstOrDefault(effect =>
+            !contractEffects.Any(candidate => SameMoveEffect(candidate, effect)));
+        string place = incompatible is { } effect
+            ? FormatReceiverMoveEffect(implementation, effect)
+            : "this";
+        _diagnostics.Report(MemberLocation(implementation),
+            $"method '{implementation.ContainingType!.Name}.{implementation.Name}' has caller-visible receiver move effects that are not compatible with {contractDisplay}; incompatible receiver place: '{place}'",
+            DiagnosticIds.HiddenVirtualMoveEffect,
+            contract.Locations.Select(location =>
+                new RelatedDiagnosticLocation(location, "callable contract declared here")));
+    }
+
+    private static bool AreMoveEffectsCompatible(
+        ImmutableArray<ReceiverMoveEffect> contract,
+        ImmutableArray<ReceiverMoveEffect> implementation) =>
+        implementation.All(effect => contract.Any(candidate => SameMoveEffect(candidate, effect)));
+
+    private static bool SameMoveEffect(ReceiverMoveEffect left, ReceiverMoveEffect right) =>
+        left.FieldOrdinals.SequenceEqual(right.FieldOrdinals);
+
+    private static string FormatReceiverMoveEffect(FunctionSymbol method, ReceiverMoveEffect effect)
+    {
+        TypeSymbol? current = method.ContainingType;
+        var names = new List<string> { "this" };
+        foreach (int ordinal in effect.FieldOrdinals)
+        {
+            if (current is not StructTypeSymbol structure ||
+                structure.Fields.FirstOrDefault(field => field.Ordinal == ordinal) is not { } field)
+                return string.Join('.', names);
+            names.Add(field.Name);
+            current = field.Type;
+        }
+        return string.Join('.', names);
+    }
+
+    private void AddGeneratedDestructorFunctions(ImmutableArray<BoundFunction>.Builder functions)
+    {
+        var existing = functions.Select(function => function.Symbol).ToHashSet(ReferenceEqualityComparer.Instance);
+        void Visit(NamespaceSymbol @namespace)
+        {
+            foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
+            {
+                Symbol root = type;
+                while (root.ContainingSymbol is not null) root = root.ContainingSymbol;
+                if (!ReferenceEquals(root, _globalNamespace)) continue;
+                if (type.CompleteDestructor is not { FunctionKind: FunctionKind.DestructorGlue } destructor || !existing.Add(destructor))
+                    continue;
+                functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
+                    new BoundExpressionStatement(new BoundDestroyFieldsExpression(type)),
+                ])));
+            }
+            foreach (NamespaceSymbol child in @namespace.Namespaces) Visit(child);
+        }
+        Visit(_globalNamespace);
+
+        foreach (OwnershipTypeSymbol ownership in _typeFactory.OwnershipTypes)
+        {
+            if (GenericTypeFacts.ContainsGenericParameter(ownership) ||
+                ownership.CompleteDestructor is not { } destructor ||
+                !existing.Add(destructor))
+                continue;
+            FunctionSymbol? elementDestructor = ownership is WeakTypeSymbol ? null : ownership.ElementType switch
+            {
+                ArrayTypeSymbol array => TypeFacts.GetCompleteDestructor(array.ElementType),
+                _ => TypeFacts.GetCompleteDestructor(ownership.ElementType),
+            };
+            functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
+                new BoundExpressionStatement(new BoundOwnershipDestructionExpression(ownership, elementDestructor)),
+            ])));
+        }
+
+        foreach (StorageTypeSymbol storage in _typeFactory.StorageTypes)
+        {
+            if (GenericTypeFacts.ContainsGenericParameter(storage) ||
+                storage.CompleteDestructor is not { } destructor ||
+                !existing.Add(destructor))
+                continue;
+            functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
+                new BoundExpressionStatement(new BoundStorageDestructionExpression(
+                    storage, TypeFacts.GetCompleteDestructor(storage.ElementType))),
+            ])));
+        }
     }
 
     private void InitializeGenericStructSpecializer()
@@ -170,6 +394,12 @@ internal sealed class SemanticAnalyzer
             changed |= ValidatePendingGenericSpecializationLayouts();
             SpecializedStructFunction[] pending = _genericStructSpecializer.SpecializedFunctions
                 .Where(entry => entry.Owner.IsConcreteType && !bound.Contains(entry.Specialized)).ToArray();
+            foreach (SpecializedStructFunction entry in pending)
+            {
+                entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
+                entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+                entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
+            }
             foreach (SpecializedStructFunction entry in pending)
             {
                 changed = true;
@@ -1880,10 +2110,17 @@ internal sealed class SemanticAnalyzer
             .Concat(_structSymbols.Values.SelectMany(type => type.Methods.Select(method => (method, type.Declaration.IdentifierToken.Location))))
             .Concat(_interfaceSymbols.SelectMany(entry => entry.Value.AllMethods.Select(method => (method, entry.Key.IdentifierToken.Location))));
         foreach (var (symbol, location) in signatures.DistinctBy(entry => entry.Item1))
+        {
             if (symbol.ReturnType is StructTypeSymbol { IsAbstract: true } ||
                 symbol.Parameters.Any(parameter => parameter.Type is StructTypeSymbol { IsAbstract: true }))
                 _diagnostics.Report(location, "abstract structs cannot be passed or returned by value",
                     DiagnosticIds.AbstractValueInSignature);
+            if (TypeFacts.IsPinned(symbol.ReturnType) ||
+                symbol.Parameters.Any(parameter => TypeFacts.IsPinned(parameter.Type)))
+                _diagnostics.Report(location,
+                    "pinned values and aggregates containing pinned fields cannot be passed or returned by value; use a pointer or reference",
+                    DiagnosticIds.PinnedRelocation);
+        }
     }
 
     private static bool ContainsStructByValue(
@@ -2347,6 +2584,14 @@ internal sealed class SemanticAnalyzer
             return;
         }
 
+        if (function.ReturnType is OwnershipTypeSymbol returnOwnership)
+        {
+            _diagnostics.Report(
+                declaration.ReturnType.NameToken.Location,
+                $"external ABI does not support ownership type '{returnOwnership.OwnershipKind}'; use a raw pointer instead",
+                DiagnosticIds.UnsupportedNativeOwnershipType);
+        }
+
         if (function.ReturnType is StructTypeSymbol returnStruct)
         {
             _diagnostics.Report(
@@ -2366,7 +2611,14 @@ internal sealed class SemanticAnalyzer
         for (int index = 0; index < function.Parameters.Length; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
-            if (parameterType is StructTypeSymbol parameterStruct)
+            if (parameterType is OwnershipTypeSymbol parameterOwnership)
+            {
+                _diagnostics.Report(
+                    declaration.Parameters[index].Type.NameToken.Location,
+                    $"external ABI does not support ownership type '{parameterOwnership.OwnershipKind}'; use a raw pointer instead",
+                    DiagnosticIds.UnsupportedNativeOwnershipType);
+            }
+            else if (parameterType is StructTypeSymbol parameterStruct)
             {
                 _diagnostics.Report(
                     declaration.Parameters[index].Type.NameToken.Location,

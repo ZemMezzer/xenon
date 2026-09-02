@@ -1,0 +1,80 @@
+namespace Ownership.CallableMoveContractRuntime;
+
+struct Log
+{
+    public static int DestructorCalls;
+    public static int Sum;
+}
+
+struct Resource
+{
+    public int Value;
+    public Resource(int value) { Value = value; }
+    public ~Resource()
+    {
+        Log.DestructorCalls = Log.DestructorCalls + 1;
+        Log.Sum = Log.Sum + Value;
+    }
+}
+
+interface IHolder
+{
+    unique<Resource> Take();
+}
+
+struct InterfaceHolder : IHolder
+{
+    public unique<Resource> Value;
+    public InterfaceHolder(unique<Resource> value) { Value = move value; }
+
+    public unique<Resource> Take()
+    {
+        unique<Resource> old = move Value;
+        Value = new Resource(2);
+        return move old;
+    }
+
+    public int Read() { return Value->Value; }
+}
+
+struct Base
+{
+    public virtual unique<Resource> Take() { return new Resource(99); }
+}
+
+struct Derived : Base
+{
+    public unique<Resource> Value;
+    public Derived(unique<Resource> value) { Value = move value; }
+
+    public override unique<Resource> Take()
+    {
+        unique<Resource> old = move Value;
+        Value = new Resource(4);
+        return move old;
+    }
+
+    public int Read() { return Value->Value; }
+}
+
+int Main()
+{
+    Log.DestructorCalls = 0;
+    Log.Sum = 0;
+    {
+        unique<Resource> first = new Resource(1);
+        InterfaceHolder holder = InterfaceHolder(move first);
+        IHolder& view = holder;
+        unique<Resource> taken = view.Take();
+        if (taken->Value != 1 || holder.Read() != 2) return 1;
+
+        unique<Resource> second = new Resource(3);
+        Derived derived = Derived(move second);
+        Base& baseView = derived;
+        unique<Resource> previous = baseView.Take();
+        if (previous->Value != 3 || derived.Read() != 4) return 2;
+    }
+
+    if (Log.DestructorCalls != 4 || Log.Sum != 10) return 3;
+    return 0;
+}
