@@ -109,7 +109,7 @@ public abstract class OwnershipTypeSymbol : TypeSymbol
     public string OwnershipKind { get; }
     public TypeSymbol ElementType { get; }
     public TypeSymbol StorageType { get; }
-    public FunctionSymbol? DropFunction { get; internal set; }
+    public FunctionSymbol? CompleteDestructor { get; internal set; }
 
     public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
         $"{OwnershipKind}<{ElementType.ToDisplayString(format)}>";

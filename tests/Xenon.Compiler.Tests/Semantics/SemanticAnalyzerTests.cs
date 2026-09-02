@@ -3626,7 +3626,7 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_DerivesRecursiveDropGlueWithoutTreatingItAsAUserDestructor()
+    public void Analyzer_DerivesRecursiveDestructorGlueWithoutTreatingItAsAUserDestructor()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -3640,14 +3640,14 @@ public sealed class SemanticAnalyzerTests
         var types = Assert.Single(compilation.SemanticModel.GlobalNamespace.Namespaces)
             .Structs.ToDictionary(type => type.Name);
         Assert.NotNull(types["Leaf"].Destructor);
-        Assert.Same(types["Leaf"].Destructor, types["Leaf"].DropFunction);
+        Assert.Same(types["Leaf"].Destructor, types["Leaf"].CompleteDestructor);
         Assert.Null(types["Inner"].Destructor);
         Assert.Null(types["Outer"].Destructor);
-        Assert.Equal(FunctionKind.DropGlue, types["Inner"].DropFunction!.FunctionKind);
-        Assert.Equal(FunctionKind.DropGlue, types["Outer"].DropFunction!.FunctionKind);
+        Assert.Equal(FunctionKind.DestructorGlue, types["Inner"].CompleteDestructor!.FunctionKind);
+        Assert.Equal(FunctionKind.DestructorGlue, types["Outer"].CompleteDestructor!.FunctionKind);
         Assert.Contains(compilation.SemanticModel.Functions, function =>
-            ReferenceEquals(function.Symbol, types["Outer"].DropFunction) &&
-            Assert.IsType<BoundExpressionStatement>(Assert.Single(function.Body.Statements)).Expression is BoundDropFieldsExpression);
+            ReferenceEquals(function.Symbol, types["Outer"].CompleteDestructor) &&
+            Assert.IsType<BoundExpressionStatement>(Assert.Single(function.Body.Statements)).Expression is BoundDestroyFieldsExpression);
     }
 
     [Fact]
@@ -4882,8 +4882,8 @@ public sealed class SemanticAnalyzerTests
         StructTypeSymbol weakBox = ns.Structs.Single(type => type.Name == "Box<weak<Example.Resource>>");
         Assert.Equal(Copyability.Copyable, sharedBox.Copyability);
         Assert.Equal(Copyability.Copyable, weakBox.Copyability);
-        Assert.True(TypeFacts.RequiresDrop(sharedBox));
-        Assert.True(TypeFacts.RequiresDrop(weakBox));
+        Assert.True(TypeFacts.RequiresDestruction(sharedBox));
+        Assert.True(TypeFacts.RequiresDestruction(weakBox));
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(

@@ -2,7 +2,7 @@ namespace Ownership.ArrayMoveRuntime;
 
 struct Log
 {
-    public static int Drops;
+    public static int DestructorCalls;
     public static int Trace;
 }
 
@@ -11,7 +11,7 @@ struct Item
     public int Id;
     public ~Item()
     {
-        Log.Drops++;
+        Log.DestructorCalls++;
         Log.Trace = Log.Trace * 10 + Id;
     }
 }
@@ -49,7 +49,7 @@ int Main()
     if (returned[0] != 17) return 4;
     free(returned);
 
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Trace = 0;
     {
         Item[] relocated;
@@ -59,11 +59,11 @@ int Main()
             items[1].Id = 2;
             relocated = move items;
         }
-        if (Log.Drops != 0) return 5;
+        if (Log.DestructorCalls != 0) return 5;
     }
-    if (Log.Drops != 2 || Log.Trace != 21) return 6;
+    if (Log.DestructorCalls != 2 || Log.Trace != 21) return 6;
 
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Trace = 0;
     {
         Item[] destination = Item[1];
@@ -71,11 +71,11 @@ int Main()
         Item[] source = Item[1];
         source[0].Id = 4;
         destination = move source;
-        if (Log.Drops != 1 || Log.Trace != 3) return 7;
+        if (Log.DestructorCalls != 1 || Log.Trace != 3) return 7;
     }
-    if (Log.Drops != 2 || Log.Trace != 34) return 8;
+    if (Log.DestructorCalls != 2 || Log.Trace != 34) return 8;
 
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Trace = 0;
     {
         Item[] source = Item[1];
@@ -85,7 +85,7 @@ int Main()
             Item[] destination = move source;
         }
     }
-    if (Log.Drops != 1 || Log.Trace != 5) return 9;
+    if (Log.DestructorCalls != 1 || Log.Trace != 5) return 9;
 
     return 42;
 }

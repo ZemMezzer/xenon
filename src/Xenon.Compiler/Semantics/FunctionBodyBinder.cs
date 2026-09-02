@@ -133,7 +133,7 @@ internal sealed class FunctionBodyBinder
         {
             _scope.TryDeclare(parameter);
             _definitelyAssigned.Add(parameter);
-            if (TypeFacts.GetDropFunction(parameter.Type) is not null)
+            if (TypeFacts.GetCompleteDestructor(parameter.Type) is not null)
                 _function.HasScalarCleanup = true;
         }
     }
@@ -142,8 +142,8 @@ internal sealed class FunctionBodyBinder
     {
         _cancellationToken.ThrowIfCancellationRequested();
         foreach (ParameterSymbol parameter in _function.Parameters)
-            if (TypeFacts.GetDropFunction(parameter.Type) is not null)
-                ValidateDropAccessibility(parameter.Type, body.OpenBraceToken.Location);
+            if (TypeFacts.GetCompleteDestructor(parameter.Type) is not null)
+                ValidateDestructorAccessibility(parameter.Type, body.OpenBraceToken.Location);
         if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingType is StructTypeSymbol owner)
         {
             foreach (FieldSymbol field in owner.Fields.Where(field => field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type)))
@@ -285,13 +285,13 @@ internal sealed class FunctionBodyBinder
             statements.AddRange(boundBody.Statements);
             boundBody = new BoundBlockStatement(statements.ToImmutable());
         }
-        else if (_function.FunctionKind == FunctionKind.Destructor && _function.ContainingStruct is StructTypeSymbol destructedType)
+        else if (_function.FunctionKind == FunctionKind.Destructor && _function.ContainingStruct is StructTypeSymbol destroyedType)
         {
-            if (destructedType.BaseType is { } baseType)
-                ValidateDropAccessibility(baseType, body.OpenBraceToken.Location);
+            if (destroyedType.BaseType is { } baseType)
+                ValidateDestructorAccessibility(baseType, body.OpenBraceToken.Location);
             // Runs after local cleanup on both fallthrough and explicit returns:
-            // own fields in reverse declaration order, then the complete base drop.
-            boundBody = boundBody with { ExitCleanup = new BoundDropFieldsExpression(destructedType) };
+            // own fields in reverse declaration order, then the complete base destructor.
+            boundBody = boundBody with { ExitCleanup = new BoundDestroyFieldsExpression(destroyedType) };
         }
 
         if (!TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void) && !AlwaysReturns(boundBody))
@@ -691,12 +691,12 @@ internal sealed class FunctionBodyBinder
 
         var variable = new LocalVariableSymbol(syntax.IdentifierToken.Text, type, _function, isConstant || syntax.Type.IsBindingReadonly(), syntax);
         _semanticInfo.Declarations[syntax] = variable;
-        if (TypeFacts.GetDropFunction(type) is { } destructor)
+        if (TypeFacts.GetCompleteDestructor(type) is { } destructor)
         {
             variable.Destructor = destructor;
             _function.HasScalarCleanup = true;
             if (syntax.Initializer is not null && type is not OwnershipTypeSymbol)
-                ValidateDropAccessibility(type, syntax.IdentifierToken.Location);
+                ValidateDestructorAccessibility(type, syntax.IdentifierToken.Location);
         }
         _localScopes.Add(variable, _scope);
         bool declared = _scope.TryDeclare(variable);
@@ -1610,7 +1610,7 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.SelfMove);
             if (assignedPlace.Fields.IsEmpty)
             {
-                ValidateDropAccessibility(assignedPlace.RootType, syntax.OperatorToken.Location);
+                ValidateDestructorAccessibility(assignedPlace.RootType, syntax.OperatorToken.Location);
                 if (assignedPlace.RootVariable is { } assignedVariable)
                     _definitelyAssigned.Add(assignedVariable);
             }
@@ -2482,7 +2482,7 @@ internal sealed class FunctionBodyBinder
         if (storage == ArrayStorageKind.Stack)
         {
             _function.HasStackArrays = true;
-            ValidateDropAccessibility(elementType, allocationLocation);
+            ValidateDestructorAccessibility(elementType, allocationLocation);
             if (elementType is ArrayTypeSymbol)
                 _diagnostics.Report(elementLocation, "stack arrays cannot contain array elements",
                     DiagnosticIds.NestedStackArrayElement);
@@ -2538,7 +2538,7 @@ internal sealed class FunctionBodyBinder
                     }
                     ValidateProjectedReceiverMove(weak, memberTarget.MemberToken.Location);
                     SharedTypeSymbol sharedType = _fileScope.TypeFactory.SharedOf(weakType.ElementType);
-                    _fileScope.TypeFactory.EnsureOwnershipDropFunction(
+                    _fileScope.TypeFactory.EnsureOwnershipDestructor(
                         sharedType, _fileScope.GlobalNamespace, memberTarget);
                     return new BoundWeakLockExpression(weak, sharedType);
                 }
@@ -3327,7 +3327,7 @@ internal sealed class FunctionBodyBinder
         }
 
         FunctionSymbol? destructor = null;
-        TypeSymbol? droppedType = null;
+        TypeSymbol? destroyedType = null;
         if (pointer.Type is PointerTypeSymbol pointerType)
         {
             if (pointerType.IsReadonly)
@@ -3335,14 +3335,14 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.FreeThroughReadonlyPointer);
             if (pointerType.ElementType is StructTypeSymbol structType)
             {
-                destructor = structType.DropFunction;
+                destructor = structType.CompleteDestructor;
             }
-            droppedType = pointerType.ElementType;
+            destroyedType = pointerType.ElementType;
         }
         else if (pointer.Type is ArrayTypeSymbol arrayType)
         {
-            destructor = TypeFacts.GetDropFunction(arrayType.ElementType);
-            droppedType = arrayType.ElementType;
+            destructor = TypeFacts.GetCompleteDestructor(arrayType.ElementType);
+            destroyedType = arrayType.ElementType;
         }
         else if (!TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Error))
         {
@@ -3353,47 +3353,47 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (droppedType is not null)
-            ValidateDropAccessibility(droppedType, syntax.FreeKeyword.Location);
+        if (destroyedType is not null)
+            ValidateDestructorAccessibility(destroyedType, syntax.FreeKeyword.Location);
         return new BoundFreeExpression(pointer, destructor);
     }
 
     private void ValidateDestructorAccess(FunctionSymbol? destructor, TextLocation location)
     {
-        if (destructor?.FunctionKind == FunctionKind.OwnershipDrop) return;
+        if (destructor?.FunctionKind == FunctionKind.OwnershipDestructor) return;
         if (destructor is { IsPublic: false } && !TypeIdentity.AreSame(_function.ContainingType, destructor.ContainingType))
             _diagnostics.Report(location, $"destructor '{destructor.ContainingType!.Name}' is private",
                 DiagnosticIds.InaccessibleSymbol);
     }
 
-    private void ValidateDropAccessibility(TypeSymbol type, TextLocation location) =>
-        ValidateDropAccessibility(type, location, []);
+    private void ValidateDestructorAccessibility(TypeSymbol type, TextLocation location) =>
+        ValidateDestructorAccessibility(type, location, []);
 
-    private void ValidateDropAccessibility(TypeSymbol type, TextLocation location, HashSet<TypeSymbol> visited)
+    private void ValidateDestructorAccessibility(TypeSymbol type, TextLocation location, HashSet<TypeSymbol> visited)
     {
         if (type is WeakTypeSymbol) return;
         if (type is UniqueTypeSymbol unique)
         {
-            ValidateDropAccessibility(unique.ElementType, location, visited);
+            ValidateDestructorAccessibility(unique.ElementType, location, visited);
             return;
         }
         if (type is SharedTypeSymbol shared)
         {
-            ValidateDropAccessibility(shared.ElementType, location, visited);
+            ValidateDestructorAccessibility(shared.ElementType, location, visited);
             return;
         }
         if (type is ArrayTypeSymbol array)
         {
-            ValidateDropAccessibility(array.ElementType, location, visited);
+            ValidateDestructorAccessibility(array.ElementType, location, visited);
             return;
         }
         if (type is not StructTypeSymbol structure || !visited.Add(type)) return;
 
         ValidateDestructorAccess(structure.Destructor, location);
         if (structure.BaseType is { } baseType)
-            ValidateDropAccessibility(baseType, location, visited);
+            ValidateDestructorAccessibility(baseType, location, visited);
         foreach (FieldSymbol field in structure.Fields)
-            ValidateDropAccessibility(field.Type, location, visited);
+            ValidateDestructorAccessibility(field.Type, location, visited);
     }
 
     private ImmutableArray<BoundExpression> ValidatePositionalArguments(
@@ -3790,7 +3790,7 @@ internal sealed class FunctionBodyBinder
     {
         if (targetType is UniqueTypeSymbol uniqueType)
         {
-            ValidateDropAccessibility(uniqueType, copyLocation);
+            ValidateDestructorAccessibility(uniqueType, copyLocation);
             if (TypeIdentity.AreSame(expression.Type, uniqueType))
                 return ApplyCopySemantics(expression, copyLocation);
 
@@ -3814,7 +3814,7 @@ internal sealed class FunctionBodyBinder
 
         if (targetType is SharedTypeSymbol sharedType)
         {
-            ValidateDropAccessibility(sharedType, copyLocation);
+            ValidateDestructorAccessibility(sharedType, copyLocation);
             expression = ContextualizeNull(expression, targetType);
             if (TypeIdentity.AreSame(expression.Type, sharedType))
                 return ApplyCopySemantics(expression, copyLocation);

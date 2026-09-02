@@ -1,4 +1,4 @@
-namespace DropGlueRuntime;
+namespace DestructorGlueRuntime;
 
 struct Log
 {

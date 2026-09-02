@@ -390,8 +390,8 @@ internal sealed class GenericStructSpecializer
         IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
     {
         UniqueTypeSymbol result = _types.UniqueOf(Substitute(unique.ElementType, substitutions, origin));
-        if (unique.DropFunction is { } sourceDrop)
-            _types.EnsureUniqueDropFunction(result, sourceDrop.ContainingNamespace, sourceDrop.Declaration);
+        if (unique.CompleteDestructor is { } sourceDestructor)
+            _types.EnsureUniqueDestructor(result, sourceDestructor.ContainingNamespace, sourceDestructor.Declaration);
         return result;
     }
 
@@ -405,8 +405,8 @@ internal sealed class GenericStructSpecializer
             WeakTypeSymbol => _types.WeakOf(element),
             _ => throw new InvalidOperationException(),
         };
-        if (ownership.DropFunction is { } sourceDrop)
-            _types.EnsureOwnershipDropFunction(result, sourceDrop.ContainingNamespace, sourceDrop.Declaration);
+        if (ownership.CompleteDestructor is { } sourceDestructor)
+            _types.EnsureOwnershipDestructor(result, sourceDestructor.ContainingNamespace, sourceDestructor.Declaration);
         return result;
     }
 

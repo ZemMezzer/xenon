@@ -15,7 +15,7 @@ The repository contains the compiler, LLVM code generator, build driver, project
 
 - native executables and static or shared libraries;
 - structs, enums, interfaces, inheritance, properties, and rich built-in operators;
-- arrays, pointers, references, explicit local/parameter/`this`-field `move`, single-owner `unique<T>`, reference-counted `shared<T>` and observing `weak<T>` (including owned arrays), partial-move flow analysis, recursive copyability and ownership-aware copy/drop glue, deterministic scope cleanup, and native `extern` functions;
+- arrays, pointers, references, explicit local/parameter/`this`-field `move`, single-owner `unique<T>`, reference-counted `shared<T>` and observing `weak<T>` (including owned arrays), partial-move flow analysis, recursive copyability and ownership-aware copy/destructor glue, deterministic scope cleanup, and native `extern` functions;
 - multi-project builds through `.xeproj` files and project references;
 - debug and release profiles, target triples, LLVM IR emission, and object-file emission;
 - editor tooling through the built-in Language Server Protocol implementation.

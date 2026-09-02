@@ -91,7 +91,7 @@ public sealed class LlvmIrGenerator
             FunctionSymbol function = bound.Symbol;
             if (compilation.IsSymbolDefinedHere(function) &&
                 (function.IsPublic || function.IsExport ||
-                 function.FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DropGlue))
+                 function.FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue))
                 exports.Add(new LlvmNativeExport(GetFunctionNativeName(function, abiIdentity)));
         }
         void AddTypeExports(NamespaceSymbol @namespace)
@@ -431,7 +431,7 @@ public sealed class LlvmIrGenerator
                     _interfaceMaps.TryGetValue(type, out LlvmVTable map) ? map.Value : LLVMValueRef.CreateConstPointerNull(elementType),
                     .. type.VirtualMethods.Select(method =>
                         _functions[method.FunctionKind == FunctionKind.Destructor
-                            ? type.DropFunction ?? method
+                            ? type.CompleteDestructor ?? method
                             : method].Value)];
                 table.Initializer = LLVMValueRef.CreateConstArray(elementType, entries);
             }
@@ -619,8 +619,8 @@ public sealed class LlvmIrGenerator
                 DeclareFunction(type.Destructor);
             }
 
-            if (type.DropFunction is { FunctionKind: FunctionKind.DropGlue } drop)
-                DeclareFunction(drop);
+            if (type.CompleteDestructor is { FunctionKind: FunctionKind.DestructorGlue } destructor)
+                DeclareFunction(destructor);
         }
 
         foreach (NamespaceSymbol child in @namespace.Namespaces)
@@ -1135,19 +1135,19 @@ public sealed class LlvmIrGenerator
 
         private void AllocateScalarCleanup(VariableSymbol variable)
         {
-            if (TypeFacts.GetDropFunction(variable.Type) is null) return;
+            if (TypeFacts.GetCompleteDestructor(variable.Type) is null) return;
             var units = ImmutableArray.CreateBuilder<ScalarCleanupEntry>();
-            foreach ((ImmutableArray<FieldSymbol> path, TypeSymbol valueType, FunctionSymbol drop) in GetScalarDropUnits(variable.Type))
+            foreach ((ImmutableArray<FieldSymbol> path, TypeSymbol valueType, FunctionSymbol destructor) in GetScalarDestructionUnits(variable.Type))
                 units.Add(new ScalarCleanupEntry(
                     _builder.BuildAlloca(_cleanupNodeType, "local.cleanup.node"),
                     _builder.BuildAlloca(_context.Int1Type, "local.constructed"),
-                    drop,
+                    destructor,
                     valueType,
                     path));
             _scalarCleanup.Add(variable, units.ToImmutable());
         }
 
-        private static ImmutableArray<(ImmutableArray<FieldSymbol> Path, TypeSymbol ValueType, FunctionSymbol Drop)> GetScalarDropUnits(
+        private static ImmutableArray<(ImmutableArray<FieldSymbol> Path, TypeSymbol ValueType, FunctionSymbol Destructor)> GetScalarDestructionUnits(
             TypeSymbol type)
         {
             var result = ImmutableArray.CreateBuilder<(ImmutableArray<FieldSymbol>, TypeSymbol, FunctionSymbol)>();
@@ -1159,23 +1159,23 @@ public sealed class LlvmIrGenerator
                 ImmutableArray<FieldSymbol> path,
                 ImmutableArray<(ImmutableArray<FieldSymbol>, TypeSymbol, FunctionSymbol)>.Builder units)
             {
-                if (current is OwnershipTypeSymbol { DropFunction: { } ownershipDrop })
+                if (current is OwnershipTypeSymbol { CompleteDestructor: { } ownershipDestructor })
                 {
-                    units.Add((path, current, ownershipDrop));
+                    units.Add((path, current, ownershipDestructor));
                     return;
                 }
                 if (current is not StructTypeSymbol structure) return;
-                // A user destructor is an indivisible drop boundary. Partial moves through
+                // A user destructor is an indivisible destruction boundary. Partial moves through
                 // this aggregate are rejected by the binder.
                 if (structure.FindDestructor() is not null)
                 {
-                    units.Add((path, structure, structure.DropFunction!));
+                    units.Add((path, structure, structure.CompleteDestructor!));
                     return;
                 }
 
                 if (structure.BaseType is { } baseType) Add(baseType, path, units);
                 foreach (FieldSymbol field in structure.Fields)
-                    if (TypeFacts.GetDropFunction(field.Type) is not null)
+                    if (TypeFacts.GetCompleteDestructor(field.Type) is not null)
                         Add(field.Type, path.Add(field), units);
             }
         }
@@ -1569,7 +1569,7 @@ public sealed class LlvmIrGenerator
         {
             if (!_function.HasScopeCleanup || !variable.RequiresArrayCleanupTransfer ||
                 variable.Type is not ArrayTypeSymbol array ||
-                TypeFacts.GetDropFunction(array.ElementType) is not FunctionSymbol destructor)
+                TypeFacts.GetCompleteDestructor(array.ElementType) is not FunctionSymbol destructor)
                 return;
             _arrayCleanup.Add(variable, new ArrayCleanupEntry(
                 _builder.BuildAlloca(_cleanupNodeType, "array.cleanup.node"),
@@ -1639,9 +1639,9 @@ public sealed class LlvmIrGenerator
                 LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("local.cleanup.ready");
                 _builder.BuildCondBr(_builder.BuildLoad2(_context.Int1Type, cleanup.Initialized), end, register);
                 _builder.PositionAtEnd(register);
-                LLVMValueRef dropAddress = EmitProjectedAddress(address, cleanup.Path);
-                EmitCleanupRegistration(cleanup.Node, _scalarScopeHeads[variable], dropAddress,
-                    SizeConstant(1), SizeConstant(_getAbiSize(cleanup.ValueType)), cleanup.DropFunction);
+                LLVMValueRef destructorAddress = EmitProjectedAddress(address, cleanup.Path);
+                EmitCleanupRegistration(cleanup.Node, _scalarScopeHeads[variable], destructorAddress,
+                    SizeConstant(1), SizeConstant(_getAbiSize(cleanup.ValueType)), cleanup.DestructorFunction);
                 _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1), cleanup.Initialized);
                 _builder.BuildBr(end);
                 _builder.PositionAtEnd(end);
@@ -1718,8 +1718,8 @@ public sealed class LlvmIrGenerator
                 construction.IsDefaultInitialization),
             BoundConstructorCallExpression constructor => EmitConstructorCall(constructor),
             BoundBaseLifecycleCallExpression lifecycle => EmitLifecycleCall(lifecycle.Function, _thisValue, lifecycle.Arguments, initializeVTable: false),
-            BoundDropFieldsExpression drop => EmitDropFields(drop),
-            BoundOwnershipDropExpression drop => EmitOwnershipDrop(drop),
+            BoundDestroyFieldsExpression destruction => EmitDestroyFields(destruction),
+            BoundOwnershipDestructionExpression destruction => EmitOwnershipDestruction(destruction),
             BoundArrayCreationExpression array => EmitArrayCreation(array),
             BoundArrayMetadataExpression metadata => EmitArrayMetadata(metadata),
             BoundNewExpression @new => EmitNew(@new),
@@ -1916,20 +1916,20 @@ public sealed class LlvmIrGenerator
             return result;
         }
 
-        private LLVMValueRef EmitDropFields(BoundDropFieldsExpression expression)
+        private LLVMValueRef EmitDestroyFields(BoundDestroyFieldsExpression expression)
         {
             foreach (FieldSymbol field in expression.StructType.Fields.Reverse())
             {
-                if (TypeFacts.GetDropFunction(field.Type) is not { } drop) continue;
+                if (TypeFacts.GetCompleteDestructor(field.Type) is not { } destructor) continue;
                 LLVMValueRef address = _builder.BuildStructGEP2(
                     _mapType(field.ContainingType),
                     _thisValue,
                     checked((uint)field.Ordinal),
-                    $"{field.Name}.drop.address");
-                EmitLifecycleCall(drop, address, [], initializeVTable: false);
+                    $"{field.Name}.destructor.address");
+                EmitLifecycleCall(destructor, address, [], initializeVTable: false);
             }
-            if (expression.StructType.BaseType?.DropFunction is { } baseDrop)
-                EmitLifecycleCall(baseDrop, _thisValue, [], initializeVTable: false);
+            if (expression.StructType.BaseType?.CompleteDestructor is { } baseDestructor)
+                EmitLifecycleCall(baseDestructor, _thisValue, [], initializeVTable: false);
             return default;
         }
 
@@ -2245,16 +2245,16 @@ public sealed class LlvmIrGenerator
             {
                 if (TryGetScalarProjection(expression.Target, out VariableSymbol destination, out ImmutableArray<FieldSymbol> destinationPath))
                 {
-                    bool trackedDrop = EmitAssignmentDestinationDrop(destination, GetAddress(destination), destinationPath);
-                    if (!trackedDrop && !expression.IsInitialization &&
-                        TypeFacts.GetDropFunction(expression.Target.Type) is { } projectedDrop)
-                        EmitLifecycleCall(projectedDrop, address, []);
+                    bool trackedDestruction = EmitAssignmentDestinationDestruction(destination, GetAddress(destination), destinationPath);
+                    if (!trackedDestruction && !expression.IsInitialization &&
+                        TypeFacts.GetCompleteDestructor(expression.Target.Type) is { } projectedDestructor)
+                        EmitLifecycleCall(projectedDestructor, address, []);
                 }
-                else if (!expression.IsInitialization && TypeFacts.GetDropFunction(expression.Target.Type) is { } drop)
-                    EmitLifecycleCall(drop, address, []);
+                else if (!expression.IsInitialization && TypeFacts.GetCompleteDestructor(expression.Target.Type) is { } destructor)
+                    EmitLifecycleCall(destructor, address, []);
                 if (!expression.IsInitialization &&
                     expression.Target is BoundVariableExpression { Variable: LocalVariableSymbol arrayDestination })
-                    EmitArrayDestinationDrop(arrayDestination);
+                    EmitArrayDestinationDestruction(arrayDestination);
             }
 
             if (expression.OperatorKind != SyntaxKind.EqualsToken)
@@ -2276,15 +2276,15 @@ public sealed class LlvmIrGenerator
             return value;
         }
 
-        private void EmitArrayDestinationDrop(LocalVariableSymbol variable)
+        private void EmitArrayDestinationDestruction(LocalVariableSymbol variable)
         {
             if (!_arrayCleanup.TryGetValue(variable, out ArrayCleanupEntry cleanup)) return;
             LLVMValueRef activeAddress = _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5);
             LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, activeAddress, "array.destination.active");
-            LLVMBasicBlockRef drop = _llvmFunction.AppendBasicBlock("array.destination.drop");
-            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("array.destination.drop.end");
-            _builder.BuildCondBr(active, drop, end);
-            _builder.PositionAtEnd(drop);
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("array.destination.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("array.destination.destroy.end");
+            _builder.BuildCondBr(active, destroy, end);
+            _builder.PositionAtEnd(destroy);
             LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMValueRef data = _builder.BuildLoad2(pointer,
                 _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 1), "array.destination.data");
@@ -2302,7 +2302,7 @@ public sealed class LlvmIrGenerator
             _builder.PositionAtEnd(end);
         }
 
-        private bool EmitAssignmentDestinationDrop(
+        private bool EmitAssignmentDestinationDestruction(
             VariableSymbol variable,
             LLVMValueRef rootAddress,
             ImmutableArray<FieldSymbol> destinationPath)
@@ -2314,12 +2314,12 @@ public sealed class LlvmIrGenerator
                 if (!IsProjectionPrefix(destinationPath, cleanup.Path)) continue;
                 matched = true;
                 LLVMValueRef activeAddress = _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5);
-                LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, activeAddress, "local.drop.active");
-                LLVMBasicBlockRef drop = _llvmFunction.AppendBasicBlock("local.drop");
-                LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("local.drop.end");
-                _builder.BuildCondBr(active, drop, end);
-                _builder.PositionAtEnd(drop);
-                EmitLifecycleCall(cleanup.DropFunction, EmitProjectedAddress(rootAddress, cleanup.Path), []);
+                LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, activeAddress, "local.destructor.active");
+                LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("local.destroy");
+                LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("local.destroy.end");
+                _builder.BuildCondBr(active, destroy, end);
+                _builder.PositionAtEnd(destroy);
+                EmitLifecycleCall(cleanup.DestructorFunction, EmitProjectedAddress(rootAddress, cleanup.Path), []);
                 _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), activeAddress);
                 _builder.BuildBr(end);
                 _builder.PositionAtEnd(end);
@@ -2515,7 +2515,7 @@ public sealed class LlvmIrGenerator
                 });
             }
             if (expression.Storage == ArrayStorageKind.Stack &&
-                TypeFacts.GetDropFunction(expression.ElementType) is FunctionSymbol destructor)
+                TypeFacts.GetCompleteDestructor(expression.ElementType) is FunctionSymbol destructor)
             {
                 LLVMValueRef node = _builder.BuildAlloca(_cleanupNodeType, "stack.cleanup.registration");
                 EmitCleanupRegistration(node, _cleanupScopes[^1].Head, data, length, elementSize, destructor);
@@ -2679,7 +2679,7 @@ public sealed class LlvmIrGenerator
         private LLVMValueRef EmitFree(BoundFreeExpression expression)
             => EmitFreeValue(EmitExpression(expression.Pointer), expression.Pointer.Type, expression.Destructor);
 
-        private LLVMValueRef EmitOwnershipDrop(BoundOwnershipDropExpression expression)
+        private LLVMValueRef EmitOwnershipDestruction(BoundOwnershipDestructionExpression expression)
         {
             LLVMValueRef storageAddress = _llvmFunction.GetParam(0);
             LLVMValueRef owned = _builder.BuildLoad2(
@@ -2688,17 +2688,17 @@ public sealed class LlvmIrGenerator
                 "ownership.handle");
             return expression.OwnershipType switch
             {
-                UniqueTypeSymbol unique => EmitFreeValue(owned, unique.StorageType, expression.ElementDrop),
-                SharedTypeSymbol shared => EmitSharedRelease(owned, shared, expression.ElementDrop),
+                UniqueTypeSymbol unique => EmitFreeValue(owned, unique.StorageType, expression.ElementDestructor),
+                SharedTypeSymbol shared => EmitSharedRelease(owned, shared, expression.ElementDestructor),
                 WeakTypeSymbol => EmitWeakRelease(owned),
-                _ => throw new LlvmCodeGenerationException("Unknown ownership drop kind."),
+                _ => throw new LlvmCodeGenerationException("Unknown ownership destruction kind."),
             };
         }
 
         private LLVMValueRef EmitSharedRelease(
             LLVMValueRef control,
             SharedTypeSymbol shared,
-            FunctionSymbol? elementDrop)
+            FunctionSymbol? elementDestructor)
         {
             LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("shared.release.body");
             LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("shared.release.destroy");
@@ -2718,7 +2718,7 @@ public sealed class LlvmIrGenerator
                 LLVMTypeRef.CreatePointer(_context.Int8Type, 0),
                 OwnershipControlField(control, 2, "shared.release.storage.address"),
                 "shared.release.storage");
-            EmitFreeValue(data, shared.StorageType, elementDrop);
+            EmitFreeValue(data, shared.StorageType, elementDestructor);
             LLVMValueRef weakAddress = OwnershipControlField(control, 1, "shared.release.weak.address");
             LLVMValueRef weak = _builder.BuildLoad2(_mapType(BuiltinTypes.NUInt), weakAddress,
                 "shared.release.weak");
@@ -3610,7 +3610,7 @@ public sealed class LlvmIrGenerator
         private readonly record struct ScalarCleanupEntry(
             LLVMValueRef Node,
             LLVMValueRef Initialized,
-            FunctionSymbol DropFunction,
+            FunctionSymbol DestructorFunction,
             TypeSymbol ValueType,
             ImmutableArray<FieldSymbol> Path);
         private readonly record struct ArrayCleanupEntry(

@@ -2,7 +2,7 @@ namespace Ownership.FollowupRuntime;
 
 struct Log
 {
-    public static int Drops;
+    public static int DestructorCalls;
     public static int Sum;
 }
 
@@ -10,7 +10,7 @@ struct Resource
 {
     public int Value;
     public Resource(int value) { Value = value; }
-    public ~Resource() { Log.Drops = Log.Drops + 1; Log.Sum = Log.Sum + Value; }
+    public ~Resource() { Log.DestructorCalls = Log.DestructorCalls + 1; Log.Sum = Log.Sum + Value; }
 }
 
 struct Holder
@@ -62,7 +62,7 @@ int Main()
     if (sizeof(shared<Resource>) != sizeof(nint) || alignof(shared<Resource>) != alignof(nint)) return 16;
     if (sizeof(weak<Resource>) != sizeof(nint) || alignof(weak<Resource>) != alignof(nint)) return 17;
 
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Sum = 0;
     {
         unique<Resource> firstValue = new Resource(1);
@@ -78,9 +78,9 @@ int Main()
         unique<Resource> old = restored.TakeAndRestore(4);
         if (old->Value != 3 || restored.Read() != 4) return 3;
     }
-    if (Log.Drops != 4 || Log.Sum != 10) return 4;
+    if (Log.DestructorCalls != 4 || Log.Sum != 10) return 4;
 
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Sum = 0;
     {
         unique<Resource> inferenceSource = new Resource(5);
@@ -90,9 +90,9 @@ int Main()
         Owned transferred = Transfer(move owned);
         if (inferred->Value != 5 || transferred.Value->Value != 6) return 5;
     }
-    if (Log.Drops != 2 || Log.Sum != 11) return 6;
+    if (Log.DestructorCalls != 2 || Log.Sum != 11) return 6;
 
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Sum = 0;
     {
         shared<Resource> first = new Resource(7);
@@ -128,9 +128,9 @@ int Main()
             if (branch->Value != 7) return 10;
         }
     }
-    if (Log.Drops != 3 || Log.Sum != 24) return 11;
+    if (Log.DestructorCalls != 3 || Log.Sum != 24) return 11;
 
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Sum = 0;
     weak<Resource> expiredObserver;
     {
@@ -151,7 +151,7 @@ int Main()
         if (fromBox == null || fromGeneric == null) return 13;
         expiredObserver = observer;
     }
-    if (Log.Drops != 1 || Log.Sum != 10) return 14;
+    if (Log.DestructorCalls != 1 || Log.Sum != 10) return 14;
     shared<Resource> expired = expiredObserver.Lock();
     if (expired != null) return 15;
     shared<Resource> empty = null;

@@ -2,7 +2,7 @@ namespace Ownership.CallableMoveContractRuntime;
 
 struct Log
 {
-    public static int Drops;
+    public static int DestructorCalls;
     public static int Sum;
 }
 
@@ -12,7 +12,7 @@ struct Resource
     public Resource(int value) { Value = value; }
     public ~Resource()
     {
-        Log.Drops = Log.Drops + 1;
+        Log.DestructorCalls = Log.DestructorCalls + 1;
         Log.Sum = Log.Sum + Value;
     }
 }
@@ -59,7 +59,7 @@ struct Derived : Base
 
 int Main()
 {
-    Log.Drops = 0;
+    Log.DestructorCalls = 0;
     Log.Sum = 0;
     {
         unique<Resource> first = new Resource(1);
@@ -75,6 +75,6 @@ int Main()
         if (previous->Value != 3 || derived.Read() != 4) return 2;
     }
 
-    if (Log.Drops != 4 || Log.Sum != 10) return 3;
+    if (Log.DestructorCalls != 4 || Log.Sum != 10) return 3;
     return 0;
 }
