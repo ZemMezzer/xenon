@@ -407,6 +407,50 @@ public sealed class OwnershipIntelligenceTests
     }
 
     [Fact]
+    public async Task StorageProjectionAndDestructorBoundaryDiagnosticsUseCompilerSemantics()
+    {
+        const string source = """
+            namespace App;
+            struct Child { public ~Child() {} }
+            struct Parent
+            {
+                public Child Child;
+                public ~Parent() {}
+            }
+            Child& GetStorageChild(storage<Parent>& value) { return value.Child; }
+            Child& GetChild(Parent& value) { return value.Child; }
+            void Test()
+            {
+                storage<Parent> slot = Parent();
+                destruct(GetStorageChild(slot));
+                Parent parent = Parent();
+                destruct(parent.Child);
+                destruct(GetChild(parent));
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("lifetime-boundaries.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        var notifications = Channel.CreateUnbounded<JsonElement>();
+        await using var session = new LanguageServerSession((method, value) =>
+        {
+            if (method == "textDocument/publishDiagnostics")
+                notifications.Writer.TryWrite(Result(value));
+            return Task.CompletedTask;
+        }, diagnosticDebounce: TimeSpan.Zero);
+        await InitializeAsync(session, uri, source);
+
+        JsonElement published = await ReadDiagnosticsAsync(notifications.Reader, version: 1);
+        string[] codes = published.GetProperty("diagnostics").EnumerateArray()
+            .Select(diagnostic => diagnostic.GetProperty("code").GetString()!).ToArray();
+
+        Assert.True(codes.Count(code => code == DiagnosticIds.StorageValueLifetimeMutation) == 1,
+            $"Published diagnostics: {string.Join(", ", codes)}");
+        Assert.Equal(2, codes.Count(code => code == DiagnosticIds.PartialDestructWithDestructor));
+        Assert.Equal(3, codes.Length);
+    }
+
+    [Fact]
     public async Task OwnershipDiagnosticsRefreshAcrossNonLexicalLifetimeEdits()
     {
         const string valid = """

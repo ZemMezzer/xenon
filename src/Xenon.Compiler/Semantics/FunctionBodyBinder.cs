@@ -1916,7 +1916,7 @@ internal sealed class FunctionBodyBinder
                 "move", DiagnosticIds.MoveWhileBorrowed))
             return new BoundErrorExpression();
 
-        if (FindPartialMoveDestructorOwner(place) is StructTypeSymbol destructorOwner)
+        if (FindPartialLifetimeDestructorOwner(place) is StructTypeSymbol destructorOwner)
         {
             _diagnostics.Report(syntax.MoveKeyword.Location,
                 $"cannot partially move '{place.DisplayName}' because '{destructorOwner.Name}' has a user-defined destructor; move the entire '{destructorOwner.Name}' value instead",
@@ -2315,6 +2315,24 @@ internal sealed class FunctionBodyBinder
             case BoundReferenceConversionExpression conversion:
             {
                 LifetimeOwnerResolution convertedOwner = ResolveAuthoritativeLifetimeOwner(conversion.Source);
+                if (convertedOwner.Authority == LifetimeAuthorityKind.Full &&
+                    TryGetStorageType(convertedOwner.ValueType, out StorageTypeSymbol storageBoundary))
+                {
+                    return TypeIdentity.AreSame(conversion.ReferenceType.ElementType, convertedOwner.ValueType)
+                        ? convertedOwner with
+                        {
+                            ValueType = conversion.ReferenceType.ElementType,
+                            Origin = LifetimeOwnerOriginKind.StorageReference,
+                            StorageType = storageBoundary,
+                        }
+                        : convertedOwner with
+                        {
+                            ValueType = conversion.ReferenceType.ElementType,
+                            Authority = LifetimeAuthorityKind.AccessOnly,
+                            Origin = LifetimeOwnerOriginKind.StorageValueReference,
+                            StorageType = storageBoundary,
+                        };
+                }
                 return TryGetStorageType(conversion.ReferenceType.ElementType, out _) &&
                        convertedOwner.Authority == LifetimeAuthorityKind.Full
                     ? convertedOwner with
@@ -2415,7 +2433,20 @@ internal sealed class FunctionBodyBinder
         LifetimeOwnerResolution owner = source.Type is ReferenceTypeSymbol
             ? ResolveReferenceLifetimeOwner(source)
             : ResolveAuthoritativeLifetimeOwner(source);
+        StorageTypeSymbol? storageBoundary = null;
+        if (owner.Authority == LifetimeAuthorityKind.Full &&
+            TryGetStorageType(owner.ValueType, out StorageTypeSymbol resolvedStorageBoundary) &&
+            !TypeIdentity.AreSame(valueType, owner.ValueType))
+            storageBoundary = resolvedStorageBoundary;
         owner = AppendLifetimeOwnerFields(owner, origin.FieldOrdinals);
+        if (storageBoundary is not null)
+            owner = owner with
+            {
+                ValueType = valueType,
+                Authority = LifetimeAuthorityKind.AccessOnly,
+                Origin = LifetimeOwnerOriginKind.StorageValueReference,
+                StorageType = storageBoundary,
+            };
         return owner.Authority == LifetimeAuthorityKind.Full
             ? owner with { Origin = LifetimeOwnerOriginKind.ReturnedReference, Subject = function.Name }
             : owner;
@@ -2425,6 +2456,12 @@ internal sealed class FunctionBodyBinder
         LifetimeOwnerResolution owner,
         ImmutableArray<int> fieldOrdinals)
     {
+        StorageTypeSymbol? storageBoundary = null;
+        if (owner.Authority == LifetimeAuthorityKind.Full &&
+            !fieldOrdinals.IsEmpty &&
+            TryGetStorageType(owner.ValueType, out StorageTypeSymbol resolvedStorageBoundary))
+            storageBoundary = resolvedStorageBoundary;
+        bool projectsFromStorage = storageBoundary is not null;
         TypeSymbol currentType = owner.ValueType;
         MovePlace? ownerPlace = owner.OwnerPlace;
         foreach (int ordinal in fieldOrdinals)
@@ -2437,7 +2474,10 @@ internal sealed class FunctionBodyBinder
                     OwnerPlace = null,
                     ValueType = reference.ElementType,
                     Authority = LifetimeAuthorityKind.AccessOnly,
-                    Origin = LifetimeOwnerOriginKind.ReferenceField,
+                    Origin = projectsFromStorage
+                        ? LifetimeOwnerOriginKind.StorageValueReference
+                        : LifetimeOwnerOriginKind.ReferenceField,
+                    StorageType = projectsFromStorage ? storageBoundary : owner.StorageType,
                 };
             if (currentType is not StructTypeSymbol structure ||
                 structure.AllInstanceFields.FirstOrDefault(field => field.Ordinal == ordinal) is not FieldSymbol field)
@@ -2455,11 +2495,23 @@ internal sealed class FunctionBodyBinder
                     OwnerPlace = ownerPlace,
                     ValueType = fieldReference.ElementType,
                     Authority = LifetimeAuthorityKind.AccessOnly,
-                    Origin = LifetimeOwnerOriginKind.ReferenceField,
+                    Origin = projectsFromStorage
+                        ? LifetimeOwnerOriginKind.StorageValueReference
+                        : LifetimeOwnerOriginKind.ReferenceField,
+                    StorageType = projectsFromStorage ? storageBoundary : owner.StorageType,
                     Subject = field.Name,
                 };
         }
-        return owner with { OwnerPlace = ownerPlace, ValueType = currentType };
+        return projectsFromStorage
+            ? owner with
+            {
+                OwnerPlace = ownerPlace,
+                ValueType = currentType,
+                Authority = LifetimeAuthorityKind.AccessOnly,
+                Origin = LifetimeOwnerOriginKind.StorageValueReference,
+                StorageType = storageBoundary,
+            }
+            : owner with { OwnerPlace = ownerPlace, ValueType = currentType };
     }
 
     private LifetimeOwnerResolution ResolveMovePlaceLifetimeOwner(
@@ -2748,7 +2800,7 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.PartiallyMovedUse);
     }
 
-    private static StructTypeSymbol? FindPartialMoveDestructorOwner(MovePlace place)
+    private static StructTypeSymbol? FindPartialLifetimeDestructorOwner(MovePlace place)
     {
         if (place.Fields.IsEmpty) return null;
         TypeSymbol containingType = place.RootType;
@@ -4705,6 +4757,15 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         TypeSymbol valueType;
         MovePlace? trackedPlace = lifetimeOwner.OwnerPlace;
+        if (!TryGetStorageType(target.Type, out _) &&
+            trackedPlace is not null &&
+            FindPartialLifetimeDestructorOwner(trackedPlace) is StructTypeSymbol destructorOwner)
+        {
+            _diagnostics.Report(targetLocation,
+                $"cannot partially end the lifetime of '{trackedPlace.DisplayName}' because '{destructorOwner.Name}' has a user-defined destructor; destroy or move the complete '{destructorOwner.Name}' value instead",
+                DiagnosticIds.PartialDestructWithDestructor);
+            return new BoundErrorExpression();
+        }
         if (trackedPlace is not null && !ValidateLifetimeInvalidation(trackedPlace, targetLocation,
                 GetReferenceAliasRoot(target), "destruct", DiagnosticIds.DestructWhileBorrowed))
             return new BoundErrorExpression();

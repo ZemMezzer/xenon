@@ -1785,6 +1785,158 @@ public sealed class OwnershipCompletionTests
     }
 
     [Fact]
+    public void Analyzer_DoesNotLeakWholeStorageAuthorityIntoReturnedValueReferences()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public int Value; public ~Resource() {} }
+            struct Child { public int Value; public ~Child() {} }
+            struct Parent { public Child Child; }
+            struct GuardedParent
+            {
+                public Child Child;
+                public ~GuardedParent() {}
+            }
+            Resource& GetValue(storage<Resource>& value) { return value; }
+            Child& GetChild(storage<Parent>& value) { return value.Child; }
+            Child& GetGuardedChild(storage<GuardedParent>& value) { return value.Child; }
+            Child& ForwardChild(storage<Parent>& value) { return GetChild(value); }
+            Child& ForwardChildAgain(storage<Parent>& value) { return ForwardChild(value); }
+            T& Forward<T>(T& value) { return value; }
+            void DestructContainedValue()
+            {
+                storage<Resource> value = Resource();
+                destruct(GetValue(value));
+            }
+            void MoveContainedValue()
+            {
+                storage<Resource> value = Resource();
+                Resource result = move GetValue(value);
+            }
+            void DestructContainedChild()
+            {
+                storage<Parent> value = Parent();
+                destruct(GetChild(value));
+            }
+            void MoveContainedChild()
+            {
+                storage<Parent> value = Parent();
+                Child result = move GetChild(value);
+            }
+            void DestructNestedForwardedChild()
+            {
+                storage<Parent> value = Parent();
+                destruct(ForwardChildAgain(value));
+            }
+            void DestructGenericForwardedValue()
+            {
+                storage<Resource> value = Resource();
+                Resource& reference = value;
+                destruct(Forward<Resource>(reference));
+            }
+            void DestructValueConvertedFromStorageReference()
+            {
+                storage<Resource> value = Resource();
+                storage<Resource>& storageReference = value;
+                Resource& valueReference = storageReference;
+                destruct(valueReference);
+            }
+            void StorageBoundaryPrecedesUserDestructorBoundary()
+            {
+                storage<GuardedParent> value = GuardedParent();
+                destruct(GetGuardedChild(value));
+            }
+            """);
+
+        Assert.Equal(8, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.StorageValueLifetimeMutation));
+        Assert.Equal(8, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_PreservesWholeStorageAuthorityThroughReturnedStorageReferences()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public int Value; public ~Resource() {} }
+            storage<Resource>& ForwardStorage(storage<Resource>& value) { return value; }
+            void Test()
+            {
+                storage<Resource> value = Resource();
+                destruct(ForwardStorage(value));
+                value = Resource();
+                Resource result = move ForwardStorage(value);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPartialDestructionAcrossUserDestructorBoundaries()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Leaf { public ~Leaf() {} }
+            struct Child { public Leaf Leaf; public ~Child() {} }
+            struct Parent
+            {
+                public Child Child;
+                public ~Parent() {}
+            }
+            struct Mid { public Leaf Leaf; }
+            struct Root
+            {
+                public Mid Mid;
+                public ~Root() {}
+            }
+            Child& GetChild(Parent& value) { return value.Child; }
+            void Direct()
+            {
+                Parent parent = Parent();
+                destruct(parent.Child);
+            }
+            void Nested()
+            {
+                Root root = Root();
+                destruct(root.Mid.Leaf);
+            }
+            void LocalAlias()
+            {
+                Parent parent = Parent();
+                Child& child = parent.Child;
+                destruct(child);
+            }
+            void ReturnedReference()
+            {
+                Parent parent = Parent();
+                destruct(GetChild(parent));
+            }
+            """);
+
+        Assert.Equal(4, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.PartialDestructWithDestructor));
+        Assert.Equal(4, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsPartialDestructionWithoutAUserDestructorBoundary()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Child { public ~Child() {} }
+            struct Parent { public Child Child; }
+            void Test()
+            {
+                Parent parent = Parent();
+                destruct(parent.Child);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
     public void Analyzer_DoesNotConvertSharedOwnershipToBool()
     {
         Compilation compilation = Create("""

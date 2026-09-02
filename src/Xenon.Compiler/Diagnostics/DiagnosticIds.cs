@@ -203,5 +203,6 @@ public static class DiagnosticIds
     public const string PartialStorageLifetimeOperation = "XE2248";
     public const string ReferenceParameterLifetimeMutation = "XE2249";
     public const string UnresolvedLifetimeOwner = "XE2250";
+    public const string PartialDestructWithDestructor = "XE2251";
     public const string RecursiveValueLayout = "XE2600";
 }
