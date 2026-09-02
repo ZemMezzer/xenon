@@ -196,17 +196,17 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 return Read([Root(construction)], construction.Type);
             case BoundBaseLifecycleCallExpression call:
                 return ContextualCall(call.Function, call.Arguments, _context.Receiver, call);
-            case BoundDropFieldsExpression drop:
+            case BoundDestroyFieldsExpression destruction:
             {
-                foreach (FieldSymbol field in drop.StructType.Fields.Reverse())
-                    if (TypeFacts.GetDropFunction(field.Type) is { } fieldDrop)
-                        ContextualCall(fieldDrop, Array.Empty<HashSet<object>>(),
-                            Project(_context.Receiver, field), drop);
-                if (drop.StructType.BaseType?.DropFunction is { } baseDrop)
-                    ContextualCall(baseDrop, Array.Empty<HashSet<object>>(), _context.Receiver, drop);
+                foreach (FieldSymbol field in destruction.StructType.Fields.Reverse())
+                    if (TypeFacts.GetCompleteDestructor(field.Type) is { } fieldDestructor)
+                        ContextualCall(fieldDestructor, Array.Empty<HashSet<object>>(),
+                            Project(_context.Receiver, field), destruction);
+                if (destruction.StructType.BaseType?.CompleteDestructor is { } baseDestructor)
+                    ContextualCall(baseDestructor, Array.Empty<HashSet<object>>(), _context.Receiver, destruction);
                 return [];
             }
-            case BoundOwnershipDropExpression:
+            case BoundOwnershipDestructionExpression:
                 return [];
             case BoundUniqueAdoptionExpression adoption:
                 return Evaluate(adoption.Allocation);
@@ -243,7 +243,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     finally { _loopDepth--; }
                 }
                 if (allocation.Storage == ArrayStorageKind.Stack &&
-                    TypeFacts.GetDropFunction(allocation.ElementType) is { } elementDestructor)
+                    TypeFacts.GetCompleteDestructor(allocation.ElementType) is { } elementDestructor)
                 {
                     object root = Root(allocation);
                     if (_cleanupScopes.TryPeek(out var cleanups))
@@ -386,7 +386,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private HashSet<object> ContextualDispatch(FunctionSymbol callee,
         HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site, HashSet<StructTypeSymbol>? interfaceTypes = null)
     {
-        if (callee.FunctionKind is FunctionKind.Destructor or FunctionKind.DropGlue or FunctionKind.OwnershipDrop)
+        if (callee.FunctionKind is FunctionKind.Destructor or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor)
             CheckWrite(receiver, site);
         var targets = new HashSet<FunctionSymbol>();
         HashSet<StructTypeSymbol>? known = callee.ContainingInterface is null ? KnownReceiverTypes(receiver) : interfaceTypes;
@@ -405,7 +405,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 if (type.IsAbstract || !IsDerivedFrom(type, declaringType) || slot >= type.VirtualMethods.Length) continue;
                 FunctionSymbol target = type.VirtualMethods[slot];
                 targets.Add(target.FunctionKind == FunctionKind.Destructor
-                    ? type.DropFunction ?? target
+                    ? type.CompleteDestructor ?? target
                     : target);
             }
         }

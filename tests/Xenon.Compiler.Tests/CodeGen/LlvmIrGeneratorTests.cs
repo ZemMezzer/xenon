@@ -2078,7 +2078,7 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
-    public void Generator_EmitsRecursiveDropGlueInReverseFieldOrder()
+    public void Generator_EmitsRecursiveDestructorGlueInReverseFieldOrder()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -2090,13 +2090,13 @@ public sealed class LlvmIrGeneratorTests
         Assert.Empty(compilation.Diagnostics);
         StructTypeSymbol container = Assert.Single(Assert.Single(
             compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Container"));
-        Assert.Equal(FunctionKind.DropGlue, container.DropFunction!.FunctionKind);
+        Assert.Equal(FunctionKind.DestructorGlue, container.CompleteDestructor!.FunctionKind);
         string ir = new LlvmIrGenerator().GenerateForTarget(
-            compilation, LlvmTargetOptions.CreateHost(), "drop-glue");
-        Assert.Contains(ManagedSymbol("drop-glue", container.DropFunction.FullName, "function"), ir, StringComparison.Ordinal);
-        int second = ir.IndexOf("Second.drop.address", StringComparison.Ordinal);
-        int first = ir.IndexOf("First.drop.address", StringComparison.Ordinal);
-        Assert.True(second >= 0 && first > second, "generated drop glue must destroy fields in reverse declaration order");
+            compilation, LlvmTargetOptions.CreateHost(), "destructor-glue");
+        Assert.Contains(ManagedSymbol("destructor-glue", container.CompleteDestructor.FullName, "function"), ir, StringComparison.Ordinal);
+        int second = ir.IndexOf("Second.destructor.address", StringComparison.Ordinal);
+        int first = ir.IndexOf("First.destructor.address", StringComparison.Ordinal);
+        Assert.True(second >= 0 && first > second, "generated destructor glue must destroy fields in reverse declaration order");
         Assert.Contains("local.cleanup.node", ir, StringComparison.Ordinal);
     }
 
@@ -2220,8 +2220,8 @@ public sealed class LlvmIrGeneratorTests
         StructTypeSymbol holder = Assert.Single(Assert.Single(
             compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Holder"));
         var ownership = Assert.IsType<UniqueTypeSymbol>(Assert.Single(holder.Fields).Type);
-        string ownershipDrop = ManagedSymbol(module, ownership.DropFunction!.FullName, "function");
-        Assert.DoesNotContain($"call void @{ownershipDrop}", Body("Example.Holder.Replace"), StringComparison.Ordinal);
+        string ownershipDestructor = ManagedSymbol(module, ownership.CompleteDestructor!.FullName, "function");
+        Assert.DoesNotContain($"call void @{ownershipDestructor}", Body("Example.Holder.Replace"), StringComparison.Ordinal);
 
         string arrayMove = Body("Example.MoveArray");
         Assert.DoesNotContain("@malloc", arrayMove, StringComparison.Ordinal);

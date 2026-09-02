@@ -33,7 +33,7 @@ public sealed record BoundMoveExpression(
 {
     // The semantic place is retained because a reference expression may have
     // been dereferenced in the bound tree.  Lowering uses this identity to
-    // transfer the original place's drop responsibility.
+    // transfer the original place's destruction responsibility.
     public VariableSymbol? TrackedVariable { get; init; }
     public ImmutableArray<FieldSymbol> TrackedPath { get; init; } = [];
     public override BoundKind Kind => BoundKind.MoveExpression;
@@ -47,18 +47,18 @@ public sealed record BoundCopyExpression(
 }
 
 /// <summary>Compiler-generated finalization after a user destructor body: own fields, then base.</summary>
-public sealed record BoundDropFieldsExpression(
+public sealed record BoundDestroyFieldsExpression(
     StructTypeSymbol StructType) : BoundExpression(BuiltinTypes.Void)
 {
-    public override BoundKind Kind => BoundKind.DropFieldsExpression;
+    public override BoundKind Kind => BoundKind.DestroyFieldsExpression;
 }
 
-/// <summary>Compiler-generated drop of the unique handle passed to an ownership helper.</summary>
-public sealed record BoundOwnershipDropExpression(
+/// <summary>Compiler-generated destruction of the ownership handle passed to an ownership helper.</summary>
+public sealed record BoundOwnershipDestructionExpression(
     OwnershipTypeSymbol OwnershipType,
-    FunctionSymbol? ElementDrop) : BoundExpression(BuiltinTypes.Void)
+    FunctionSymbol? ElementDestructor) : BoundExpression(BuiltinTypes.Void)
 {
-    public override BoundKind Kind => BoundKind.OwnershipDropExpression;
+    public override BoundKind Kind => BoundKind.OwnershipDestructionExpression;
 }
 
 /// <summary>A fresh heap result adopted directly into its first and only owner.</summary>

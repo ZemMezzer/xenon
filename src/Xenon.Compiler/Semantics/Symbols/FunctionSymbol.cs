@@ -154,7 +154,7 @@ public sealed class FunctionSymbol : Symbol
             FunctionKind.Constructor => containingType.Name,
             FunctionKind.InstanceInitializer => "__init_fields",
             FunctionKind.Destructor => $"~{containingType.Name}",
-            FunctionKind.DropGlue => "__drop",
+            FunctionKind.DestructorGlue => "__destructor",
             _ => throw new ArgumentOutOfRangeException(nameof(functionKind)),
         }, SymbolKind.Function, containingType)
     {
@@ -178,11 +178,11 @@ public sealed class FunctionSymbol : Symbol
         PointerTypeSymbol addressType,
         SyntaxNode declaration)
         : base(
-            $"__drop_ownership_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(ownershipType)))}",
+            $"__ownership_destructor_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(ownershipType)))}",
             SymbolKind.Function,
             containingNamespace)
     {
-        FunctionKind = FunctionKind.OwnershipDrop;
+        FunctionKind = FunctionKind.OwnershipDestructor;
         ReturnType = BuiltinTypes.Void;
         Parameters = ParameterSymbol.Own([new ParameterSymbol("value", addressType, 0)], this);
         Declaration = declaration;
@@ -210,8 +210,8 @@ public sealed class FunctionSymbol : Symbol
         FunctionKind.Constructor => ConstructorOverloadCount == 1 ? $"{ContainingType!.FullName}.__ctor" : $"{ContainingType!.FullName}.__ctor.{ConstructorOverload}",
         FunctionKind.InstanceInitializer => $"{ContainingType!.FullName}.__init_fields",
         FunctionKind.Destructor => $"{ContainingType!.FullName}.__dtor",
-        FunctionKind.DropGlue => $"{ContainingType!.FullName}.__drop",
-        FunctionKind.OwnershipDrop => $"{ContainingNamespace.FullName}.{Name}",
+        FunctionKind.DestructorGlue => $"{ContainingType!.FullName}.__destructor",
+        FunctionKind.OwnershipDestructor => $"{ContainingNamespace.FullName}.{Name}",
         _ => $"{ContainingNamespace.FullName}.{Name}",
     };
 
@@ -248,8 +248,8 @@ public sealed class FunctionSymbol : Symbol
     public bool IsAccessor => ContainingProperty is not null || ContainingInterfaceProperty is not null ||
         ContainingIndexer is not null || ContainingInterfaceIndexer is not null;
 
-    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DropGlue or FunctionKind.OwnershipDrop;
-    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.DropGlue or FunctionKind.OwnershipDrop) && !IsAccessor;
+    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor;
+    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor) && !IsAccessor;
     public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor;
     public override bool IsDefinition => Declaration switch
     {
@@ -257,8 +257,8 @@ public sealed class FunctionSymbol : Symbol
         MethodDeclarationSyntax syntax => syntax.Body is not null,
         ConstructorDeclarationSyntax => true,
         DestructorDeclarationSyntax => true,
-        _ when FunctionKind == FunctionKind.DropGlue => true,
-        _ when FunctionKind == FunctionKind.OwnershipDrop => true,
+        _ when FunctionKind == FunctionKind.DestructorGlue => true,
+        _ when FunctionKind == FunctionKind.OwnershipDestructor => true,
         PropertyAccessorDeclarationSyntax syntax => syntax.Body is not null,
         _ => false,
     };
@@ -300,7 +300,7 @@ public sealed class FunctionSymbol : Symbol
 
     internal SyntaxNode Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
-        Declaration is TypeDeclarationSyntax || FunctionKind == FunctionKind.OwnershipDrop ? [] : [new(Declaration)];
+        Declaration is TypeDeclarationSyntax || FunctionKind == FunctionKind.OwnershipDestructor ? [] : [new(Declaration)];
 }
 
 public readonly record struct ReceiverMoveEffect(ImmutableArray<int> FieldOrdinals);

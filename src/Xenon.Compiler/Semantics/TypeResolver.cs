@@ -94,7 +94,7 @@ internal static class TypeResolver
                         SyntaxKind.WeakKeyword => scope.TypeFactory.WeakOf(element),
                         _ => throw new InvalidOperationException(),
                     };
-                    scope.TypeFactory.EnsureOwnershipDropFunction(ownership, scope.GlobalNamespace, named);
+                    scope.TypeFactory.EnsureOwnershipDestructor(ownership, scope.GlobalNamespace, named);
                     return ownership;
                 }
 

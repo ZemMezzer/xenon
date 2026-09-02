@@ -53,15 +53,15 @@ public sealed class TypeFactory
     internal IReadOnlyCollection<OwnershipTypeSymbol> OwnershipTypes =>
         [.. _unique.Values, .. _shared.Values, .. _weak.Values];
 
-    internal void EnsureOwnershipDropFunction(
+    internal void EnsureOwnershipDestructor(
         OwnershipTypeSymbol type,
         NamespaceSymbol globalNamespace,
         SyntaxNode declaration)
     {
-        if (type.DropFunction is not null) return;
+        if (type.CompleteDestructor is not null) return;
         lock (type)
         {
-            type.DropFunction ??= new FunctionSymbol(
+            type.CompleteDestructor ??= new FunctionSymbol(
                 type,
                 globalNamespace,
                 PointerTo(type),
@@ -69,8 +69,8 @@ public sealed class TypeFactory
         }
     }
 
-    internal void EnsureUniqueDropFunction(UniqueTypeSymbol type, NamespaceSymbol globalNamespace, SyntaxNode declaration) =>
-        EnsureOwnershipDropFunction(type, globalNamespace, declaration);
+    internal void EnsureUniqueDestructor(UniqueTypeSymbol type, NamespaceSymbol globalNamespace, SyntaxNode declaration) =>
+        EnsureOwnershipDestructor(type, globalNamespace, declaration);
 
     // Normalize incoming derived types, including those built with another factory.
     // Dictionary keys then use canonical element references, never display strings.

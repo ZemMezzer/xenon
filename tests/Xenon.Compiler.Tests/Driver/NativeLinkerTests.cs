@@ -1985,7 +1985,7 @@ public sealed class NativeLinkerTests
                 Process(&output, &input);
                 if (State.Value != 7 || input != 38) return 1;
                 // Accessor + heap + two array elements + scalar local + four
-                // compiler-dropped Pair fields in value/copy.
+                // compiler-destroyed Pair fields in value/copy.
                 if (output != 47) return 2;
                 return 42;
             }

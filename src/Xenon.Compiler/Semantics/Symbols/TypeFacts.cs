@@ -71,23 +71,23 @@ public static class TypeFacts
         }
     }
 
-    public static bool RequiresDrop(TypeSymbol type) => RequiresDrop(type, []);
+    public static bool RequiresDestruction(TypeSymbol type) => RequiresDestruction(type, []);
 
-    private static bool RequiresDrop(TypeSymbol type, HashSet<TypeSymbol> visited)
+    private static bool RequiresDestruction(TypeSymbol type, HashSet<TypeSymbol> visited)
     {
         if (type is OwnershipTypeSymbol) return true;
         if (type is not StructTypeSymbol structure || !visited.Add(type)) return false;
         return structure.Destructor is not null ||
-            structure.BaseType is not null && RequiresDrop(structure.BaseType, visited) ||
-            structure.Fields.Any(field => RequiresDrop(field.Type, visited));
+            structure.BaseType is not null && RequiresDestruction(structure.BaseType, visited) ||
+            structure.Fields.Any(field => RequiresDestruction(field.Type, visited));
     }
 
-    public static FunctionSymbol? GetDropFunction(TypeSymbol type) => type switch
+    public static FunctionSymbol? GetCompleteDestructor(TypeSymbol type) => type switch
     {
-        UniqueTypeSymbol unique => unique.DropFunction,
-        SharedTypeSymbol shared => shared.DropFunction,
-        WeakTypeSymbol weak => weak.DropFunction,
-        StructTypeSymbol structure => structure.DropFunction,
+        UniqueTypeSymbol unique => unique.CompleteDestructor,
+        SharedTypeSymbol shared => shared.CompleteDestructor,
+        WeakTypeSymbol weak => weak.CompleteDestructor,
+        StructTypeSymbol structure => structure.CompleteDestructor,
         _ => null,
     };
 

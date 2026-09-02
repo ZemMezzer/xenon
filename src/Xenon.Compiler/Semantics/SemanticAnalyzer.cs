@@ -129,7 +129,7 @@ internal sealed class SemanticAnalyzer
         ValidateCallableMoveEffects();
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
-        AddGeneratedDropFunctions(functions);
+        AddGeneratedDestructorFunctions(functions);
 
         // Lifecycle/accessor checks need all bodies, including declarations that
         // occur after the readonly caller and synthesized field initializers.
@@ -286,7 +286,7 @@ internal sealed class SemanticAnalyzer
         return string.Join('.', names);
     }
 
-    private void AddGeneratedDropFunctions(ImmutableArray<BoundFunction>.Builder functions)
+    private void AddGeneratedDestructorFunctions(ImmutableArray<BoundFunction>.Builder functions)
     {
         var existing = functions.Select(function => function.Symbol).ToHashSet(ReferenceEqualityComparer.Instance);
         void Visit(NamespaceSymbol @namespace)
@@ -296,10 +296,10 @@ internal sealed class SemanticAnalyzer
                 Symbol root = type;
                 while (root.ContainingSymbol is not null) root = root.ContainingSymbol;
                 if (!ReferenceEquals(root, _globalNamespace)) continue;
-                if (type.DropFunction is not { FunctionKind: FunctionKind.DropGlue } drop || !existing.Add(drop))
+                if (type.CompleteDestructor is not { FunctionKind: FunctionKind.DestructorGlue } destructor || !existing.Add(destructor))
                     continue;
-                functions.Add(new BoundFunction(drop, new BoundBlockStatement([
-                    new BoundExpressionStatement(new BoundDropFieldsExpression(type)),
+                functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
+                    new BoundExpressionStatement(new BoundDestroyFieldsExpression(type)),
                 ])));
             }
             foreach (NamespaceSymbol child in @namespace.Namespaces) Visit(child);
@@ -309,16 +309,16 @@ internal sealed class SemanticAnalyzer
         foreach (OwnershipTypeSymbol ownership in _typeFactory.OwnershipTypes)
         {
             if (GenericTypeFacts.ContainsGenericParameter(ownership) ||
-                ownership.DropFunction is not { } drop ||
-                !existing.Add(drop))
+                ownership.CompleteDestructor is not { } destructor ||
+                !existing.Add(destructor))
                 continue;
-            FunctionSymbol? elementDrop = ownership is WeakTypeSymbol ? null : ownership.ElementType switch
+            FunctionSymbol? elementDestructor = ownership is WeakTypeSymbol ? null : ownership.ElementType switch
             {
-                ArrayTypeSymbol array => TypeFacts.GetDropFunction(array.ElementType),
-                _ => TypeFacts.GetDropFunction(ownership.ElementType),
+                ArrayTypeSymbol array => TypeFacts.GetCompleteDestructor(array.ElementType),
+                _ => TypeFacts.GetCompleteDestructor(ownership.ElementType),
             };
-            functions.Add(new BoundFunction(drop, new BoundBlockStatement([
-                new BoundExpressionStatement(new BoundOwnershipDropExpression(ownership, elementDrop)),
+            functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
+                new BoundExpressionStatement(new BoundOwnershipDestructionExpression(ownership, elementDestructor)),
             ])));
         }
     }
