@@ -199,5 +199,7 @@ public static class DiagnosticIds
     public const string HeapPointeeExplicitDestruction = "XE2244";
     public const string StorageValueLifetimeMutation = "XE2245";
     public const string InvalidLockOperand = "XE2246";
+    public const string UnconsumedOwnershipExpression = "XE2247";
+    public const string PartialStorageLifetimeOperation = "XE2248";
     public const string RecursiveValueLayout = "XE2600";
 }

@@ -1459,6 +1459,99 @@ public sealed class OwnershipCompletionTests
     }
 
     [Fact]
+    public void Analyzer_RejectsDiscardedOwnershipExpressionsButAllowsConsumedForms()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public ~Resource() {} }
+            void Consume(unique<Resource> value) {}
+            void ConsumeShared(shared<Resource> value) {}
+            void ConsumePointer(Resource* value) { free(value); }
+            shared<Resource> Upgrade(weak<Resource> value) { return lock value; }
+            void Invalid(unique<Resource> owned, weak<Resource> observer)
+            {
+                move owned;
+                lock observer;
+                new Resource();
+            }
+            void Valid(unique<Resource> owned, weak<Resource> observer)
+            {
+                unique<Resource> local = move owned;
+                Consume(move local);
+                shared<Resource> locked = lock observer;
+                ConsumeShared(lock observer);
+                shared<Resource> returned = Upgrade(observer);
+                Resource* pointer = new Resource();
+                free(pointer);
+                ConsumePointer(new Resource());
+            }
+            """);
+
+        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnconsumedOwnershipExpression));
+        Assert.Equal(3, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsPartialLifetimeOperationsInsideStorageAcrossProjections()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Leaf { public ~Leaf() {} }
+            struct Child { public Leaf Leaf; public ~Child() {} }
+            struct Resource { public Child Child; public ~Resource() {} }
+            void DirectMove()
+            {
+                storage<Resource> slot = Resource();
+                Child child = move slot.Child;
+            }
+            void DirectDestruct()
+            {
+                storage<Resource> slot = Resource();
+                destruct(slot.Child);
+            }
+            void NestedDestruct()
+            {
+                storage<Resource> slot = Resource();
+                destruct(slot.Child.Leaf);
+            }
+            void ReferenceProjection()
+            {
+                storage<Resource> slot = Resource();
+                storage<Resource>& reference = slot;
+                destruct(reference.Child);
+            }
+            void PointerAndIndexProjection()
+            {
+                storage<Resource>* pointer = new storage<Resource>();
+                pointer[0] = Resource();
+                Child child = move pointer[0].Child;
+                free(pointer);
+            }
+            """);
+
+        Assert.Equal(5, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.PartialStorageLifetimeOperation));
+        Assert.Equal(5, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_DoesNotConvertSharedOwnershipToBool()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource {}
+            void Test(shared<Resource> owner)
+            {
+                if (owner) {}
+            }
+            """);
+
+        Assert.Single(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.InvalidCondition);
+    }
+
+    [Fact]
     public void Analyzer_RejectsLockForNonWeakValuesAndRejectsOldMethodSyntax()
     {
         Compilation compilation = Create("""

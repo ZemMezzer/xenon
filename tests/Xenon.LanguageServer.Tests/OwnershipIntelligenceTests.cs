@@ -235,10 +235,11 @@ public sealed class OwnershipIntelligenceTests
     {
         const string source = """
             namespace App;
-            struct Resource { public void Use() {} public ~Resource() {} }
+            struct Resource { public int Value; public void Use() {} public ~Resource() {} }
             void RawPointer(Resource* pointer)
             {
                 destruct(*pointer);
+                destruct(pointer[0]);
                 Resource value = move *pointer;
             }
             void MovedValue()
@@ -264,6 +265,49 @@ public sealed class OwnershipIntelligenceTests
                 Resource value = Resource();
                 lock value;
             }
+            void DiscardedOwnership(unique<Resource> owned, weak<Resource> observer)
+            {
+                move owned;
+                lock observer;
+                new Resource();
+            }
+            void PartialStorageLifetime()
+            {
+                storage<Resource> slot = Resource();
+                destruct(slot.Value);
+                int value = move slot.Value;
+            }
+            void SharedCondition(shared<Resource> owner)
+            {
+                if (owner) {}
+            }
+            void BorrowedMove()
+            {
+                Resource value = Resource();
+                Resource& reference = value;
+                Resource moved = move value;
+                reference.Use();
+            }
+            void ReconstructStorage()
+            {
+                storage<Resource> slot = Resource();
+                slot = Resource();
+            }
+            void MutateThroughStorageValueReference()
+            {
+                storage<Resource> slot = Resource();
+                Resource& reference = slot;
+                destruct(reference);
+            }
+            void MutateReadonlyStorage(readonly storage<Resource>& reference)
+            {
+                destruct(reference);
+            }
+            Resource& EscapeReference()
+            {
+                Resource local = Resource();
+                return local;
+            }
             """;
         using var directory = new TestDirectory();
         string file = directory.Write("diagnostics.xe", source);
@@ -285,7 +329,15 @@ public sealed class OwnershipIntelligenceTests
         Assert.Contains(DiagnosticIds.UseAfterMove, codes);
         Assert.Contains(DiagnosticIds.StorageNotInitialized, codes);
         Assert.Contains(DiagnosticIds.DestructWhileBorrowed, codes);
+        Assert.Contains(DiagnosticIds.MoveWhileBorrowed, codes);
         Assert.Contains(DiagnosticIds.InvalidLockOperand, codes);
+        Assert.Equal(3, codes.Count(code => code == DiagnosticIds.UnconsumedOwnershipExpression));
+        Assert.Equal(2, codes.Count(code => code == DiagnosticIds.PartialStorageLifetimeOperation));
+        Assert.Contains(DiagnosticIds.InvalidCondition, codes);
+        Assert.Contains(DiagnosticIds.StorageAlreadyInitialized, codes);
+        Assert.Contains(DiagnosticIds.StorageValueLifetimeMutation, codes);
+        Assert.Contains(DiagnosticIds.InvalidAssignmentTarget, codes);
+        Assert.Contains(DiagnosticIds.EscapingLocalReference, codes);
     }
 
     [Fact]

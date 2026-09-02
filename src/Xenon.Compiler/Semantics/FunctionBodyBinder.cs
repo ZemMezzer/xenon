@@ -48,6 +48,7 @@ internal sealed class FunctionBodyBinder
     private readonly Dictionary<FieldSymbol, LocalVariableSymbol> _requiredFields = [];
     private ExpressionSyntax? _initializationTarget;
     private ExpressionSyntax? _fieldReceiverSyntax;
+    private ExpressionSyntax? _unconsumedOwnershipExpression;
     private int _memberAccessBindingDepth;
     private sealed class MovePlace(
         object root,
@@ -474,7 +475,7 @@ internal sealed class FunctionBodyBinder
         BlockStatementSyntax block => BindBlockStatement(block),
         VariableDeclarationStatementSyntax variable => BindVariableDeclaration(variable),
         ReturnStatementSyntax @return => BindReturnStatement(@return),
-        ExpressionStatementSyntax expression => new BoundExpressionStatement(BindExpression(expression.Expression)),
+        ExpressionStatementSyntax expression => new BoundExpressionStatement(BindDiscardedExpression(expression.Expression)),
         IfStatementSyntax @if => BindIfStatement(@if),
         WhileStatementSyntax @while => BindWhileStatement(@while),
         ForStatementSyntax @for => BindForStatement(@for),
@@ -609,7 +610,7 @@ internal sealed class FunctionBodyBinder
         _loopMoveContexts.Push((new(afterCondition), []));
         _loopDepth++;
         BoundStatement body = BindEmbeddedStatement(syntax.Body);
-        BoundExpression? increment = syntax.Increment is null ? null : BindExpression(syntax.Increment);
+        BoundExpression? increment = syntax.Increment is null ? null : BindDiscardedExpression(syntax.Increment);
         _loopDepth--;
         var moveContext = _loopMoveContexts.Pop();
         ValidateLoopMoves(moveContext, body);
@@ -1810,7 +1811,15 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindMoveExpression(MoveExpressionSyntax syntax)
     {
+        if (ReferenceEquals(syntax, _unconsumedOwnershipExpression))
+        {
+            BoundExpression operand = BindExpression(syntax.Operand);
+            return operand is BoundErrorExpression ? operand : new BoundMoveExpression(operand);
+        }
+
         BoundExpression source = BindLifetimeInvalidationOperand(syntax.Operand);
+        if (!ValidateWholeStorageLifetimeOperation(source, syntax.MoveKeyword.Location, "move"))
+            return new BoundErrorExpression();
         if (!ValidateLifetimeOperationAuthority(source, LifetimeOperationKind.TransferLifetime,
                 syntax.MoveKeyword.Location))
             return new BoundErrorExpression();
@@ -4378,6 +4387,8 @@ internal sealed class FunctionBodyBinder
         if (arguments.Length != 1)
             _diagnostics.Report(name.IdentifierToken.Location,
                 "'destruct' expects exactly one argument", DiagnosticIds.WrongArity);
+        if (!ValidateWholeStorageLifetimeOperation(target, targetLocation, "destruct"))
+            return new BoundErrorExpression();
         if (!ValidateLifetimeOperationAuthority(target, LifetimeOperationKind.EndLifetime, targetLocation))
             return new BoundErrorExpression();
         TypeSymbol valueType;
@@ -5358,6 +5369,79 @@ internal sealed class FunctionBodyBinder
         }
         return expression;
     }
+
+    private BoundExpression BindDiscardedExpression(ExpressionSyntax syntax)
+    {
+        ExpressionSyntax? ownershipExpression = GetStandaloneOwnershipExpression(syntax);
+        ExpressionSyntax? previous = _unconsumedOwnershipExpression;
+        _unconsumedOwnershipExpression = ownershipExpression;
+        BoundExpression expression;
+        try { expression = BindExpression(syntax); }
+        finally { _unconsumedOwnershipExpression = previous; }
+
+        if (ownershipExpression is not null && expression is not BoundErrorExpression)
+        {
+            (SyntaxToken keyword, string operation) = ownershipExpression switch
+            {
+                MoveExpressionSyntax move => (move.MoveKeyword, "move"),
+                LockExpressionSyntax @lock => (@lock.LockKeyword, "lock"),
+                NewExpressionSyntax @new => (@new.NewKeyword, "new"),
+                _ => throw new InvalidOperationException(),
+            };
+            _diagnostics.Report(keyword.Location,
+                $"result of '{operation}' must be consumed",
+                DiagnosticIds.UnconsumedOwnershipExpression);
+            return new BoundErrorExpression();
+        }
+
+        if (IsOrdinaryValueProducingCall(expression) &&
+            TypeFacts.GetCompleteDestructor(expression.Type) is { } destructor)
+        {
+            ValidateDestructorAccessibility(expression.Type, GetLocation(syntax));
+            var discard = new BoundDiscardExpression(expression, destructor);
+            _expressionLocations[discard] = GetLocation(syntax);
+            return discard;
+        }
+
+        return expression;
+    }
+
+    private static ExpressionSyntax? GetStandaloneOwnershipExpression(ExpressionSyntax syntax)
+    {
+        while (syntax is ParenthesizedExpressionSyntax parenthesized)
+            syntax = parenthesized.Expression;
+        return syntax is MoveExpressionSyntax or LockExpressionSyntax or NewExpressionSyntax ? syntax : null;
+    }
+
+    private static bool IsOrdinaryValueProducingCall(BoundExpression expression) => expression is
+        BoundCallExpression or
+        BoundMethodCallExpression or
+        BoundInterfaceMethodCallExpression or
+        BoundConstructorCallExpression or
+        BoundStructConstructionExpression;
+
+    private bool ValidateWholeStorageLifetimeOperation(
+        BoundExpression expression,
+        TextLocation location,
+        string operation)
+    {
+        if (!ContainsStorageValueProjection(expression)) return true;
+        _diagnostics.Report(location,
+            $"cannot {operation} a field of a value owned by 'storage<T>'; target the complete storage value instead",
+            DiagnosticIds.PartialStorageLifetimeOperation);
+        return false;
+    }
+
+    private static bool ContainsStorageValueProjection(BoundExpression expression) => expression switch
+    {
+        BoundLifetimeValueExpression { ModifierType: StorageTypeSymbol } => true,
+        BoundMemberAccessExpression member => ContainsStorageValueProjection(member.Receiver),
+        BoundIndexExpression index => ContainsStorageValueProjection(index.Receiver),
+        BoundReferenceConversionExpression conversion => ContainsStorageValueProjection(conversion.Source),
+        BoundReferenceDereferenceExpression dereference => ContainsStorageValueProjection(dereference.Reference),
+        BoundUnaryExpression unary => ContainsStorageValueProjection(unary.Operand),
+        _ => false,
+    };
 
     private static bool TryGetStorageType(TypeSymbol type, out StorageTypeSymbol storage)
     {
