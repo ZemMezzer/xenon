@@ -220,6 +220,11 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 Initialize(construction.StructType, construction.Arguments, construction);
                 return Read([Root(construction)], construction.Type);
             case BoundNewExpression allocation:
+                if (allocation.StructType is null)
+                {
+                    foreach (BoundExpression argument in allocation.Arguments) Evaluate(argument);
+                    return [Root(allocation)];
+                }
                 ResetConstruction(allocation, allocation.StructType);
                 if (allocation.Constructor is { } constructor)
                     ContextualCall(constructor, allocation.Arguments, [Root(allocation)], allocation);

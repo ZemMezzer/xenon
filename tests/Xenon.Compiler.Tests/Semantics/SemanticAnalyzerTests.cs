@@ -4586,14 +4586,192 @@ public sealed class SemanticAnalyzerTests
 
         Diagnostic[] escaping = compilation.Diagnostics.Where(diagnostic =>
             diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.EscapingLocalReference).ToArray();
-        Assert.Equal(7, escaping.Length);
+        Assert.Equal(8, escaping.Length);
         Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("local variable 'value'", StringComparison.Ordinal));
         Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("local variable 'data'", StringComparison.Ordinal));
         Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("by-value parameter 'value'", StringComparison.Ordinal));
         Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("a temporary value", StringComparison.Ordinal));
+        Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("unknown lifetime", StringComparison.Ordinal));
         Assert.DoesNotContain(compilation.Diagnostics, diagnostic =>
             diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.EscapingLocalReference &&
             diagnostic.Message.Contains("reference parameter", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_ComposesReferenceReturnProvenanceThroughCalls()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Data
+            {
+                public int Value;
+                public int& Get() { return Value; }
+                public int& Choose(int& other, bool own)
+                {
+                    if (own) return Value;
+                    return other;
+                }
+            }
+
+            int& Forward(int& value) { return value; }
+            int& Select(int& left, int& right, bool first)
+            {
+                if (first) return left;
+                return right;
+            }
+            int& GetValue(Data& value) { return value.Value; }
+            int& LayerA(int& value) { return LayerB(value); }
+            int& LayerB(int& value) { return Forward(value); }
+            T& GenericForward<T>(T& value) { return value; }
+
+            int& BadForward() { int local = 1; return Forward(local); }
+            int& BadField() { Data local = Data(); return GetValue(local); }
+            int& BadReceiver() { Data local = Data(); return local.Get(); }
+            int& BadLayers() { int local = 1; return LayerA(local); }
+            int& BadGeneric() { int local = 1; return GenericForward(local); }
+            int& BadAliasCall()
+            {
+                int local = 1;
+                int& alias = Forward(local);
+                return alias;
+            }
+
+            int& GoodForward(int& external) { return LayerA(external); }
+            int& GoodField(Data& external) { return GetValue(external); }
+            int& GoodAliasCall(int& external)
+            {
+                int& alias = Forward(external);
+                return alias;
+            }
+            """);
+
+        Diagnostic[] escaping = compilation.Diagnostics.Where(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.EscapingLocalReference).ToArray();
+        Assert.Equal(6, escaping.Length);
+        Assert.All(escaping, diagnostic => Assert.Contains("local variable 'local'", diagnostic.Message));
+
+        FunctionSymbol layerA = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.Name == "LayerA").Symbol;
+        Assert.Contains(layerA.ReferenceReturnOrigins, origin =>
+            origin.Kind == ReferenceReturnOriginKind.Parameter && origin.ParameterOrdinal == 0);
+        FunctionSymbol getValue = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.Name == "GetValue").Symbol;
+        Assert.Contains(getValue.ReferenceReturnOrigins, origin =>
+            origin.Kind == ReferenceReturnOriginKind.Parameter && origin.ParameterOrdinal == 0 &&
+            origin.FieldOrdinals.Length == 1);
+        FunctionSymbol receiverGetter = compilation.SemanticModel.GlobalNamespace.Namespaces.Single()
+            .Structs.Single(type => type.Name == "Data").Methods.Single(method => method.Name == "Get");
+        Assert.Contains(receiverGetter.ReferenceReturnOrigins, origin =>
+            origin.Kind == ReferenceReturnOriginKind.Receiver && origin.FieldOrdinals.Length == 1);
+        FunctionSymbol select = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.Name == "Select").Symbol;
+        Assert.Equal(2, select.ReferenceReturnOrigins.Count(origin =>
+            origin.Kind == ReferenceReturnOriginKind.Parameter));
+        FunctionSymbol choose = compilation.SemanticModel.GlobalNamespace.Namespaces.Single()
+            .Structs.Single(type => type.Name == "Data").Methods.Single(method => method.Name == "Choose");
+        Assert.Contains(choose.ReferenceReturnOrigins, origin => origin.Kind == ReferenceReturnOriginKind.Receiver);
+        Assert.Contains(choose.ReferenceReturnOrigins, origin =>
+            origin.Kind == ReferenceReturnOriginKind.Parameter && origin.ParameterOrdinal == 0);
+        FunctionSymbol genericSpecialization = compilation.SemanticModel.Functions.Single(function =>
+            function.Symbol.GenericDefinition?.Name == "GenericForward").Symbol;
+        Assert.Contains(genericSpecialization.ReferenceReturnOrigins, origin =>
+            origin.Kind == ReferenceReturnOriginKind.Parameter && origin.ParameterOrdinal == 0);
+    }
+
+    [Fact]
+    public void Analyzer_RequiresAccessibleTransitiveDestructorForOwningTypes()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct PrivateResource { private ~PrivateResource() {} }
+            struct Nested { public PrivateResource Value; }
+            struct PublicResource { public ~PublicResource() {} }
+
+            void Invalid()
+            {
+                unique<PrivateResource> uniqueValue = new PrivateResource();
+                shared<PrivateResource> sharedValue = new PrivateResource();
+                unique<PrivateResource[]> uniqueArray = new PrivateResource[1];
+                shared<PrivateResource[]> sharedArray = new PrivateResource[1];
+                unique<Nested> nested = new Nested();
+            }
+
+            void Valid()
+            {
+                unique<PublicResource> uniqueValue = new PublicResource();
+                shared<PublicResource> sharedValue = new PublicResource();
+                weak<PublicResource> weakValue = sharedValue;
+            }
+            """);
+
+        Diagnostic[] inaccessible = compilation.Diagnostics.Where(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.InaccessibleSymbol &&
+            diagnostic.Message.Contains("destructor 'PrivateResource'", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(5, inaccessible.Length);
+    }
+
+    [Fact]
+    public void Analyzer_SupportsOwnershipForEveryPrimitiveType()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            void Main()
+            {
+                unique<bool> a = new bool(true);
+                unique<byte> b = new byte();
+                unique<sbyte> c = new sbyte();
+                unique<short> d = new short();
+                unique<ushort> e = new ushort();
+                unique<int> f = new int(42);
+                unique<uint> g = new uint();
+                unique<long> h = new long();
+                unique<ulong> i = new ulong();
+                unique<float> j = new float();
+                unique<double> k = new double();
+                unique<nint> l = new nint();
+                unique<nuint> m = new nuint();
+                unique<clong> n = new clong();
+                unique<culong> o = new culong();
+                shared<int> strong = new int(7);
+                weak<int> observer = strong;
+                shared<int> locked = observer.Lock();
+                *f = *f + *locked;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("bool")]
+    [InlineData("byte")]
+    [InlineData("sbyte")]
+    [InlineData("short")]
+    [InlineData("ushort")]
+    [InlineData("int")]
+    [InlineData("uint")]
+    [InlineData("long")]
+    [InlineData("ulong")]
+    [InlineData("float")]
+    [InlineData("double")]
+    [InlineData("nint")]
+    [InlineData("nuint")]
+    [InlineData("clong")]
+    [InlineData("culong")]
+    public void Analyzer_SupportsUniqueSharedAndWeakForPrimitive(string primitive)
+    {
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            void Main()
+            {
+                unique<{{primitive}}> uniqueValue = new {{primitive}}();
+                shared<{{primitive}}> sharedValue = new {{primitive}}();
+                weak<{{primitive}}> weakValue = sharedValue;
+                shared<{{primitive}}> locked = weakValue.Lock();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
     }
 
     [Fact]

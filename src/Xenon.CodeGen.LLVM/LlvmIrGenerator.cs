@@ -2010,7 +2010,10 @@ public sealed class LlvmIrGenerator
             if (expression.OperatorKind is SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken)
                 return EmitIncrement(expression);
 
-            LLVMValueRef operand = EmitExpression(expression.Operand);
+            LLVMValueRef operand = expression.OperatorKind == SyntaxKind.StarToken &&
+                                   expression.Operand.Type is OwnershipTypeSymbol
+                ? EmitOwnershipStorage(expression.Operand)
+                : EmitExpression(expression.Operand);
             return expression.OperatorKind switch
             {
                 SyntaxKind.PlusToken => operand,
@@ -2020,6 +2023,8 @@ public sealed class LlvmIrGenerator
                 SyntaxKind.BangToken or SyntaxKind.TildeToken => _builder.BuildNot(operand, "not"),
                 SyntaxKind.StarToken when expression.Operand.Type is PointerTypeSymbol pointer =>
                     _builder.BuildLoad2(_mapType(pointer.ElementType), operand, "deref"),
+                SyntaxKind.StarToken when expression.Operand.Type is OwnershipTypeSymbol ownership =>
+                    _builder.BuildLoad2(_mapType(ownership.ElementType), operand, "ownership.deref"),
                 _ => throw new LlvmCodeGenerationException($"Unary operator '{expression.OperatorKind}' is not supported."),
             };
         }
@@ -2622,9 +2627,18 @@ public sealed class LlvmIrGenerator
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
             LLVMValueRef size = LLVMValueRef.CreateConstInt(
                 runtime.SizeType,
-                Math.Max(1UL, _getAbiSize(expression.StructType)),
+                Math.Max(1UL, _getAbiSize(expression.AllocatedType)),
                 false);
-            LLVMValueRef address = EmitAllocation(size, $"{expression.StructType.Name}.heap");
+            LLVMValueRef address = EmitAllocation(size, $"{expression.AllocatedType.Name}.heap");
+
+            if (expression.StructType is null)
+            {
+                LLVMValueRef value = expression.Arguments.IsEmpty
+                    ? DefaultValue(expression.AllocatedType, _mapType, _virtualTables)
+                    : EmitExpression(expression.Arguments[0]);
+                _builder.BuildStore(value, address);
+                return address;
+            }
 
             if (expression.IsPositionalInitialization)
             {
@@ -2852,7 +2866,9 @@ public sealed class LlvmIrGenerator
             BoundVariableExpression variable => GetAddress(variable.Variable),
             BoundStaticFieldExpression field => _staticFields[field.Field],
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } dereference =>
-                EmitExpression(dereference.Operand),
+                dereference.Operand.Type is OwnershipTypeSymbol
+                    ? EmitOwnershipStorage(dereference.Operand)
+                    : EmitExpression(dereference.Operand),
             BoundReferenceDereferenceExpression dereference => EmitReferenceAddress(dereference.Reference),
             BoundMemberAccessExpression member => EmitMemberAddress(member),
             BoundIndexExpression index => EmitIndexAddress(index),

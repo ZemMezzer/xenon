@@ -25,8 +25,10 @@ internal sealed class FunctionBodyBinder
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _localScopes = [];
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _stackArrayScopes = [];
     private readonly Dictionary<LocalVariableSymbol, MovePlace> _referenceAliases = [];
+    private readonly Dictionary<LocalVariableSymbol, ImmutableArray<ReferenceSource>> _referenceAliasSources = [];
     private readonly HashSet<BoundScope> _retainedStackScopes = [];
     private readonly List<ImmutableArray<MovePlace>> _receiverMoveEffectExits = [];
+    private readonly List<ReferenceReturnOrigin> _referenceReturnOrigins = [];
     private int _loopDepth;
     private readonly Stack<(HashSet<VariableSymbol> Entry, Dictionary<MovePlace, TextLocation> Sites)> _loopMoveContexts = [];
     private int _switchDepth;
@@ -140,8 +142,8 @@ internal sealed class FunctionBodyBinder
     {
         _cancellationToken.ThrowIfCancellationRequested();
         foreach (ParameterSymbol parameter in _function.Parameters)
-            if (TypeFacts.GetDropFunction(parameter.Type) is { } drop)
-                ValidateDestructorAccess(drop, body.OpenBraceToken.Location);
+            if (TypeFacts.GetDropFunction(parameter.Type) is not null)
+                ValidateDropAccessibility(parameter.Type, body.OpenBraceToken.Location);
         if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingType is StructTypeSymbol owner)
         {
             foreach (FieldSymbol field in owner.Fields.Where(field => field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type)))
@@ -259,6 +261,12 @@ internal sealed class FunctionBodyBinder
             .Select(place => new ReceiverMoveEffect(place.Fields.Select(field => field.Ordinal).ToImmutableArray()))
             .ToImmutableArray();
         _function.SetReceiverMoveEffects(receiverMoveEffects);
+        _function.SetReferenceReturnOrigins(_function.ReturnType is ReferenceTypeSymbol
+            ? _referenceReturnOrigins
+                .DistinctBy(ReferenceReturnOriginKey)
+                .OrderBy(ReferenceReturnOriginKey, StringComparer.Ordinal)
+                .ToImmutableArray()
+            : []);
         RecordScope(body, _scope);
         if (!AlwaysReturns(boundBody)) ValidateRequiredFields(body.CloseBraceToken.Location);
         if (_function.FunctionKind == FunctionKind.Constructor &&
@@ -279,7 +287,8 @@ internal sealed class FunctionBodyBinder
         }
         else if (_function.FunctionKind == FunctionKind.Destructor && _function.ContainingStruct is StructTypeSymbol destructedType)
         {
-            ValidateDestructorAccess(destructedType.BaseType?.DropFunction, body.OpenBraceToken.Location);
+            if (destructedType.BaseType is { } baseType)
+                ValidateDropAccessibility(baseType, body.OpenBraceToken.Location);
             // Runs after local cleanup on both fallthrough and explicit returns:
             // own fields in reverse declaration order, then the complete base drop.
             boundBody = boundBody with { ExitCleanup = new BoundDropFieldsExpression(destructedType) };
@@ -686,7 +695,8 @@ internal sealed class FunctionBodyBinder
         {
             variable.Destructor = destructor;
             _function.HasScalarCleanup = true;
-            if (syntax.Initializer is not null) ValidateDestructorAccess(destructor, syntax.IdentifierToken.Location);
+            if (syntax.Initializer is not null && type is not OwnershipTypeSymbol)
+                ValidateDropAccessibility(type, syntax.IdentifierToken.Location);
         }
         _localScopes.Add(variable, _scope);
         bool declared = _scope.TryDeclare(variable);
@@ -715,8 +725,12 @@ internal sealed class FunctionBodyBinder
         {
             initializer = ContextualizeConversion(initializer, type, GetLocation(syntax.Initializer!));
             SetConvertedType(syntax.Initializer!, initializer.Type);
-            if (type is ReferenceTypeSymbol && TryGetReferenceAlias(initializer, out MovePlace aliasPlace))
-                _referenceAliases[variable] = aliasPlace;
+            if (type is ReferenceTypeSymbol)
+            {
+                _referenceAliasSources[variable] = GetReferenceSources(initializer);
+                if (TryGetReferenceAlias(initializer, out MovePlace aliasPlace))
+                    _referenceAliases[variable] = aliasPlace;
+            }
         }
 
         if (isConstant)
@@ -796,93 +810,187 @@ internal sealed class FunctionBodyBinder
         return new BoundReturnStatement(expression);
     }
 
-    private enum ReferenceStorageKind
+    private enum ReferenceSourceKind
     {
-        External,
-        CurrentFrameLocal,
-        CurrentFrameParameter,
+        Local,
+        Parameter,
+        Receiver,
+        Static,
+        Unknown,
         Temporary,
     }
 
-    private readonly record struct ReferenceStorage(ReferenceStorageKind Kind, string? Name = null);
+    private readonly record struct ReferenceSource(
+        ReferenceSourceKind Kind,
+        VariableSymbol? Variable,
+        ImmutableArray<int> FieldOrdinals);
 
     private void ValidateReturnedReference(BoundExpression expression, TextLocation location)
     {
-        ReferenceStorage storage = GetReferenceStorage(expression);
-        string? subject = storage.Kind switch
+        ImmutableArray<ReferenceSource> sources = GetReferenceSources(expression)
+            .DistinctBy(ReferenceSourceKey)
+            .ToImmutableArray();
+        foreach (ReferenceSource source in sources)
         {
-            ReferenceStorageKind.CurrentFrameLocal => $"local variable '{storage.Name}'",
-            ReferenceStorageKind.CurrentFrameParameter => $"by-value parameter '{storage.Name}'",
-            ReferenceStorageKind.Temporary => "a temporary value",
-            _ => null,
+            ReferenceReturnOrigin origin = source.Kind switch
+            {
+                ReferenceSourceKind.Parameter when source.Variable is ParameterSymbol parameter &&
+                                                   parameter.Type is ReferenceTypeSymbol =>
+                    new ReferenceReturnOrigin(ReferenceReturnOriginKind.Parameter, parameter.Ordinal,
+                        source.FieldOrdinals),
+                ReferenceSourceKind.Receiver =>
+                    new ReferenceReturnOrigin(ReferenceReturnOriginKind.Receiver, -1, source.FieldOrdinals),
+                ReferenceSourceKind.Static =>
+                    new ReferenceReturnOrigin(ReferenceReturnOriginKind.Static, -1, source.FieldOrdinals),
+                _ => new ReferenceReturnOrigin(ReferenceReturnOriginKind.Unknown, -1, []),
+            };
+            _referenceReturnOrigins.Add(origin);
+        }
+
+        ReferenceSource[] invalidSources = sources.Where(source => !IsSafeReferenceReturnSource(source)).ToArray();
+        if (invalidSources.Length == 0) return;
+        ReferenceSource unsafeSource = invalidSources[0];
+        string subject = unsafeSource.Kind switch
+        {
+            ReferenceSourceKind.Local => $"local variable '{unsafeSource.Variable!.Name}'",
+            ReferenceSourceKind.Parameter => $"by-value parameter '{unsafeSource.Variable!.Name}'",
+            ReferenceSourceKind.Unknown => "a reference with unknown lifetime",
+            _ => "a temporary value",
         };
-        if (subject is null) return;
-        _diagnostics.Report(location,
-            $"cannot return a reference to {subject} because the referenced storage belongs to the current function's stack frame and does not outlive the function call",
+        string reason = unsafeSource.Kind == ReferenceSourceKind.Unknown
+            ? "the referenced storage may belong to the current function's stack frame and may not outlive the function call"
+            : "the referenced storage belongs to the current function's stack frame and does not outlive the function call";
+        _diagnostics.Report(location, $"cannot return a reference to {subject} because {reason}",
             DiagnosticIds.EscapingLocalReference);
     }
 
-    private ReferenceStorage GetReferenceStorage(BoundExpression expression)
+    private static bool IsSafeReferenceReturnSource(ReferenceSource source) => source.Kind switch
+    {
+        ReferenceSourceKind.Parameter => source.Variable is ParameterSymbol { Type: ReferenceTypeSymbol },
+        ReferenceSourceKind.Receiver or ReferenceSourceKind.Static => true,
+        _ => false,
+    };
+
+    private ImmutableArray<ReferenceSource> GetReferenceSources(BoundExpression expression)
     {
         switch (expression)
         {
             case BoundReferenceConversionExpression conversion:
-                return GetReferenceStorage(conversion.Source);
+                return GetReferenceSources(conversion.Source);
             case BoundCopyExpression copy:
-                return GetReferenceStorage(copy.Source);
+                return GetReferenceSources(copy.Source);
             case BoundCastExpression cast:
-                return GetReferenceStorage(cast.Expression);
+                return GetReferenceSources(cast.Expression);
             case BoundInterfaceConversionExpression conversion:
-                return GetReferenceStorage(conversion.Source);
+                return GetReferenceSources(conversion.Source);
             case BoundReferenceDereferenceExpression dereference:
-                return GetReferenceStorage(dereference.Reference);
-            case BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken, Operand.Type: PointerTypeSymbol }:
-                // Returning T& derived through raw T* keeps the existing raw
-                // pointer contract; pointer provenance is outside this check.
-                return new ReferenceStorage(ReferenceStorageKind.External);
-            case BoundMemberAccessExpression { Receiver: BoundThisExpression }:
+                return GetReferenceSources(dereference.Reference);
+            case BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken,
+                Operand.Type: PointerTypeSymbol or UniqueTypeSymbol or SharedTypeSymbol }:
+                return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
             case BoundThisExpression:
+                return [new ReferenceSource(ReferenceSourceKind.Receiver, null, [])];
             case BoundStaticFieldExpression:
-                return new ReferenceStorage(ReferenceStorageKind.External);
-            case BoundMemberAccessExpression { IsPointerAccess: true }:
-                // Raw pointers and ownership handles have separate low-level
-                // lifetime semantics.  This focused rule does not chase them.
-                return new ReferenceStorage(ReferenceStorageKind.External);
+                return [new ReferenceSource(ReferenceSourceKind.Static, null, [])];
+            case BoundMemberAccessExpression { IsPointerAccess: true, Receiver: not BoundThisExpression }:
+                return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
             case BoundMemberAccessExpression member:
-                return GetReferenceStorage(member.Receiver);
+                return AppendReferenceField(GetReferenceSources(member.Receiver), member.Field.Ordinal);
             case BoundIndexExpression index:
-                if (GetArrayStorage(index.Receiver) == ArrayStorageKind.Heap)
-                    return new ReferenceStorage(ReferenceStorageKind.External);
-                return GetReferenceStorage(index.Receiver);
+                if (index.Receiver.Type is OwnershipTypeSymbol)
+                    return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
+                return GetArrayStorage(index.Receiver) == ArrayStorageKind.Heap
+                    ? [new ReferenceSource(ReferenceSourceKind.Static, null, [])]
+                    : GetReferenceSources(index.Receiver);
             case BoundVariableExpression { Variable: LocalVariableSymbol local }:
-                if (_referenceAliases.TryGetValue(local, out MovePlace? alias))
-                    return GetReferenceStorage(alias);
-                return new ReferenceStorage(ReferenceStorageKind.CurrentFrameLocal, local.Name);
+                if (_referenceAliasSources.TryGetValue(local, out ImmutableArray<ReferenceSource> sources))
+                    return sources;
+                return _referenceAliases.TryGetValue(local, out MovePlace? alias)
+                    ? GetReferenceSources(alias)
+                    : [new ReferenceSource(ReferenceSourceKind.Local, local, [])];
             case BoundVariableExpression { Variable: ParameterSymbol parameter }:
-                return parameter.Type is ReferenceTypeSymbol
-                    ? new ReferenceStorage(ReferenceStorageKind.External, parameter.Name)
-                    : new ReferenceStorage(ReferenceStorageKind.CurrentFrameParameter, parameter.Name);
-            case BoundCallExpression { Function.ReturnType: ReferenceTypeSymbol }:
-            case BoundMethodCallExpression { Method.ReturnType: ReferenceTypeSymbol }:
+                return [new ReferenceSource(ReferenceSourceKind.Parameter, parameter, [])];
+            case BoundCallExpression call when call.Function.ReturnType is ReferenceTypeSymbol:
+                return ComposeReferenceReturnOrigins(call.Function, call.Arguments, receiver: null,
+                    conservativeDispatch: false);
+            case BoundMethodCallExpression call when call.Method.ReturnType is ReferenceTypeSymbol:
+                return ComposeReferenceReturnOrigins(call.Method, call.Arguments, call.Receiver,
+                    conservativeDispatch: call.Method.IsVirtual || call.Method.IsOverride);
             case BoundInterfaceMethodCallExpression { Method.ReturnType: ReferenceTypeSymbol }:
-                // A reference-returning callable is validated at its declaration;
-                // forwarding its result does not create current-frame storage.
-                return new ReferenceStorage(ReferenceStorageKind.External);
+                return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
+            case BoundErrorExpression:
+                return [];
             default:
-                return new ReferenceStorage(ReferenceStorageKind.Temporary);
+                return [new ReferenceSource(ReferenceSourceKind.Temporary, null, [])];
         }
     }
 
-    private ReferenceStorage GetReferenceStorage(MovePlace place) => place.Root switch
+    private ImmutableArray<ReferenceSource> ComposeReferenceReturnOrigins(
+        FunctionSymbol callable,
+        ImmutableArray<BoundExpression> arguments,
+        BoundExpression? receiver,
+        bool conservativeDispatch)
     {
-        LocalVariableSymbol local => new ReferenceStorage(ReferenceStorageKind.CurrentFrameLocal, local.Name),
-        ParameterSymbol parameter when parameter.Type is ReferenceTypeSymbol =>
-            new ReferenceStorage(ReferenceStorageKind.External, parameter.Name),
-        ParameterSymbol parameter =>
-            new ReferenceStorage(ReferenceStorageKind.CurrentFrameParameter, parameter.Name),
-        FunctionSymbol => new ReferenceStorage(ReferenceStorageKind.External),
-        _ => new ReferenceStorage(ReferenceStorageKind.External),
-    };
+        if (conservativeDispatch)
+            return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
+
+        ImmutableArray<ReferenceReturnOrigin> origins = callable.ReferenceReturnOrigins;
+        if (origins.IsEmpty && callable.GenericDefinition is { } definition)
+            origins = definition.ReferenceReturnOrigins;
+        // A source definition may not have been visited during the first pass yet.
+        // Treat that temporary empty state optimistically; stabilization below will
+        // rebind every body after all callable summaries are known.  Extern and
+        // abstract contracts remain conservatively unknown.
+        if (origins.IsEmpty)
+            return callable.IsDefinition
+                ? []
+                : [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
+
+        var result = ImmutableArray.CreateBuilder<ReferenceSource>();
+        foreach (ReferenceReturnOrigin origin in origins)
+        {
+            ImmutableArray<ReferenceSource> mapped = origin.Kind switch
+            {
+                ReferenceReturnOriginKind.Parameter when origin.ParameterOrdinal >= 0 &&
+                                                        origin.ParameterOrdinal < arguments.Length =>
+                    GetReferenceSources(arguments[origin.ParameterOrdinal]),
+                ReferenceReturnOriginKind.Receiver when receiver is not null => GetReferenceSources(receiver),
+                ReferenceReturnOriginKind.Static =>
+                    [new ReferenceSource(ReferenceSourceKind.Static, null, [])],
+                _ => [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])],
+            };
+            result.AddRange(AppendReferenceFields(mapped, origin.FieldOrdinals));
+        }
+        return result.ToImmutable();
+    }
+
+    private static ImmutableArray<ReferenceSource> AppendReferenceField(
+        ImmutableArray<ReferenceSource> sources,
+        int fieldOrdinal) => AppendReferenceFields(sources, [fieldOrdinal]);
+
+    private static ImmutableArray<ReferenceSource> AppendReferenceFields(
+        ImmutableArray<ReferenceSource> sources,
+        ImmutableArray<int> fieldOrdinals) => sources
+        .Select(source => source with { FieldOrdinals = source.FieldOrdinals.AddRange(fieldOrdinals) })
+        .ToImmutableArray();
+
+    private ImmutableArray<ReferenceSource> GetReferenceSources(MovePlace place)
+    {
+        ImmutableArray<int> fields = place.Fields.Select(field => field.Ordinal).ToImmutableArray();
+        return place.Root switch
+        {
+            LocalVariableSymbol local => [new ReferenceSource(ReferenceSourceKind.Local, local, fields)],
+            ParameterSymbol parameter => [new ReferenceSource(ReferenceSourceKind.Parameter, parameter, fields)],
+            FunctionSymbol => [new ReferenceSource(ReferenceSourceKind.Receiver, null, fields)],
+            _ => [new ReferenceSource(ReferenceSourceKind.Unknown, null, fields)],
+        };
+    }
+
+    private static string ReferenceSourceKey(ReferenceSource source) =>
+        $"{(int)source.Kind}:{source.Variable?.Name}:{string.Join(',', source.FieldOrdinals)}";
+
+    private static string ReferenceReturnOriginKey(ReferenceReturnOrigin origin) =>
+        $"{(int)origin.Kind}:{origin.ParameterOrdinal}:{string.Join(',', origin.FieldOrdinals)}";
 
     private BoundExpression BindExpression(ExpressionSyntax syntax)
     {
@@ -1283,6 +1391,8 @@ internal sealed class FunctionBodyBinder
             SyntaxKind.BangToken when TypeIdentity.AreSame(operand.Type, BuiltinTypes.Bool) => BuiltinTypes.Bool,
             SyntaxKind.TildeToken when TypeFacts.IsInteger(operand.Type) => operand.Type,
             SyntaxKind.StarToken when operand.Type is PointerTypeSymbol pointer => pointer.ElementType,
+            SyntaxKind.StarToken when operand.Type is UniqueTypeSymbol unique => unique.ElementType,
+            SyntaxKind.StarToken when operand.Type is SharedTypeSymbol shared => shared.ElementType,
             SyntaxKind.AmpersandToken when IsAddressable(operand) => _fileScope.TypeFactory.PointerTo(operand.Type, isReadonly: !IsWritable(operand)),
             SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken
                 when IsWritable(operand) && (TypeFacts.IsNumeric(operand.Type) ||
@@ -1500,10 +1610,7 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.SelfMove);
             if (assignedPlace.Fields.IsEmpty)
             {
-                ValidateDestructorAccess(assignedPlace.Root is LocalVariableSymbol local
-                    ? local.Destructor
-                    : (assignedPlace.RootType as StructTypeSymbol)?.DropFunction,
-                    syntax.OperatorToken.Location);
+                ValidateDropAccessibility(assignedPlace.RootType, syntax.OperatorToken.Location);
                 if (assignedPlace.RootVariable is { } assignedVariable)
                     _definitelyAssigned.Add(assignedVariable);
             }
@@ -2375,7 +2482,7 @@ internal sealed class FunctionBodyBinder
         if (storage == ArrayStorageKind.Stack)
         {
             _function.HasStackArrays = true;
-            ValidateDestructorAccess(TypeFacts.GetDropFunction(elementType), allocationLocation);
+            ValidateDropAccessibility(elementType, allocationLocation);
             if (elementType is ArrayTypeSymbol)
                 _diagnostics.Report(elementLocation, "stack arrays cannot contain array elements",
                     DiagnosticIds.NestedStackArrayElement);
@@ -3118,6 +3225,29 @@ internal sealed class FunctionBodyBinder
         if (type is GenericParameterSymbol genericParameter)
             return BindGenericNewExpression(syntax, genericParameter);
 
+        if (type is PrimitiveTypeSymbol primitive && !TypeIdentity.AreSame(type, BuiltinTypes.Void))
+        {
+            ImmutableArray<BoundExpression> primitiveArguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+            if (primitiveArguments.Length > 1)
+                _diagnostics.Report(syntax.OpenDelimiterToken.Location,
+                    $"primitive allocation of '{primitive.Name}' expects zero or one initializer value, but {primitiveArguments.Length} were provided",
+                    DiagnosticIds.WrongArity);
+            if (primitiveArguments.Length > 0)
+            {
+                BoundExpression initializer = ContextualizeConversion(primitiveArguments[0], primitive,
+                    GetLocation(syntax.Arguments[0]));
+                primitiveArguments = [initializer];
+                SetConvertedType(syntax.Arguments[0], initializer.Type);
+                if (!TypeFacts.CanAssign(primitive, initializer.Type))
+                    ReportCannotConvert(GetLocation(syntax.Arguments[0]), initializer.Type, primitive);
+            }
+            return new BoundNewExpression(primitive, null, primitiveArguments, true,
+                _fileScope.TypeFactory.PointerTo(primitive))
+            {
+                IsDefaultInitialization = primitiveArguments.IsEmpty,
+            };
+        }
+
         if (type is not StructTypeSymbol structType)
         {
             if (!TypeIdentity.AreSame(type, BuiltinTypes.Error))
@@ -3197,6 +3327,7 @@ internal sealed class FunctionBodyBinder
         }
 
         FunctionSymbol? destructor = null;
+        TypeSymbol? droppedType = null;
         if (pointer.Type is PointerTypeSymbol pointerType)
         {
             if (pointerType.IsReadonly)
@@ -3206,10 +3337,12 @@ internal sealed class FunctionBodyBinder
             {
                 destructor = structType.DropFunction;
             }
+            droppedType = pointerType.ElementType;
         }
         else if (pointer.Type is ArrayTypeSymbol arrayType)
         {
             destructor = TypeFacts.GetDropFunction(arrayType.ElementType);
+            droppedType = arrayType.ElementType;
         }
         else if (!TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Error))
         {
@@ -3220,7 +3353,8 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        ValidateDestructorAccess(destructor, syntax.FreeKeyword.Location);
+        if (droppedType is not null)
+            ValidateDropAccessibility(droppedType, syntax.FreeKeyword.Location);
         return new BoundFreeExpression(pointer, destructor);
     }
 
@@ -3230,6 +3364,36 @@ internal sealed class FunctionBodyBinder
         if (destructor is { IsPublic: false } && !TypeIdentity.AreSame(_function.ContainingType, destructor.ContainingType))
             _diagnostics.Report(location, $"destructor '{destructor.ContainingType!.Name}' is private",
                 DiagnosticIds.InaccessibleSymbol);
+    }
+
+    private void ValidateDropAccessibility(TypeSymbol type, TextLocation location) =>
+        ValidateDropAccessibility(type, location, []);
+
+    private void ValidateDropAccessibility(TypeSymbol type, TextLocation location, HashSet<TypeSymbol> visited)
+    {
+        if (type is WeakTypeSymbol) return;
+        if (type is UniqueTypeSymbol unique)
+        {
+            ValidateDropAccessibility(unique.ElementType, location, visited);
+            return;
+        }
+        if (type is SharedTypeSymbol shared)
+        {
+            ValidateDropAccessibility(shared.ElementType, location, visited);
+            return;
+        }
+        if (type is ArrayTypeSymbol array)
+        {
+            ValidateDropAccessibility(array.ElementType, location, visited);
+            return;
+        }
+        if (type is not StructTypeSymbol structure || !visited.Add(type)) return;
+
+        ValidateDestructorAccess(structure.Destructor, location);
+        if (structure.BaseType is { } baseType)
+            ValidateDropAccessibility(baseType, location, visited);
+        foreach (FieldSymbol field in structure.Fields)
+            ValidateDropAccessibility(field.Type, location, visited);
     }
 
     private ImmutableArray<BoundExpression> ValidatePositionalArguments(
@@ -3626,6 +3790,7 @@ internal sealed class FunctionBodyBinder
     {
         if (targetType is UniqueTypeSymbol uniqueType)
         {
+            ValidateDropAccessibility(uniqueType, copyLocation);
             if (TypeIdentity.AreSame(expression.Type, uniqueType))
                 return ApplyCopySemantics(expression, copyLocation);
 
@@ -3649,6 +3814,7 @@ internal sealed class FunctionBodyBinder
 
         if (targetType is SharedTypeSymbol sharedType)
         {
+            ValidateDropAccessibility(sharedType, copyLocation);
             expression = ContextualizeNull(expression, targetType);
             if (TypeIdentity.AreSame(expression.Type, sharedType))
                 return ApplyCopySemantics(expression, copyLocation);
@@ -4553,6 +4719,8 @@ internal sealed class FunctionBodyBinder
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (ReferenceTypeSymbol left, _) =>
+                TryInferGenericType(left.ElementType, actual, inferred),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) when left.Rank == right.Rank =>
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
             (UniqueTypeSymbol left, UniqueTypeSymbol right) =>

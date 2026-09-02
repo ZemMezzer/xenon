@@ -124,7 +124,7 @@ internal sealed class SemanticAnalyzer
                 functions.Add(new BoundFunction(symbol, boundBody));
             foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
         }
-        StabilizeMoveEffects();
+        StabilizeCallableSummaries();
         BindSpecializedStructFunctions(functions, genericSpecializer);
         ValidateCallableMoveEffects();
         functions.AddRange(genericSpecializer.Functions);
@@ -149,15 +149,13 @@ internal sealed class SemanticAnalyzer
             _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
     }
 
-    private void StabilizeMoveEffects()
+    private void StabilizeCallableSummaries()
     {
         DiagnosticBag lastDiagnostics = new();
         for (int round = 0; round <= _functionBodies.Count; round++)
         {
-            PropagateGenericStructMoveEffects();
-            string before = string.Join('|', _functionBodies.Select(entry =>
-                string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect =>
-                    string.Join(',', effect.FieldOrdinals)))));
+            PropagateGenericStructCallableSummaries();
+            string before = GetCallableSummaryFingerprint();
             var diagnostics = new DiagnosticBag();
             foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
             {
@@ -166,18 +164,16 @@ internal sealed class SemanticAnalyzer
                     new SemanticInfoStore(), _cancellationToken);
                 _ = binder.BindBody(body);
             }
-            PropagateGenericStructMoveEffects();
+            PropagateGenericStructCallableSummaries();
             lastDiagnostics = diagnostics;
-            string after = string.Join('|', _functionBodies.Select(entry =>
-                string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect =>
-                    string.Join(',', effect.FieldOrdinals)))));
+            string after = GetCallableSummaryFingerprint();
             if (string.Equals(before, after, StringComparison.Ordinal)) break;
         }
 
-        HashSet<string> ownershipEffectIds =
+        HashSet<string> callableSummaryDiagnosticIds =
             [DiagnosticIds.UseAfterMove, DiagnosticIds.PartiallyMovedUse,
-                DiagnosticIds.InconsistentReceiverMoveEffect];
-        foreach (Diagnostic diagnostic in lastDiagnostics.Where(diagnostic => ownershipEffectIds.Contains(diagnostic.Id)))
+                DiagnosticIds.InconsistentReceiverMoveEffect, DiagnosticIds.EscapingLocalReference];
+        foreach (Diagnostic diagnostic in lastDiagnostics.Where(diagnostic => callableSummaryDiagnosticIds.Contains(diagnostic.Id)))
         {
             bool duplicate = _diagnostics.Any(existing =>
                 existing.Id == diagnostic.Id && existing.Message == diagnostic.Message &&
@@ -186,11 +182,19 @@ internal sealed class SemanticAnalyzer
         }
     }
 
-    private void PropagateGenericStructMoveEffects()
+    private string GetCallableSummaryFingerprint() => string.Join('|', _functionBodies.Select(entry =>
+        $"{string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect => string.Join(',', effect.FieldOrdinals)))}" +
+        $"/{string.Join(';', entry.Symbol.ReferenceReturnOrigins.Select(origin =>
+            $"{(int)origin.Kind}:{origin.ParameterOrdinal}:{string.Join(',', origin.FieldOrdinals)}"))}"));
+
+    private void PropagateGenericStructCallableSummaries()
     {
         if (_genericStructSpecializer is null) return;
         foreach (SpecializedStructFunction entry in _genericStructSpecializer.SpecializedFunctions)
+        {
             entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
+            entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+        }
     }
 
     private void ValidateCallableMoveEffects()
@@ -344,7 +348,10 @@ internal sealed class SemanticAnalyzer
             SpecializedStructFunction[] pending = _genericStructSpecializer.SpecializedFunctions
                 .Where(entry => entry.Owner.IsConcreteType && !bound.Contains(entry.Specialized)).ToArray();
             foreach (SpecializedStructFunction entry in pending)
+            {
                 entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
+                entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+            }
             foreach (SpecializedStructFunction entry in pending)
             {
                 changed = true;

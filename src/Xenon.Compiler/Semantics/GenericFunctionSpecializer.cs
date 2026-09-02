@@ -90,6 +90,8 @@ internal sealed class GenericFunctionSpecializer
         var specialized = new FunctionSymbol(name, definition.ContainingNamespace, returnType, parameters,
             (FunctionDeclarationSyntax)definition.Declaration);
         specialized.SetGenericSpecialization(definition, typeArguments);
+        specialized.SetReceiverMoveEffects(definition.ReceiverMoveEffects);
+        specialized.SetReferenceReturnOrigins(definition.ReferenceReturnOrigins);
         _symbols.Add(key, specialized);
 
         var source = _definitions[definition];
@@ -142,6 +144,8 @@ internal sealed class GenericFunctionSpecializer
                 TryInfer(left.ElementType, right.ElementType, inferred),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
+            (ReferenceTypeSymbol left, _) =>
+                TryInfer(left.ElementType, actual, inferred),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) when left.Rank == right.Rank =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
             (UniqueTypeSymbol left, UniqueTypeSymbol right) =>

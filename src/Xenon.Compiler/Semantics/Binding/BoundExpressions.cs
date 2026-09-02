@@ -280,13 +280,14 @@ public sealed record BoundArrayMetadataExpression(
 }
 
 public sealed record BoundNewExpression(
-    StructTypeSymbol StructType,
+    TypeSymbol AllocatedType,
     FunctionSymbol? Constructor,
     ImmutableArray<BoundExpression> Arguments,
     bool IsPositionalInitialization,
     PointerTypeSymbol PointerType) : BoundExpression(PointerType)
 {
     public override BoundKind Kind => BoundKind.NewExpression;
+    public StructTypeSymbol? StructType => AllocatedType as StructTypeSymbol;
     public bool IsDefaultInitialization { get; init; }
 }
 
