@@ -97,6 +97,18 @@ public sealed record BoundLockExpression(
     public override BoundKind Kind => BoundKind.LockExpression;
 }
 
+/// <summary>
+/// A value-producing call whose result is intentionally discarded.  When the
+/// result owns a lifetime, lowering destroys the temporary at the end of the
+/// full expression.
+/// </summary>
+public sealed record BoundDiscardExpression(
+    BoundExpression Value,
+    FunctionSymbol? Destructor) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.DiscardExpression;
+}
+
 public sealed record BoundBinaryExpression(
     BoundExpression Left,
     SyntaxKind OperatorKind,

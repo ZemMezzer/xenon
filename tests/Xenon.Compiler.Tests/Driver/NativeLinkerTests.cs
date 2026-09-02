@@ -3574,6 +3574,74 @@ public sealed class NativeLinkerTests
     [Theory]
     [InlineData(0)]
     [InlineData(2)]
+    public void Linker_DestroysDiscardedNonTrivialCallResultsAtFullExpressionEnd(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Destroyed; }
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; }
+                public ~Resource() { State.Destroyed += Value; }
+            }
+            struct Bundle
+            {
+                public Resource Value;
+                public Bundle(int value) { Value = Resource(value); }
+            }
+            struct Factory
+            {
+                public Resource Make(int value) { return Resource(value); }
+            }
+            Resource MakeResource(int value) { return Resource(value); }
+            Bundle MakeBundle(int value) { return Bundle(value); }
+            unique<Resource> MakeUnique(int value) { return new Resource(value); }
+            shared<Resource> MakeShared(int value) { return new Resource(value); }
+            int GetInt() { return 42; }
+            int Main()
+            {
+                State.Destroyed = 0;
+
+                GetInt();
+                if (State.Destroyed != 0) return 1;
+                MakeResource(1);
+                if (State.Destroyed != 1) return 2;
+                MakeUnique(2);
+                if (State.Destroyed != 3) return 3;
+                MakeShared(4);
+                if (State.Destroyed != 7) return 4;
+                MakeBundle(8);
+                if (State.Destroyed != 15) return 5;
+
+                {
+                    Resource consumed = MakeResource(16);
+                    if (State.Destroyed != 15) return 6;
+                }
+                if (State.Destroyed != 31) return 7;
+
+                {
+                    unique<Resource> consumed = MakeUnique(32);
+                    if (State.Destroyed != 31) return 8;
+                }
+                if (State.Destroyed != 63) return 9;
+
+                Factory factory = Factory();
+                factory.Make(64);
+                if (State.Destroyed != 127) return 10;
+
+                {
+                    shared<Resource> consumed = MakeShared(128);
+                    if (State.Destroyed != 127) return 11;
+                }
+                if (State.Destroyed != 255) return 12;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
     public void Linker_ConstructsDirectlyInsideStorageAndPinnedStorage(int optimization)
     {
         Assert.Equal(0, RunIterationFourProgram("""

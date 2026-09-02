@@ -1735,6 +1735,7 @@ public sealed class LlvmIrGenerator
             BoundSharedAdoptionExpression adoption => EmitSharedAdoption(adoption),
             BoundWeakConversionExpression conversion => EmitWeakConversion(conversion),
             BoundLockExpression @lock => EmitWeakLock(@lock),
+            BoundDiscardExpression discard => EmitDiscard(discard),
             BoundBinaryExpression binary => EmitBinary(binary),
             BoundAssignmentExpression assignment => EmitAssignment(assignment),
             BoundCompoundAccessorAssignmentExpression assignment => EmitCompoundAccessorAssignment(assignment),
@@ -1774,6 +1775,33 @@ public sealed class LlvmIrGenerator
             BoundFreeExpression free => EmitFree(free),
             _ => throw new LlvmCodeGenerationException($"Bound expression '{expression.Kind}' is not supported by LLVM code generation."),
         };
+
+        private LLVMValueRef EmitDiscard(BoundDiscardExpression expression)
+        {
+            if (expression.Destructor is null)
+            {
+                EmitExpression(expression.Value);
+                return default;
+            }
+
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LlvmMemoryRuntime memory = _getMemoryRuntime();
+            LLVMValueRef stack = _builder.BuildCall2(
+                LLVMTypeRef.CreateFunction(pointer, [], false),
+                memory.StackSave,
+                Array.Empty<LLVMValueRef>(),
+                "discard.stack");
+            LLVMValueRef value = EmitExpression(expression.Value);
+            LLVMValueRef address = _builder.BuildAlloca(_mapType(expression.Value.Type), "discard.tmp");
+            _builder.BuildStore(value, address);
+            EmitLifecycleCall(expression.Destructor, address, []);
+            _builder.BuildCall2(
+                LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false),
+                memory.StackRestore,
+                new[] { stack },
+                string.Empty);
+            return default;
+        }
 
         private LLVMValueRef EmitLiteral(BoundLiteralExpression expression)
         {
