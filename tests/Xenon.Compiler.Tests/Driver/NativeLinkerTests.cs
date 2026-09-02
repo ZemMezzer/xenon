@@ -3833,6 +3833,57 @@ public sealed class NativeLinkerTests
     [Theory]
     [InlineData(0)]
     [InlineData(2)]
+    public void Linker_PreservesWholeObjectDestructionAtUserDestructorBoundaries(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State
+            {
+                public static int ParentDestroyed;
+                public static int ChildDestroyed;
+                public static int Order;
+            }
+            struct Child
+            {
+                public ~Child()
+                {
+                    State.ChildDestroyed += 1;
+                    State.Order = State.Order * 10 + 2;
+                }
+            }
+            struct Parent
+            {
+                public Child Child;
+                public ~Parent()
+                {
+                    State.ParentDestroyed += 1;
+                    State.Order = State.Order * 10 + 1;
+                }
+            }
+            int Main()
+            {
+                State.ParentDestroyed = 0;
+                State.ChildDestroyed = 0;
+                State.Order = 0;
+                {
+                    Parent parent = Parent();
+                    destruct(parent);
+                    if (State.ParentDestroyed != 1 || State.ChildDestroyed != 1) return 1;
+                    if (State.Order != 12) return 2;
+                }
+                if (State.ParentDestroyed != 1 || State.ChildDestroyed != 1) return 3;
+                {
+                    Parent parent = Parent();
+                }
+                if (State.ParentDestroyed != 2 || State.ChildDestroyed != 2) return 4;
+                if (State.Order != 1212) return 5;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
     public void Linker_ConstructsDirectlyInsideStorageAndPinnedStorage(int optimization)
     {
         Assert.Equal(0, RunIterationFourProgram("""
