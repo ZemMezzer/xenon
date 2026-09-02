@@ -22,6 +22,7 @@ public sealed class LlvmIrGenerator
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
+    private readonly Dictionary<StorageTypeSymbol, LLVMTypeRef> _storageTypes = [];
     private readonly Dictionary<InterfaceTypeSymbol, LLVMTypeRef> _interfaceTypes = [];
     private readonly Dictionary<InterfaceTypeSymbol, LLVMValueRef> _interfaceKeys = [];
     private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields = [];
@@ -243,6 +244,7 @@ public sealed class LlvmIrGenerator
             _functions.Clear();
             _nativeFunctions.Clear();
             _structTypes.Clear();
+            _storageTypes.Clear();
             _interfaceTypes.Clear();
             _interfaceKeys.Clear();
             _staticFields.Clear();
@@ -546,6 +548,12 @@ public sealed class LlvmIrGenerator
     private static LLVMValueRef DefaultValue(TypeSymbol type, Func<TypeSymbol, LLVMTypeRef> mapType,
         Dictionary<StructTypeSymbol, LlvmVTable> virtualTables, StructTypeSymbol? runtimeType = null)
     {
+        if (type is StorageTypeSymbol storage)
+            return LLVMValueRef.CreateConstNamedStruct(mapType(storage),
+                [DefaultValue(storage.ElementType, mapType, virtualTables),
+                    LLVMValueRef.CreateConstInt(mapType(BuiltinTypes.Bool), 0)]);
+        if (type is LifetimeModifierTypeSymbol modifier)
+            return DefaultValue(modifier.ElementType, mapType, virtualTables, runtimeType);
         if (type is not StructTypeSymbol structure) return LLVMValueRef.CreateConstNull(mapType(type));
         var fields = new List<LLVMValueRef>();
         runtimeType ??= structure;
@@ -759,6 +767,16 @@ public sealed class LlvmIrGenerator
 
     private LLVMTypeRef MapType(TypeSymbol type)
     {
+        if (type is StorageTypeSymbol storage)
+        {
+            if (_storageTypes.TryGetValue(storage, out LLVMTypeRef existing)) return existing;
+            LLVMTypeRef result = _context.CreateNamedStruct($"__xenon.storage.{_storageTypes.Count}");
+            _storageTypes.Add(storage, result);
+            result.StructSetBody([MapType(storage.ElementType), _context.Int1Type], false);
+            return result;
+        }
+        if (type is LifetimeModifierTypeSymbol modifier)
+            return MapType(modifier.ElementType);
         if (TypeIdentity.AreSame(type, BuiltinTypes.Void))
         {
             return _context.VoidType;
@@ -1159,6 +1177,17 @@ public sealed class LlvmIrGenerator
                 ImmutableArray<FieldSymbol> path,
                 ImmutableArray<(ImmutableArray<FieldSymbol>, TypeSymbol, FunctionSymbol)>.Builder units)
             {
+                if (current is PinTypeSymbol pin)
+                {
+                    Add(pin.ElementType, path, units);
+                    return;
+                }
+                if (current is StorageTypeSymbol storage)
+                {
+                    if (storage.CompleteDestructor is { } storageDestructor)
+                        units.Add((path, storage, storageDestructor));
+                    return;
+                }
                 if (current is OwnershipTypeSymbol { CompleteDestructor: { } ownershipDestructor })
                 {
                     units.Add((path, current, ownershipDestructor));
@@ -1555,13 +1584,26 @@ public sealed class LlvmIrGenerator
             LLVMValueRef address = GetAddress(statement.Variable);
             InitializeScalarCleanup(statement.Variable);
             InitializeArrayCleanup(statement.Variable);
+            bool isStorage = TryGetStorageType(statement.Variable.Type, out _);
+            if (isStorage)
+                _builder.BuildStore(DefaultValue(statement.Variable.Type, _mapType, _virtualTables), address);
 
             if (statement.Initializer is not null)
             {
+                if (statement.Initializer is BoundStorageConstructExpression destinationConstruction)
+                {
+                    EmitStorageConstruct(destinationConstruction);
+                    return;
+                }
                 LLVMValueRef value = EmitExpression(statement.Initializer);
                 _builder.BuildStore(value, address);
                 EmitScalarRegistration(statement.Variable, address);
                 EmitArrayRegistration(statement.Variable, value, statement.Initializer);
+            }
+            else if (isStorage)
+            {
+                // The wrapper itself is live even while it contains no T.
+                EmitScalarRegistration(statement.Variable, address);
             }
         }
 
@@ -1710,6 +1752,11 @@ public sealed class LlvmIrGenerator
             BoundInterfaceConversionExpression conversion => EmitInterfaceConversion(conversion),
             BoundReferenceConversionExpression conversion => EmitReferenceConversion(conversion),
             BoundReferenceDereferenceExpression dereference => EmitReferenceDereference(dereference),
+            BoundLifetimeValueExpression value => EmitLifetimeValue(value),
+            BoundDefaultValueExpression value => DefaultValue(value.Type, _mapType, _virtualTables),
+            BoundStorageConstructExpression construction => EmitStorageConstruct(construction),
+            BoundExplicitDestructExpression destruction => EmitExplicitDestruct(destruction),
+            BoundStorageMoveExpression move => EmitStorageMove(move),
             BoundInterfaceMethodCallExpression interfaceCall => EmitInterfaceMethodCall(interfaceCall),
             BoundIndexExpression index => EmitIndex(index),
             BoundStructConstructionExpression construction => EmitStructConstruction(
@@ -1720,6 +1767,7 @@ public sealed class LlvmIrGenerator
             BoundBaseLifecycleCallExpression lifecycle => EmitLifecycleCall(lifecycle.Function, _thisValue, lifecycle.Arguments, initializeVTable: false),
             BoundDestroyFieldsExpression destruction => EmitDestroyFields(destruction),
             BoundOwnershipDestructionExpression destruction => EmitOwnershipDestruction(destruction),
+            BoundStorageDestructionExpression destruction => EmitStorageDestruction(destruction),
             BoundArrayCreationExpression array => EmitArrayCreation(array),
             BoundArrayMetadataExpression metadata => EmitArrayMetadata(metadata),
             BoundNewExpression @new => EmitNew(@new),
@@ -1787,6 +1835,8 @@ public sealed class LlvmIrGenerator
         private LLVMValueRef EmitMove(BoundMoveExpression expression)
         {
             LLVMValueRef value = EmitExpression(expression.Source);
+            if (IsAddressable(expression.Source))
+                MarkContainedStoragesEmpty(EmitAddress(expression.Source), expression.Source.Type);
             VariableSymbol? trackedVariable = expression.TrackedVariable;
             ImmutableArray<FieldSymbol> trackedPath = expression.TrackedPath;
             if (trackedVariable is not null &&
@@ -1810,6 +1860,162 @@ public sealed class LlvmIrGenerator
                 _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), activeAddress);
             }
             return value;
+        }
+
+        private LLVMValueRef EmitStorageConstruct(BoundStorageConstructExpression expression)
+        {
+            bool isStorage = TryGetStorageType(expression.Storage.Type, out StorageTypeSymbol storageType);
+            LLVMValueRef storageAddress = EmitAddress(expression.Storage);
+            if (isStorage)
+                EmitStorageStateCheck(storageAddress, storageType, expectedInitialized: false);
+            LLVMValueRef address = isStorage
+                ? GetStorageValueAddress(storageAddress, storageType)
+                : storageAddress;
+            if (expression.Value is { } value)
+            {
+                _builder.BuildStore(EmitExpression(value), address);
+            }
+            else if (expression.Constructor is { } constructor)
+            {
+                _builder.BuildStore(DefaultValue(expression.ValueType, _mapType, _virtualTables), address);
+                EmitLifecycleCall(constructor, address, expression.Arguments);
+            }
+            else if (expression.ValueType is StructTypeSymbol structure)
+            {
+                EmitStructConstructionAtAddress(structure, expression.Arguments,
+                    expression.IsDefaultInitialization, address);
+            }
+            else
+                _builder.BuildStore(DefaultValue(expression.ValueType, _mapType, _virtualTables), address);
+            if (isStorage)
+                MarkStorageInitialized(storageAddress, storageType);
+            if (TryGetScalarProjection(expression.Storage, out VariableSymbol variable,
+                    out ImmutableArray<FieldSymbol> initializedPath))
+                EmitScalarRegistration(variable, GetAddress(variable), initializedPath);
+            return default;
+        }
+
+        private LLVMValueRef EmitStorageMove(BoundStorageMoveExpression expression)
+        {
+            LLVMValueRef storageAddress = EmitAddress(expression.Storage);
+            EmitStorageStateCheck(storageAddress, expression.StorageType, expectedInitialized: true);
+            LLVMValueRef value = _builder.BuildLoad2(_mapType(expression.Type),
+                GetStorageValueAddress(storageAddress, expression.StorageType),
+                "storage.move");
+            MarkStorageEmpty(storageAddress, expression.StorageType);
+            return value;
+        }
+
+        private static bool TryGetStorageType(TypeSymbol type, out StorageTypeSymbol storage)
+        {
+            while (type is PinTypeSymbol pin) type = pin.ElementType;
+            storage = type as StorageTypeSymbol ?? null!;
+            return storage is not null;
+        }
+
+        private LLVMValueRef GetStorageValueAddress(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStructGEP2(_mapType(storage), storageAddress, 0, "storage.value.address");
+
+        private LLVMValueRef GetStorageStateAddress(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStructGEP2(_mapType(storage), storageAddress, 1, "storage.state.address");
+
+        private void MarkStorageInitialized(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1),
+                GetStorageStateAddress(storageAddress, storage));
+
+        private void MarkStorageEmpty(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                GetStorageStateAddress(storageAddress, storage));
+
+        private void EmitStorageStateCheck(
+            LLVMValueRef storageAddress,
+            StorageTypeSymbol storage,
+            bool expectedInitialized)
+        {
+            LLVMValueRef state = _builder.BuildLoad2(_context.Int1Type,
+                GetStorageStateAddress(storageAddress, storage), "storage.state");
+            LLVMValueRef expected = LLVMValueRef.CreateConstInt(_context.Int1Type,
+                expectedInitialized ? 1UL : 0UL);
+            EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, state, expected,
+                "storage.state.valid"));
+        }
+
+        private LLVMValueRef EmitStorageDestruction(BoundStorageDestructionExpression expression)
+        {
+            LLVMValueRef storageAddress = _llvmFunction.GetParam(0);
+            LLVMValueRef state = _builder.BuildLoad2(_context.Int1Type,
+                GetStorageStateAddress(storageAddress, expression.StorageType), "storage.cleanup.state");
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("storage.cleanup.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("storage.cleanup.end");
+            _builder.BuildCondBr(state, destroy, end);
+            _builder.PositionAtEnd(destroy);
+            if (expression.ElementDestructor is not null)
+                EmitLifecycleCall(expression.ElementDestructor,
+                    GetStorageValueAddress(storageAddress, expression.StorageType), []);
+            MarkStorageEmpty(storageAddress, expression.StorageType);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+            return default;
+        }
+
+        private void MarkContainedStoragesEmpty(LLVMValueRef address, TypeSymbol type)
+        {
+            if (type is PinTypeSymbol pin)
+            {
+                MarkContainedStoragesEmpty(address, pin.ElementType);
+                return;
+            }
+            if (type is StorageTypeSymbol storage)
+            {
+                MarkStorageEmpty(address, storage);
+                return;
+            }
+            if (type is not StructTypeSymbol structure) return;
+            if (structure.BaseType is { } baseType)
+                MarkContainedStoragesEmpty(address, baseType);
+            foreach (FieldSymbol field in structure.Fields)
+            {
+                LLVMValueRef fieldAddress = _builder.BuildStructGEP2(_mapType(field.ContainingType), address,
+                    checked((uint)field.Ordinal), $"{field.Name}.move.storage.address");
+                MarkContainedStoragesEmpty(fieldAddress, field.Type);
+            }
+        }
+
+        private LLVMValueRef EmitExplicitDestruct(BoundExplicitDestructExpression expression)
+        {
+            if (TryGetStorageType(expression.Target.Type, out StorageTypeSymbol storageType))
+            {
+                LLVMValueRef storageAddress = EmitAddress(expression.Target);
+                EmitStorageStateCheck(storageAddress, storageType, expectedInitialized: true);
+                if (expression.Destructor is not null)
+                    EmitLifecycleCall(expression.Destructor,
+                        GetStorageValueAddress(storageAddress, storageType), []);
+                MarkStorageEmpty(storageAddress, storageType);
+                return default;
+            }
+            if (expression.TrackedVariable is { } trackedVariable &&
+                _scalarCleanup.TryGetValue(trackedVariable, out ImmutableArray<ScalarCleanupEntry> cleanups))
+                foreach (ScalarCleanupEntry cleanup in cleanups)
+                    if (IsProjectionPrefix(expression.TrackedPath, cleanup.Path))
+                        _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                            _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
+            if (expression.Destructor is not null)
+                EmitLifecycleCall(expression.Destructor, EmitAddress(expression.Target), []);
+            return default;
+        }
+
+        private LLVMValueRef EmitLifetimeValue(BoundLifetimeValueExpression expression)
+        {
+            LLVMValueRef address = EmitAddress(expression);
+            return _builder.BuildLoad2(_mapType(expression.Type), address, "lifetime.value");
+        }
+
+        private LLVMValueRef EmitLifetimeValueAddress(BoundLifetimeValueExpression expression)
+        {
+            LLVMValueRef address = EmitAddress(expression.Source);
+            if (expression.ModifierType is not StorageTypeSymbol storage) return address;
+            EmitStorageStateCheck(address, storage, expectedInitialized: true);
+            return GetStorageValueAddress(address, storage);
         }
 
         private LLVMValueRef EmitCopy(BoundCopyExpression expression) =>
@@ -2394,6 +2600,26 @@ public sealed class LlvmIrGenerator
             return value;
         }
 
+        private void EmitStructConstructionAtAddress(
+            StructTypeSymbol structType,
+            ImmutableArray<BoundExpression> arguments,
+            bool defaultInitialize,
+            LLVMValueRef address)
+        {
+            if (defaultInitialize)
+                _builder.BuildStore(DefaultValue(structType, _mapType, _virtualTables), address);
+            if (structType.HasVirtualDispatch && _virtualTables.TryGetValue(structType, out LlvmVTable vtable))
+                _builder.BuildStore(vtable.Value, EmitDispatchAddress(structType, address));
+            EmitDefaultInstanceInitialization(structType, address);
+            for (int index = 0; index < arguments.Length; index++)
+            {
+                FieldSymbol field = structType.AllInstanceFields[index];
+                LLVMValueRef fieldAddress = _builder.BuildStructGEP2(
+                    _mapType(field.ContainingType), address, checked((uint)field.Ordinal), $"{field.Name}.address");
+                _builder.BuildStore(EmitExpression(arguments[index]), fieldAddress);
+            }
+        }
+
         private LLVMValueRef ExtractBaseValue(LLVMValueRef value, StructTypeSymbol type, DeclaredTypeSymbol baseType)
         {
             while (!TypeIdentity.AreSame(type, baseType))
@@ -2870,6 +3096,7 @@ public sealed class LlvmIrGenerator
                     ? EmitOwnershipStorage(dereference.Operand)
                     : EmitExpression(dereference.Operand),
             BoundReferenceDereferenceExpression dereference => EmitReferenceAddress(dereference.Reference),
+            BoundLifetimeValueExpression value => EmitLifetimeValueAddress(value),
             BoundMemberAccessExpression member => EmitMemberAddress(member),
             BoundIndexExpression index => EmitIndexAddress(index),
             _ => throw new LlvmCodeGenerationException(
@@ -2916,6 +3143,9 @@ public sealed class LlvmIrGenerator
                 path = path.Add(member.Field);
                 return true;
             }
+            if (expression is BoundLifetimeValueExpression value &&
+                TryGetScalarProjection(value.Source, out variable, out path))
+                return true;
             variable = null!;
             path = [];
             return false;
@@ -3357,6 +3587,7 @@ public sealed class LlvmIrGenerator
             BoundStaticFieldExpression => true,
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
             BoundReferenceDereferenceExpression => true,
+            BoundLifetimeValueExpression value => IsAddressable(value.Source),
             BoundMemberAccessExpression { IsPointerAccess: true } => true,
             BoundMemberAccessExpression member => IsAddressable(member.Receiver),
             BoundIndexExpression => true,

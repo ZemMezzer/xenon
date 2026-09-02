@@ -39,8 +39,20 @@ public static class TypeFacts
             failure = new CopyabilityFailure(type, [], Copyability.NonCopyable);
             return Copyability.NonCopyable;
         }
+        if (type is ReferenceTypeSymbol { IsReadonly: false })
+        {
+            failure = new CopyabilityFailure(type, [], Copyability.NonCopyable);
+            return Copyability.NonCopyable;
+        }
+        if (type is ReferenceTypeSymbol)
+            return Copyability.Copyable;
         if (type is SharedTypeSymbol or WeakTypeSymbol)
             return Copyability.Copyable;
+        if (type is StorageTypeSymbol or PinTypeSymbol)
+        {
+            failure = new CopyabilityFailure(type, [], Copyability.NonCopyable);
+            return Copyability.NonCopyable;
+        }
         if (type is GenericParameterSymbol)
         {
             failure = new CopyabilityFailure(type, [], Copyability.NotGuaranteed);
@@ -73,8 +85,34 @@ public static class TypeFacts
 
     public static bool RequiresDestruction(TypeSymbol type) => RequiresDestruction(type, []);
 
+    public static bool CanMove(TypeSymbol type) => !IsPinned(type);
+
+    public static bool CanRelocate(TypeSymbol type) => CanMove(type) &&
+        (type is not StructTypeSymbol structure || !structure.AllInstanceFields.Any(field => IsPinned(field.Type)));
+
+    public static bool HasAutomaticDestructor(TypeSymbol type) => GetCompleteDestructor(type) is not null;
+
+    public static bool IsPinned(TypeSymbol type) => IsPinned(type, []);
+
+    private static bool IsPinned(TypeSymbol type, HashSet<TypeSymbol> visited) => type switch
+    {
+        PinTypeSymbol => true,
+        LifetimeModifierTypeSymbol modifier => IsPinned(modifier.ElementType, visited),
+        StructTypeSymbol structure when visited.Add(structure) =>
+            structure.AllInstanceFields.Any(field => IsPinned(field.Type, visited)),
+        _ => false,
+    };
+
+    public static bool IsStorageType(TypeSymbol type)
+    {
+        while (type is PinTypeSymbol pin) type = pin.ElementType;
+        return type is StorageTypeSymbol;
+    }
+
     private static bool RequiresDestruction(TypeSymbol type, HashSet<TypeSymbol> visited)
     {
+        if (type is StorageTypeSymbol storage) return RequiresDestruction(storage.ElementType, visited);
+        if (type is PinTypeSymbol pin) return RequiresDestruction(pin.ElementType, visited);
         if (type is OwnershipTypeSymbol) return true;
         if (type is not StructTypeSymbol structure || !visited.Add(type)) return false;
         return structure.Destructor is not null ||
@@ -87,6 +125,8 @@ public static class TypeFacts
         UniqueTypeSymbol unique => unique.CompleteDestructor,
         SharedTypeSymbol shared => shared.CompleteDestructor,
         WeakTypeSymbol weak => weak.CompleteDestructor,
+        StorageTypeSymbol storage => storage.CompleteDestructor,
+        PinTypeSymbol pin => GetCompleteDestructor(pin.ElementType),
         StructTypeSymbol structure => structure.CompleteDestructor,
         _ => null,
     };
@@ -95,7 +135,10 @@ public static class TypeFacts
     public static bool ContainsReferenceStorage(TypeSymbol type) => ContainsReferenceStorage(type, []);
 
     private static bool ContainsReferenceStorage(TypeSymbol type, HashSet<TypeSymbol> visited) =>
-        type is ReferenceTypeSymbol || type is IFieldStorageTypeSymbol structure && visited.Add(type) &&
+        type is ReferenceTypeSymbol ||
+        type is StorageTypeSymbol storage && ContainsReferenceStorage(storage.ElementType, visited) ||
+        type is PinTypeSymbol pin && ContainsReferenceStorage(pin.ElementType, visited) ||
+        type is IFieldStorageTypeSymbol structure && visited.Add(type) &&
         structure.AllInstanceFields.Any(field => ContainsReferenceStorage(field.Type, visited));
 
     public static bool IsNumeric(TypeSymbol type) =>
@@ -141,6 +184,9 @@ public static class TypeFacts
         {
             return 0;
         }
+
+        if (destination is PinTypeSymbol pin && TypeIdentity.AreSame(pin.ElementType, source))
+            return 1;
 
         if (destination is PointerTypeSymbol && TypeIdentity.AreSame(source, BuiltinTypes.Null))
             return 1000;

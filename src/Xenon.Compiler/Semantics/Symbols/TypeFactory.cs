@@ -15,6 +15,8 @@ public sealed class TypeFactory
     private readonly ConcurrentDictionary<TypeSymbol, UniqueTypeSymbol> _unique = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, SharedTypeSymbol> _shared = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, WeakTypeSymbol> _weak = new(TypeIdentity.Comparer);
+    private readonly ConcurrentDictionary<TypeSymbol, StorageTypeSymbol> _storage = new(TypeIdentity.Comparer);
+    private readonly ConcurrentDictionary<TypeSymbol, PinTypeSymbol> _pin = new(TypeIdentity.Comparer);
 
     public PointerTypeSymbol PointerTo(TypeSymbol elementType, bool isReadonly = false) =>
         _pointers.GetOrAdd((Intern(elementType), isReadonly), static key => new PointerTypeSymbol(key.Element, key.Readonly));
@@ -50,8 +52,15 @@ public sealed class TypeFactory
             value, value is ArrayTypeSymbol ? value : PointerTo(value)));
     }
 
+    public StorageTypeSymbol StorageOf(TypeSymbol elementType) =>
+        _storage.GetOrAdd(Intern(elementType), static value => new StorageTypeSymbol(value));
+
+    public PinTypeSymbol PinOf(TypeSymbol elementType) =>
+        _pin.GetOrAdd(Intern(elementType), static value => new PinTypeSymbol(value));
+
     internal IReadOnlyCollection<OwnershipTypeSymbol> OwnershipTypes =>
         [.. _unique.Values, .. _shared.Values, .. _weak.Values];
+    internal IReadOnlyCollection<StorageTypeSymbol> StorageTypes => [.. _storage.Values];
 
     internal void EnsureOwnershipDestructor(
         OwnershipTypeSymbol type,
@@ -72,6 +81,22 @@ public sealed class TypeFactory
     internal void EnsureUniqueDestructor(UniqueTypeSymbol type, NamespaceSymbol globalNamespace, SyntaxNode declaration) =>
         EnsureOwnershipDestructor(type, globalNamespace, declaration);
 
+    internal void EnsureStorageDestructor(
+        StorageTypeSymbol type,
+        NamespaceSymbol globalNamespace,
+        SyntaxNode declaration)
+    {
+        if (type.CompleteDestructor is not null) return;
+        lock (type)
+        {
+            type.CompleteDestructor ??= new FunctionSymbol(
+                type,
+                globalNamespace,
+                PointerTo(type),
+                declaration);
+        }
+    }
+
     // Normalize incoming derived types, including those built with another factory.
     // Dictionary keys then use canonical element references, never display strings.
     public TypeSymbol Intern(TypeSymbol type)
@@ -85,6 +110,8 @@ public sealed class TypeFactory
             UniqueTypeSymbol unique => UniqueOf(unique.ElementType),
             SharedTypeSymbol shared => SharedOf(shared.ElementType),
             WeakTypeSymbol weak => WeakOf(weak.ElementType),
+            StorageTypeSymbol storage => StorageOf(storage.ElementType),
+            PinTypeSymbol pin => PinOf(pin.ElementType),
             _ => type,
         };
     }

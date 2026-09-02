@@ -91,6 +91,45 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     ? Evaluate(conversion.Source) : Address(conversion.Source);
             case BoundReferenceDereferenceExpression dereference:
                 return Read(Evaluate(dereference.Reference), dereference.Type);
+            case BoundLifetimeValueExpression value:
+                return Evaluate(value.Source);
+            case BoundDefaultValueExpression:
+                return [];
+            case BoundStorageConstructExpression construction:
+            {
+                HashSet<object> storage = Address(construction.Storage);
+                CheckWrite(storage, construction);
+                HashSet<object> value;
+                if (construction.Value is { } direct)
+                    value = Capture(Evaluate(direct), direct.Type, construction);
+                else if (construction.Constructor is { } placementConstructor)
+                {
+                    ContextualCall(placementConstructor, construction.Arguments, storage, construction);
+                    value = Read(storage, construction.ValueType);
+                }
+                else
+                    value = construction.Arguments.SelectMany(Evaluate)
+                        .ToHashSet(ReferenceEqualityComparer.Instance);
+                StoreValue(storage, value, construction.ValueType);
+                return [];
+            }
+            case BoundExplicitDestructExpression destruction:
+            {
+                HashSet<object> storage = Address(destruction.Target);
+                CheckWrite(storage, destruction);
+                if (destruction.Destructor is { } destructor)
+                    ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), storage, destruction);
+                StoreValue(storage, [], destruction.ValueType);
+                return [];
+            }
+            case BoundStorageMoveExpression move:
+            {
+                HashSet<object> storage = Address(move.Storage);
+                CheckWrite(storage, move);
+                HashSet<object> value = Read(storage, move.StorageType.ElementType);
+                StoreValue(storage, [], move.StorageType.ElementType);
+                return value;
+            }
             case BoundInterfaceConversionExpression conversion:
             {
                 // The runtime object selects the interface map at conversion.
@@ -279,6 +318,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 return [_hidden];
             case BoundReferenceDereferenceExpression reference:
                 return Evaluate(reference.Reference);
+            case BoundLifetimeValueExpression value:
+                return Address(value.Source);
             case BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } pointer:
                 return Evaluate(pointer.Operand);
             case BoundMemberAccessExpression member:
@@ -386,7 +427,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private HashSet<object> ContextualDispatch(FunctionSymbol callee,
         HashSet<object>[] arguments, HashSet<object> receiver, BoundExpression site, HashSet<StructTypeSymbol>? interfaceTypes = null)
     {
-        if (callee.FunctionKind is FunctionKind.Destructor or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor)
+        if (callee.FunctionKind is FunctionKind.Destructor or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor)
             CheckWrite(receiver, site);
         var targets = new HashSet<FunctionSymbol>();
         HashSet<StructTypeSymbol>? known = callee.ContainingInterface is null ? KnownReceiverTypes(receiver) : interfaceTypes;

@@ -117,6 +117,8 @@ public enum SyntaxKind
     UniqueKeyword,
     SharedKeyword,
     WeakKeyword,
+    StorageKeyword,
+    PinKeyword,
 
     CompilationUnit,
     UsingDirective,

@@ -68,6 +68,8 @@ public static class SyntaxFacts
             ["unique"] = SyntaxKind.UniqueKeyword,
             ["shared"] = SyntaxKind.SharedKeyword,
             ["weak"] = SyntaxKind.WeakKeyword,
+            ["storage"] = SyntaxKind.StorageKeyword,
+            ["pin"] = SyntaxKind.PinKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
 
     public static SyntaxKind GetKeywordKind(string text) =>
@@ -97,6 +99,8 @@ public static class SyntaxFacts
         SyntaxKind.UniqueKeyword or
         SyntaxKind.SharedKeyword or
         SyntaxKind.WeakKeyword or
+        SyntaxKind.StorageKeyword or
+        SyntaxKind.PinKeyword or
         SyntaxKind.IdentifierToken;
 
     public static bool IsAssignmentOperator(SyntaxKind kind) => kind is

@@ -15,6 +15,8 @@ internal static class TypeSignature
         UniqueTypeSymbol unique => $"unique({Get(unique.ElementType)})",
         SharedTypeSymbol shared => $"shared({Get(shared.ElementType)})",
         WeakTypeSymbol weak => $"weak({Get(weak.ElementType)})",
+        StorageTypeSymbol storage => $"storage({Get(storage.ElementType)})",
+        PinTypeSymbol pin => $"pin({Get(pin.ElementType)})",
         _ => type.Name,
     };
 

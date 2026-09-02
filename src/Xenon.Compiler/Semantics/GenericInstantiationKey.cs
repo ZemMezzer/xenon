@@ -48,6 +48,8 @@ internal static class GenericTypeFacts
         UniqueTypeSymbol unique => ContainsGenericParameter(unique.ElementType),
         SharedTypeSymbol shared => ContainsGenericParameter(shared.ElementType),
         WeakTypeSymbol weak => ContainsGenericParameter(weak.ElementType),
+        StorageTypeSymbol storage => ContainsGenericParameter(storage.ElementType),
+        PinTypeSymbol pin => ContainsGenericParameter(pin.ElementType),
         _ => false,
     };
 }
