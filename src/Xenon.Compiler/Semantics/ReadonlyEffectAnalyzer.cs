@@ -255,12 +255,13 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 return Evaluate(conversion.Shared);
             case BoundLockExpression @lock:
                 return Evaluate(@lock.Weak);
-            case BoundDiscardExpression discard:
+            case BoundFullExpression fullExpression:
             {
-                Evaluate(discard.Value);
-                if (discard.Destructor is { } destructor)
-                    ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), [Root(discard)], discard);
-                return [];
+                HashSet<object> result = Evaluate(fullExpression.Expression);
+                foreach (BoundFullExpressionTemporary temporary in fullExpression.Temporaries.Reverse())
+                    ContextualDispatch(temporary.Destructor, Array.Empty<HashSet<object>>(),
+                        [Root(temporary.Value)], fullExpression);
+                return result;
             }
             case BoundStructConstructionExpression construction:
                 Initialize(construction.StructType, construction.Arguments, construction);

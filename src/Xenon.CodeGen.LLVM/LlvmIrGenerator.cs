@@ -1065,6 +1065,7 @@ public sealed class LlvmIrGenerator
         private readonly Dictionary<LocalVariableSymbol, LLVMValueRef> _arrayScopeHeads = [];
         private readonly Dictionary<BoundMoveExpression, LLVMValueRef> _arrayMoveCleanupState = new(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<BoundArrayCreationExpression, LLVMValueRef> _arrayCreationCleanupNodes = new(ReferenceEqualityComparer.Instance);
+        private Dictionary<BoundExpression, FullExpressionTemporarySlot>? _fullExpressionTemporaries;
         private LLVMTypeRef _cleanupNodeType;
         private bool _terminated;
         private BoundExpression? _exitCleanup;
@@ -1590,9 +1591,10 @@ public sealed class LlvmIrGenerator
 
             if (statement.Initializer is not null)
             {
-                if (statement.Initializer is BoundStorageConstructExpression destinationConstruction)
+                if (statement.Initializer is BoundStorageConstructExpression or
+                    BoundFullExpression { Expression: BoundStorageConstructExpression })
                 {
-                    EmitStorageConstruct(destinationConstruction);
+                    EmitExpression(statement.Initializer);
                     return;
                 }
                 LLVMValueRef value = EmitExpression(statement.Initializer);
@@ -1723,7 +1725,14 @@ public sealed class LlvmIrGenerator
             _terminated = true;
         }
 
-        private LLVMValueRef EmitExpression(BoundExpression expression) => expression switch
+        private LLVMValueRef EmitExpression(BoundExpression expression)
+        {
+            if (_fullExpressionTemporaries?.TryGetValue(expression, out FullExpressionTemporarySlot? temporary) == true)
+                return EmitFullExpressionTemporary(expression, temporary);
+            return EmitExpressionCore(expression);
+        }
+
+        private LLVMValueRef EmitExpressionCore(BoundExpression expression) => expression switch
         {
             BoundLiteralExpression literal => EmitLiteral(literal),
             BoundVariableExpression variable => EmitVariable(variable),
@@ -1735,7 +1744,7 @@ public sealed class LlvmIrGenerator
             BoundSharedAdoptionExpression adoption => EmitSharedAdoption(adoption),
             BoundWeakConversionExpression conversion => EmitWeakConversion(conversion),
             BoundLockExpression @lock => EmitWeakLock(@lock),
-            BoundDiscardExpression discard => EmitDiscard(discard),
+            BoundFullExpression fullExpression => EmitFullExpression(fullExpression),
             BoundBinaryExpression binary => EmitBinary(binary),
             BoundAssignmentExpression assignment => EmitAssignment(assignment),
             BoundCompoundAccessorAssignmentExpression assignment => EmitCompoundAccessorAssignment(assignment),
@@ -1776,31 +1785,71 @@ public sealed class LlvmIrGenerator
             _ => throw new LlvmCodeGenerationException($"Bound expression '{expression.Kind}' is not supported by LLVM code generation."),
         };
 
-        private LLVMValueRef EmitDiscard(BoundDiscardExpression expression)
+        private LLVMValueRef EmitFullExpression(BoundFullExpression expression)
         {
-            if (expression.Destructor is null)
-            {
-                EmitExpression(expression.Value);
-                return default;
-            }
-
             LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LlvmMemoryRuntime memory = _getMemoryRuntime();
             LLVMValueRef stack = _builder.BuildCall2(
                 LLVMTypeRef.CreateFunction(pointer, [], false),
                 memory.StackSave,
                 Array.Empty<LLVMValueRef>(),
-                "discard.stack");
-            LLVMValueRef value = EmitExpression(expression.Value);
-            LLVMValueRef address = _builder.BuildAlloca(_mapType(expression.Value.Type), "discard.tmp");
-            _builder.BuildStore(value, address);
-            EmitLifecycleCall(expression.Destructor, address, []);
+                "full.expression.stack");
+            var temporaries = new Dictionary<BoundExpression, FullExpressionTemporarySlot>(
+                ReferenceEqualityComparer.Instance);
+            foreach (BoundFullExpressionTemporary temporary in expression.Temporaries)
+            {
+                LLVMValueRef address = _builder.BuildAlloca(_mapType(temporary.Value.Type), "temporary.value");
+                LLVMValueRef active = _builder.BuildAlloca(_context.Int1Type, "temporary.active");
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), active);
+                temporaries.Add(temporary.Value,
+                    new FullExpressionTemporarySlot(address, active, temporary.Destructor));
+            }
+
+            Dictionary<BoundExpression, FullExpressionTemporarySlot>? previous = _fullExpressionTemporaries;
+            _fullExpressionTemporaries = temporaries;
+            LLVMValueRef result = EmitExpression(expression.Expression);
+            for (int index = expression.Temporaries.Length - 1; index >= 0; index--)
+                EmitFullExpressionTemporaryCleanup(temporaries[expression.Temporaries[index].Value]);
+            _fullExpressionTemporaries = previous;
             _builder.BuildCall2(
                 LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false),
                 memory.StackRestore,
                 new[] { stack },
                 string.Empty);
-            return default;
+            return result;
+        }
+
+        private LLVMValueRef EmitFullExpressionTemporary(
+            BoundExpression expression,
+            FullExpressionTemporarySlot temporary)
+        {
+            if (temporary.Emitted)
+                return _builder.BuildLoad2(_mapType(expression.Type), temporary.Address, "temporary.value");
+            LLVMValueRef value = EmitExpressionCore(expression);
+            _builder.BuildStore(value, temporary.Address);
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1), temporary.Active);
+            temporary.Emitted = true;
+            return value;
+        }
+
+        private LLVMValueRef EmitFullExpressionTemporaryAddress(
+            BoundExpression expression,
+            FullExpressionTemporarySlot temporary)
+        {
+            if (!temporary.Emitted) EmitFullExpressionTemporary(expression, temporary);
+            return temporary.Address;
+        }
+
+        private void EmitFullExpressionTemporaryCleanup(FullExpressionTemporarySlot temporary)
+        {
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("temporary.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("temporary.end");
+            LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, temporary.Active, "temporary.is.active");
+            _builder.BuildCondBr(active, destroy, end);
+            _builder.PositionAtEnd(destroy);
+            EmitLifecycleCall(temporary.Destructor, temporary.Address, []);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
         }
 
         private LLVMValueRef EmitLiteral(BoundLiteralExpression expression)
@@ -2178,7 +2227,8 @@ public sealed class LlvmIrGenerator
 
             if (expression.Source is BoundThisExpression)
                 return EmitExpression(expression.Source);
-            if (IsAddressable(expression.Source))
+            if (_fullExpressionTemporaries?.ContainsKey(expression.Source) == true ||
+                IsAddressable(expression.Source))
                 return EmitAddress(expression.Source);
             return StoreTemporary(expression.Source, expression.Source.Type);
         }
@@ -3115,7 +3165,14 @@ public sealed class LlvmIrGenerator
             return _builder.BuildLoad2(_mapType(expression.ElementType), address, "element");
         }
 
-        private LLVMValueRef EmitAddress(BoundExpression expression) => expression switch
+        private LLVMValueRef EmitAddress(BoundExpression expression)
+        {
+            if (_fullExpressionTemporaries?.TryGetValue(expression, out FullExpressionTemporarySlot? temporary) == true)
+                return EmitFullExpressionTemporaryAddress(expression, temporary);
+            return EmitAddressCore(expression);
+        }
+
+        private LLVMValueRef EmitAddressCore(BoundExpression expression) => expression switch
         {
             BoundVariableExpression variable => GetAddress(variable.Variable),
             BoundStaticFieldExpression field => _staticFields[field.Field],
@@ -3254,7 +3311,8 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitInterfaceConversion(BoundInterfaceConversionExpression expression)
         {
-            LLVMValueRef data = IsAddressable(expression.Source)
+            LLVMValueRef data = _fullExpressionTemporaries?.ContainsKey(expression.Source) == true ||
+                IsAddressable(expression.Source)
                 ? EmitAddress(expression.Source)
                 : StoreTemporary(expression.Source, expression.SourceType);
             LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
@@ -3800,6 +3858,9 @@ public sealed class LlvmIrGenerator
             if (isPointerAccess)
                 return EmitOwnershipStorage(receiver);
 
+            if (_fullExpressionTemporaries?.ContainsKey(receiver) == true)
+                return EmitAddress(receiver);
+
             if (IsAddressable(receiver))
                 return EmitAddress(receiver);
 
@@ -3877,6 +3938,16 @@ public sealed class LlvmIrGenerator
             LLVMValueRef Registered,
             FunctionSymbol Destructor,
             ArrayTypeSymbol ArrayType);
+        private sealed class FullExpressionTemporarySlot(
+            LLVMValueRef address,
+            LLVMValueRef active,
+            FunctionSymbol destructor)
+        {
+            public LLVMValueRef Address { get; } = address;
+            public LLVMValueRef Active { get; } = active;
+            public FunctionSymbol Destructor { get; } = destructor;
+            public bool Emitted { get; set; }
+        }
         private readonly record struct BranchTarget(LLVMBasicBlockRef Block, int RetainedDepth);
         private readonly record struct LoopTargets(BranchTarget ContinueTarget);
     }

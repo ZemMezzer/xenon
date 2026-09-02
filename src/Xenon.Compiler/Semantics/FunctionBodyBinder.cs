@@ -28,6 +28,7 @@ internal sealed class FunctionBodyBinder
     private readonly Dictionary<LocalVariableSymbol, MovePlace> _referenceAliases = [];
     private readonly Dictionary<LocalVariableSymbol, ImmutableArray<ReferenceSource>> _referenceAliasSources = [];
     private readonly Dictionary<LocalVariableSymbol, StorageValueReferenceOrigin> _storageValueReferenceOrigins = [];
+    private readonly Dictionary<LocalVariableSymbol, LifetimeOwnerResolution> _referenceLifetimeOwners = [];
     private readonly Dictionary<MovePlace, ImmutableArray<ValueReference>> _valueReferenceMetadata = [];
     private readonly Dictionary<BoundExpression, ImmutableArray<ValueReference>> _expressionReferenceMetadata =
         new(ReferenceEqualityComparer.Instance);
@@ -96,6 +97,27 @@ internal sealed class FunctionBodyBinder
         LocalVariableSymbol? ParentAlias,
         int LastUsePosition);
     private sealed record StorageValueReferenceOrigin(StorageTypeSymbol StorageType);
+    private enum LifetimeAuthorityKind { Full, AccessOnly, Unknown }
+    private enum LifetimeOwnerOriginKind
+    {
+        DirectPlace,
+        LocalReference,
+        ReferenceParameter,
+        ReferenceField,
+        ReturnedReference,
+        StorageValueReference,
+        StorageReference,
+        StoragePointer,
+        RawPointer,
+        Unknown,
+    }
+    private sealed record LifetimeOwnerResolution(
+        MovePlace? OwnerPlace,
+        TypeSymbol ValueType,
+        LifetimeAuthorityKind Authority,
+        LifetimeOwnerOriginKind Origin,
+        StorageTypeSymbol? StorageType = null,
+        string? Subject = null);
     private enum LifetimeOperationKind
     {
         EndLifetime,
@@ -135,6 +157,8 @@ internal sealed class FunctionBodyBinder
     }
     private (ExpressionFlow? True, ExpressionFlow? False) BooleanFlow(BoundExpression expression)
     {
+        if (expression is BoundFullExpression fullExpression)
+            return BooleanFlow(fullExpression.Expression);
         if (_booleanFlows.TryGetValue(expression, out var flow)) return flow;
         if (expression is BoundUnaryExpression { OperatorKind: SyntaxKind.BangToken } unary)
         {
@@ -227,8 +251,8 @@ internal sealed class FunctionBodyBinder
                     arguments = ValidateFunctionArguments(target, arguments, initializerArguments,
                         constructorSyntax.BaseKeyword.Location);
                     ApplyChainedConstructorReferenceOrigins(thisType, target, arguments);
-                    baseConstructorCall = new BoundExpressionStatement(
-                        new BoundBaseLifecycleCallExpression(target, arguments));
+                    baseConstructorCall = new BoundExpressionStatement(CompleteFullExpression(
+                        new BoundBaseLifecycleCallExpression(target, arguments), resultConsumed: false));
                     callsThisConstructor = true;
                     _requiredFields.Clear();
                 }
@@ -261,7 +285,8 @@ internal sealed class FunctionBodyBinder
                 }
                 arguments = ValidateFunctionArguments(baseConstructor, arguments, baseArguments, location);
                 ApplyChainedConstructorReferenceOrigins(baseType, baseConstructor, arguments);
-                baseConstructorCall = new BoundExpressionStatement(new BoundBaseLifecycleCallExpression(baseConstructor, arguments));
+                baseConstructorCall = new BoundExpressionStatement(CompleteFullExpression(
+                    new BoundBaseLifecycleCallExpression(baseConstructor, arguments), resultConsumed: false));
             }
         }
         else if (_function.FunctionKind == FunctionKind.Constructor &&
@@ -399,15 +424,16 @@ internal sealed class FunctionBodyBinder
                 continue;
 
             if (initializer is BoundStorageConstructExpression construction)
-                statements.Add(new BoundExpressionStatement(construction));
+                statements.Add(new BoundExpressionStatement(
+                    CompleteFullExpression(construction, resultConsumed: false)));
             else
             {
                 var target = new BoundMemberAccessExpression(receiver, field, IsPointerAccess: true);
                 statements.Add(new BoundExpressionStatement(
-                    new BoundAssignmentExpression(target, SyntaxKind.EqualsToken, initializer)
+                    CompleteFullExpression(new BoundAssignmentExpression(target, SyntaxKind.EqualsToken, initializer)
                     {
                         IsInitialization = true,
-                    }));
+                    }, resultConsumed: false)));
             }
         }
 
@@ -758,7 +784,7 @@ internal sealed class FunctionBodyBinder
         if (sections.Count > 0 && sections[^1].Body.Statements.IsEmpty)
             _diagnostics.Report(syntax.Sections[^1].Label.Location, "final case requires an explicitly terminated body",
                 DiagnosticIds.FinalSwitchCaseRequiresTermination);
-        return new BoundSwitchStatement(expression, sections.ToImmutable());
+        return new BoundSwitchStatement(CompleteFullExpression(expression, resultConsumed: false), sections.ToImmutable());
     }
 
     private static bool TerminatesCase(BoundStatement statement) => BoundControlFlow.TerminatesSection(statement);
@@ -817,7 +843,7 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.InvalidCondition);
         }
 
-        return condition;
+        return CompleteFullExpression(condition, resultConsumed: false);
     }
 
     private BoundVariableDeclarationStatement BindVariableDeclaration(VariableDeclarationStatementSyntax syntax)
@@ -884,6 +910,7 @@ internal sealed class FunctionBodyBinder
                 isDirectPinDeclaration && type is PinTypeSymbol convertedPin ? convertedPin.ElementType : type);
             if (type is ReferenceTypeSymbol)
             {
+                _referenceLifetimeOwners[variable] = ResolveReferenceLifetimeOwner(initializer);
                 if (TryGetStorageValueReferenceOrigin(initializer, out StorageValueReferenceOrigin storageOrigin))
                     _storageValueReferenceOrigins[variable] = storageOrigin;
                 ImmutableArray<ReferenceSource> aliasSources = GetReferenceSources(initializer);
@@ -962,6 +989,8 @@ internal sealed class FunctionBodyBinder
             _storageStates[new MovePlace(variable, [])] = StorageState.Empty;
         }
 
+        if (initializer is not null)
+            initializer = CompleteFullExpression(initializer, resultConsumed: true);
         return new BoundVariableDeclarationStatement(variable, initializer);
     }
 
@@ -1006,6 +1035,8 @@ internal sealed class FunctionBodyBinder
 
         RecordReceiverMoveEffectExit();
         ValidateRequiredFields(syntax.ReturnKeyword.Location);
+        if (expression is not null)
+            expression = CompleteFullExpression(expression, resultConsumed: true);
         return new BoundReturnStatement(expression);
     }
 
@@ -1821,7 +1852,7 @@ internal sealed class FunctionBodyBinder
         if (!ValidateWholeStorageLifetimeOperation(source, syntax.MoveKeyword.Location, "move"))
             return new BoundErrorExpression();
         if (!ValidateLifetimeOperationAuthority(source, LifetimeOperationKind.TransferLifetime,
-                syntax.MoveKeyword.Location))
+                syntax.MoveKeyword.Location, out LifetimeOwnerResolution lifetimeOwner))
             return new BoundErrorExpression();
         if (TryGetStorageType(source.Type, out StorageTypeSymbol storageType) && IsAddressable(source))
         {
@@ -1832,7 +1863,7 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.InvalidMoveSource);
                 return new BoundErrorExpression();
             }
-            MovePlace? storagePlace = TryGetMovePlace(source, out MovePlace trackedStorage) ? trackedStorage : null;
+            MovePlace? storagePlace = lifetimeOwner.OwnerPlace;
             if (storagePlace is not null &&
                 _storageStates.GetValueOrDefault(storagePlace, StorageState.MaybeInitialized) == StorageState.Empty)
             {
@@ -1857,7 +1888,7 @@ internal sealed class FunctionBodyBinder
             }
             return storageMove;
         }
-        if (!TryGetMovePlace(source, out MovePlace place) ||
+        if (lifetimeOwner.OwnerPlace is not MovePlace place ||
             place.RootVariable is null && place.Fields.IsEmpty ||
             source.Type is ReferenceTypeSymbol ||
             !IsWritable(source))
@@ -2223,6 +2254,234 @@ internal sealed class FunctionBodyBinder
         return true;
     }
 
+    private LifetimeOwnerResolution ResolveAuthoritativeLifetimeOwner(BoundExpression expression)
+    {
+        switch (expression)
+        {
+            case BoundFullExpression fullExpression:
+                return ResolveAuthoritativeLifetimeOwner(fullExpression.Expression);
+            case BoundReferenceDereferenceExpression dereference:
+                return ResolveReferenceLifetimeOwner(dereference.Reference);
+            case BoundReferenceConversionExpression conversion:
+                return ResolveReferenceLifetimeOwner(conversion);
+            case BoundCopyExpression copy:
+                return ResolveAuthoritativeLifetimeOwner(copy.Source);
+            case BoundCastExpression cast:
+                return ResolveAuthoritativeLifetimeOwner(cast.Expression);
+            case BoundLifetimeValueExpression { ModifierType: StorageTypeSymbol storage } value:
+            {
+                LifetimeOwnerResolution owner = ResolveAuthoritativeLifetimeOwner(value.Source);
+                return owner with
+                {
+                    ValueType = storage.ElementType,
+                    Authority = LifetimeAuthorityKind.AccessOnly,
+                    Origin = LifetimeOwnerOriginKind.StorageValueReference,
+                    StorageType = storage,
+                };
+            }
+            case BoundLifetimeValueExpression value:
+                return ResolveAuthoritativeLifetimeOwner(value.Source) with { ValueType = value.Type };
+            case BoundMemberAccessExpression { IsPointerAccess: false } member:
+                return AppendLifetimeOwnerFields(
+                    ResolveAuthoritativeLifetimeOwner(member.Receiver), [member.Field.Ordinal]);
+            case BoundUnaryExpression
+            {
+                OperatorKind: SyntaxKind.StarToken,
+                Operand.Type: PointerTypeSymbol pointer,
+            } when TryGetStorageType(pointer.ElementType, out _):
+                return new LifetimeOwnerResolution(null, expression.Type, LifetimeAuthorityKind.Full,
+                    LifetimeOwnerOriginKind.StoragePointer);
+            case BoundIndexExpression { Receiver.Type: PointerTypeSymbol pointer }
+                when TryGetStorageType(pointer.ElementType, out _):
+                return new LifetimeOwnerResolution(null, expression.Type, LifetimeAuthorityKind.Full,
+                    LifetimeOwnerOriginKind.StoragePointer);
+        }
+
+        if (IsOrdinaryRawPointerPointee(expression))
+            return new LifetimeOwnerResolution(null, expression.Type, LifetimeAuthorityKind.AccessOnly,
+                LifetimeOwnerOriginKind.RawPointer);
+        if (TryGetMovePlace(expression, out MovePlace place))
+            return ResolveMovePlaceLifetimeOwner(place, expression.Type, LifetimeOwnerOriginKind.DirectPlace);
+        if (TryGetStorageType(expression.Type, out _) && IsAddressable(expression))
+            return new LifetimeOwnerResolution(null, expression.Type, LifetimeAuthorityKind.Full,
+                LifetimeOwnerOriginKind.StoragePointer);
+        return UnknownLifetimeOwner(expression.Type);
+    }
+
+    private LifetimeOwnerResolution ResolveReferenceLifetimeOwner(BoundExpression expression)
+    {
+        switch (expression)
+        {
+            case BoundReferenceConversionExpression conversion:
+            {
+                LifetimeOwnerResolution convertedOwner = ResolveAuthoritativeLifetimeOwner(conversion.Source);
+                return TryGetStorageType(conversion.ReferenceType.ElementType, out _) &&
+                       convertedOwner.Authority == LifetimeAuthorityKind.Full
+                    ? convertedOwner with
+                    {
+                        ValueType = conversion.ReferenceType.ElementType,
+                        Origin = LifetimeOwnerOriginKind.StorageReference,
+                    }
+                    : convertedOwner with { ValueType = conversion.ReferenceType.ElementType };
+            }
+            case BoundCopyExpression copy:
+                return ResolveReferenceLifetimeOwner(copy.Source);
+            case BoundCastExpression cast:
+                return ResolveReferenceLifetimeOwner(cast.Expression);
+            case BoundReferenceDereferenceExpression dereference:
+                return ResolveAuthoritativeLifetimeOwner(dereference);
+            case BoundVariableExpression { Variable: LocalVariableSymbol local }:
+                if (_referenceLifetimeOwners.TryGetValue(local, out LifetimeOwnerResolution? aliasOwner))
+                {
+                    aliasOwner = aliasOwner.OwnerPlace is null &&
+                                 aliasOwner.Origin == LifetimeOwnerOriginKind.StorageReference
+                        ? aliasOwner with { OwnerPlace = new MovePlace(local, []) }
+                        : aliasOwner;
+                    return aliasOwner.Authority == LifetimeAuthorityKind.Full
+                        ? aliasOwner with { Origin = LifetimeOwnerOriginKind.LocalReference, Subject = local.Name }
+                        : aliasOwner;
+                }
+                if (_referenceAliases.TryGetValue(local, out MovePlace? alias))
+                    return ResolveMovePlaceLifetimeOwner(alias,
+                        ((ReferenceTypeSymbol)local.Type).ElementType,
+                        LifetimeOwnerOriginKind.LocalReference) with { Subject = local.Name };
+                return UnknownLifetimeOwner(((ReferenceTypeSymbol)local.Type).ElementType,
+                    $"local reference '{local.Name}'");
+            case BoundVariableExpression
+            {
+                Variable: ParameterSymbol { Type: ReferenceTypeSymbol parameterReference } parameter,
+            }:
+                return TryGetStorageType(parameterReference.ElementType, out _)
+                    ? new LifetimeOwnerResolution(new MovePlace(parameter, []), parameterReference.ElementType,
+                        LifetimeAuthorityKind.Full, LifetimeOwnerOriginKind.StorageReference,
+                        Subject: parameter.Name)
+                    : new LifetimeOwnerResolution(new MovePlace(parameter, []), parameterReference.ElementType,
+                        LifetimeAuthorityKind.AccessOnly, LifetimeOwnerOriginKind.ReferenceParameter,
+                        Subject: parameter.Name);
+            case BoundMemberAccessExpression { Field.Type: ReferenceTypeSymbol fieldReference } member:
+                return new LifetimeOwnerResolution(
+                    TryGetMovePlace(member, out MovePlace fieldPlace) ? fieldPlace : null,
+                    fieldReference.ElementType,
+                    LifetimeAuthorityKind.AccessOnly,
+                    LifetimeOwnerOriginKind.ReferenceField,
+                    Subject: member.Field.Name);
+            case BoundCallExpression call when call.Function.ReturnType is ReferenceTypeSymbol:
+                return ResolveReturnedReferenceLifetimeOwner(call.Function, call.Arguments, receiver: null);
+            case BoundMethodCallExpression call when call.Method.ReturnType is ReferenceTypeSymbol &&
+                                                       call.Method.VTableSlot is null:
+                return ResolveReturnedReferenceLifetimeOwner(call.Method, call.Arguments, call.Receiver);
+            case BoundInterfaceMethodCallExpression { Method.ReturnType: ReferenceTypeSymbol }:
+                return UnknownLifetimeOwner(((ReferenceTypeSymbol)expression.Type).ElementType,
+                    "an interface-dispatched reference return", LifetimeOwnerOriginKind.ReturnedReference);
+            default:
+                return expression.Type is ReferenceTypeSymbol reference
+                    ? UnknownLifetimeOwner(reference.ElementType, "a reference with unknown provenance")
+                    : ResolveAuthoritativeLifetimeOwner(expression);
+        }
+    }
+
+    private LifetimeOwnerResolution ResolveReturnedReferenceLifetimeOwner(
+        FunctionSymbol function,
+        ImmutableArray<BoundExpression> arguments,
+        BoundExpression? receiver)
+    {
+        TypeSymbol valueType = function.ReturnType is ReferenceTypeSymbol reference
+            ? reference.ElementType
+            : function.ReturnType;
+        ImmutableArray<ReferenceReturnOrigin> origins = function.ReferenceReturnOrigins.IsEmpty &&
+            function.GenericDefinition is { } definition
+                ? definition.ReferenceReturnOrigins
+                : function.ReferenceReturnOrigins;
+        if (origins.Length != 1)
+            return UnknownLifetimeOwner(valueType,
+                origins.IsEmpty ? $"reference returned by '{function.Name}' has unknown provenance" :
+                    $"reference returned by '{function.Name}' has multiple possible owners",
+                LifetimeOwnerOriginKind.ReturnedReference);
+
+        ReferenceReturnOrigin origin = origins[0];
+        BoundExpression? source = origin.Kind switch
+        {
+            ReferenceReturnOriginKind.Parameter when origin.ParameterOrdinal >= 0 &&
+                                                     origin.ParameterOrdinal < arguments.Length =>
+                arguments[origin.ParameterOrdinal],
+            ReferenceReturnOriginKind.Receiver => receiver,
+            _ => null,
+        };
+        if (source is null)
+            return UnknownLifetimeOwner(valueType,
+                $"reference returned by '{function.Name}' does not resolve to one tracked owner",
+                LifetimeOwnerOriginKind.ReturnedReference);
+
+        LifetimeOwnerResolution owner = source.Type is ReferenceTypeSymbol
+            ? ResolveReferenceLifetimeOwner(source)
+            : ResolveAuthoritativeLifetimeOwner(source);
+        owner = AppendLifetimeOwnerFields(owner, origin.FieldOrdinals);
+        return owner.Authority == LifetimeAuthorityKind.Full
+            ? owner with { Origin = LifetimeOwnerOriginKind.ReturnedReference, Subject = function.Name }
+            : owner;
+    }
+
+    private LifetimeOwnerResolution AppendLifetimeOwnerFields(
+        LifetimeOwnerResolution owner,
+        ImmutableArray<int> fieldOrdinals)
+    {
+        TypeSymbol currentType = owner.ValueType;
+        MovePlace? ownerPlace = owner.OwnerPlace;
+        foreach (int ordinal in fieldOrdinals)
+        {
+            while (currentType is LifetimeModifierTypeSymbol modifier)
+                currentType = modifier.ElementType;
+            if (currentType is ReferenceTypeSymbol reference)
+                return owner with
+                {
+                    OwnerPlace = null,
+                    ValueType = reference.ElementType,
+                    Authority = LifetimeAuthorityKind.AccessOnly,
+                    Origin = LifetimeOwnerOriginKind.ReferenceField,
+                };
+            if (currentType is not StructTypeSymbol structure ||
+                structure.AllInstanceFields.FirstOrDefault(field => field.Ordinal == ordinal) is not FieldSymbol field)
+                return UnknownLifetimeOwner(owner.ValueType,
+                    "returned reference field path could not be resolved",
+                    LifetimeOwnerOriginKind.ReturnedReference);
+
+            if (ownerPlace is not null)
+                ownerPlace = new MovePlace(ownerPlace.Root, ownerPlace.RootType, ownerPlace.RootName,
+                    ownerPlace.Fields.Add(field));
+            currentType = field.Type;
+            if (currentType is ReferenceTypeSymbol fieldReference)
+                return owner with
+                {
+                    OwnerPlace = ownerPlace,
+                    ValueType = fieldReference.ElementType,
+                    Authority = LifetimeAuthorityKind.AccessOnly,
+                    Origin = LifetimeOwnerOriginKind.ReferenceField,
+                    Subject = field.Name,
+                };
+        }
+        return owner with { OwnerPlace = ownerPlace, ValueType = currentType };
+    }
+
+    private LifetimeOwnerResolution ResolveMovePlaceLifetimeOwner(
+        MovePlace place,
+        TypeSymbol valueType,
+        LifetimeOwnerOriginKind origin)
+    {
+        if (place.RootVariable is ParameterSymbol { Type: ReferenceTypeSymbol reference } parameter)
+            return TryGetStorageType(reference.ElementType, out _)
+                ? new LifetimeOwnerResolution(place, valueType, LifetimeAuthorityKind.Full,
+                    LifetimeOwnerOriginKind.StorageReference, Subject: parameter.Name)
+                : new LifetimeOwnerResolution(place, valueType, LifetimeAuthorityKind.AccessOnly,
+                    LifetimeOwnerOriginKind.ReferenceParameter, Subject: parameter.Name);
+        return new LifetimeOwnerResolution(place, valueType, LifetimeAuthorityKind.Full, origin);
+    }
+
+    private static LifetimeOwnerResolution UnknownLifetimeOwner(
+        TypeSymbol valueType,
+        string? subject = null,
+        LifetimeOwnerOriginKind origin = LifetimeOwnerOriginKind.Unknown) =>
+        new(null, valueType, LifetimeAuthorityKind.Unknown, origin, Subject: subject);
+
     private static bool IsPlacePrefixOf(MovePlace prefix, MovePlace place)
     {
         if (!ReferenceEquals(prefix.Root, place.Root) || prefix.Fields.Length > place.Fields.Length) return false;
@@ -2277,33 +2536,77 @@ internal sealed class FunctionBodyBinder
     private bool ValidateLifetimeOperationAuthority(
         BoundExpression expression,
         LifetimeOperationKind operation,
-        TextLocation location)
+        TextLocation location,
+        out LifetimeOwnerResolution resolution)
     {
-        if (operation is not LifetimeOperationKind.EndLifetimeAndDeallocate &&
-            TryGetStorageValueReferenceOrigin(expression, out StorageValueReferenceOrigin storageOrigin))
+        if (operation == LifetimeOperationKind.EndLifetimeAndDeallocate)
         {
-            string action = operation == LifetimeOperationKind.EndLifetime ? "end" : "transfer";
-            _diagnostics.Report(location,
-                $"cannot {action} the lifetime of a value through a reference borrowed from '{storageOrigin.StorageType.ToDisplayString()}'; use '{storageOrigin.StorageType.ToDisplayString()}&' to manage the storage lifetime",
-                DiagnosticIds.StorageValueLifetimeMutation);
-            return false;
+            resolution = UnknownLifetimeOwner(expression.Type);
+            return true;
         }
 
-        if (operation is not LifetimeOperationKind.EndLifetimeAndDeallocate &&
-            IsOrdinaryRawPointerPointee(expression))
+        resolution = ResolveAuthoritativeLifetimeOwner(expression);
+        if (resolution.Authority == LifetimeAuthorityKind.Full)
+            return resolution.OwnerPlace is not null ||
+                   resolution.Origin is LifetimeOwnerOriginKind.StoragePointer or
+                       LifetimeOwnerOriginKind.StorageReference;
+
+        if (operation == LifetimeOperationKind.TransferLifetime &&
+            resolution.Authority == LifetimeAuthorityKind.Unknown &&
+            expression is not BoundReferenceDereferenceExpression &&
+            !IsAddressable(expression))
         {
-            if (operation == LifetimeOperationKind.EndLifetime)
+            if (!TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
                 _diagnostics.Report(location,
-                    "cannot explicitly destruct a value through an ordinary raw pointer; use 'free(ptr)' for a heap allocation, or 'storage<T>' for manual lifetime management",
-                    DiagnosticIds.HeapPointeeExplicitDestruction);
-            else
-                _diagnostics.Report(location,
-                    "cannot move a value through an ordinary raw pointer; raw pointers provide access but no lifetime-management authority",
+                    "'move' requires a writable local storage location",
                     DiagnosticIds.InvalidMoveSource);
             return false;
         }
 
-        return true;
+        return ReportLifetimeAuthorityDiagnostic(resolution, operation, location);
+    }
+
+    private bool ReportLifetimeAuthorityDiagnostic(
+        LifetimeOwnerResolution resolution,
+        LifetimeOperationKind operation,
+        TextLocation location)
+    {
+        string action = operation == LifetimeOperationKind.EndLifetime ? "end" : "transfer";
+        switch (resolution.Origin)
+        {
+            case LifetimeOwnerOriginKind.ReferenceParameter:
+                _diagnostics.Report(location,
+                    $"cannot {action} a lifetime through ordinary reference parameter '{resolution.Subject}'; use 'storage<T>&' when the callable must manage storage lifetime",
+                    DiagnosticIds.ReferenceParameterLifetimeMutation);
+                return false;
+            case LifetimeOwnerOriginKind.StorageValueReference:
+                string storageName = resolution.StorageType?.ToDisplayString() ?? "storage<T>";
+                _diagnostics.Report(location,
+                    $"cannot {action} the lifetime of a value through a reference borrowed from '{storageName}'; use '{storageName}&' to manage the storage lifetime",
+                    DiagnosticIds.StorageValueLifetimeMutation);
+                return false;
+            case LifetimeOwnerOriginKind.RawPointer:
+                if (operation == LifetimeOperationKind.EndLifetime)
+                    _diagnostics.Report(location,
+                        "cannot explicitly destruct a value through an ordinary raw pointer; use 'free(ptr)' for a heap allocation, or 'storage<T>' for manual lifetime management",
+                        DiagnosticIds.HeapPointeeExplicitDestruction);
+                else
+                    _diagnostics.Report(location,
+                        "cannot move a value through an ordinary raw pointer; raw pointers provide access but no lifetime-management authority",
+                        DiagnosticIds.InvalidMoveSource);
+                return false;
+            case LifetimeOwnerOriginKind.ReferenceField:
+                _diagnostics.Report(location,
+                    $"cannot {action} a lifetime through reference field '{resolution.Subject}'; reference fields borrow external values and do not own their lifetimes",
+                    DiagnosticIds.UnresolvedLifetimeOwner);
+                return false;
+            default:
+                _diagnostics.Report(location,
+                    $"cannot {action} this lifetime because its authoritative owner cannot be resolved to one semantic place" +
+                    (resolution.Subject is null ? string.Empty : $" ({resolution.Subject})"),
+                    DiagnosticIds.UnresolvedLifetimeOwner);
+                return false;
+        }
     }
 
     private void ValidateBorrowCreation(
@@ -2404,6 +2707,14 @@ internal sealed class FunctionBodyBinder
         BoundReferenceConversionExpression conversion => GetReferenceAliasRoot(conversion.Source),
         BoundCopyExpression copy => GetReferenceAliasRoot(copy.Source),
         BoundMemberAccessExpression member => GetReferenceAliasRoot(member.Receiver),
+        BoundCallExpression call when TryGetReturnedReferenceSource(
+            call.Function, call.Arguments, receiver: null, out BoundExpression source) =>
+            GetReferenceAliasRoot(source),
+        BoundMethodCallExpression call when call.Method.VTableSlot is null &&
+                                               TryGetReturnedReferenceSource(
+                                                   call.Method, call.Arguments, call.Receiver,
+                                                   out BoundExpression source) =>
+            GetReferenceAliasRoot(source),
         BoundMethodCallExpression call => GetReferenceAliasRoot(call.Receiver),
         BoundInterfaceMethodCallExpression call => GetReferenceAliasRoot(call.Receiver),
         BoundLifetimeValueExpression value => GetReferenceAliasRoot(value.Source),
@@ -4389,10 +4700,11 @@ internal sealed class FunctionBodyBinder
                 "'destruct' expects exactly one argument", DiagnosticIds.WrongArity);
         if (!ValidateWholeStorageLifetimeOperation(target, targetLocation, "destruct"))
             return new BoundErrorExpression();
-        if (!ValidateLifetimeOperationAuthority(target, LifetimeOperationKind.EndLifetime, targetLocation))
+        if (!ValidateLifetimeOperationAuthority(target, LifetimeOperationKind.EndLifetime, targetLocation,
+                out LifetimeOwnerResolution lifetimeOwner))
             return new BoundErrorExpression();
         TypeSymbol valueType;
-        MovePlace? trackedPlace = TryGetMovePlace(target, out MovePlace destructPlace) ? destructPlace : null;
+        MovePlace? trackedPlace = lifetimeOwner.OwnerPlace;
         if (trackedPlace is not null && !ValidateLifetimeInvalidation(trackedPlace, targetLocation,
                 GetReferenceAliasRoot(target), "destruct", DiagnosticIds.DestructWhileBorrowed))
             return new BoundErrorExpression();
@@ -4479,7 +4791,21 @@ internal sealed class FunctionBodyBinder
                 ? definition.ReceiverMoveEffects
                 : method.ReceiverMoveEffects;
         if (effects.IsEmpty) return;
-        if (pointerAccess || !TryGetMovePlace(receiver, out MovePlace receiverPlace))
+        LifetimeOwnerResolution lifetimeOwner = ResolveAuthoritativeLifetimeOwner(receiver);
+        if (lifetimeOwner.Origin == LifetimeOwnerOriginKind.StorageValueReference)
+        {
+            _diagnostics.Report(location,
+                $"method '{method.Name}' cannot leave a value owned by 'storage<T>' partially moved or destructed",
+                DiagnosticIds.PartialStorageLifetimeOperation);
+            return;
+        }
+        if (lifetimeOwner.Authority != LifetimeAuthorityKind.Full)
+        {
+            _ = ReportLifetimeAuthorityDiagnostic(lifetimeOwner,
+                LifetimeOperationKind.TransferLifetime, location);
+            return;
+        }
+        if (pointerAccess || lifetimeOwner.OwnerPlace is not MovePlace receiverPlace)
         {
             _diagnostics.Report(location,
                 $"receiver move effect of method '{method.Name}' cannot be represented through this indirect receiver",
@@ -4678,7 +5004,7 @@ internal sealed class FunctionBodyBinder
         }
 
         if (!ValidateLifetimeOperationAuthority(pointer,
-                LifetimeOperationKind.EndLifetimeAndDeallocate, syntax.FreeKeyword.Location))
+                LifetimeOperationKind.EndLifetimeAndDeallocate, syntax.FreeKeyword.Location, out _))
             return new BoundErrorExpression();
 
         if (TryGetMovePlace(pointer, out MovePlace pointerPlace) &&
@@ -4865,6 +5191,9 @@ internal sealed class FunctionBodyBinder
                         $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments",
                         DiagnosticIds.BorrowConflict);
                 callBorrows.Add((argumentPlace, parameterReference.IsReadonly));
+                if (!parameterReference.IsReadonly &&
+                    TryGetStorageType(parameterReference.ElementType, out _))
+                    _storageStates[argumentPlace] = StorageState.MaybeInitialized;
             }
         }
 
@@ -5394,16 +5723,7 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (IsOrdinaryValueProducingCall(expression) &&
-            TypeFacts.GetCompleteDestructor(expression.Type) is { } destructor)
-        {
-            ValidateDestructorAccessibility(expression.Type, GetLocation(syntax));
-            var discard = new BoundDiscardExpression(expression, destructor);
-            _expressionLocations[discard] = GetLocation(syntax);
-            return discard;
-        }
-
-        return expression;
+        return CompleteFullExpression(expression, resultConsumed: false);
     }
 
     private static ExpressionSyntax? GetStandaloneOwnershipExpression(ExpressionSyntax syntax)
@@ -5413,12 +5733,177 @@ internal sealed class FunctionBodyBinder
         return syntax is MoveExpressionSyntax or LockExpressionSyntax or NewExpressionSyntax ? syntax : null;
     }
 
-    private static bool IsOrdinaryValueProducingCall(BoundExpression expression) => expression is
+    private BoundExpression CompleteFullExpression(BoundExpression expression, bool resultConsumed)
+    {
+        var temporaries = ImmutableArray.CreateBuilder<BoundFullExpressionTemporary>();
+        var registered = new HashSet<BoundExpression>(ReferenceEqualityComparer.Instance);
+        CollectFullExpressionTemporaries(expression, resultConsumed, temporaries, registered);
+        if (temporaries.Count == 0) return expression;
+        var fullExpression = new BoundFullExpression(expression, temporaries.ToImmutable());
+        if (_expressionLocations.TryGetValue(expression, out TextLocation location))
+            _expressionLocations[fullExpression] = location;
+        return fullExpression;
+    }
+
+    private void CollectFullExpressionTemporaries(
+        BoundExpression expression,
+        bool consumed,
+        ImmutableArray<BoundFullExpressionTemporary>.Builder temporaries,
+        HashSet<BoundExpression> registered)
+    {
+        void Visit(BoundExpression child, bool childConsumed = false) =>
+            CollectFullExpressionTemporaries(child, childConsumed, temporaries, registered);
+        void ConsumeAll(IEnumerable<BoundExpression> children)
+        {
+            foreach (BoundExpression child in children) Visit(child, childConsumed: true);
+        }
+
+        switch (expression)
+        {
+            case BoundFullExpression full:
+                Visit(full.Expression, consumed);
+                break;
+            case BoundUnaryExpression unary:
+                Visit(unary.Operand);
+                break;
+            case BoundMoveExpression move:
+                Visit(move.Source);
+                break;
+            case BoundCopyExpression copy:
+                Visit(copy.Source);
+                break;
+            case BoundUniqueAdoptionExpression adoption:
+                Visit(adoption.Allocation, childConsumed: true);
+                break;
+            case BoundSharedAdoptionExpression adoption:
+                Visit(adoption.Allocation, childConsumed: true);
+                break;
+            case BoundWeakConversionExpression conversion:
+                Visit(conversion.Shared);
+                break;
+            case BoundLockExpression @lock:
+                Visit(@lock.Weak);
+                break;
+            case BoundBinaryExpression binary:
+                Visit(binary.Left);
+                Visit(binary.Right);
+                break;
+            case BoundAssignmentExpression assignment:
+                Visit(assignment.Target);
+                Visit(assignment.Expression, childConsumed: true);
+                break;
+            case BoundCompoundAccessorAssignmentExpression assignment:
+                Visit(assignment.Receiver);
+                ConsumeAll(assignment.Arguments);
+                Visit(assignment.Value, childConsumed: true);
+                break;
+            case BoundCallExpression call:
+                ConsumeAll(call.Arguments);
+                break;
+            case BoundMethodCallExpression call:
+                Visit(call.Receiver);
+                ConsumeAll(call.Arguments);
+                break;
+            case BoundInterfaceMethodCallExpression call:
+                Visit(call.Receiver);
+                ConsumeAll(call.Arguments);
+                break;
+            case BoundPropertySetExpression set:
+                Visit(set.Receiver);
+                Visit(set.Value, childConsumed: true);
+                break;
+            case BoundInterfacePropertySetExpression set:
+                Visit(set.Receiver);
+                Visit(set.Value, childConsumed: true);
+                break;
+            case BoundIndexerSetExpression set:
+                Visit(set.Receiver);
+                ConsumeAll(set.Arguments);
+                Visit(set.Value, childConsumed: true);
+                break;
+            case BoundInterfaceIndexerSetExpression set:
+                Visit(set.Receiver);
+                ConsumeAll(set.Arguments);
+                Visit(set.Value, childConsumed: true);
+                break;
+            case BoundMemberAccessExpression member:
+                Visit(member.Receiver);
+                break;
+            case BoundCastExpression cast:
+                Visit(cast.Expression);
+                break;
+            case BoundInterfaceConversionExpression conversion:
+                Visit(conversion.Source);
+                break;
+            case BoundReferenceConversionExpression conversion:
+                Visit(conversion.Source);
+                break;
+            case BoundReferenceDereferenceExpression dereference:
+                Visit(dereference.Reference);
+                break;
+            case BoundLifetimeValueExpression value:
+                Visit(value.Source);
+                break;
+            case BoundStorageConstructExpression construction:
+                Visit(construction.Storage);
+                if (construction.Value is { } constructedValue) Visit(constructedValue, childConsumed: true);
+                ConsumeAll(construction.Arguments);
+                break;
+            case BoundExplicitDestructExpression destruction:
+                Visit(destruction.Target);
+                break;
+            case BoundStorageMoveExpression move:
+                Visit(move.Storage);
+                break;
+            case BoundIndexExpression index:
+                Visit(index.Receiver);
+                foreach (BoundExpression argument in index.Indices) Visit(argument);
+                break;
+            case BoundStructConstructionExpression construction:
+                ConsumeAll(construction.Arguments);
+                break;
+            case BoundConstructorCallExpression construction:
+                ConsumeAll(construction.Arguments);
+                break;
+            case BoundBaseLifecycleCallExpression call:
+                ConsumeAll(call.Arguments);
+                break;
+            case BoundArrayCreationExpression array:
+                foreach (BoundExpression dimension in array.Dimensions) Visit(dimension);
+                break;
+            case BoundArrayMetadataExpression metadata:
+                Visit(metadata.Receiver);
+                if (metadata.Dimension is { } metadataDimension) Visit(metadataDimension);
+                break;
+            case BoundNewExpression allocation:
+                ConsumeAll(allocation.Arguments);
+                break;
+            case BoundFreeExpression free:
+                Visit(free.Pointer);
+                break;
+        }
+
+        if (consumed || !IsTemporaryValue(expression) || !registered.Add(expression) ||
+            TypeFacts.GetCompleteDestructor(expression.Type) is not { } destructor)
+            return;
+        TextLocation location = _expressionLocations.GetValueOrDefault(expression);
+        ValidateDestructorAccessibility(expression.Type, location);
+        temporaries.Add(new BoundFullExpressionTemporary(expression, destructor));
+    }
+
+    private static bool IsTemporaryValue(BoundExpression expression) => expression is
+        BoundMoveExpression or
+        BoundCopyExpression or
+        BoundUniqueAdoptionExpression or
+        BoundSharedAdoptionExpression or
+        BoundWeakConversionExpression or
+        BoundLockExpression or
         BoundCallExpression or
         BoundMethodCallExpression or
         BoundInterfaceMethodCallExpression or
-        BoundConstructorCallExpression or
-        BoundStructConstructionExpression;
+        BoundStorageMoveExpression or
+        BoundStructConstructionExpression or
+        BoundConstructorCallExpression;
 
     private bool ValidateWholeStorageLifetimeOperation(
         BoundExpression expression,

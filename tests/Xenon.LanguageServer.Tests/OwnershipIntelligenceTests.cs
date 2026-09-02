@@ -236,6 +236,26 @@ public sealed class OwnershipIntelligenceTests
         const string source = """
             namespace App;
             struct Resource { public int Value; public void Use() {} public ~Resource() {} }
+            struct Child { public int Value; public ~Child() {} }
+            struct Parent
+            {
+                public Child Child;
+                public Child TakeChild() { return move Child; }
+                public void DestroyChild() { destruct(Child); }
+            }
+            Resource& Forward(Resource& value) { return value; }
+            Resource& Select(bool condition, Resource& first, Resource& second)
+            {
+                if (condition) return first;
+                return second;
+            }
+            interface ISource { Resource& Get(); }
+            struct View
+            {
+                public Resource& Resource;
+                public void Kill() { destruct(Resource); }
+                public Resource& Get() { return Resource; }
+            }
             void RawPointer(Resource* pointer)
             {
                 destruct(*pointer);
@@ -276,6 +296,50 @@ public sealed class OwnershipIntelligenceTests
                 storage<Resource> slot = Resource();
                 destruct(slot.Value);
                 int value = move slot.Value;
+            }
+            void PartialStorageLifetimeThroughMethods()
+            {
+                storage<Parent> slot = Parent();
+                Child child = slot.TakeChild();
+                slot.DestroyChild();
+            }
+            void ReferenceParameterLifetime(Resource& resource)
+            {
+                destruct(resource);
+                Resource moved = move resource;
+            }
+            void ReferenceParameterChildLifetime(Parent& parent)
+            {
+                destruct(parent.Child);
+                Child moved = move parent.Child;
+            }
+            void ReferenceParameterIndirectLifetime(Parent& parent)
+            {
+                parent.DestroyChild();
+            }
+            void ForwardedReferenceParameterLifetime(Resource& resource)
+            {
+                destruct(Forward(resource));
+            }
+            void ForwardedStorageValueLifetime()
+            {
+                storage<Resource> value = Resource();
+                Resource moved = move Forward(value);
+            }
+            void ReturnedReferenceFieldLifetime(Resource& resource)
+            {
+                View view = View { resource };
+                destruct(view.Get());
+            }
+            void UnknownReferenceLifetime(ISource& source)
+            {
+                destruct(source.Get());
+            }
+            void MultipleReferenceLifetime(bool condition)
+            {
+                Resource first = Resource();
+                Resource second = Resource();
+                destruct(Select(condition, first, second));
             }
             void SharedCondition(shared<Resource> owner)
             {
@@ -332,7 +396,9 @@ public sealed class OwnershipIntelligenceTests
         Assert.Contains(DiagnosticIds.MoveWhileBorrowed, codes);
         Assert.Contains(DiagnosticIds.InvalidLockOperand, codes);
         Assert.Equal(3, codes.Count(code => code == DiagnosticIds.UnconsumedOwnershipExpression));
-        Assert.Equal(2, codes.Count(code => code == DiagnosticIds.PartialStorageLifetimeOperation));
+        Assert.Equal(4, codes.Count(code => code == DiagnosticIds.PartialStorageLifetimeOperation));
+        Assert.Equal(6, codes.Count(code => code == DiagnosticIds.ReferenceParameterLifetimeMutation));
+        Assert.Equal(4, codes.Count(code => code == DiagnosticIds.UnresolvedLifetimeOwner));
         Assert.Contains(DiagnosticIds.InvalidCondition, codes);
         Assert.Contains(DiagnosticIds.StorageAlreadyInitialized, codes);
         Assert.Contains(DiagnosticIds.StorageValueLifetimeMutation, codes);

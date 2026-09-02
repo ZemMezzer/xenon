@@ -97,16 +97,20 @@ public sealed record BoundLockExpression(
     public override BoundKind Kind => BoundKind.LockExpression;
 }
 
-/// <summary>
-/// A value-producing call whose result is intentionally discarded.  When the
-/// result owns a lifetime, lowering destroys the temporary at the end of the
-/// full expression.
-/// </summary>
-public sealed record BoundDiscardExpression(
+/// <summary>A destructible prvalue whose lifetime ends with its enclosing full expression.</summary>
+public sealed record BoundFullExpressionTemporary(
     BoundExpression Value,
-    FunctionSymbol? Destructor) : BoundExpression(BuiltinTypes.Void)
+    FunctionSymbol Destructor);
+
+/// <summary>
+/// One language full-expression and every unconsumed temporary constructed
+/// while evaluating it, in construction order.
+/// </summary>
+public sealed record BoundFullExpression(
+    BoundExpression Expression,
+    ImmutableArray<BoundFullExpressionTemporary> Temporaries) : BoundExpression(Expression.Type)
 {
-    public override BoundKind Kind => BoundKind.DiscardExpression;
+    public override BoundKind Kind => BoundKind.FullExpression;
 }
 
 public sealed record BoundBinaryExpression(
