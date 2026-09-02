@@ -6,20 +6,20 @@ struct Box<T>
 
     public Box(T initial)
     {
-        value = initial;
+        value = move initial;
     }
 
     public T Get()
     {
-        T local = value;
-        return local;
+        T local = move value;
+        return move local;
     }
 }
 
 int ReadInt(int value) { return Box<int>(value).Get(); }
 float ReadFloat(float value) { return Box<float>(value).Get(); }
 long ReadLong(long value) { return Box<long>(value).Get(); }
-T Identity<T>(T value) { return value; }
+T Identity<T>(T value) { return move value; }
 
 int Main()
 {

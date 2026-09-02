@@ -285,6 +285,7 @@ internal sealed class GenericStructSpecializer
             var constructor = new FunctionSymbol(FunctionKind.Constructor, specialized,
                 SubstituteParameters(source.Parameters, substitutions, _originLocations[specialized]),
                 source.Declaration, source.Accessibility);
+            constructor.SetGenericSpecialization(source, specialized.TypeArguments);
             _specializedFunctions.Add((source, specialized), constructor);
             return constructor;
         }).ToImmutableArray();
@@ -294,6 +295,7 @@ internal sealed class GenericStructSpecializer
         {
             var destructor = new FunctionSymbol(FunctionKind.Destructor, specialized, [],
                 sourceDestructor.Declaration, sourceDestructor.Accessibility);
+            destructor.SetGenericSpecialization(sourceDestructor, specialized.TypeArguments);
             specialized.SetDestructor(destructor);
             _specializedFunctions.Add((sourceDestructor, specialized), destructor);
         }
@@ -380,8 +382,46 @@ internal sealed class GenericStructSpecializer
         PointerTypeSymbol pointer => _types.PointerTo(Substitute(pointer.ElementType, substitutions, origin), pointer.IsReadonly),
         ReferenceTypeSymbol reference => _types.ReferenceTo(Substitute(reference.ElementType, substitutions, origin), reference.IsReadonly),
         ArrayTypeSymbol array => _types.ArrayOf(Substitute(array.ElementType, substitutions, origin), array.Rank),
+        UniqueTypeSymbol unique => SubstituteUnique(unique, substitutions, origin),
+        SharedTypeSymbol shared => SubstituteOwnership(shared, substitutions, origin),
+        WeakTypeSymbol weak => SubstituteOwnership(weak, substitutions, origin),
+        StorageTypeSymbol storage => SubstituteStorage(storage, substitutions, origin),
+        PinTypeSymbol pin => _types.PinOf(Substitute(pin.ElementType, substitutions, origin)),
         _ => type,
     };
+
+    private TypeSymbol SubstituteUnique(UniqueTypeSymbol unique,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
+    {
+        UniqueTypeSymbol result = _types.UniqueOf(Substitute(unique.ElementType, substitutions, origin));
+        if (unique.CompleteDestructor is { } sourceDestructor)
+            _types.EnsureUniqueDestructor(result, sourceDestructor.ContainingNamespace, sourceDestructor.Declaration);
+        return result;
+    }
+
+    private TypeSymbol SubstituteStorage(StorageTypeSymbol storage,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
+    {
+        StorageTypeSymbol result = _types.StorageOf(Substitute(storage.ElementType, substitutions, origin));
+        if (storage.CompleteDestructor is { } sourceDestructor)
+            _types.EnsureStorageDestructor(result, sourceDestructor.ContainingNamespace, sourceDestructor.Declaration);
+        return result;
+    }
+
+    private TypeSymbol SubstituteOwnership(OwnershipTypeSymbol ownership,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
+    {
+        TypeSymbol element = Substitute(ownership.ElementType, substitutions, origin);
+        OwnershipTypeSymbol result = ownership switch
+        {
+            SharedTypeSymbol => _types.SharedOf(element),
+            WeakTypeSymbol => _types.WeakOf(element),
+            _ => throw new InvalidOperationException(),
+        };
+        if (ownership.CompleteDestructor is { } sourceDestructor)
+            _types.EnsureOwnershipDestructor(result, sourceDestructor.ContainingNamespace, sourceDestructor.Declaration);
+        return result;
+    }
 
     private TypeSymbol SubstituteConstructed(StructTypeSymbol constructed,
         IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)

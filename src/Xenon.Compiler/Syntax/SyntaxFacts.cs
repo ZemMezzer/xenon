@@ -64,6 +64,13 @@ public static class SyntaxFacts
             ["bitcast"] = SyntaxKind.BitCastKeyword,
             ["new"] = SyntaxKind.NewKeyword,
             ["free"] = SyntaxKind.FreeKeyword,
+            ["move"] = SyntaxKind.MoveKeyword,
+            ["lock"] = SyntaxKind.LockKeyword,
+            ["unique"] = SyntaxKind.UniqueKeyword,
+            ["shared"] = SyntaxKind.SharedKeyword,
+            ["weak"] = SyntaxKind.WeakKeyword,
+            ["storage"] = SyntaxKind.StorageKeyword,
+            ["pin"] = SyntaxKind.PinKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
 
     public static SyntaxKind GetKeywordKind(string text) =>
@@ -90,6 +97,11 @@ public static class SyntaxFacts
         SyntaxKind.NUIntKeyword or
         SyntaxKind.CLongKeyword or
         SyntaxKind.CULongKeyword or
+        SyntaxKind.UniqueKeyword or
+        SyntaxKind.SharedKeyword or
+        SyntaxKind.WeakKeyword or
+        SyntaxKind.StorageKeyword or
+        SyntaxKind.PinKeyword or
         SyntaxKind.IdentifierToken;
 
     public static bool IsAssignmentOperator(SyntaxKind kind) => kind is

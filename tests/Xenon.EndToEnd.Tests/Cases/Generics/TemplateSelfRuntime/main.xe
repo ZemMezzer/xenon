@@ -1,7 +1,7 @@
 namespace GenericTemplateSelfRuntime;
 
-struct Box<T> { public T value; public Box(T value) { this.value = value; } }
-struct Wrapper<T> { public T value; public Wrapper(T value) { this.value = value; } }
+struct Box<T> { public T value; public Box(T value) { this.value = move value; } }
+struct Wrapper<T> { public T value; public Wrapper(T value) { this.value = move value; } }
 
 template Equalable { bool Equals(Equalable other); }
 template Processor { int Process(Box<Processor> value); }
@@ -16,10 +16,10 @@ struct Worker
     public int ProcessDeep(Wrapper<Box<Worker>> input) { return input.value.value.value; }
 }
 
-bool AreEqual<T>(T left, T right) where T : Equalable { return left.Equals(right); }
-int Execute<T>(T worker, Box<T> value) where T : Processor { return worker.Process(value); }
+bool AreEqual<T>(T left, T right) where T : Equalable { return left.Equals(move right); }
+int Execute<T>(T worker, Box<T> value) where T : Processor { return worker.Process(move value); }
 int ExecuteDeep<T>(T worker, Wrapper<Box<T>> value) where T : DeepProcessor
-{ return worker.ProcessDeep(value); }
+{ return worker.ProcessDeep(move value); }
 
 int Main()
 {

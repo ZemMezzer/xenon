@@ -22,6 +22,7 @@ public sealed class LlvmIrGenerator
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
+    private readonly Dictionary<StorageTypeSymbol, LLVMTypeRef> _storageTypes = [];
     private readonly Dictionary<InterfaceTypeSymbol, LLVMTypeRef> _interfaceTypes = [];
     private readonly Dictionary<InterfaceTypeSymbol, LLVMValueRef> _interfaceKeys = [];
     private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields = [];
@@ -90,7 +91,8 @@ public sealed class LlvmIrGenerator
         {
             FunctionSymbol function = bound.Symbol;
             if (compilation.IsSymbolDefinedHere(function) &&
-                (function.IsPublic || function.IsExport || function.FunctionKind == FunctionKind.InstanceInitializer))
+                (function.IsPublic || function.IsExport ||
+                 function.FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue))
                 exports.Add(new LlvmNativeExport(GetFunctionNativeName(function, abiIdentity)));
         }
         void AddTypeExports(NamespaceSymbol @namespace)
@@ -206,10 +208,9 @@ public sealed class LlvmIrGenerator
             DeclareInterfaceTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareStructTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
-            foreach (BoundFunction specialization in compilation.SemanticModel.Functions
-                .Where(function => function.Symbol.IsGenericSpecialization))
-                if (!_functions.ContainsKey(specialization.Symbol))
-                    DeclareFunction(specialization.Symbol);
+            foreach (BoundFunction function in compilation.SemanticModel.Functions)
+                if (!_functions.ContainsKey(function.Symbol))
+                    DeclareFunction(function.Symbol);
             DeclareInterfaceTables(compilation.SemanticModel.GlobalNamespace);
             DeclareVirtualTables(compilation.SemanticModel.GlobalNamespace);
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
@@ -243,6 +244,7 @@ public sealed class LlvmIrGenerator
             _functions.Clear();
             _nativeFunctions.Clear();
             _structTypes.Clear();
+            _storageTypes.Clear();
             _interfaceTypes.Clear();
             _interfaceKeys.Clear();
             _staticFields.Clear();
@@ -429,7 +431,10 @@ public sealed class LlvmIrGenerator
                 // Object layout still needs only one dispatch pointer.
                 LLVMValueRef[] entries = [
                     _interfaceMaps.TryGetValue(type, out LlvmVTable map) ? map.Value : LLVMValueRef.CreateConstPointerNull(elementType),
-                    .. type.VirtualMethods.Select(method => _functions[method].Value)];
+                    .. type.VirtualMethods.Select(method =>
+                        _functions[method.FunctionKind == FunctionKind.Destructor
+                            ? type.CompleteDestructor ?? method
+                            : method].Value)];
                 table.Initializer = LLVMValueRef.CreateConstArray(elementType, entries);
             }
             else if (IsWindowsTarget() && IsSharedReference(type))
@@ -543,6 +548,12 @@ public sealed class LlvmIrGenerator
     private static LLVMValueRef DefaultValue(TypeSymbol type, Func<TypeSymbol, LLVMTypeRef> mapType,
         Dictionary<StructTypeSymbol, LlvmVTable> virtualTables, StructTypeSymbol? runtimeType = null)
     {
+        if (type is StorageTypeSymbol storage)
+            return LLVMValueRef.CreateConstNamedStruct(mapType(storage),
+                [DefaultValue(storage.ElementType, mapType, virtualTables),
+                    LLVMValueRef.CreateConstInt(mapType(BuiltinTypes.Bool), 0)]);
+        if (type is LifetimeModifierTypeSymbol modifier)
+            return DefaultValue(modifier.ElementType, mapType, virtualTables, runtimeType);
         if (type is not StructTypeSymbol structure) return LLVMValueRef.CreateConstNull(mapType(type));
         var fields = new List<LLVMValueRef>();
         runtimeType ??= structure;
@@ -615,6 +626,9 @@ public sealed class LlvmIrGenerator
             {
                 DeclareFunction(type.Destructor);
             }
+
+            if (type.CompleteDestructor is { FunctionKind: FunctionKind.DestructorGlue } destructor)
+                DeclareFunction(destructor);
         }
 
         foreach (NamespaceSymbol child in @namespace.Namespaces)
@@ -753,6 +767,16 @@ public sealed class LlvmIrGenerator
 
     private LLVMTypeRef MapType(TypeSymbol type)
     {
+        if (type is StorageTypeSymbol storage)
+        {
+            if (_storageTypes.TryGetValue(storage, out LLVMTypeRef existing)) return existing;
+            LLVMTypeRef result = _context.CreateNamedStruct($"__xenon.storage.{_storageTypes.Count}");
+            _storageTypes.Add(storage, result);
+            result.StructSetBody([MapType(storage.ElementType), _context.Int1Type], false);
+            return result;
+        }
+        if (type is LifetimeModifierTypeSymbol modifier)
+            return MapType(modifier.ElementType);
         if (TypeIdentity.AreSame(type, BuiltinTypes.Void))
         {
             return _context.VoidType;
@@ -808,6 +832,14 @@ public sealed class LlvmIrGenerator
         {
             return LLVMTypeRef.CreatePointer(MapType(array.ElementType), 0);
         }
+
+        if (type is UniqueTypeSymbol unique)
+        {
+            return MapType(unique.StorageType);
+        }
+
+        if (type is SharedTypeSymbol or WeakTypeSymbol)
+            return LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
 
         if (type is EnumTypeSymbol enumeration) return MapType(enumeration.UnderlyingType);
 
@@ -1027,8 +1059,13 @@ public sealed class LlvmIrGenerator
         private readonly Stack<LoopTargets> _loopTargets = [];
         private readonly Stack<BranchTarget> _breakTargets = [];
         private readonly List<CleanupScope> _cleanupScopes = [];
-        private readonly Dictionary<LocalVariableSymbol, (LLVMValueRef Node, LLVMValueRef Initialized)> _scalarCleanup = [];
-        private readonly Dictionary<LocalVariableSymbol, LLVMValueRef> _scalarScopeHeads = [];
+        private readonly Dictionary<VariableSymbol, ImmutableArray<ScalarCleanupEntry>> _scalarCleanup = [];
+        private readonly Dictionary<VariableSymbol, LLVMValueRef> _scalarScopeHeads = [];
+        private readonly Dictionary<LocalVariableSymbol, ArrayCleanupEntry> _arrayCleanup = [];
+        private readonly Dictionary<LocalVariableSymbol, LLVMValueRef> _arrayScopeHeads = [];
+        private readonly Dictionary<BoundMoveExpression, LLVMValueRef> _arrayMoveCleanupState = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<BoundArrayCreationExpression, LLVMValueRef> _arrayCreationCleanupNodes = new(ReferenceEqualityComparer.Instance);
+        private Dictionary<BoundExpression, FullExpressionTemporarySlot>? _fullExpressionTemporaries;
         private LLVMTypeRef _cleanupNodeType;
         private bool _terminated;
         private BoundExpression? _exitCleanup;
@@ -1093,10 +1130,13 @@ public sealed class LlvmIrGenerator
                 LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
                 // One runtime LIFO list per lexical scope tracks lifetimes, not aliases. Nodes
                 // retain the element stride and destructor so different types can mix.
-                _cleanupNodeType = _context.GetStructType([pointer, pointer, _mapType(BuiltinTypes.NUInt), _mapType(BuiltinTypes.NUInt), pointer], false);
+                _cleanupNodeType = _context.GetStructType(
+                    [pointer, pointer, _mapType(BuiltinTypes.NUInt), _mapType(BuiltinTypes.NUInt), pointer, _context.Int1Type],
+                    false);
             }
+            AllocateParameterCleanups();
             AllocateLocals(body);
-            EmitBlock(body);
+            EmitBlock(body, registerParameters: true);
 
             if (!_terminated && TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void))
             {
@@ -1104,6 +1144,88 @@ public sealed class LlvmIrGenerator
                 _builder.BuildRetVoid();
                 _terminated = true;
             }
+        }
+
+        private void AllocateParameterCleanups()
+        {
+            foreach (ParameterSymbol parameter in _function.Parameters)
+                AllocateScalarCleanup(parameter);
+        }
+
+        private void AllocateScalarCleanup(VariableSymbol variable)
+        {
+            if (TypeFacts.GetCompleteDestructor(variable.Type) is null) return;
+            var units = ImmutableArray.CreateBuilder<ScalarCleanupEntry>();
+            foreach ((ImmutableArray<FieldSymbol> path, TypeSymbol valueType, FunctionSymbol destructor) in GetScalarDestructionUnits(variable.Type))
+                units.Add(new ScalarCleanupEntry(
+                    _builder.BuildAlloca(_cleanupNodeType, "local.cleanup.node"),
+                    _builder.BuildAlloca(_context.Int1Type, "local.constructed"),
+                    destructor,
+                    valueType,
+                    path));
+            _scalarCleanup.Add(variable, units.ToImmutable());
+        }
+
+        private static ImmutableArray<(ImmutableArray<FieldSymbol> Path, TypeSymbol ValueType, FunctionSymbol Destructor)> GetScalarDestructionUnits(
+            TypeSymbol type)
+        {
+            var result = ImmutableArray.CreateBuilder<(ImmutableArray<FieldSymbol>, TypeSymbol, FunctionSymbol)>();
+            Add(type, [], result);
+            return result.ToImmutable();
+
+            static void Add(
+                TypeSymbol current,
+                ImmutableArray<FieldSymbol> path,
+                ImmutableArray<(ImmutableArray<FieldSymbol>, TypeSymbol, FunctionSymbol)>.Builder units)
+            {
+                if (current is PinTypeSymbol pin)
+                {
+                    Add(pin.ElementType, path, units);
+                    return;
+                }
+                if (current is StorageTypeSymbol storage)
+                {
+                    if (storage.CompleteDestructor is { } storageDestructor)
+                        units.Add((path, storage, storageDestructor));
+                    return;
+                }
+                if (current is OwnershipTypeSymbol { CompleteDestructor: { } ownershipDestructor })
+                {
+                    units.Add((path, current, ownershipDestructor));
+                    return;
+                }
+                if (current is not StructTypeSymbol structure) return;
+                // A user destructor is an indivisible destruction boundary. Partial moves through
+                // this aggregate are rejected by the binder.
+                if (structure.FindDestructor() is not null)
+                {
+                    units.Add((path, structure, structure.CompleteDestructor!));
+                    return;
+                }
+
+                if (structure.BaseType is { } baseType) Add(baseType, path, units);
+                foreach (FieldSymbol field in structure.Fields)
+                    if (TypeFacts.GetCompleteDestructor(field.Type) is not null)
+                        Add(field.Type, path.Add(field), units);
+            }
+        }
+
+        private void InitializeScalarCleanup(VariableSymbol variable)
+        {
+            if (!_scalarCleanup.TryGetValue(variable, out ImmutableArray<ScalarCleanupEntry> cleanups)) return;
+            _scalarScopeHeads[variable] = _cleanupScopes[^1].Head;
+            foreach (ScalarCleanupEntry cleanup in cleanups)
+            {
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), cleanup.Initialized);
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                    _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
+            }
+        }
+
+        private void EmitInitialScalarRegistration(VariableSymbol variable, LLVMValueRef address)
+        {
+            InitializeScalarCleanup(variable);
+            EmitScalarRegistration(variable, address);
         }
 
         private void AllocateLocals(BoundStatement statement)
@@ -1120,9 +1242,8 @@ public sealed class LlvmIrGenerator
                 case BoundVariableDeclarationStatement variable:
                     LLVMValueRef address = _builder.BuildAlloca(_mapType(variable.Variable.Type), variable.Variable.Name);
                     _addresses.Add(variable.Variable, address);
-                    if (variable.Variable.Destructor is not null)
-                        _scalarCleanup.Add(variable.Variable, (_builder.BuildAlloca(_cleanupNodeType, "local.cleanup.node"),
-                            _builder.BuildAlloca(_context.Int1Type, "local.constructed")));
+                    AllocateScalarCleanup(variable.Variable);
+                    AllocateArrayCleanup(variable.Variable);
                     break;
                 case BoundIfStatement @if:
                     AllocateLocals(@if.ThenStatement);
@@ -1149,9 +1270,12 @@ public sealed class LlvmIrGenerator
             }
         }
 
-        private void EmitBlock(BoundBlockStatement block)
+        private void EmitBlock(BoundBlockStatement block, bool registerParameters = false)
         {
-            BeginCleanupScope();
+            BeginCleanupScope(restoreStack: !block.RetainsStackStorage);
+            if (registerParameters)
+                foreach (ParameterSymbol parameter in _function.Parameters)
+                    EmitInitialScalarRegistration(parameter, GetAddress(parameter));
             foreach (BoundStatement statement in block.Statements)
             {
                 if (_terminated)
@@ -1176,14 +1300,14 @@ public sealed class LlvmIrGenerator
             EndCleanupScope();
         }
 
-        private void BeginCleanupScope()
+        private void BeginCleanupScope(bool restoreStack = true)
         {
             if (!_function.HasScopeCleanup) return;
             LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMValueRef stack = _builder.BuildCall2(LLVMTypeRef.CreateFunction(pointer, [], false), _getMemoryRuntime().StackSave, Array.Empty<LLVMValueRef>(), "scope.stack");
             LLVMValueRef head = _builder.BuildAlloca(pointer, "scope.cleanup.head");
             _builder.BuildStore(LLVMValueRef.CreateConstPointerNull(pointer), head);
-            _cleanupScopes.Add(new CleanupScope(stack, head));
+            _cleanupScopes.Add(new CleanupScope(stack, head, restoreStack));
         }
 
         private void EndCleanupScope()
@@ -1204,6 +1328,8 @@ public sealed class LlvmIrGenerator
             LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMBasicBlockRef condition = _llvmFunction.AppendBasicBlock("stack.cleanup.condition");
             LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("stack.cleanup.body");
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("stack.cleanup.destroy");
+            LLVMBasicBlockRef nextNode = _llvmFunction.AppendBasicBlock("stack.cleanup.next");
             LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("stack.cleanup.end");
             _builder.BuildBr(condition);
             _builder.PositionAtEnd(condition);
@@ -1216,15 +1342,21 @@ public sealed class LlvmIrGenerator
             LLVMValueRef length = Load(2, _mapType(BuiltinTypes.NUInt));
             LLVMValueRef stride = Load(3, _mapType(BuiltinTypes.NUInt));
             LLVMValueRef destructor = Load(4, pointer);
+            LLVMValueRef active = Load(5, _context.Int1Type);
+            _builder.BuildCondBr(active, destroy, nextNode);
+            _builder.PositionAtEnd(destroy);
             EmitElementLoop(length, reverse: true, index =>
             {
                 LLVMValueRef element = _builder.BuildGEP2(_context.Int8Type, data, new[] { _builder.BuildMul(index, stride) }, "stack.destroy.element");
                 _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false), destructor, new[] { element }, string.Empty);
             });
+            _builder.BuildBr(nextNode);
+            _builder.PositionAtEnd(nextNode);
             _builder.BuildStore(next, scope.Head);
             _builder.BuildBr(condition);
             _builder.PositionAtEnd(end);
-            _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false), _getMemoryRuntime().StackRestore, new[] { scope.Stack }, string.Empty);
+            if (scope.RestoreStack)
+                _builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false), _getMemoryRuntime().StackRestore, new[] { scope.Stack }, string.Empty);
         }
 
         private void EmitStatement(BoundStatement statement)
@@ -1451,37 +1583,125 @@ public sealed class LlvmIrGenerator
         private void EmitVariableDeclaration(BoundVariableDeclarationStatement statement)
         {
             LLVMValueRef address = GetAddress(statement.Variable);
-            if (_scalarCleanup.TryGetValue(statement.Variable, out var cleanup))
-            {
-                _scalarScopeHeads[statement.Variable] = _cleanupScopes[^1].Head;
-                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), cleanup.Initialized);
-            }
+            InitializeScalarCleanup(statement.Variable);
+            InitializeArrayCleanup(statement.Variable);
+            bool isStorage = TryGetStorageType(statement.Variable.Type, out _);
+            if (isStorage)
+                _builder.BuildStore(DefaultValue(statement.Variable.Type, _mapType, _virtualTables), address);
 
             if (statement.Initializer is not null)
             {
-                _builder.BuildStore(EmitExpression(statement.Initializer), address);
+                if (statement.Initializer is BoundStorageConstructExpression or
+                    BoundFullExpression { Expression: BoundStorageConstructExpression })
+                {
+                    EmitExpression(statement.Initializer);
+                    return;
+                }
+                LLVMValueRef value = EmitExpression(statement.Initializer);
+                _builder.BuildStore(value, address);
+                EmitScalarRegistration(statement.Variable, address);
+                EmitArrayRegistration(statement.Variable, value, statement.Initializer);
+            }
+            else if (isStorage)
+            {
+                // The wrapper itself is live even while it contains no T.
                 EmitScalarRegistration(statement.Variable, address);
             }
         }
 
-        private void EmitScalarRegistration(LocalVariableSymbol local, LLVMValueRef address)
+        private void AllocateArrayCleanup(LocalVariableSymbol variable)
         {
-            if (!_scalarCleanup.TryGetValue(local, out var cleanup)) return;
-            LLVMBasicBlockRef register = _llvmFunction.AppendBasicBlock("local.cleanup.register");
-            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("local.cleanup.ready");
-            _builder.BuildCondBr(_builder.BuildLoad2(_context.Int1Type, cleanup.Initialized), end, register);
+            if (!_function.HasScopeCleanup || !variable.RequiresArrayCleanupTransfer ||
+                variable.Type is not ArrayTypeSymbol array ||
+                TypeFacts.GetCompleteDestructor(array.ElementType) is not FunctionSymbol destructor)
+                return;
+            _arrayCleanup.Add(variable, new ArrayCleanupEntry(
+                _builder.BuildAlloca(_cleanupNodeType, "array.cleanup.node"),
+                _builder.BuildAlloca(_context.Int1Type, "array.cleanup.registered"),
+                destructor,
+                array));
+        }
+
+        private void InitializeArrayCleanup(LocalVariableSymbol variable)
+        {
+            if (!_arrayCleanup.TryGetValue(variable, out ArrayCleanupEntry cleanup)) return;
+            _arrayScopeHeads[variable] = _cleanupScopes[^1].Head;
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), cleanup.Registered);
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
+        }
+
+        private void EmitArrayRegistration(
+            LocalVariableSymbol variable,
+            LLVMValueRef arrayValue,
+            BoundExpression source)
+        {
+            if (!_arrayCleanup.TryGetValue(variable, out ArrayCleanupEntry cleanup)) return;
+            LLVMValueRef active = source switch
+            {
+                BoundArrayCreationExpression { Storage: ArrayStorageKind.Stack } =>
+                    LLVMValueRef.CreateConstInt(_context.Int1Type, 1),
+                BoundMoveExpression move when _arrayMoveCleanupState.TryGetValue(move, out LLVMValueRef movedActive) => movedActive,
+                _ => LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+            };
+            if (source is BoundArrayCreationExpression creation &&
+                _arrayCreationCleanupNodes.TryGetValue(creation, out LLVMValueRef allocationNode))
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                    _builder.BuildStructGEP2(_cleanupNodeType, allocationNode, 5));
+            LLVMValueRef data = ArrayData(arrayValue, cleanup.ArrayType);
+            LLVMValueRef length = ConvertIntegerToSize(
+                _builder.BuildLoad2(_context.Int32Type, arrayValue, "array.cleanup.length"),
+                BuiltinTypes.Int);
+
+            LLVMBasicBlockRef update = _llvmFunction.AppendBasicBlock("array.cleanup.update");
+            LLVMBasicBlockRef register = _llvmFunction.AppendBasicBlock("array.cleanup.register");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("array.cleanup.ready");
+            _builder.BuildCondBr(_builder.BuildLoad2(_context.Int1Type, cleanup.Registered), update, register);
             _builder.PositionAtEnd(register);
-            EmitCleanupRegistration(cleanup.Node, _scalarScopeHeads[local], address, SizeConstant(1), SizeConstant(_getAbiSize(local.Type)), local.Destructor!);
-            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1), cleanup.Initialized);
+            EmitCleanupRegistration(cleanup.Node, _arrayScopeHeads[variable], data, length,
+                SizeConstant(_getAbiSize(cleanup.ArrayType.ElementType)), cleanup.Destructor, active);
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1), cleanup.Registered);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(update);
+            _builder.BuildStore(data, _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 1));
+            _builder.BuildStore(length, _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 2));
+            _builder.BuildStore(active, _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
             _builder.BuildBr(end);
             _builder.PositionAtEnd(end);
         }
 
+        private void EmitScalarRegistration(
+            VariableSymbol variable,
+            LLVMValueRef address,
+            ImmutableArray<FieldSymbol> initializedPath = default)
+        {
+            if (!_scalarCleanup.TryGetValue(variable, out ImmutableArray<ScalarCleanupEntry> cleanups)) return;
+            foreach (ScalarCleanupEntry cleanup in cleanups)
+            {
+                if (!initializedPath.IsDefault && !IsProjectionPrefix(initializedPath, cleanup.Path)) continue;
+                LLVMBasicBlockRef register = _llvmFunction.AppendBasicBlock("local.cleanup.register");
+                LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("local.cleanup.ready");
+                _builder.BuildCondBr(_builder.BuildLoad2(_context.Int1Type, cleanup.Initialized), end, register);
+                _builder.PositionAtEnd(register);
+                LLVMValueRef destructorAddress = EmitProjectedAddress(address, cleanup.Path);
+                EmitCleanupRegistration(cleanup.Node, _scalarScopeHeads[variable], destructorAddress,
+                    SizeConstant(1), SizeConstant(_getAbiSize(cleanup.ValueType)), cleanup.DestructorFunction);
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1), cleanup.Initialized);
+                _builder.BuildBr(end);
+                _builder.PositionAtEnd(end);
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1),
+                    _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
+            }
+        }
+
         private void EmitCleanupRegistration(LLVMValueRef node, LLVMValueRef head, LLVMValueRef data,
-            LLVMValueRef length, LLVMValueRef stride, FunctionSymbol destructor)
+            LLVMValueRef length, LLVMValueRef stride, FunctionSymbol destructor, LLVMValueRef active = default)
         {
             LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
-            LLVMValueRef[] fields = [_builder.BuildLoad2(pointer, head), data, length, stride, _functions[destructor].Value];
+            if (active.Handle == IntPtr.Zero) active = LLVMValueRef.CreateConstInt(_context.Int1Type, 1);
+            LLVMValueRef[] fields =
+                [_builder.BuildLoad2(pointer, head), data, length, stride, _functions[destructor].Value,
+                    active];
             for (uint i = 0; i < fields.Length; i++)
                 _builder.BuildStore(fields[i], _builder.BuildStructGEP2(_cleanupNodeType, node, i));
             _builder.BuildStore(node, head);
@@ -1505,12 +1725,26 @@ public sealed class LlvmIrGenerator
             _terminated = true;
         }
 
-        private LLVMValueRef EmitExpression(BoundExpression expression) => expression switch
+        private LLVMValueRef EmitExpression(BoundExpression expression)
+        {
+            if (_fullExpressionTemporaries?.TryGetValue(expression, out FullExpressionTemporarySlot? temporary) == true)
+                return EmitFullExpressionTemporary(expression, temporary);
+            return EmitExpressionCore(expression);
+        }
+
+        private LLVMValueRef EmitExpressionCore(BoundExpression expression) => expression switch
         {
             BoundLiteralExpression literal => EmitLiteral(literal),
             BoundVariableExpression variable => EmitVariable(variable),
             BoundThisExpression => _thisValue,
             BoundUnaryExpression unary => EmitUnary(unary),
+            BoundMoveExpression move => EmitMove(move),
+            BoundCopyExpression copy => EmitCopy(copy),
+            BoundUniqueAdoptionExpression adoption => EmitExpression(adoption.Allocation),
+            BoundSharedAdoptionExpression adoption => EmitSharedAdoption(adoption),
+            BoundWeakConversionExpression conversion => EmitWeakConversion(conversion),
+            BoundLockExpression @lock => EmitWeakLock(@lock),
+            BoundFullExpression fullExpression => EmitFullExpression(fullExpression),
             BoundBinaryExpression binary => EmitBinary(binary),
             BoundAssignmentExpression assignment => EmitAssignment(assignment),
             BoundCompoundAccessorAssignmentExpression assignment => EmitCompoundAccessorAssignment(assignment),
@@ -1528,6 +1762,11 @@ public sealed class LlvmIrGenerator
             BoundInterfaceConversionExpression conversion => EmitInterfaceConversion(conversion),
             BoundReferenceConversionExpression conversion => EmitReferenceConversion(conversion),
             BoundReferenceDereferenceExpression dereference => EmitReferenceDereference(dereference),
+            BoundLifetimeValueExpression value => EmitLifetimeValue(value),
+            BoundDefaultValueExpression value => DefaultValue(value.Type, _mapType, _virtualTables),
+            BoundStorageConstructExpression construction => EmitStorageConstruct(construction),
+            BoundExplicitDestructExpression destruction => EmitExplicitDestruct(destruction),
+            BoundStorageMoveExpression move => EmitStorageMove(move),
             BoundInterfaceMethodCallExpression interfaceCall => EmitInterfaceMethodCall(interfaceCall),
             BoundIndexExpression index => EmitIndex(index),
             BoundStructConstructionExpression construction => EmitStructConstruction(
@@ -1536,6 +1775,9 @@ public sealed class LlvmIrGenerator
                 construction.IsDefaultInitialization),
             BoundConstructorCallExpression constructor => EmitConstructorCall(constructor),
             BoundBaseLifecycleCallExpression lifecycle => EmitLifecycleCall(lifecycle.Function, _thisValue, lifecycle.Arguments, initializeVTable: false),
+            BoundDestroyFieldsExpression destruction => EmitDestroyFields(destruction),
+            BoundOwnershipDestructionExpression destruction => EmitOwnershipDestruction(destruction),
+            BoundStorageDestructionExpression destruction => EmitStorageDestruction(destruction),
             BoundArrayCreationExpression array => EmitArrayCreation(array),
             BoundArrayMetadataExpression metadata => EmitArrayMetadata(metadata),
             BoundNewExpression @new => EmitNew(@new),
@@ -1543,9 +1785,76 @@ public sealed class LlvmIrGenerator
             _ => throw new LlvmCodeGenerationException($"Bound expression '{expression.Kind}' is not supported by LLVM code generation."),
         };
 
+        private LLVMValueRef EmitFullExpression(BoundFullExpression expression)
+        {
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LlvmMemoryRuntime memory = _getMemoryRuntime();
+            LLVMValueRef stack = _builder.BuildCall2(
+                LLVMTypeRef.CreateFunction(pointer, [], false),
+                memory.StackSave,
+                Array.Empty<LLVMValueRef>(),
+                "full.expression.stack");
+            var temporaries = new Dictionary<BoundExpression, FullExpressionTemporarySlot>(
+                ReferenceEqualityComparer.Instance);
+            foreach (BoundFullExpressionTemporary temporary in expression.Temporaries)
+            {
+                LLVMValueRef address = _builder.BuildAlloca(_mapType(temporary.Value.Type), "temporary.value");
+                LLVMValueRef active = _builder.BuildAlloca(_context.Int1Type, "temporary.active");
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), active);
+                temporaries.Add(temporary.Value,
+                    new FullExpressionTemporarySlot(address, active, temporary.Destructor));
+            }
+
+            Dictionary<BoundExpression, FullExpressionTemporarySlot>? previous = _fullExpressionTemporaries;
+            _fullExpressionTemporaries = temporaries;
+            LLVMValueRef result = EmitExpression(expression.Expression);
+            for (int index = expression.Temporaries.Length - 1; index >= 0; index--)
+                EmitFullExpressionTemporaryCleanup(temporaries[expression.Temporaries[index].Value]);
+            _fullExpressionTemporaries = previous;
+            _builder.BuildCall2(
+                LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false),
+                memory.StackRestore,
+                new[] { stack },
+                string.Empty);
+            return result;
+        }
+
+        private LLVMValueRef EmitFullExpressionTemporary(
+            BoundExpression expression,
+            FullExpressionTemporarySlot temporary)
+        {
+            if (temporary.Emitted)
+                return _builder.BuildLoad2(_mapType(expression.Type), temporary.Address, "temporary.value");
+            LLVMValueRef value = EmitExpressionCore(expression);
+            _builder.BuildStore(value, temporary.Address);
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1), temporary.Active);
+            temporary.Emitted = true;
+            return value;
+        }
+
+        private LLVMValueRef EmitFullExpressionTemporaryAddress(
+            BoundExpression expression,
+            FullExpressionTemporarySlot temporary)
+        {
+            if (!temporary.Emitted) EmitFullExpressionTemporary(expression, temporary);
+            return temporary.Address;
+        }
+
+        private void EmitFullExpressionTemporaryCleanup(FullExpressionTemporarySlot temporary)
+        {
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("temporary.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("temporary.end");
+            LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, temporary.Active, "temporary.is.active");
+            _builder.BuildCondBr(active, destroy, end);
+            _builder.PositionAtEnd(destroy);
+            EmitLifecycleCall(temporary.Destructor, temporary.Address, []);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+        }
+
         private LLVMValueRef EmitLiteral(BoundLiteralExpression expression)
         {
-            if (expression.Value is null && expression.Type is not PointerTypeSymbol)
+            if (expression.Value is null && expression.Type is not (PointerTypeSymbol or SharedTypeSymbol))
             {
                 throw new LlvmCodeGenerationException(
                     "Uncontextualized null literal reached LLVM code generation; null must be bound to a concrete pointer type first.");
@@ -1586,7 +1895,7 @@ public sealed class LlvmIrGenerator
                 return _builder.BuildGlobalStringPtr(text, "str");
             }
 
-            if (expression.Type is PointerTypeSymbol && expression.Value is null)
+            if (expression.Type is PointerTypeSymbol or SharedTypeSymbol && expression.Value is null)
             {
                 return LLVMValueRef.CreateConstPointerNull(type);
             }
@@ -1600,6 +1909,313 @@ public sealed class LlvmIrGenerator
             return _builder.BuildLoad2(_mapType(expression.Type), address, expression.Variable.Name);
         }
 
+        private LLVMValueRef EmitMove(BoundMoveExpression expression)
+        {
+            LLVMValueRef value = EmitExpression(expression.Source);
+            if (IsAddressable(expression.Source))
+                MarkContainedStoragesEmpty(EmitAddress(expression.Source), expression.Source.Type);
+            VariableSymbol? trackedVariable = expression.TrackedVariable;
+            ImmutableArray<FieldSymbol> trackedPath = expression.TrackedPath;
+            if (trackedVariable is not null &&
+                _scalarCleanup.TryGetValue(trackedVariable, out ImmutableArray<ScalarCleanupEntry> trackedCleanups))
+                foreach (ScalarCleanupEntry cleanup in trackedCleanups)
+                    if (IsProjectionPrefix(trackedPath, cleanup.Path))
+                        _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                            _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
+            else if (TryGetScalarProjection(expression.Source, out VariableSymbol variable, out ImmutableArray<FieldSymbol> movedPath) &&
+                _scalarCleanup.TryGetValue(variable, out ImmutableArray<ScalarCleanupEntry> cleanups))
+                foreach (ScalarCleanupEntry projectedCleanup in cleanups)
+                    if (IsProjectionPrefix(movedPath, projectedCleanup.Path))
+                        _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                            _builder.BuildStructGEP2(_cleanupNodeType, projectedCleanup.Node, 5));
+            if (trackedVariable is LocalVariableSymbol arrayVariable &&
+                _arrayCleanup.TryGetValue(arrayVariable, out ArrayCleanupEntry arrayCleanup))
+            {
+                LLVMValueRef activeAddress = _builder.BuildStructGEP2(_cleanupNodeType, arrayCleanup.Node, 5);
+                LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, activeAddress, "array.move.active");
+                _arrayMoveCleanupState[expression] = active;
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), activeAddress);
+            }
+            return value;
+        }
+
+        private LLVMValueRef EmitStorageConstruct(BoundStorageConstructExpression expression)
+        {
+            bool isStorage = TryGetStorageType(expression.Storage.Type, out StorageTypeSymbol storageType);
+            LLVMValueRef storageAddress = EmitAddress(expression.Storage);
+            if (isStorage)
+                EmitStorageStateCheck(storageAddress, storageType, expectedInitialized: false);
+            LLVMValueRef address = isStorage
+                ? GetStorageValueAddress(storageAddress, storageType)
+                : storageAddress;
+            if (expression.Value is { } value)
+            {
+                _builder.BuildStore(EmitExpression(value), address);
+            }
+            else if (expression.Constructor is { } constructor)
+            {
+                _builder.BuildStore(DefaultValue(expression.ValueType, _mapType, _virtualTables), address);
+                EmitLifecycleCall(constructor, address, expression.Arguments);
+            }
+            else if (expression.ValueType is StructTypeSymbol structure)
+            {
+                EmitStructConstructionAtAddress(structure, expression.Arguments,
+                    expression.IsDefaultInitialization, address);
+            }
+            else
+                _builder.BuildStore(DefaultValue(expression.ValueType, _mapType, _virtualTables), address);
+            if (isStorage)
+                MarkStorageInitialized(storageAddress, storageType);
+            if (TryGetScalarProjection(expression.Storage, out VariableSymbol variable,
+                    out ImmutableArray<FieldSymbol> initializedPath))
+                EmitScalarRegistration(variable, GetAddress(variable), initializedPath);
+            return default;
+        }
+
+        private LLVMValueRef EmitStorageMove(BoundStorageMoveExpression expression)
+        {
+            LLVMValueRef storageAddress = EmitAddress(expression.Storage);
+            EmitStorageStateCheck(storageAddress, expression.StorageType, expectedInitialized: true);
+            LLVMValueRef value = _builder.BuildLoad2(_mapType(expression.Type),
+                GetStorageValueAddress(storageAddress, expression.StorageType),
+                "storage.move");
+            MarkStorageEmpty(storageAddress, expression.StorageType);
+            return value;
+        }
+
+        private static bool TryGetStorageType(TypeSymbol type, out StorageTypeSymbol storage)
+        {
+            while (type is PinTypeSymbol pin) type = pin.ElementType;
+            storage = type as StorageTypeSymbol ?? null!;
+            return storage is not null;
+        }
+
+        private LLVMValueRef GetStorageValueAddress(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStructGEP2(_mapType(storage), storageAddress, 0, "storage.value.address");
+
+        private LLVMValueRef GetStorageStateAddress(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStructGEP2(_mapType(storage), storageAddress, 1, "storage.state.address");
+
+        private void MarkStorageInitialized(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1),
+                GetStorageStateAddress(storageAddress, storage));
+
+        private void MarkStorageEmpty(LLVMValueRef storageAddress, StorageTypeSymbol storage) =>
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                GetStorageStateAddress(storageAddress, storage));
+
+        private void EmitStorageStateCheck(
+            LLVMValueRef storageAddress,
+            StorageTypeSymbol storage,
+            bool expectedInitialized)
+        {
+            LLVMValueRef state = _builder.BuildLoad2(_context.Int1Type,
+                GetStorageStateAddress(storageAddress, storage), "storage.state");
+            LLVMValueRef expected = LLVMValueRef.CreateConstInt(_context.Int1Type,
+                expectedInitialized ? 1UL : 0UL);
+            EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, state, expected,
+                "storage.state.valid"));
+        }
+
+        private LLVMValueRef EmitStorageDestruction(BoundStorageDestructionExpression expression)
+        {
+            LLVMValueRef storageAddress = _llvmFunction.GetParam(0);
+            LLVMValueRef state = _builder.BuildLoad2(_context.Int1Type,
+                GetStorageStateAddress(storageAddress, expression.StorageType), "storage.cleanup.state");
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("storage.cleanup.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("storage.cleanup.end");
+            _builder.BuildCondBr(state, destroy, end);
+            _builder.PositionAtEnd(destroy);
+            if (expression.ElementDestructor is not null)
+                EmitLifecycleCall(expression.ElementDestructor,
+                    GetStorageValueAddress(storageAddress, expression.StorageType), []);
+            MarkStorageEmpty(storageAddress, expression.StorageType);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+            return default;
+        }
+
+        private void MarkContainedStoragesEmpty(LLVMValueRef address, TypeSymbol type)
+        {
+            if (type is PinTypeSymbol pin)
+            {
+                MarkContainedStoragesEmpty(address, pin.ElementType);
+                return;
+            }
+            if (type is StorageTypeSymbol storage)
+            {
+                MarkStorageEmpty(address, storage);
+                return;
+            }
+            if (type is not StructTypeSymbol structure) return;
+            if (structure.BaseType is { } baseType)
+                MarkContainedStoragesEmpty(address, baseType);
+            foreach (FieldSymbol field in structure.Fields)
+            {
+                LLVMValueRef fieldAddress = _builder.BuildStructGEP2(_mapType(field.ContainingType), address,
+                    checked((uint)field.Ordinal), $"{field.Name}.move.storage.address");
+                MarkContainedStoragesEmpty(fieldAddress, field.Type);
+            }
+        }
+
+        private LLVMValueRef EmitExplicitDestruct(BoundExplicitDestructExpression expression)
+        {
+            if (TryGetStorageType(expression.Target.Type, out StorageTypeSymbol storageType))
+            {
+                LLVMValueRef storageAddress = EmitAddress(expression.Target);
+                EmitStorageStateCheck(storageAddress, storageType, expectedInitialized: true);
+                if (expression.Destructor is not null)
+                    EmitLifecycleCall(expression.Destructor,
+                        GetStorageValueAddress(storageAddress, storageType), []);
+                MarkStorageEmpty(storageAddress, storageType);
+                return default;
+            }
+            if (expression.TrackedVariable is { } trackedVariable &&
+                _scalarCleanup.TryGetValue(trackedVariable, out ImmutableArray<ScalarCleanupEntry> cleanups))
+                foreach (ScalarCleanupEntry cleanup in cleanups)
+                    if (IsProjectionPrefix(expression.TrackedPath, cleanup.Path))
+                        _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                            _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
+            if (expression.Destructor is not null)
+                EmitLifecycleCall(expression.Destructor, EmitAddress(expression.Target), []);
+            return default;
+        }
+
+        private LLVMValueRef EmitLifetimeValue(BoundLifetimeValueExpression expression)
+        {
+            LLVMValueRef address = EmitAddress(expression);
+            return _builder.BuildLoad2(_mapType(expression.Type), address, "lifetime.value");
+        }
+
+        private LLVMValueRef EmitLifetimeValueAddress(BoundLifetimeValueExpression expression)
+        {
+            LLVMValueRef address = EmitAddress(expression.Source);
+            if (expression.ModifierType is not StorageTypeSymbol storage) return address;
+            EmitStorageStateCheck(address, storage, expectedInitialized: true);
+            return GetStorageValueAddress(address, storage);
+        }
+
+        private LLVMValueRef EmitCopy(BoundCopyExpression expression) =>
+            EmitCopyValue(EmitExpression(expression.Source), expression.Type);
+
+        private LLVMValueRef EmitCopyValue(LLVMValueRef source, TypeSymbol type)
+        {
+            if (type is SharedTypeSymbol)
+                return EmitOwnershipRetain(source, counterIndex: 0, "shared.retain");
+            if (type is WeakTypeSymbol)
+                return EmitOwnershipRetain(source, counterIndex: 1, "weak.retain");
+            if (type is not StructTypeSymbol structure) return source;
+
+            LLVMValueRef result = _mapType(structure).Poison;
+            if (structure.BaseType is { } baseType)
+            {
+                LLVMValueRef baseValue = _builder.BuildExtractValue(source, 0, "copy.base");
+                result = _builder.BuildInsertValue(result, EmitCopyValue(baseValue, baseType), 0, "copy.base.init");
+            }
+            if (structure.IntroducesVirtualDispatch)
+            {
+                uint dispatchIndex = LlvmStructLayout.DispatchIndex(structure);
+                result = _builder.BuildInsertValue(result,
+                    _builder.BuildExtractValue(source, dispatchIndex, "copy.dispatch"),
+                    dispatchIndex,
+                    "copy.dispatch.init");
+            }
+            foreach (FieldSymbol field in structure.Fields)
+            {
+                uint index = checked((uint)field.Ordinal);
+                LLVMValueRef fieldValue = _builder.BuildExtractValue(source, index, $"copy.{field.Name}");
+                result = _builder.BuildInsertValue(result, EmitCopyValue(fieldValue, field.Type), index,
+                    $"copy.{field.Name}.init");
+            }
+            return result;
+        }
+
+        private LLVMTypeRef OwnershipControlBlockType => _context.GetStructType([
+            _mapType(BuiltinTypes.NUInt),
+            _mapType(BuiltinTypes.NUInt),
+            LLVMTypeRef.CreatePointer(_context.Int8Type, 0),
+        ], false);
+
+        private LLVMValueRef OwnershipControlField(LLVMValueRef control, uint index, string name) =>
+            _builder.BuildStructGEP2(OwnershipControlBlockType, control, index, name);
+
+        private LLVMValueRef EmitSharedAdoption(BoundSharedAdoptionExpression expression)
+        {
+            LLVMValueRef storage = EmitExpression(expression.Allocation);
+            ulong pointerBytes = checked((ulong)_getIntegerBitWidth(BuiltinTypes.NUInt) / 8);
+            LLVMValueRef control = EmitAllocation(SizeConstant(checked(pointerBytes * 3)), "shared.control");
+            _builder.BuildStore(SizeConstant(1), OwnershipControlField(control, 0, "shared.strong.address"));
+            // One implicit weak reference is held while the strong count is non-zero.
+            _builder.BuildStore(SizeConstant(1), OwnershipControlField(control, 1, "shared.weak.address"));
+            _builder.BuildStore(storage, OwnershipControlField(control, 2, "shared.storage.address"));
+            return control;
+        }
+
+        private LLVMValueRef EmitWeakConversion(BoundWeakConversionExpression expression)
+        {
+            LLVMValueRef control = EmitExpression(expression.Shared);
+            return EmitOwnershipRetain(control, counterIndex: 1, "weak.create");
+        }
+
+        private LLVMValueRef EmitOwnershipRetain(LLVMValueRef control, uint counterIndex, string name)
+        {
+            LLVMBasicBlockRef entry = _builder.InsertBlock;
+            LLVMBasicBlockRef retain = _llvmFunction.AppendBasicBlock($"{name}.body");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock($"{name}.end");
+            LLVMValueRef notNull = _builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, control,
+                LLVMValueRef.CreateConstPointerNull(control.TypeOf), $"{name}.valid");
+            _builder.BuildCondBr(notNull, retain, end);
+            _builder.PositionAtEnd(retain);
+            LLVMValueRef address = OwnershipControlField(control, counterIndex, $"{name}.count.address");
+            LLVMValueRef count = _builder.BuildLoad2(_mapType(BuiltinTypes.NUInt), address, $"{name}.count");
+            _builder.BuildStore(_builder.BuildAdd(count, SizeConstant(1), $"{name}.next"), address);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+            return control;
+        }
+
+        private LLVMValueRef EmitWeakLock(BoundLockExpression expression)
+        {
+            LLVMValueRef control = EmitExpression(expression.Weak);
+            LLVMValueRef nullControl = LLVMValueRef.CreateConstPointerNull(control.TypeOf);
+            LLVMBasicBlockRef entry = _builder.InsertBlock;
+            LLVMBasicBlockRef inspect = _llvmFunction.AppendBasicBlock("weak.lock.inspect");
+            LLVMBasicBlockRef retain = _llvmFunction.AppendBasicBlock("weak.lock.retain");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("weak.lock.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, control, nullControl,
+                "weak.lock.control.valid"), inspect, end);
+            _builder.PositionAtEnd(inspect);
+            LLVMValueRef strongAddress = OwnershipControlField(control, 0, "weak.lock.strong.address");
+            LLVMValueRef strong = _builder.BuildLoad2(_mapType(BuiltinTypes.NUInt), strongAddress, "weak.lock.strong");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, strong, SizeConstant(0),
+                "weak.lock.alive"), retain, end);
+            _builder.PositionAtEnd(retain);
+            _builder.BuildStore(_builder.BuildAdd(strong, SizeConstant(1), "weak.lock.next"), strongAddress);
+            LLVMBasicBlockRef retained = _builder.InsertBlock;
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+            LLVMValueRef result = _builder.BuildPhi(control.TypeOf, "weak.lock.result");
+            result.AddIncoming([nullControl, nullControl, control], [entry, inspect, retained], 3);
+            return result;
+        }
+
+        private LLVMValueRef EmitDestroyFields(BoundDestroyFieldsExpression expression)
+        {
+            foreach (FieldSymbol field in expression.StructType.Fields.Reverse())
+            {
+                if (TypeFacts.GetCompleteDestructor(field.Type) is not { } destructor) continue;
+                LLVMValueRef address = _builder.BuildStructGEP2(
+                    _mapType(field.ContainingType),
+                    _thisValue,
+                    checked((uint)field.Ordinal),
+                    $"{field.Name}.destructor.address");
+                EmitLifecycleCall(destructor, address, [], initializeVTable: false);
+            }
+            if (expression.StructType.BaseType?.CompleteDestructor is { } baseDestructor)
+                EmitLifecycleCall(baseDestructor, _thisValue, [], initializeVTable: false);
+            return default;
+        }
+
         private LLVMValueRef EmitReferenceConversion(BoundReferenceConversionExpression expression)
         {
             if (expression.ReferenceType.ElementType is InterfaceTypeSymbol targetInterface &&
@@ -1611,7 +2227,8 @@ public sealed class LlvmIrGenerator
 
             if (expression.Source is BoundThisExpression)
                 return EmitExpression(expression.Source);
-            if (IsAddressable(expression.Source))
+            if (_fullExpressionTemporaries?.ContainsKey(expression.Source) == true ||
+                IsAddressable(expression.Source))
                 return EmitAddress(expression.Source);
             return StoreTemporary(expression.Source, expression.Source.Type);
         }
@@ -1677,7 +2294,10 @@ public sealed class LlvmIrGenerator
             if (expression.OperatorKind is SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken)
                 return EmitIncrement(expression);
 
-            LLVMValueRef operand = EmitExpression(expression.Operand);
+            LLVMValueRef operand = expression.OperatorKind == SyntaxKind.StarToken &&
+                                   expression.Operand.Type is OwnershipTypeSymbol
+                ? EmitOwnershipStorage(expression.Operand)
+                : EmitExpression(expression.Operand);
             return expression.OperatorKind switch
             {
                 SyntaxKind.PlusToken => operand,
@@ -1687,6 +2307,8 @@ public sealed class LlvmIrGenerator
                 SyntaxKind.BangToken or SyntaxKind.TildeToken => _builder.BuildNot(operand, "not"),
                 SyntaxKind.StarToken when expression.Operand.Type is PointerTypeSymbol pointer =>
                     _builder.BuildLoad2(_mapType(pointer.ElementType), operand, "deref"),
+                SyntaxKind.StarToken when expression.Operand.Type is OwnershipTypeSymbol ownership =>
+                    _builder.BuildLoad2(_mapType(ownership.ElementType), operand, "ownership.deref"),
                 _ => throw new LlvmCodeGenerationException($"Unary operator '{expression.OperatorKind}' is not supported."),
             };
         }
@@ -1894,7 +2516,30 @@ public sealed class LlvmIrGenerator
             LLVMValueRef address = EmitAddress(expression.Target);
             LLVMValueRef current = expression.OperatorKind == SyntaxKind.EqualsToken ? default
                 : _builder.BuildLoad2(_mapType(expression.Target.Type), address, "current");
+            bool sameScalarStorage = expression.Expression is BoundCopyExpression copy &&
+                TryGetScalarProjection(copy.Source, out VariableSymbol source, out ImmutableArray<FieldSymbol> sourcePath) &&
+                TryGetScalarProjection(expression.Target, out VariableSymbol copyDestination, out ImmutableArray<FieldSymbol> copyDestinationPath) &&
+                ReferenceEquals(source, copyDestination) && sourcePath.SequenceEqual(copyDestinationPath);
+            if (expression.OperatorKind == SyntaxKind.EqualsToken && sameScalarStorage)
+                return _builder.BuildLoad2(_mapType(expression.Target.Type), address, "self.assignment");
+
             LLVMValueRef value = EmitExpression(expression.Expression);
+            if (expression.OperatorKind == SyntaxKind.EqualsToken && !sameScalarStorage &&
+                !expression.ReinitializesMovedPlace)
+            {
+                if (TryGetScalarProjection(expression.Target, out VariableSymbol destination, out ImmutableArray<FieldSymbol> destinationPath))
+                {
+                    bool trackedDestruction = EmitAssignmentDestinationDestruction(destination, GetAddress(destination), destinationPath);
+                    if (!trackedDestruction && !expression.IsInitialization &&
+                        TypeFacts.GetCompleteDestructor(expression.Target.Type) is { } projectedDestructor)
+                        EmitLifecycleCall(projectedDestructor, address, []);
+                }
+                else if (!expression.IsInitialization && TypeFacts.GetCompleteDestructor(expression.Target.Type) is { } destructor)
+                    EmitLifecycleCall(destructor, address, []);
+                if (!expression.IsInitialization &&
+                    expression.Target is BoundVariableExpression { Variable: LocalVariableSymbol arrayDestination })
+                    EmitArrayDestinationDestruction(arrayDestination);
+            }
 
             if (expression.OperatorKind != SyntaxKind.EqualsToken)
             {
@@ -1907,9 +2552,63 @@ public sealed class LlvmIrGenerator
             }
 
             _builder.BuildStore(value, address);
-            if (expression.Target is BoundVariableExpression { Variable: LocalVariableSymbol local })
-                EmitScalarRegistration(local, address);
+            if (TryGetScalarProjection(expression.Target, out VariableSymbol variable, out ImmutableArray<FieldSymbol> initializedPath))
+                EmitScalarRegistration(variable, GetAddress(variable), initializedPath);
+            if (expression.OperatorKind == SyntaxKind.EqualsToken &&
+                expression.Target is BoundVariableExpression { Variable: LocalVariableSymbol arrayVariable })
+                EmitArrayRegistration(arrayVariable, value, expression.Expression);
             return value;
+        }
+
+        private void EmitArrayDestinationDestruction(LocalVariableSymbol variable)
+        {
+            if (!_arrayCleanup.TryGetValue(variable, out ArrayCleanupEntry cleanup)) return;
+            LLVMValueRef activeAddress = _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5);
+            LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, activeAddress, "array.destination.active");
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("array.destination.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("array.destination.destroy.end");
+            _builder.BuildCondBr(active, destroy, end);
+            _builder.PositionAtEnd(destroy);
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef data = _builder.BuildLoad2(pointer,
+                _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 1), "array.destination.data");
+            LLVMValueRef length = _builder.BuildLoad2(_mapType(BuiltinTypes.NUInt),
+                _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 2), "array.destination.length");
+            LLVMValueRef stride = SizeConstant(_getAbiSize(cleanup.ArrayType.ElementType));
+            EmitElementLoop(length, reverse: true, index =>
+            {
+                LLVMValueRef element = _builder.BuildGEP2(_context.Int8Type, data,
+                    new[] { _builder.BuildMul(index, stride) }, "array.destination.element");
+                EmitLifecycleCall(cleanup.Destructor, element, []);
+            });
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), activeAddress);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+        }
+
+        private bool EmitAssignmentDestinationDestruction(
+            VariableSymbol variable,
+            LLVMValueRef rootAddress,
+            ImmutableArray<FieldSymbol> destinationPath)
+        {
+            if (!_scalarCleanup.TryGetValue(variable, out ImmutableArray<ScalarCleanupEntry> cleanups)) return false;
+            bool matched = false;
+            foreach (ScalarCleanupEntry cleanup in cleanups.Reverse())
+            {
+                if (!IsProjectionPrefix(destinationPath, cleanup.Path)) continue;
+                matched = true;
+                LLVMValueRef activeAddress = _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5);
+                LLVMValueRef active = _builder.BuildLoad2(_context.Int1Type, activeAddress, "local.destructor.active");
+                LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("local.destroy");
+                LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("local.destroy.end");
+                _builder.BuildCondBr(active, destroy, end);
+                _builder.PositionAtEnd(destroy);
+                EmitLifecycleCall(cleanup.DestructorFunction, EmitProjectedAddress(rootAddress, cleanup.Path), []);
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), activeAddress);
+                _builder.BuildBr(end);
+                _builder.PositionAtEnd(end);
+            }
+            return matched;
         }
 
         private LLVMValueRef EmitMemberAccess(BoundMemberAccessExpression expression)
@@ -1977,6 +2676,26 @@ public sealed class LlvmIrGenerator
             }
 
             return value;
+        }
+
+        private void EmitStructConstructionAtAddress(
+            StructTypeSymbol structType,
+            ImmutableArray<BoundExpression> arguments,
+            bool defaultInitialize,
+            LLVMValueRef address)
+        {
+            if (defaultInitialize)
+                _builder.BuildStore(DefaultValue(structType, _mapType, _virtualTables), address);
+            if (structType.HasVirtualDispatch && _virtualTables.TryGetValue(structType, out LlvmVTable vtable))
+                _builder.BuildStore(vtable.Value, EmitDispatchAddress(structType, address));
+            EmitDefaultInstanceInitialization(structType, address);
+            for (int index = 0; index < arguments.Length; index++)
+            {
+                FieldSymbol field = structType.AllInstanceFields[index];
+                LLVMValueRef fieldAddress = _builder.BuildStructGEP2(
+                    _mapType(field.ContainingType), address, checked((uint)field.Ordinal), $"{field.Name}.address");
+                _builder.BuildStore(EmitExpression(arguments[index]), fieldAddress);
+            }
         }
 
         private LLVMValueRef ExtractBaseValue(LLVMValueRef value, StructTypeSymbol type, DeclaredTypeSymbol baseType)
@@ -2100,10 +2819,11 @@ public sealed class LlvmIrGenerator
                 });
             }
             if (expression.Storage == ArrayStorageKind.Stack &&
-                expression.ElementType is StructTypeSymbol elementType && elementType.FindDestructor() is FunctionSymbol destructor)
+                TypeFacts.GetCompleteDestructor(expression.ElementType) is FunctionSymbol destructor)
             {
                 LLVMValueRef node = _builder.BuildAlloca(_cleanupNodeType, "stack.cleanup.registration");
                 EmitCleanupRegistration(node, _cleanupScopes[^1].Head, data, length, elementSize, destructor);
+                _arrayCreationCleanupNodes[expression] = node;
             }
             return address;
         }
@@ -2132,8 +2852,15 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitArrayMetadata(BoundArrayMetadataExpression expression)
         {
-            LLVMValueRef array = EmitExpression(expression.Receiver);
-            var type = (ArrayTypeSymbol)expression.Receiver.Type;
+            LLVMValueRef array = EmitOwnershipStorage(expression.Receiver);
+            ArrayTypeSymbol type = expression.Receiver.Type switch
+            {
+                ArrayTypeSymbol direct => direct,
+                UniqueTypeSymbol { ElementType: ArrayTypeSymbol owned } => owned,
+                SharedTypeSymbol { ElementType: ArrayTypeSymbol owned } => owned,
+                _ => throw new LlvmCodeGenerationException(
+                    $"Type '{expression.Receiver.Type.ToDisplayString()}' has no array metadata."),
+            };
             if (expression.Member == "Rank") return IntConstant(type.Rank);
             EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, array, LLVMValueRef.CreateConstPointerNull(array.TypeOf), "array.valid"));
             if (expression.Member == "Length") return _builder.BuildLoad2(_context.Int32Type, array, "array.length");
@@ -2204,9 +2931,18 @@ public sealed class LlvmIrGenerator
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
             LLVMValueRef size = LLVMValueRef.CreateConstInt(
                 runtime.SizeType,
-                Math.Max(1UL, _getAbiSize(expression.StructType)),
+                Math.Max(1UL, _getAbiSize(expression.AllocatedType)),
                 false);
-            LLVMValueRef address = EmitAllocation(size, $"{expression.StructType.Name}.heap");
+            LLVMValueRef address = EmitAllocation(size, $"{expression.AllocatedType.Name}.heap");
+
+            if (expression.StructType is null)
+            {
+                LLVMValueRef value = expression.Arguments.IsEmpty
+                    ? DefaultValue(expression.AllocatedType, _mapType, _virtualTables)
+                    : EmitExpression(expression.Arguments[0]);
+                _builder.BuildStore(value, address);
+                return address;
+            }
 
             if (expression.IsPositionalInitialization)
             {
@@ -2245,23 +2981,111 @@ public sealed class LlvmIrGenerator
         }
 
         private LLVMValueRef EmitFree(BoundFreeExpression expression)
+            => EmitFreeValue(EmitExpression(expression.Pointer), expression.Pointer.Type, expression.Destructor);
+
+        private LLVMValueRef EmitOwnershipDestruction(BoundOwnershipDestructionExpression expression)
+        {
+            LLVMValueRef storageAddress = _llvmFunction.GetParam(0);
+            LLVMValueRef owned = _builder.BuildLoad2(
+                _mapType(expression.OwnershipType),
+                storageAddress,
+                "ownership.handle");
+            return expression.OwnershipType switch
+            {
+                UniqueTypeSymbol unique => EmitFreeValue(owned, unique.StorageType, expression.ElementDestructor),
+                SharedTypeSymbol shared => EmitSharedRelease(owned, shared, expression.ElementDestructor),
+                WeakTypeSymbol => EmitWeakRelease(owned),
+                _ => throw new LlvmCodeGenerationException("Unknown ownership destruction kind."),
+            };
+        }
+
+        private LLVMValueRef EmitSharedRelease(
+            LLVMValueRef control,
+            SharedTypeSymbol shared,
+            FunctionSymbol? elementDestructor)
+        {
+            LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("shared.release.body");
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("shared.release.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("shared.release.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, control,
+                LLVMValueRef.CreateConstPointerNull(control.TypeOf), "shared.release.valid"), body, end);
+            _builder.PositionAtEnd(body);
+            LLVMValueRef strongAddress = OwnershipControlField(control, 0, "shared.release.strong.address");
+            LLVMValueRef strong = _builder.BuildLoad2(_mapType(BuiltinTypes.NUInt), strongAddress,
+                "shared.release.strong");
+            LLVMValueRef remaining = _builder.BuildSub(strong, SizeConstant(1), "shared.release.remaining");
+            _builder.BuildStore(remaining, strongAddress);
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, remaining, SizeConstant(0),
+                "shared.release.final"), destroy, end);
+            _builder.PositionAtEnd(destroy);
+            LLVMValueRef data = _builder.BuildLoad2(
+                LLVMTypeRef.CreatePointer(_context.Int8Type, 0),
+                OwnershipControlField(control, 2, "shared.release.storage.address"),
+                "shared.release.storage");
+            EmitFreeValue(data, shared.StorageType, elementDestructor);
+            LLVMValueRef weakAddress = OwnershipControlField(control, 1, "shared.release.weak.address");
+            LLVMValueRef weak = _builder.BuildLoad2(_mapType(BuiltinTypes.NUInt), weakAddress,
+                "shared.release.weak");
+            LLVMValueRef weakRemaining = _builder.BuildSub(weak, SizeConstant(1),
+                "shared.release.weak.remaining");
+            _builder.BuildStore(weakRemaining, weakAddress);
+            EmitControlBlockFreeIfZero(control, weakRemaining, "shared.release.control");
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+            return default;
+        }
+
+        private LLVMValueRef EmitWeakRelease(LLVMValueRef control)
+        {
+            LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("weak.release.body");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("weak.release.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, control,
+                LLVMValueRef.CreateConstPointerNull(control.TypeOf), "weak.release.valid"), body, end);
+            _builder.PositionAtEnd(body);
+            LLVMValueRef weakAddress = OwnershipControlField(control, 1, "weak.release.count.address");
+            LLVMValueRef weak = _builder.BuildLoad2(_mapType(BuiltinTypes.NUInt), weakAddress,
+                "weak.release.count");
+            LLVMValueRef remaining = _builder.BuildSub(weak, SizeConstant(1), "weak.release.remaining");
+            _builder.BuildStore(remaining, weakAddress);
+            EmitControlBlockFreeIfZero(control, remaining, "weak.release.control");
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+            return default;
+        }
+
+        private void EmitControlBlockFreeIfZero(LLVMValueRef control, LLVMValueRef count, string name)
+        {
+            LLVMBasicBlockRef free = _llvmFunction.AppendBasicBlock($"{name}.free");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock($"{name}.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, count, SizeConstant(0),
+                $"{name}.unused"), free, end);
+            _builder.PositionAtEnd(free);
+            LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            _builder.BuildCall2(runtime.FreeType, runtime.Free, new LLVMValueRef[] { control }, string.Empty);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+        }
+
+        private LLVMValueRef EmitFreeValue(
+            LLVMValueRef address,
+            TypeSymbol storageType,
+            FunctionSymbol? destructor)
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
-            LLVMValueRef address = EmitExpression(expression.Pointer);
-            if (expression.Pointer.Type is ArrayTypeSymbol array)
+            if (storageType is ArrayTypeSymbol array)
             {
                 LLVMBasicBlockRef body = _llvmFunction.AppendBasicBlock("array.free");
                 LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("array.free.end");
                 _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address, LLVMValueRef.CreateConstPointerNull(address.TypeOf)), body, end);
                 _builder.PositionAtEnd(body);
-                if (expression.Destructor is not null)
+                if (destructor is not null)
                 {
                     LLVMValueRef count = ConvertIntegerToSize(_builder.BuildLoad2(_context.Int32Type, address, "array.destroy.length"), BuiltinTypes.Int);
                     LLVMValueRef data = ArrayData(address, array);
                     EmitElementLoop(count, reverse: true, index =>
                     {
                         LLVMValueRef element = _builder.BuildGEP2(_mapType(array.ElementType), data, new LLVMValueRef[] { index }, "array.destroy.element");
-                        EmitLifecycleCall(expression.Destructor, element, []);
+                        EmitLifecycleCall(destructor, element, []);
                     });
                 }
                 _builder.BuildCall2(runtime.FreeType, runtime.Free, new LLVMValueRef[] { address }, string.Empty);
@@ -2274,17 +3098,17 @@ public sealed class LlvmIrGenerator
             _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
                 LLVMValueRef.CreateConstPointerNull(address.TypeOf)), pointerBody, pointerEnd);
             _builder.PositionAtEnd(pointerBody);
-            if (expression.Destructor is not null)
+            if (destructor is not null)
             {
-                if (expression.Destructor.VTableSlot is int slot &&
-                    expression.Pointer.Type is PointerTypeSymbol { ElementType: StructTypeSymbol staticType } &&
+                if (destructor.VTableSlot is int slot &&
+                    storageType is PointerTypeSymbol { ElementType: StructTypeSymbol staticType } &&
                     _virtualTables.TryGetValue(staticType, out LlvmVTable vtable))
                 {
-                    EmitVirtualDestructor(expression.Destructor, address, vtable, slot);
+                    EmitVirtualDestructor(destructor, address, vtable, slot);
                 }
                 else
                 {
-                    EmitLifecycleCall(expression.Destructor, address, []);
+                    EmitLifecycleCall(destructor, address, []);
                 }
             }
 
@@ -2341,18 +3165,76 @@ public sealed class LlvmIrGenerator
             return _builder.BuildLoad2(_mapType(expression.ElementType), address, "element");
         }
 
-        private LLVMValueRef EmitAddress(BoundExpression expression) => expression switch
+        private LLVMValueRef EmitAddress(BoundExpression expression)
+        {
+            if (_fullExpressionTemporaries?.TryGetValue(expression, out FullExpressionTemporarySlot? temporary) == true)
+                return EmitFullExpressionTemporaryAddress(expression, temporary);
+            return EmitAddressCore(expression);
+        }
+
+        private LLVMValueRef EmitAddressCore(BoundExpression expression) => expression switch
         {
             BoundVariableExpression variable => GetAddress(variable.Variable),
             BoundStaticFieldExpression field => _staticFields[field.Field],
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } dereference =>
-                EmitExpression(dereference.Operand),
+                dereference.Operand.Type is OwnershipTypeSymbol
+                    ? EmitOwnershipStorage(dereference.Operand)
+                    : EmitExpression(dereference.Operand),
             BoundReferenceDereferenceExpression dereference => EmitReferenceAddress(dereference.Reference),
+            BoundLifetimeValueExpression value => EmitLifetimeValueAddress(value),
             BoundMemberAccessExpression member => EmitMemberAddress(member),
             BoundIndexExpression index => EmitIndexAddress(index),
             _ => throw new LlvmCodeGenerationException(
                 $"Expression '{expression.Kind}' does not have an addressable storage location."),
         };
+
+        private LLVMValueRef EmitProjectedAddress(LLVMValueRef rootAddress, ImmutableArray<FieldSymbol> path)
+        {
+            LLVMValueRef address = rootAddress;
+            foreach (FieldSymbol field in path)
+                address = _builder.BuildStructGEP2(
+                    _mapType(field.ContainingType),
+                    address,
+                    checked((uint)field.Ordinal),
+                    $"{field.Name}.cleanup.address");
+            return address;
+        }
+
+        private static bool IsProjectionPrefix(
+            ImmutableArray<FieldSymbol> prefix,
+            ImmutableArray<FieldSymbol> path)
+        {
+            if (prefix.Length > path.Length) return false;
+            for (int index = 0; index < prefix.Length; index++)
+                if (!ReferenceEquals(prefix[index], path[index])) return false;
+            return true;
+        }
+
+        private static bool TryGetScalarProjection(
+            BoundExpression expression,
+            out VariableSymbol variable,
+            out ImmutableArray<FieldSymbol> path)
+        {
+            if (expression is BoundVariableExpression root &&
+                root.Variable is LocalVariableSymbol or ParameterSymbol)
+            {
+                variable = root.Variable;
+                path = [];
+                return true;
+            }
+            if (expression is BoundMemberAccessExpression { IsPointerAccess: false } member &&
+                TryGetScalarProjection(member.Receiver, out variable, out path))
+            {
+                path = path.Add(member.Field);
+                return true;
+            }
+            if (expression is BoundLifetimeValueExpression value &&
+                TryGetScalarProjection(value.Source, out variable, out path))
+                return true;
+            variable = null!;
+            path = [];
+            return false;
+        }
 
         private LLVMValueRef EmitTypeLayout(BoundTypeLayoutExpression expression)
         {
@@ -2429,7 +3311,8 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitInterfaceConversion(BoundInterfaceConversionExpression expression)
         {
-            LLVMValueRef data = IsAddressable(expression.Source)
+            LLVMValueRef data = _fullExpressionTemporaries?.ContainsKey(expression.Source) == true ||
+                IsAddressable(expression.Source)
                 ? EmitAddress(expression.Source)
                 : StoreTemporary(expression.Source, expression.SourceType);
             LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
@@ -2562,7 +3445,7 @@ public sealed class LlvmIrGenerator
             }
 
             StructTypeSymbol receiverType = expression.IsPointerAccess
-                ? (StructTypeSymbol)((PointerTypeSymbol)expression.Receiver.Type).ElementType
+                ? GetPointerReceiverStruct(expression.Receiver.Type)
                 : (StructTypeSymbol)expression.Receiver.Type;
             LLVMValueRef receiver = EmitInstanceReceiverAddress(
                 expression.Receiver,
@@ -2731,8 +3614,10 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitIndexAddress(BoundIndexExpression expression)
         {
-            LLVMValueRef pointer = EmitExpression(expression.Receiver);
-            if (expression.Receiver.Type is ArrayTypeSymbol arrayType)
+            LLVMValueRef pointer = EmitOwnershipStorage(expression.Receiver);
+            ArrayTypeSymbol? arrayType = expression.Receiver.Type as ArrayTypeSymbol ??
+                (expression.Receiver.Type as OwnershipTypeSymbol)?.ElementType as ArrayTypeSymbol;
+            if (arrayType is not null)
             {
                 EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, pointer, LLVMValueRef.CreateConstPointerNull(pointer.TypeOf), "array.valid"));
                 LLVMValueRef linear = SizeConstant(0);
@@ -2768,7 +3653,7 @@ public sealed class LlvmIrGenerator
             LLVMValueRef receiverAddress;
             if (expression.IsPointerAccess)
             {
-                receiverAddress = EmitExpression(expression.Receiver);
+                receiverAddress = EmitOwnershipStorage(expression.Receiver);
             }
             else
             {
@@ -2788,6 +3673,7 @@ public sealed class LlvmIrGenerator
             BoundStaticFieldExpression => true,
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
             BoundReferenceDereferenceExpression => true,
+            BoundLifetimeValueExpression value => IsAddressable(value.Source),
             BoundMemberAccessExpression { IsPointerAccess: true } => true,
             BoundMemberAccessExpression member => IsAddressable(member.Receiver),
             BoundIndexExpression => true,
@@ -2806,7 +3692,46 @@ public sealed class LlvmIrGenerator
             }
 
             string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "method.call";
-            return _builder.BuildCall2(function.Type, function.Value, arguments, name);
+            LLVMValueRef result = _builder.BuildCall2(function.Type, function.Value, arguments, name);
+            ApplyReceiverMoveEffects(expression.Receiver, expression.Method);
+            return result;
+        }
+
+        private void ApplyReceiverMoveEffects(BoundExpression receiver, FunctionSymbol method)
+        {
+            ImmutableArray<ReceiverMoveEffect> effects = method.ReceiverMoveEffects.IsEmpty &&
+                method.GenericDefinition is { } definition
+                    ? definition.ReceiverMoveEffects
+                    : method.ReceiverMoveEffects;
+            if (effects.IsEmpty ||
+                !TryGetScalarProjection(receiver, out VariableSymbol variable, out ImmutableArray<FieldSymbol> receiverPath) ||
+                !_scalarCleanup.TryGetValue(variable, out ImmutableArray<ScalarCleanupEntry> cleanups))
+                return;
+
+            TypeSymbol receiverType = variable.Type;
+            foreach (FieldSymbol projected in receiverPath) receiverType = projected.Type;
+            foreach (ReceiverMoveEffect effect in effects)
+            {
+                TypeSymbol currentType = receiverType;
+                ImmutableArray<FieldSymbol> effectPath = receiverPath;
+                bool valid = true;
+                foreach (int ordinal in effect.FieldOrdinals)
+                {
+                    if (currentType is not StructTypeSymbol structure ||
+                        structure.Fields.FirstOrDefault(field => field.Ordinal == ordinal) is not FieldSymbol field)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    effectPath = effectPath.Add(field);
+                    currentType = field.Type;
+                }
+                if (!valid) continue;
+                foreach (ScalarCleanupEntry cleanup in cleanups)
+                    if (IsProjectionPrefix(effectPath, cleanup.Path))
+                        _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                            _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
+            }
         }
 
         private LLVMValueRef EmitPropertySet(BoundPropertySetExpression expression)
@@ -2828,7 +3753,7 @@ public sealed class LlvmIrGenerator
             }
 
             StructTypeSymbol receiverType = expression.IsPointerAccess
-                ? (StructTypeSymbol)((PointerTypeSymbol)expression.Receiver.Type).ElementType
+                ? GetPointerReceiverStruct(expression.Receiver.Type)
                 : (StructTypeSymbol)expression.Receiver.Type;
             if (!_virtualTables.TryGetValue(receiverType, out LlvmVTable vtable))
                 throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
@@ -2894,7 +3819,7 @@ public sealed class LlvmIrGenerator
         private LLVMValueRef EmitVirtualMethodCall(BoundMethodCallExpression expression)
         {
             StructTypeSymbol receiverType = expression.IsPointerAccess
-                ? (StructTypeSymbol)((PointerTypeSymbol)expression.Receiver.Type).ElementType
+                ? GetPointerReceiverStruct(expression.Receiver.Type)
                 : (StructTypeSymbol)expression.Receiver.Type;
             if (!_virtualTables.TryGetValue(receiverType, out LlvmVTable vtable))
                 throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
@@ -2931,7 +3856,10 @@ public sealed class LlvmIrGenerator
             string memberName)
         {
             if (isPointerAccess)
-                return EmitExpression(receiver);
+                return EmitOwnershipStorage(receiver);
+
+            if (_fullExpressionTemporaries?.ContainsKey(receiver) == true)
+                return EmitAddress(receiver);
 
             if (IsAddressable(receiver))
                 return EmitAddress(receiver);
@@ -2942,6 +3870,28 @@ public sealed class LlvmIrGenerator
             _builder.BuildStore(EmitExpression(receiver), temporary);
             return temporary;
         }
+
+        private LLVMValueRef EmitOwnershipStorage(BoundExpression receiver)
+        {
+            LLVMValueRef value = EmitExpression(receiver);
+            if (receiver.Type is not SharedTypeSymbol)
+                return value;
+            EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, value,
+                LLVMValueRef.CreateConstPointerNull(value.TypeOf), "shared.access.valid"));
+            return _builder.BuildLoad2(
+                LLVMTypeRef.CreatePointer(_context.Int8Type, 0),
+                OwnershipControlField(value, 2, "shared.access.storage.address"),
+                "shared.access.storage");
+        }
+
+        private static StructTypeSymbol GetPointerReceiverStruct(TypeSymbol type) => type switch
+        {
+            PointerTypeSymbol { ElementType: StructTypeSymbol structure } => structure,
+            UniqueTypeSymbol { ElementType: StructTypeSymbol structure } => structure,
+            SharedTypeSymbol { ElementType: StructTypeSymbol structure } => structure,
+            _ => throw new LlvmCodeGenerationException(
+                $"Type '{type.ToDisplayString()}' is not an owning or raw struct pointer."),
+        };
 
         private LLVMValueRef EmitCall(BoundCallExpression expression)
         {
@@ -2976,7 +3926,28 @@ public sealed class LlvmIrGenerator
             _ => throw new LlvmCodeGenerationException($"Invalid compound assignment operator '{kind}'."),
         };
 
-        private readonly record struct CleanupScope(LLVMValueRef Stack, LLVMValueRef Head);
+        private readonly record struct CleanupScope(LLVMValueRef Stack, LLVMValueRef Head, bool RestoreStack);
+        private readonly record struct ScalarCleanupEntry(
+            LLVMValueRef Node,
+            LLVMValueRef Initialized,
+            FunctionSymbol DestructorFunction,
+            TypeSymbol ValueType,
+            ImmutableArray<FieldSymbol> Path);
+        private readonly record struct ArrayCleanupEntry(
+            LLVMValueRef Node,
+            LLVMValueRef Registered,
+            FunctionSymbol Destructor,
+            ArrayTypeSymbol ArrayType);
+        private sealed class FullExpressionTemporarySlot(
+            LLVMValueRef address,
+            LLVMValueRef active,
+            FunctionSymbol destructor)
+        {
+            public LLVMValueRef Address { get; } = address;
+            public LLVMValueRef Active { get; } = active;
+            public FunctionSymbol Destructor { get; } = destructor;
+            public bool Emitted { get; set; }
+        }
         private readonly record struct BranchTarget(LLVMBasicBlockRef Block, int RetainedDepth);
         private readonly record struct LoopTargets(BranchTarget ContinueTarget);
     }

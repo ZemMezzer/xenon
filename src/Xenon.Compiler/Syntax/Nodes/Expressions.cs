@@ -129,6 +129,20 @@ public sealed record FreeExpressionSyntax(
     public override SyntaxKind Kind => SyntaxKind.FreeExpression;
 }
 
+public sealed record MoveExpressionSyntax(
+    SyntaxToken MoveKeyword,
+    ExpressionSyntax Operand) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.MoveExpression;
+}
+
+public sealed record LockExpressionSyntax(
+    SyntaxToken LockKeyword,
+    ExpressionSyntax Operand) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.LockExpression;
+}
+
 public sealed record ParenthesizedExpressionSyntax(
     SyntaxToken OpenParenthesisToken,
     ExpressionSyntax Expression,

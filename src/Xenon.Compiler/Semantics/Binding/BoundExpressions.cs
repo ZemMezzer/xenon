@@ -28,6 +28,91 @@ public sealed record BoundUnaryExpression(
     public override BoundKind Kind => BoundKind.UnaryExpression;
 }
 
+public sealed record BoundMoveExpression(
+    BoundExpression Source) : BoundExpression(Source.Type)
+{
+    // The semantic place is retained because a reference expression may have
+    // been dereferenced in the bound tree.  Lowering uses this identity to
+    // transfer the original place's destruction responsibility.
+    public VariableSymbol? TrackedVariable { get; init; }
+    public ImmutableArray<FieldSymbol> TrackedPath { get; init; } = [];
+    public override BoundKind Kind => BoundKind.MoveExpression;
+}
+
+/// <summary>A semantic by-value copy. Fresh temporaries and explicit moves bypass this node.</summary>
+public sealed record BoundCopyExpression(
+    BoundExpression Source) : BoundExpression(Source.Type)
+{
+    public override BoundKind Kind => BoundKind.CopyExpression;
+}
+
+/// <summary>Compiler-generated finalization after a user destructor body: own fields, then base.</summary>
+public sealed record BoundDestroyFieldsExpression(
+    StructTypeSymbol StructType) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.DestroyFieldsExpression;
+}
+
+/// <summary>Compiler-generated destruction of the ownership handle passed to an ownership helper.</summary>
+public sealed record BoundOwnershipDestructionExpression(
+    OwnershipTypeSymbol OwnershipType,
+    FunctionSymbol? ElementDestructor) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.OwnershipDestructionExpression;
+}
+
+public sealed record BoundStorageDestructionExpression(
+    StorageTypeSymbol StorageType,
+    FunctionSymbol? ElementDestructor) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.StorageDestructionExpression;
+}
+
+/// <summary>A fresh heap result adopted directly into its first and only owner.</summary>
+public sealed record BoundUniqueAdoptionExpression(
+    BoundExpression Allocation,
+    UniqueTypeSymbol UniqueType) : BoundExpression(UniqueType)
+{
+    public override BoundKind Kind => BoundKind.UniqueAdoptionExpression;
+}
+
+public sealed record BoundSharedAdoptionExpression(
+    BoundExpression Allocation,
+    SharedTypeSymbol SharedType) : BoundExpression(SharedType)
+{
+    public override BoundKind Kind => BoundKind.SharedAdoptionExpression;
+}
+
+public sealed record BoundWeakConversionExpression(
+    BoundExpression Shared,
+    WeakTypeSymbol WeakType) : BoundExpression(WeakType)
+{
+    public override BoundKind Kind => BoundKind.WeakConversionExpression;
+}
+
+public sealed record BoundLockExpression(
+    BoundExpression Weak,
+    SharedTypeSymbol SharedType) : BoundExpression(SharedType)
+{
+    public override BoundKind Kind => BoundKind.LockExpression;
+}
+
+/// <summary>A destructible prvalue whose lifetime ends with its enclosing full expression.</summary>
+public sealed record BoundFullExpressionTemporary(
+    BoundExpression Value,
+    FunctionSymbol Destructor);
+
+/// <summary>
+/// One language full-expression and every unconsumed temporary constructed
+/// while evaluating it, in construction order.
+/// </summary>
+public sealed record BoundFullExpression(
+    BoundExpression Expression,
+    ImmutableArray<BoundFullExpressionTemporary> Temporaries) : BoundExpression(Expression.Type)
+{
+    public override BoundKind Kind => BoundKind.FullExpression;
+}
+
 public sealed record BoundBinaryExpression(
     BoundExpression Left,
     SyntaxKind OperatorKind,
@@ -43,6 +128,8 @@ public sealed record BoundAssignmentExpression(
     BoundExpression Expression) : BoundExpression(Target.Type)
 {
     public override BoundKind Kind => BoundKind.AssignmentExpression;
+    public bool IsInitialization { get; init; }
+    public bool ReinitializesMovedPlace { get; init; }
 }
 
 public sealed record BoundCompoundAccessorAssignmentExpression(
@@ -155,6 +242,46 @@ public sealed record BoundReferenceDereferenceExpression(
     public override BoundKind Kind => BoundKind.ReferenceDereferenceExpression;
 }
 
+public sealed record BoundLifetimeValueExpression(
+    BoundExpression Source,
+    LifetimeModifierTypeSymbol ModifierType) : BoundExpression(ModifierType.ElementType)
+{
+    public override BoundKind Kind => BoundKind.LifetimeValueExpression;
+}
+
+public sealed record BoundDefaultValueExpression(TypeSymbol ValueType) : BoundExpression(ValueType)
+{
+    public override BoundKind Kind => BoundKind.DefaultValueExpression;
+}
+
+public sealed record BoundStorageConstructExpression(
+    BoundExpression Storage,
+    TypeSymbol ValueType,
+    BoundExpression? Value,
+    FunctionSymbol? Constructor,
+    ImmutableArray<BoundExpression> Arguments,
+    bool IsDefaultInitialization) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.StorageConstructExpression;
+}
+
+public sealed record BoundExplicitDestructExpression(
+    BoundExpression Target,
+    TypeSymbol ValueType,
+    FunctionSymbol? Destructor) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.ExplicitDestructExpression;
+    public VariableSymbol? TrackedVariable { get; init; }
+    public ImmutableArray<FieldSymbol> TrackedPath { get; init; } = [];
+}
+
+public sealed record BoundStorageMoveExpression(
+    BoundExpression Storage,
+    StorageTypeSymbol StorageType) : BoundExpression(StorageType.ElementType)
+{
+    public override BoundKind Kind => BoundKind.StorageMoveExpression;
+}
+
 public sealed record BoundInterfaceMethodCallExpression(
     BoundExpression Receiver,
     InterfaceTypeSymbol InterfaceType,
@@ -216,13 +343,14 @@ public sealed record BoundArrayMetadataExpression(
 }
 
 public sealed record BoundNewExpression(
-    StructTypeSymbol StructType,
+    TypeSymbol AllocatedType,
     FunctionSymbol? Constructor,
     ImmutableArray<BoundExpression> Arguments,
     bool IsPositionalInitialization,
     PointerTypeSymbol PointerType) : BoundExpression(PointerType)
 {
     public override BoundKind Kind => BoundKind.NewExpression;
+    public StructTypeSymbol? StructType => AllocatedType as StructTypeSymbol;
     public bool IsDefaultInitialization { get; init; }
 }
 

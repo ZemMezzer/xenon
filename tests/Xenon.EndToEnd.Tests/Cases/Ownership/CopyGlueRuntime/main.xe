@@ -1,0 +1,73 @@
+namespace Ownership.CopyGlueRuntime;
+
+struct Log
+{
+    public static int Trace;
+}
+
+struct Tracked
+{
+    public int Id;
+    public Tracked(int id) { Id = id; }
+    public ~Tracked() { Log.Trace = Log.Trace * 10 + Id; }
+}
+
+struct Pair
+{
+    public int Left;
+    public int Right;
+    public Pair(int left, int right) { Left = left; Right = right; }
+}
+
+struct Container
+{
+    public Pair Pair;
+    public int Tail;
+    public Container(Pair pair, int tail) { Pair = pair; Tail = tail; }
+}
+
+struct Holder
+{
+    public Tracked Value;
+    public Holder(Tracked value) { Value = move value; }
+    public ~Holder() { Log.Trace = Log.Trace * 10 + 9; }
+}
+
+int Read(Pair value) { return value.Left * 10 + value.Right; }
+Pair CopyReturn(Pair value) { return value; }
+Tracked Forward(Tracked value) { return move value; }
+
+int Main()
+{
+    Container first = Container(Pair(1, 2), 3);
+    Container second = first;
+    second.Pair.Left = 9;
+    if (first.Pair.Left != 1 || second.Pair.Left != 9 || second.Tail != 3) return 1;
+
+    Pair argument = Pair(4, 5);
+    if (Read(argument) != 45 || argument.Left != 4) return 2;
+    Pair returned = CopyReturn(argument);
+    if (returned.Left != 4 || returned.Right != 5 || argument.Right != 5) return 3;
+
+    Log.Trace = 0;
+    { Tracked original = Tracked(5); Tracked copy = original; }
+    if (Log.Trace != 55) return 4;
+
+    Log.Trace = 0;
+    { Tracked destination = Tracked(1); Tracked source = Tracked(2); destination = source; }
+    if (Log.Trace != 122) return 5;
+
+    Log.Trace = 0;
+    { Tracked value = Tracked(3); value = value; }
+    if (Log.Trace != 3) return 6;
+
+    Log.Trace = 0;
+    { Tracked source = Tracked(4); Tracked received = Forward(move source); }
+    if (Log.Trace != 4) return 7;
+
+    Log.Trace = 0;
+    { Holder holder = Holder(Tracked(1)); Tracked source = Tracked(2); holder.Value = source; }
+    if (Log.Trace != 1292) return 8;
+
+    return 42;
+}

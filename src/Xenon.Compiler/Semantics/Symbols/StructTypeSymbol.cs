@@ -71,6 +71,24 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
 
     public FunctionSymbol? Destructor { get; private set; }
 
+    private FunctionSymbol? _destructorGlue;
+
+    /// <summary>The complete deterministic destructor operation for this concrete value type.</summary>
+    public FunctionSymbol? CompleteDestructor
+    {
+        get
+        {
+            if (Destructor is not null) return Destructor;
+            if (!TypeFacts.RequiresDestruction(this)) return null;
+            return _destructorGlue ??= new FunctionSymbol(
+                FunctionKind.DestructorGlue,
+                this,
+                [],
+                Declaration,
+                Accessibility.Public);
+        }
+    }
+
     public StructTypeSymbol? BaseType { get; private set; }
 
     public ImmutableArray<InterfaceTypeSymbol> Interfaces { get; private set; } = [];

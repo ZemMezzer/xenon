@@ -1,0 +1,16 @@
+namespace Negative.ConditionalReceiverMoveEffect;
+
+struct Resource {}
+
+struct Holder
+{
+    public unique<Resource> Value;
+
+    public unique<Resource> Take(bool consume)
+    {
+        if (consume)
+            return move Value;
+
+        return new Resource();
+    }
+}

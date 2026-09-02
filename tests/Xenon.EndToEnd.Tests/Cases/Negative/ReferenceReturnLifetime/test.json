@@ -1,0 +1,15 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2229", "message": "cannot return a reference to local variable 'value' because the referenced storage belongs to the current function's stack frame and does not outlive the function call" },
+    { "id": "XE2229", "message": "cannot return a reference to local variable 'value' because the referenced storage belongs to the current function's stack frame and does not outlive the function call" },
+    { "id": "XE2229", "message": "cannot return a reference to local variable 'data' because the referenced storage belongs to the current function's stack frame and does not outlive the function call" },
+    { "id": "XE2229", "message": "cannot return a reference to local variable 'value' because the referenced storage belongs to the current function's stack frame and does not outlive the function call" },
+    { "id": "XE2229", "message": "cannot return a reference to by-value parameter 'value' because the referenced storage belongs to the current function's stack frame and does not outlive the function call" },
+    { "id": "XE2229", "message": "cannot return a reference to local variable 'value' because the referenced storage belongs to the current function's stack frame and does not outlive the function call" },
+    { "id": "XE2229", "message": "cannot return a reference to a temporary value because the referenced storage belongs to the current function's stack frame and does not outlive the function call" }
+  ]
+}

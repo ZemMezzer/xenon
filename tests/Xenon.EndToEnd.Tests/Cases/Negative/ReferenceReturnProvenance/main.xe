@@ -1,0 +1,17 @@
+namespace Negative.ReferenceReturnProvenance;
+
+struct Data
+{
+    public int Value;
+    public int& Get() { return Value; }
+}
+
+int& Forward(int& value) { return value; }
+int& GetValue(Data& value) { return value.Value; }
+int& LayerA(int& value) { return LayerB(value); }
+int& LayerB(int& value) { return Forward(value); }
+
+int& BadForward() { int local = 1; return Forward(local); }
+int& BadField() { Data local = Data(); return GetValue(local); }
+int& BadReceiver() { Data local = Data(); return local.Get(); }
+int& BadLayers() { int local = 1; return LayerA(local); }

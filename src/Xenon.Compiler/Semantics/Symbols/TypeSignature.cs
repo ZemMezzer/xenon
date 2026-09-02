@@ -12,6 +12,11 @@ internal static class TypeSignature
         PointerTypeSymbol pointer => $"ptr{(pointer.IsReadonly ? "readonly" : "")}({Get(pointer.ElementType)})",
         ReferenceTypeSymbol reference => $"ref{(reference.IsReadonly ? "readonly" : "")}({Get(reference.ElementType)})",
         ArrayTypeSymbol array => $"array{array.Rank}({Get(array.ElementType)})",
+        UniqueTypeSymbol unique => $"unique({Get(unique.ElementType)})",
+        SharedTypeSymbol shared => $"shared({Get(shared.ElementType)})",
+        WeakTypeSymbol weak => $"weak({Get(weak.ElementType)})",
+        StorageTypeSymbol storage => $"storage({Get(storage.ElementType)})",
+        PinTypeSymbol pin => $"pin({Get(pin.ElementType)})",
         _ => type.Name,
     };
 

@@ -1,0 +1,47 @@
+namespace Negative.FollowupOwnershipErrors;
+
+struct Resource { public int Value; }
+
+struct Guarded
+{
+    public unique<Resource> Value;
+    public ~Guarded() {}
+    public unique<Resource> Take() { return move this.Value; }
+}
+
+T Duplicate<T>(T value)
+{
+    T copy = value;
+    return copy;
+}
+
+extern shared<Resource> ReceiveShared();
+export void SendWeak(weak<Resource> value) {}
+
+void InvalidOwners()
+{
+    Resource* raw = new Resource();
+    shared<Resource> sharedRaw = raw;
+    weak<Resource> weakRaw = raw;
+
+    shared<Resource> strong = new Resource();
+    weak<Resource> observer = strong;
+    observer.Value;
+
+    free(strong);
+    free(observer);
+
+    shared<Resource> movedStrong = move strong;
+    strong->Value;
+    weak<Resource> movedWeak = move observer;
+    observer.Lock();
+
+    free(raw);
+}
+
+struct InvalidNested
+{
+    public unique<shared<Resource>> First;
+    public shared<unique<Resource>> Second;
+    public weak<shared<Resource>> Third;
+}

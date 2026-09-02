@@ -16,8 +16,8 @@ public sealed class LlvmIrGeneratorTests
         Compilation compilation = CreateCompilation("""
             namespace Example;
             struct UnusedBox<T> { T value; }
-            T Identity<T>(T value) { return value; }
-            T Forward<T>(T value) { return Identity(value); }
+            T Identity<T>(T value) { return move value; }
+            T Forward<T>(T value) { return Identity(move value); }
             int Use() { return Identity<int>(42) + Identity(1) + Forward(2); }
             """);
 
@@ -57,8 +57,8 @@ public sealed class LlvmIrGeneratorTests
             struct Box<T>
             {
                 T value;
-                public Box(T initial) { value = initial; }
-                public T Get() { return value; }
+                public Box(T initial) { value = move initial; }
+                public T Get() { return move value; }
             }
             int Use()
             {
@@ -85,8 +85,8 @@ public sealed class LlvmIrGeneratorTests
             struct Box<T>
             {
                 T value;
-                public Box(T initial) { value = initial; }
-                public T Get() { return value; }
+                public Box(T initial) { value = move initial; }
+                public T Get() { return move value; }
             }
             int ReadInt(int value) { return Box<int>(value).Get(); }
             float ReadFloat(float value) { return Box<float>(value).Get(); }
@@ -2054,6 +2054,179 @@ public sealed class LlvmIrGeneratorTests
             Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
             Assert.Contains(signed ? "fptosi" : "fptoui", ir, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void Generator_DoesNotAddCleanupRuntimeForTrivialMove()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Pair { public int X; public int Y; }
+            int Use()
+            {
+                Pair source = Pair { 1, 2 };
+                Pair destination = move source;
+                return destination.X + destination.Y;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().Generate(compilation, "trivial-move");
+        Assert.DoesNotContain("local.cleanup.node", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("local.constructed", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("stack.cleanup", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsRecursiveDestructorGlueInReverseFieldOrder()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Leaf { public int Id; public ~Leaf() {} }
+            struct Container { public Leaf First; public Leaf Second; }
+            void Use() { Container value = Container(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol container = Assert.Single(Assert.Single(
+            compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Container"));
+        Assert.Equal(FunctionKind.DestructorGlue, container.CompleteDestructor!.FunctionKind);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), "destructor-glue");
+        Assert.Contains(ManagedSymbol("destructor-glue", container.CompleteDestructor.FullName, "function"), ir, StringComparison.Ordinal);
+        int second = ir.IndexOf("Second.destructor.address", StringComparison.Ordinal);
+        int first = ir.IndexOf("First.destructor.address", StringComparison.Ordinal);
+        Assert.True(second >= 0 && first > second, "generated destructor glue must destroy fields in reverse declaration order");
+        Assert.Contains("local.cleanup.node", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_LowersCompositeCopiesFieldByField()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Pair { public int Left; public int Right; }
+            struct Container { public Pair Pair; public int Tail; }
+            int Use()
+            {
+                Container source = Container { Pair { 1, 2 }, 3 };
+                Container destination = source;
+                destination.Pair.Left = 10;
+                return source.Pair.Left + destination.Pair.Left + destination.Tail;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().Generate(compilation, "copy-glue");
+        Assert.Contains("copy.Pair", ir, StringComparison.Ordinal);
+        Assert.Contains("copy.Left", ir, StringComparison.Ordinal);
+        Assert.Contains("copy.Right", ir, StringComparison.Ordinal);
+        Assert.Contains("copy.Tail", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_OwnershipCopiesRetainAndMovesOnlyTransferHandles()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            shared<Resource> CopyShared(shared<Resource> value)
+            {
+                shared<Resource> result = value;
+                return move result;
+            }
+            shared<Resource> MoveShared(shared<Resource> value)
+            {
+                shared<Resource> result = move value;
+                return move result;
+            }
+            weak<Resource> CopyWeak(weak<Resource> value)
+            {
+                weak<Resource> result = value;
+                return move result;
+            }
+            weak<Resource> MoveWeak(weak<Resource> value)
+            {
+                weak<Resource> result = move value;
+                return move result;
+            }
+            unique<Resource> MoveUnique(unique<Resource> value)
+            {
+                unique<Resource> result = move value;
+                return move result;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), "ownership-costs");
+        string Body(string name)
+        {
+            string symbol = ManagedSymbol("ownership-costs", $"Example.{name}", "function");
+            int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"missing function {name}");
+            int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+            Assert.True(end > start, $"unterminated function {name}");
+            return ir[start..end];
+        }
+
+        Assert.Contains("shared.retain.body", Body("CopyShared"), StringComparison.Ordinal);
+        Assert.DoesNotContain("shared.retain.body", Body("MoveShared"), StringComparison.Ordinal);
+        Assert.Contains("weak.retain.body", Body("CopyWeak"), StringComparison.Ordinal);
+        Assert.DoesNotContain("weak.retain.body", Body("MoveWeak"), StringComparison.Ordinal);
+        Assert.DoesNotContain("copy.", Body("MoveUnique"), StringComparison.Ordinal);
+        Assert.Contains("store i1 false", Body("MoveShared"), StringComparison.Ordinal);
+        Assert.Contains("store i1 false", Body("MoveWeak"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_LowersReceiverEffectsAndRawArrayMovesWithoutSourceZeroingOrHeapCopies()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder
+            {
+                public unique<Resource> Value;
+                public unique<Resource> Take() { return move Value; }
+                public unique<Resource> Replace()
+                {
+                    unique<Resource> old = move Value;
+                    Value = new Resource();
+                    return move old;
+                }
+            }
+            int[] MoveArray(int[] value) { return move value; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "move-effects";
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), module);
+        string Body(string fullName)
+        {
+            string symbol = ManagedSymbol(module, fullName, "function");
+            int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"missing function {fullName}");
+            int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+            Assert.True(end > start, $"unterminated function {fullName}");
+            return ir[start..end];
+        }
+
+        string take = Body("Example.Holder.Take");
+        Assert.DoesNotContain("store ptr null", take, StringComparison.Ordinal);
+        Assert.DoesNotContain("zeroinitializer", take, StringComparison.Ordinal);
+
+        StructTypeSymbol holder = Assert.Single(Assert.Single(
+            compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Holder"));
+        var ownership = Assert.IsType<UniqueTypeSymbol>(Assert.Single(holder.Fields).Type);
+        string ownershipDestructor = ManagedSymbol(module, ownership.CompleteDestructor!.FullName, "function");
+        Assert.DoesNotContain($"call void @{ownershipDestructor}", Body("Example.Holder.Replace"), StringComparison.Ordinal);
+
+        string arrayMove = Body("Example.MoveArray");
+        Assert.DoesNotContain("@malloc", arrayMove, StringComparison.Ordinal);
+        Assert.DoesNotContain("@calloc", arrayMove, StringComparison.Ordinal);
+        Assert.DoesNotContain("llvm.memcpy", arrayMove, StringComparison.Ordinal);
     }
 
     private static Compilation CreateCompilation(string source) =>
