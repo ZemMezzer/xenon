@@ -3841,6 +3841,46 @@ public sealed class NativeLinkerTests
                     reference = Resource();
                 }
                 if (State.Constructors != 2 || State.Destructors != 2) return 1;
+
+                State.Constructors = 0;
+                State.Destructors = 0;
+                storage<Resource>* value = new storage<Resource>();
+                storage<Resource>& reference = *value;
+                reference = Resource();
+                destruct(reference);
+                reference = Resource();
+                free(value);
+                if (State.Constructors != 2 || State.Destructors != 2) return 2;
+                return 0;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ReusesIndexedStoragePointerWithExactlyOnceDestruction(int optimization)
+    {
+        Assert.Equal(0, RunIterationFourProgram("""
+            struct State { public static int Constructors; public static int Destructors; }
+            struct Resource
+            {
+                public Resource() { State.Constructors++; }
+                public ~Resource() { State.Destructors++; }
+            }
+            int Main()
+            {
+                {
+                    storage<Resource>* pointer = new storage<Resource>();
+                    int index = 0;
+                    pointer[index] = Resource();
+                    destruct(pointer[index]);
+                    pointer[index] = Resource();
+                    Resource value = move pointer[index];
+                    free(pointer);
+                    if (State.Constructors != 2 || State.Destructors != 1) return 1;
+                }
+                if (State.Constructors != 2 || State.Destructors != 2) return 2;
                 return 0;
             }
             """, optimization));

@@ -19,7 +19,7 @@ public static class ServerCapabilities
         implementationProvider = true,
         documentSymbolProvider = true,
         workspaceSymbolProvider = true,
-        completionProvider = new { triggerCharacters = new[] { "." }, resolveProvider = false },
+        completionProvider = new { triggerCharacters = new[] { ".", ">" }, resolveProvider = false },
         signatureHelpProvider = new { triggerCharacters = new[] { "(", ",", "[" },
             retriggerCharacters = new[] { "," } },
         semanticTokensProvider = new

@@ -253,8 +253,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 return Evaluate(adoption.Allocation);
             case BoundWeakConversionExpression conversion:
                 return Evaluate(conversion.Shared);
-            case BoundWeakLockExpression weakLock:
-                return Evaluate(weakLock.Weak);
+            case BoundLockExpression @lock:
+                return Evaluate(@lock.Weak);
             case BoundStructConstructionExpression construction:
                 Initialize(construction.StructType, construction.Arguments, construction);
                 return Read([Root(construction)], construction.Type);

@@ -994,6 +994,515 @@ public sealed class OwnershipCompletionTests
         Assert.Single(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.InvalidMoveSource);
     }
 
+    [Fact]
+    public void Analyzer_DistinguishesOrdinaryHeapAndStoragePointerDestruction()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public ~Resource() {} }
+            void DirectNew()
+            {
+                Resource* value = new Resource();
+                destruct(*value);
+            }
+            void DirectNewThenFree()
+            {
+                Resource* value = new Resource();
+                destruct(*value);
+                free(value);
+            }
+            void AssignedNew()
+            {
+                Resource* value;
+                value = new Resource();
+                destruct(*value);
+            }
+            void AliasedNew()
+            {
+                Resource* value = new Resource();
+                Resource* alias = value;
+                destruct(*alias);
+            }
+            void UnknownRawPointer(Resource* value)
+            {
+                destruct(*value);
+            }
+            void ReusableHeapStorage()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                *value = Resource();
+                destruct(*value);
+                *value = Resource();
+                free(value);
+            }
+            """);
+
+        Assert.Equal(5, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
+        Assert.Equal(5, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_RawPointerLifetimeAuthorityIsTypeBasedAcrossReturnsFieldsAndExternalValues()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public void Use() {} public ~Resource() {} }
+            struct Holder { public Resource* Value; }
+            Resource* Create() { return new Resource(); }
+            extern Resource* GetExternal();
+            void ReturnedPointer()
+            {
+                Resource* pointer = Create();
+                destruct(*pointer);
+                Resource value = move *pointer;
+            }
+            void PointerField()
+            {
+                Holder holder = Holder();
+                holder.Value = Create();
+                destruct(*holder.Value);
+                Resource value = move *holder.Value;
+            }
+            void ExternalPointer()
+            {
+                Resource* pointer = GetExternal();
+                destruct(*pointer);
+                Resource value = move *pointer;
+            }
+            void AccessAndFree()
+            {
+                Resource* pointer = Create();
+                pointer->Use();
+                free(pointer);
+            }
+            """);
+
+        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
+        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.InvalidMoveSource));
+        Assert.Equal(6, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_ProtectsPointerProjectedStorageDestructionWithNonLexicalBorrows()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource
+            {
+                public int Value;
+                public void Use() { Value++; }
+                public int readonly Read() { return Value; }
+                public ~Resource() {}
+            }
+            Resource& Forward(Resource& value) { return value; }
+            void MutableBorrow()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                *value = Resource();
+                Resource& reference = *value;
+                destruct(*value);
+                reference.Use();
+            }
+            void ReadonlyBorrow()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                *value = Resource();
+                readonly Resource& reference = *value;
+                destruct(*value);
+                int observed = reference.Read();
+            }
+            void ChildBorrow()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                *value = Resource();
+                int& reference = (*value).Value;
+                destruct(*value);
+                reference = 10;
+            }
+            void BorrowEnds()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                *value = Resource();
+                Resource& reference = *value;
+                reference.Use();
+                destruct(*value);
+                free(value);
+            }
+            void ForwardedBorrow()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                *value = Resource();
+                Resource& reference = Forward(*value);
+                destruct(*value);
+                reference.Use();
+            }
+            """);
+
+        Assert.Equal(4, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.DestructWhileBorrowed));
+        Assert.Equal(4, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsLifetimeManagementThroughStorageValueReferences()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public int Value; public ~Resource() {} }
+            Resource& Forward(Resource& value) { return value; }
+            void LocalDestruct()
+            {
+                storage<Resource> value = Resource();
+                Resource& reference = value;
+                destruct(reference);
+            }
+            void HeapDestruct()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                *value = Resource();
+                Resource& reference = *value;
+                destruct(reference);
+                free(value);
+            }
+            void LocalMove()
+            {
+                storage<Resource> value = Resource();
+                Resource& reference = value;
+                Resource moved = move reference;
+            }
+            void ChildDestruct()
+            {
+                storage<Resource> value = Resource();
+                int& reference = value.Value;
+                destruct(reference);
+            }
+            void ForwardedStorageReference()
+            {
+                storage<Resource> value = Resource();
+                Resource& reference = Forward(value);
+                destruct(reference);
+            }
+            void OrdinaryReferenceRemainsAuthoritative()
+            {
+                Resource value = Resource();
+                Resource& reference = value;
+                destruct(reference);
+            }
+            """);
+
+        Assert.Equal(5, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.StorageValueLifetimeMutation));
+        Assert.Equal(5, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsHeapStorageLifetimeManagementThroughStorageReference()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public ~Resource() {} }
+            void Main()
+            {
+                storage<Resource>* value = new storage<Resource>();
+                storage<Resource>& reference = *value;
+                reference = Resource();
+                destruct(reference);
+                reference = Resource();
+                free(value);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsRawPointerLifetimeOperationsRegardlessOfPlaceAndFlow()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource
+            {
+                public void Use() {}
+                public ~Resource() {}
+            }
+            struct Holder { public Resource* Value; }
+            struct Inner { public Resource* Value; }
+            struct Outer { public Inner Inner; }
+            struct StorageHolder { public storage<Resource>* Value; }
+            extern Resource* GetExternal();
+            void DirectField()
+            {
+                Holder holder = Holder();
+                holder.Value = new Resource();
+                destruct(*holder.Value);
+            }
+            void NestedField()
+            {
+                Outer outer = Outer();
+                outer.Inner.Value = new Resource();
+                destruct(*outer.Inner.Value);
+            }
+            void LocalToField()
+            {
+                Resource* value = new Resource();
+                Holder holder = Holder();
+                holder.Value = value;
+                destruct(*holder.Value);
+            }
+            void FieldToLocal()
+            {
+                Holder holder = Holder();
+                holder.Value = new Resource();
+                Resource* value = holder.Value;
+                destruct(*value);
+            }
+            void PointerFieldMove()
+            {
+                Holder holder = Holder();
+                holder.Value = new Resource();
+                Resource value = move *holder.Value;
+            }
+            void DefiniteBranch(bool condition)
+            {
+                Resource* value;
+                if (condition) value = new Resource();
+                else value = new Resource();
+                destruct(*value);
+            }
+            void UnknownBranch(bool condition)
+            {
+                Resource* value;
+                if (condition) value = new Resource();
+                else value = GetExternal();
+                destruct(*value);
+            }
+            void LoopReplacement(bool condition)
+            {
+                Resource* value = new Resource();
+                while (condition)
+                {
+                    value = GetExternal();
+                    condition = false;
+                }
+                destruct(*value);
+            }
+            void DistinctFieldInstances()
+            {
+                Holder first = Holder();
+                Holder second = Holder();
+                first.Value = new Resource();
+                second.Value = GetExternal();
+                destruct(*second.Value);
+            }
+            void AggregateMove()
+            {
+                Holder first = Holder();
+                first.Value = new Resource();
+                Holder second = move first;
+                destruct(*second.Value);
+            }
+            void AggregateCopy()
+            {
+                Holder first = Holder();
+                first.Value = new Resource();
+                Holder second = first;
+                destruct(*second.Value);
+            }
+            void LocalReplacement()
+            {
+                Resource* value = new Resource();
+                free(value);
+                value = GetExternal();
+                destruct(*value);
+            }
+            void FieldReplacement()
+            {
+                Holder holder = Holder();
+                holder.Value = new Resource();
+                free(holder.Value);
+                holder.Value = GetExternal();
+                destruct(*holder.Value);
+            }
+            void FreeField()
+            {
+                Holder holder = Holder();
+                holder.Value = new Resource();
+                free(holder.Value);
+            }
+            void ActiveFieldBorrow()
+            {
+                Holder holder = Holder();
+                holder.Value = new Resource();
+                Resource& reference = *holder.Value;
+                free(holder.Value);
+                reference.Use();
+            }
+            void EndedFieldBorrow()
+            {
+                Holder holder = Holder();
+                holder.Value = new Resource();
+                Resource& reference = *holder.Value;
+                reference.Use();
+                free(holder.Value);
+            }
+            void StoragePointerField()
+            {
+                StorageHolder holder = StorageHolder();
+                holder.Value = new storage<Resource>();
+                *holder.Value = Resource();
+                destruct(*holder.Value);
+                *holder.Value = Resource();
+                free(holder.Value);
+            }
+            """);
+
+        Assert.Equal(12, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
+        Assert.Single(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.InvalidMoveSource);
+        Assert.Single(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.FreeWhileBorrowed);
+        Assert.Equal(14, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_TreatsPointerIndexingAsPointerLifetimeProjection()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Child { public ~Child() {} }
+            struct Resource
+            {
+                public Child Child;
+                public void Use() {}
+                public int readonly Read() { return 0; }
+                public ~Resource() {}
+            }
+            extern Resource* ExternalApi();
+            void RawIndexedDestruct(Resource* pointer)
+            {
+                destruct(pointer[0]);
+                destruct(pointer[1].Child);
+            }
+            void RawRuntimeIndexedMove(Resource* pointer, int index)
+            {
+                Resource value = move pointer[index];
+            }
+            void ExternalIndexedDestruct()
+            {
+                destruct(ExternalApi()[3]);
+            }
+            void StorageIndexedLifetime(int index)
+            {
+                storage<Resource>* pointer = new storage<Resource>();
+                pointer[0] = Resource();
+                destruct(pointer[index]);
+                pointer[0] = Resource();
+                Resource value = move pointer[index];
+                free(pointer);
+            }
+            void ActiveMutableBorrow()
+            {
+                storage<Resource>* pointer = new storage<Resource>();
+                pointer[0] = Resource();
+                Resource& reference = pointer[0];
+                destruct(pointer[0]);
+                reference.Use();
+            }
+            void ActiveReadonlyBorrow(int index)
+            {
+                storage<Resource>* pointer = new storage<Resource>();
+                pointer[0] = Resource();
+                readonly Resource& reference = pointer[index];
+                destruct(pointer[0]);
+                int observed = reference.Read();
+            }
+            void BorrowEnds()
+            {
+                storage<Resource>* pointer = new storage<Resource>();
+                pointer[0] = Resource();
+                Resource& reference = pointer[0];
+                reference.Use();
+                destruct(pointer[0]);
+                free(pointer);
+            }
+            """);
+
+        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
+        Assert.Single(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.InvalidMoveSource);
+        Assert.Equal(2, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.DestructWhileBorrowed));
+        Assert.Equal(6, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_BindsLockAsAValueProducingWeakOwnershipExpression()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public void Use() {} }
+            shared<T> Acquire<T>(weak<T> value) { return lock value; }
+            shared<Resource> ReturnLock(weak<Resource> value) { return lock value; }
+            void Consume(shared<Resource> value) { value->Use(); }
+            void Test(shared<Resource> owner)
+            {
+                weak<Resource> observer = owner;
+                shared<Resource> local = lock observer;
+                Consume(lock observer);
+                shared<Resource> generic = Acquire<Resource>(observer);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsLockForNonWeakValuesAndRejectsOldMethodSyntax()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource {}
+            void Test(Resource resource, shared<Resource> sharedValue,
+                unique<Resource> uniqueValue, storage<Resource> storageValue,
+                weak<Resource> observer)
+            {
+                lock resource;
+                lock sharedValue;
+                lock uniqueValue;
+                lock storageValue;
+                observer.Lock();
+            }
+            """);
+
+        Assert.Equal(4, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.InvalidLockOperand));
+        Assert.Single(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.WeakDirectAccess);
+        Assert.Equal(5, compilation.Diagnostics.Length);
+    }
+
+    [Fact]
+    public void Analyzer_LifetimeAndMemoryOperationsDoNotProduceValues()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource { public ~Resource() {} }
+            void Test()
+            {
+                Resource value = Resource();
+                Resource invalidDestruct = destruct(value);
+                Resource* pointer = new Resource();
+                Resource invalidFree = free(pointer);
+            }
+            """);
+
+        Assert.Equal(2, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.TypeMismatch));
+        Assert.Equal(2, compilation.Diagnostics.Length);
+    }
+
     private static Compilation Create(string source) =>
         Compilation.Create(SourceText.From(source, "ownership-completion.xe"));
 }

@@ -4736,7 +4736,7 @@ public sealed class SemanticAnalyzerTests
                 unique<culong> o = new culong();
                 shared<int> strong = new int(7);
                 weak<int> observer = strong;
-                shared<int> locked = observer.Lock();
+                shared<int> locked = lock observer;
                 *f = *f + *locked;
             }
             """);
@@ -4769,7 +4769,7 @@ public sealed class SemanticAnalyzerTests
                 unique<{{primitive}}> uniqueValue = new {{primitive}}();
                 shared<{{primitive}}> sharedValue = new {{primitive}}();
                 weak<{{primitive}}> weakValue = sharedValue;
-                shared<{{primitive}}> locked = weakValue.Lock();
+                shared<{{primitive}}> locked = lock weakValue;
             }
             """);
 

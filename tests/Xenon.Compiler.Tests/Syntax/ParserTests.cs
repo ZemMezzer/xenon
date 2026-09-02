@@ -1014,6 +1014,21 @@ public sealed class ParserTests
     }
 
     [Fact]
+    public void Parser_ParsesLockAsDedicatedPrefixExpressionInNestedPosition()
+    {
+        SyntaxTree tree = Parse("namespace Example; void Use(shared<Value> value) {} void Test(weak<Value> source) { Use(lock source); }");
+
+        Assert.Empty(tree.Diagnostics);
+        FunctionDeclarationSyntax test = tree.Root.Members.OfType<FunctionDeclarationSyntax>()
+            .Single(function => function.IdentifierToken.Text == "Test");
+        var call = Assert.IsType<CallExpressionSyntax>(
+            Assert.IsType<ExpressionStatementSyntax>(Assert.Single(test.Body!.Statements)).Expression);
+        LockExpressionSyntax @lock = Assert.IsType<LockExpressionSyntax>(Assert.Single(call.Arguments));
+        Assert.Equal(SyntaxKind.LockKeyword, @lock.LockKeyword.Kind);
+        Assert.Equal("source", Assert.IsType<NameExpressionSyntax>(@lock.Operand).IdentifierToken.Text);
+    }
+
+    [Fact]
     public void Parser_ParsesOwnershipTypesIncludingArrays()
     {
         SyntaxTree tree = Parse("namespace Example; void Own(unique<Resource> item, unique<int[]> values, shared<Resource> strong, weak<Resource> observer) {}");

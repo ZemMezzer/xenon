@@ -27,6 +27,7 @@ internal sealed class FunctionBodyBinder
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _stackArrayScopes = [];
     private readonly Dictionary<LocalVariableSymbol, MovePlace> _referenceAliases = [];
     private readonly Dictionary<LocalVariableSymbol, ImmutableArray<ReferenceSource>> _referenceAliasSources = [];
+    private readonly Dictionary<LocalVariableSymbol, StorageValueReferenceOrigin> _storageValueReferenceOrigins = [];
     private readonly Dictionary<MovePlace, ImmutableArray<ValueReference>> _valueReferenceMetadata = [];
     private readonly Dictionary<BoundExpression, ImmutableArray<ValueReference>> _expressionReferenceMetadata =
         new(ReferenceEqualityComparer.Instance);
@@ -91,7 +92,15 @@ internal sealed class FunctionBodyBinder
     private sealed record PointerLifetimeBorrow(
         LocalVariableSymbol Alias,
         MovePlace Pointer,
+        LocalVariableSymbol? ParentAlias,
         int LastUsePosition);
+    private sealed record StorageValueReferenceOrigin(StorageTypeSymbol StorageType);
+    private enum LifetimeOperationKind
+    {
+        EndLifetime,
+        TransferLifetime,
+        EndLifetimeAndDeallocate,
+    }
     private enum StorageState { Empty, Initialized, MaybeInitialized }
     private sealed record ExpressionFlow(
         HashSet<VariableSymbol> Assigned,
@@ -874,6 +883,8 @@ internal sealed class FunctionBodyBinder
                 isDirectPinDeclaration && type is PinTypeSymbol convertedPin ? convertedPin.ElementType : type);
             if (type is ReferenceTypeSymbol)
             {
+                if (TryGetStorageValueReferenceOrigin(initializer, out StorageValueReferenceOrigin storageOrigin))
+                    _storageValueReferenceOrigins[variable] = storageOrigin;
                 ImmutableArray<ReferenceSource> aliasSources = GetReferenceSources(initializer);
                 _referenceAliasSources[variable] = aliasSources;
                 int lastUsePosition = FindLastReferenceUse(variable, syntax);
@@ -887,8 +898,10 @@ internal sealed class FunctionBodyBinder
                     _borrows.Add(new Borrow(variable, aliasPlace, ((ReferenceTypeSymbol)type).IsReadonly, throughAlias,
                         lastUsePosition));
                 }
-                else if (TryGetDirectPointerLifetimeRoot(initializer, out MovePlace pointer))
-                    _pointerLifetimeBorrows.Add(new PointerLifetimeBorrow(variable, pointer, lastUsePosition));
+                else if (TryGetPointerLifetimeRoot(initializer, out MovePlace pointer,
+                             out LocalVariableSymbol? pointerParentAlias))
+                    _pointerLifetimeBorrows.Add(new PointerLifetimeBorrow(variable, pointer,
+                        pointerParentAlias, lastUsePosition));
             }
             else if (TypeFacts.ContainsReferenceStorage(type))
             {
@@ -1121,6 +1134,8 @@ internal sealed class FunctionBodyBinder
                 return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
             case BoundMemberAccessExpression member:
                 return AppendReferenceField(GetReferenceSources(member.Receiver), member.Field.Ordinal);
+            case BoundIndexExpression { Receiver.Type: PointerTypeSymbol }:
+                return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
             case BoundIndexExpression index:
                 if (index.Receiver.Type is OwnershipTypeSymbol)
                     return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
@@ -1570,6 +1585,7 @@ internal sealed class FunctionBodyBinder
                 ThisExpressionSyntax @this => BindThisExpression(@this),
                 ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
                 MoveExpressionSyntax move => BindMoveExpression(move),
+                LockExpressionSyntax @lock => BindLockExpression(@lock),
                 UnaryExpressionSyntax unary => BindUnaryExpression(unary),
                 PostfixUnaryExpressionSyntax postfix => BindPostfixUnaryExpression(postfix),
                 BinaryExpressionSyntax binary => BindBinaryExpression(binary),
@@ -1795,6 +1811,9 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindMoveExpression(MoveExpressionSyntax syntax)
     {
         BoundExpression source = BindLifetimeInvalidationOperand(syntax.Operand);
+        if (!ValidateLifetimeOperationAuthority(source, LifetimeOperationKind.TransferLifetime,
+                syntax.MoveKeyword.Location))
+            return new BoundErrorExpression();
         if (TryGetStorageType(source.Type, out StorageTypeSymbol storageType) && IsAddressable(source))
         {
             if (!IsWritable(source))
@@ -1815,6 +1834,11 @@ internal sealed class FunctionBodyBinder
             }
             if (storagePlace is not null && !ValidateLifetimeInvalidation(storagePlace, GetLocation(syntax),
                     GetReferenceAliasRoot(source), "move", DiagnosticIds.MoveWhileBorrowed))
+                return new BoundErrorExpression();
+            if (TryGetPointerLifetimeRoot(source, out MovePlace storagePointer,
+                    out LocalVariableSymbol? storagePointerAlias) &&
+                !ValidatePointerLifetimeInvalidation(storagePointer, GetLocation(syntax), storagePointerAlias,
+                    "move", DiagnosticIds.MoveWhileBorrowed))
                 return new BoundErrorExpression();
             var storageMove = new BoundStorageMoveExpression(source, storageType);
             if (storagePlace is not null)
@@ -1876,6 +1900,24 @@ internal sealed class FunctionBodyBinder
             TryGetValueCarrierPlace(source, out MovePlace carrier))
             TransferValueReferenceMetadata(carrier, result, syntax.MoveKeyword.Location.Span.Start);
         return result;
+    }
+
+    private BoundExpression BindLockExpression(LockExpressionSyntax syntax)
+    {
+        BoundExpression operand = BindExpression(syntax.Operand);
+        if (operand.Type is not WeakTypeSymbol weakType)
+        {
+            if (!TypeIdentity.AreSame(operand.Type, BuiltinTypes.Error))
+                _diagnostics.Report(syntax.LockKeyword.Location,
+                    $"'lock' requires a weak<T> value, but has type '{operand.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidLockOperand);
+            return new BoundErrorExpression();
+        }
+
+        SharedTypeSymbol sharedType = _fileScope.TypeFactory.SharedOf(weakType.ElementType);
+        _fileScope.TypeFactory.EnsureOwnershipDestructor(
+            sharedType, _fileScope.GlobalNamespace, syntax);
+        return new BoundLockExpression(operand, sharedType);
     }
 
     private bool TryGetMovePlace(BoundExpression expression, out MovePlace place)
@@ -1940,26 +1982,158 @@ internal sealed class FunctionBodyBinder
         return false;
     }
 
-    private bool TryGetDirectPointerLifetimeRoot(BoundExpression expression, out MovePlace place)
+    private bool TryGetPointerLifetimeRoot(
+        BoundExpression expression,
+        out MovePlace place,
+        out LocalVariableSymbol? throughAlias)
     {
         switch (expression)
         {
             case BoundReferenceConversionExpression conversion:
-                return TryGetDirectPointerLifetimeRoot(conversion.Source, out place);
+                return TryGetPointerLifetimeRoot(conversion.Source, out place, out throughAlias);
             case BoundCopyExpression copy:
-                return TryGetDirectPointerLifetimeRoot(copy.Source, out place);
+                return TryGetPointerLifetimeRoot(copy.Source, out place, out throughAlias);
             case BoundLifetimeValueExpression value:
-                return TryGetDirectPointerLifetimeRoot(value.Source, out place);
+                return TryGetPointerLifetimeRoot(value.Source, out place, out throughAlias);
+            case BoundReferenceDereferenceExpression dereference:
+                return TryGetPointerLifetimeRoot(dereference.Reference, out place, out throughAlias);
+            case BoundVariableExpression { Variable: LocalVariableSymbol local }:
+                PointerLifetimeBorrow? origin = _pointerLifetimeBorrows.LastOrDefault(borrow =>
+                    ReferenceEquals(borrow.Alias, local));
+                if (origin is not null)
+                {
+                    place = origin.Pointer;
+                    throughAlias = local;
+                    return true;
+                }
+                break;
             case BoundUnaryExpression
             {
                 OperatorKind: SyntaxKind.StarToken,
                 Operand.Type: PointerTypeSymbol,
             } dereference:
+                throughAlias = null;
                 return TryGetMovePlace(dereference.Operand, out place);
+            case BoundIndexExpression { Receiver.Type: PointerTypeSymbol } index:
+                throughAlias = null;
+                return TryGetMovePlace(index.Receiver, out place);
+            case BoundMemberAccessExpression { IsPointerAccess: true } member:
+                throughAlias = null;
+                return TryGetMovePlace(member.Receiver, out place);
+            case BoundMemberAccessExpression member:
+                return TryGetPointerLifetimeRoot(member.Receiver, out place, out throughAlias);
+            case BoundCallExpression call when TryGetReturnedReferenceSource(
+                call.Function, call.Arguments, receiver: null, out BoundExpression callSource):
+                return TryGetPointerLifetimeRoot(callSource, out place, out throughAlias);
+            case BoundMethodCallExpression call when call.Method.VTableSlot is null &&
+                                                     TryGetReturnedReferenceSource(
+                                                         call.Method, call.Arguments, call.Receiver,
+                                                         out BoundExpression methodSource):
+                return TryGetPointerLifetimeRoot(methodSource, out place, out throughAlias);
+        }
+        place = null!;
+        throughAlias = null;
+        return false;
+    }
+
+    private bool TryGetStorageValueReferenceOrigin(
+        BoundExpression expression,
+        out StorageValueReferenceOrigin origin)
+    {
+        switch (expression)
+        {
+            case BoundReferenceConversionExpression conversion:
+                return TryGetStorageValueReferenceOrigin(conversion.Source, out origin);
+            case BoundCopyExpression copy:
+                return TryGetStorageValueReferenceOrigin(copy.Source, out origin);
+            case BoundReferenceDereferenceExpression dereference:
+                return TryGetStorageValueReferenceOrigin(dereference.Reference, out origin);
+            case BoundLifetimeValueExpression { ModifierType: StorageTypeSymbol storage }:
+                origin = new StorageValueReferenceOrigin(storage);
+                return true;
+            case BoundLifetimeValueExpression value:
+                return TryGetStorageValueReferenceOrigin(value.Source, out origin);
+            case BoundMemberAccessExpression member:
+                return TryGetStorageValueReferenceOrigin(member.Receiver, out origin);
+            case BoundVariableExpression { Variable: LocalVariableSymbol local }
+                when _storageValueReferenceOrigins.TryGetValue(local, out origin!):
+                return true;
+            case BoundCallExpression call when TryGetReturnedReferenceSource(
+                call.Function, call.Arguments, receiver: null, out BoundExpression callSource):
+                return TryGetStorageValueReferenceOrigin(callSource, out origin);
+            case BoundMethodCallExpression call when call.Method.VTableSlot is null &&
+                                                     TryGetReturnedReferenceSource(
+                                                         call.Method, call.Arguments, call.Receiver,
+                                                         out BoundExpression methodSource):
+                return TryGetStorageValueReferenceOrigin(methodSource, out origin);
             default:
-                place = null!;
+                origin = null!;
                 return false;
         }
+    }
+
+    private bool IsOrdinaryRawPointerPointee(BoundExpression expression)
+    {
+        switch (expression)
+        {
+            case BoundUnaryExpression
+            {
+                OperatorKind: SyntaxKind.StarToken,
+                Operand.Type: PointerTypeSymbol pointer,
+            }:
+                return pointer.ElementType is not StorageTypeSymbol;
+            case BoundIndexExpression { Receiver.Type: PointerTypeSymbol pointer }:
+                return pointer.ElementType is not StorageTypeSymbol;
+            case BoundMemberAccessExpression
+            {
+                IsPointerAccess: true,
+                Receiver: not BoundThisExpression,
+                Receiver.Type: PointerTypeSymbol pointer,
+            }:
+                return pointer.ElementType is not StorageTypeSymbol;
+            case BoundMemberAccessExpression member:
+                return IsOrdinaryRawPointerPointee(member.Receiver);
+            case BoundReferenceConversionExpression conversion:
+                return IsOrdinaryRawPointerPointee(conversion.Source);
+            case BoundReferenceDereferenceExpression dereference:
+                return IsOrdinaryRawPointerPointee(dereference.Reference);
+        }
+
+        if (!TryGetPointerLifetimeRoot(expression, out MovePlace pointerPlace, out _))
+            return false;
+        TypeSymbol pointerType = pointerPlace.Fields.IsEmpty
+            ? pointerPlace.RootType
+            : pointerPlace.Fields[^1].Type;
+        return pointerType is PointerTypeSymbol { ElementType: not StorageTypeSymbol };
+    }
+
+    private static bool TryGetReturnedReferenceSource(
+        FunctionSymbol function,
+        ImmutableArray<BoundExpression> arguments,
+        BoundExpression? receiver,
+        out BoundExpression source)
+    {
+        ImmutableArray<ReferenceReturnOrigin> origins = function.ReferenceReturnOrigins.IsEmpty &&
+            function.GenericDefinition is { } definition
+                ? definition.ReferenceReturnOrigins
+                : function.ReferenceReturnOrigins;
+        if (origins.Length == 1)
+        {
+            ReferenceReturnOrigin origin = origins[0];
+            if (origin.Kind == ReferenceReturnOriginKind.Parameter &&
+                origin.ParameterOrdinal >= 0 && origin.ParameterOrdinal < arguments.Length)
+            {
+                source = arguments[origin.ParameterOrdinal];
+                return true;
+            }
+            if (origin.Kind == ReferenceReturnOriginKind.Receiver && receiver is not null)
+            {
+                source = receiver;
+                return true;
+            }
+        }
+        source = null!;
+        return false;
     }
 
     private bool TryGetReturnedReferenceAlias(
@@ -2073,6 +2247,56 @@ internal sealed class FunctionBodyBinder
         return false;
     }
 
+    private bool ValidatePointerLifetimeInvalidation(
+        MovePlace pointer,
+        TextLocation location,
+        LocalVariableSymbol? throughAlias,
+        string operation,
+        string diagnosticId)
+    {
+        PointerLifetimeBorrow? conflict = _pointerLifetimeBorrows.FirstOrDefault(borrow =>
+            borrow.LastUsePosition >= location.Span.Start &&
+            !IsPointerBorrowInAliasLineage(borrow, throughAlias) &&
+            PlacesOverlap(borrow.Pointer, pointer));
+        if (conflict is null) return true;
+        ReportBorrowDiagnostic(location,
+            $"cannot {operation} '{pointer.DisplayName}' while its pointee is borrowed through '{conflict.Alias.Name}'",
+            diagnosticId);
+        return false;
+    }
+
+    private bool ValidateLifetimeOperationAuthority(
+        BoundExpression expression,
+        LifetimeOperationKind operation,
+        TextLocation location)
+    {
+        if (operation is not LifetimeOperationKind.EndLifetimeAndDeallocate &&
+            TryGetStorageValueReferenceOrigin(expression, out StorageValueReferenceOrigin storageOrigin))
+        {
+            string action = operation == LifetimeOperationKind.EndLifetime ? "end" : "transfer";
+            _diagnostics.Report(location,
+                $"cannot {action} the lifetime of a value through a reference borrowed from '{storageOrigin.StorageType.ToDisplayString()}'; use '{storageOrigin.StorageType.ToDisplayString()}&' to manage the storage lifetime",
+                DiagnosticIds.StorageValueLifetimeMutation);
+            return false;
+        }
+
+        if (operation is not LifetimeOperationKind.EndLifetimeAndDeallocate &&
+            IsOrdinaryRawPointerPointee(expression))
+        {
+            if (operation == LifetimeOperationKind.EndLifetime)
+                _diagnostics.Report(location,
+                    "cannot explicitly destruct a value through an ordinary raw pointer; use 'free(ptr)' for a heap allocation, or 'storage<T>' for manual lifetime management",
+                    DiagnosticIds.HeapPointeeExplicitDestruction);
+            else
+                _diagnostics.Report(location,
+                    "cannot move a value through an ordinary raw pointer; raw pointers provide access but no lifetime-management authority",
+                    DiagnosticIds.InvalidMoveSource);
+            return false;
+        }
+
+        return true;
+    }
+
     private void ValidateBorrowCreation(
         MovePlace place,
         bool isReadonly,
@@ -2129,6 +2353,17 @@ internal sealed class FunctionBodyBinder
         {
             if (ReferenceEquals(borrow.Alias, current)) return true;
             current = _borrows.LastOrDefault(candidate => ReferenceEquals(candidate.Alias, current))?.ParentAlias;
+        }
+        return false;
+    }
+
+    private bool IsPointerBorrowInAliasLineage(PointerLifetimeBorrow borrow, LocalVariableSymbol? alias)
+    {
+        for (LocalVariableSymbol? current = alias; current is not null;)
+        {
+            if (ReferenceEquals(borrow.Alias, current)) return true;
+            current = _pointerLifetimeBorrows.LastOrDefault(candidate =>
+                ReferenceEquals(candidate.Alias, current))?.ParentAlias;
         }
         return false;
     }
@@ -2713,7 +2948,7 @@ internal sealed class FunctionBodyBinder
         if (receiver.Type is WeakTypeSymbol)
         {
             _diagnostics.Report(syntax.MemberToken.Location,
-                $"cannot access a value through '{receiver.Type.ToDisplayString()}' directly; call 'Lock()' and check the returned shared owner first",
+                $"cannot access a value through '{receiver.Type.ToDisplayString()}' directly; use 'lock value' and check the returned shared owner first",
                 DiagnosticIds.WeakDirectAccess);
             return new BoundErrorExpression();
         }
@@ -3481,25 +3716,6 @@ internal sealed class FunctionBodyBinder
 
         if (syntax.Target is MemberAccessExpressionSyntax memberTarget)
         {
-            if (memberTarget.OperatorToken.Kind == SyntaxKind.DotToken &&
-                memberTarget.MemberToken.Text == "Lock")
-            {
-                BoundExpression weak = BindExpression(memberTarget.Receiver);
-                if (weak.Type is WeakTypeSymbol weakType)
-                {
-                    if (!arguments.IsEmpty)
-                    {
-                        _diagnostics.Report(memberTarget.MemberToken.Location,
-                            "weak Lock() does not accept arguments", DiagnosticIds.WrongArity);
-                        return new BoundErrorExpression();
-                    }
-                    ValidateProjectedReceiverMove(weak, memberTarget.MemberToken.Location);
-                    SharedTypeSymbol sharedType = _fileScope.TypeFactory.SharedOf(weakType.ElementType);
-                    _fileScope.TypeFactory.EnsureOwnershipDestructor(
-                        sharedType, _fileScope.GlobalNamespace, memberTarget);
-                    return new BoundWeakLockExpression(weak, sharedType);
-                }
-            }
             if (TryBindStaticMethodCall(memberTarget, arguments, syntax.Arguments, syntax) is BoundExpression staticCall)
                 return staticCall;
             BoundExpression? qualifiedCall = TryBindQualifiedCallExpression(
@@ -4011,7 +4227,7 @@ internal sealed class FunctionBodyBinder
         if (receiver.Type is WeakTypeSymbol)
         {
             _diagnostics.Report(target.MemberToken.Location,
-                $"cannot access a value through '{receiver.Type.ToDisplayString()}' directly; call 'Lock()' and check the returned shared owner first",
+                $"cannot access a value through '{receiver.Type.ToDisplayString()}' directly; use 'lock value' and check the returned shared owner first",
                 DiagnosticIds.WeakDirectAccess);
             return new BoundErrorExpression();
         }
@@ -4162,10 +4378,18 @@ internal sealed class FunctionBodyBinder
         if (arguments.Length != 1)
             _diagnostics.Report(name.IdentifierToken.Location,
                 "'destruct' expects exactly one argument", DiagnosticIds.WrongArity);
+        if (!ValidateLifetimeOperationAuthority(target, LifetimeOperationKind.EndLifetime, targetLocation))
+            return new BoundErrorExpression();
         TypeSymbol valueType;
         MovePlace? trackedPlace = TryGetMovePlace(target, out MovePlace destructPlace) ? destructPlace : null;
         if (trackedPlace is not null && !ValidateLifetimeInvalidation(trackedPlace, targetLocation,
                 GetReferenceAliasRoot(target), "destruct", DiagnosticIds.DestructWhileBorrowed))
+            return new BoundErrorExpression();
+        if (TryGetStorageType(target.Type, out _) &&
+            TryGetPointerLifetimeRoot(target, out MovePlace pointerPlace,
+                out LocalVariableSymbol? pointerAlias) &&
+            !ValidatePointerLifetimeInvalidation(pointerPlace, targetLocation, pointerAlias,
+                "destruct", DiagnosticIds.DestructWhileBorrowed))
             return new BoundErrorExpression();
         if (TryGetStorageType(target.Type, out StorageTypeSymbol storageType))
         {
@@ -4442,19 +4666,14 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (TryGetMovePlace(pointer, out MovePlace pointerPlace))
-        {
-            PointerLifetimeBorrow? conflict = _pointerLifetimeBorrows.FirstOrDefault(borrow =>
-                borrow.LastUsePosition >= syntax.FreeKeyword.Location.Span.Start &&
-                PlacesOverlap(borrow.Pointer, pointerPlace));
-            if (conflict is not null)
-            {
-                ReportBorrowDiagnostic(syntax.FreeKeyword.Location,
-                    $"cannot free '{pointerPlace.DisplayName}' while its pointee is borrowed through '{conflict.Alias.Name}'",
-                    DiagnosticIds.FreeWhileBorrowed);
-                return new BoundErrorExpression();
-            }
-        }
+        if (!ValidateLifetimeOperationAuthority(pointer,
+                LifetimeOperationKind.EndLifetimeAndDeallocate, syntax.FreeKeyword.Location))
+            return new BoundErrorExpression();
+
+        if (TryGetMovePlace(pointer, out MovePlace pointerPlace) &&
+            !ValidatePointerLifetimeInvalidation(pointerPlace, syntax.FreeKeyword.Location,
+                throughAlias: null, "free", DiagnosticIds.FreeWhileBorrowed))
+            return new BoundErrorExpression();
 
         if (destroyedType is not null)
             ValidateDestructorAccessibility(destroyedType, syntax.FreeKeyword.Location);
@@ -5104,7 +5323,18 @@ internal sealed class FunctionBodyBinder
     {
         ExpressionSyntax? previous = _fieldReceiverSyntax;
         _fieldReceiverSyntax = syntax;
-        try { return ExposeLifetimeValue(BindExpression(syntax), syntax); }
+        try
+        {
+            BoundExpression receiver = ExposeLifetimeValue(BindExpression(syntax), syntax);
+            _semanticInfo.Receivers[syntax] = new ReceiverInfo(
+                receiver.Type,
+                IsStatic: false,
+                IsReadonly: receiver.Type is PointerTypeSymbol { IsReadonly: true } or
+                    ReferenceTypeSymbol { IsReadonly: true } ||
+                    IsAddressable(receiver) && !IsWritable(receiver),
+                IsWritable: IsWritable(receiver));
+            return receiver;
+        }
         finally { _fieldReceiverSyntax = previous; }
     }
 
@@ -5470,6 +5700,7 @@ internal sealed class FunctionBodyBinder
         ThisExpressionSyntax @this => @this.ThisKeyword.Location,
         ParenthesizedExpressionSyntax parenthesized => parenthesized.OpenParenthesisToken.Location,
         MoveExpressionSyntax move => move.MoveKeyword.Location,
+        LockExpressionSyntax @lock => @lock.LockKeyword.Location,
         UnaryExpressionSyntax unary => unary.OperatorToken.Location,
         PostfixUnaryExpressionSyntax postfix => postfix.OperatorToken.Location,
         BinaryExpressionSyntax binary => binary.OperatorToken.Location,
