@@ -1411,7 +1411,8 @@ public sealed class SemanticAnalyzerTests
             diagnostic => diagnostic.Message == "stack array cannot be passed to another function");
         Assert.Contains(
             compilation.Diagnostics,
-            diagnostic => diagnostic.Message == "stack array cannot be returned from a function");
+            diagnostic => diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.StackArrayReturn &&
+                diagnostic.Message.Contains("backing storage belongs to the current function's stack frame", StringComparison.Ordinal));
         Assert.Contains(
             compilation.Diagnostics,
             diagnostic => diagnostic.Message == "stack array cannot be stored inside a positional struct value");
@@ -4302,6 +4303,328 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(guarded.Diagnostics, diagnostic =>
             diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.PartialMoveWithDestructor &&
             diagnostic.Message.Contains("this.Value", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_PropagatesReceiverMoveEffectsAndBlocksKnownAliases()
+    {
+        Compilation movedField = CreateCompilation("""
+            namespace Example;
+            struct Resource { public int Value; }
+            struct Holder
+            {
+                public unique<Resource> Value;
+                public Holder(unique<Resource> value) { Value = move value; }
+                public unique<Resource> Take() { return move Value; }
+                public unique<Resource> Replace()
+                {
+                    unique<Resource> old = move Value;
+                    Value = new Resource();
+                    return move old;
+                }
+            }
+            void Invalid()
+            {
+                Holder holder = Holder(new Resource());
+                unique<Resource> resource = holder.Take();
+                holder.Value->Value;
+            }
+            void Valid()
+            {
+                Holder holder = Holder(new Resource());
+                unique<Resource> resource = holder.Replace();
+                holder.Value->Value;
+            }
+            """);
+        StructTypeSymbol effectHolder = Assert.Single(movedField.SemanticModel.GlobalNamespace.Namespaces)
+            .Structs.Single(type => type.Name == "Holder");
+        Assert.NotEmpty(effectHolder.LookupMethods("Take").Single().ReceiverMoveEffects);
+        Assert.Single(movedField.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UseAfterMove &&
+            diagnostic.Message.Contains("holder.Value", StringComparison.Ordinal));
+
+        Compilation alias = CreateCompilation("""
+            namespace Example;
+            struct Buffer { public int Value; public int Read() { return Value; } }
+            void Invalid()
+            {
+                Buffer value = Buffer();
+                Buffer& alias = value;
+                Buffer moved = move value;
+                alias.Read();
+            }
+            """);
+        Assert.Contains(alias.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UseAfterMove &&
+            diagnostic.Message.Contains("value", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsHiddenVirtualReceiverMoveEffects()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder
+            {
+                public unique<Resource> Value;
+                public virtual unique<Resource> Take() { return move Value; }
+            }
+            abstract struct Base
+            {
+                public abstract unique<Resource> Take();
+            }
+            struct Derived : Base
+            {
+                public unique<Resource> Value;
+                public override unique<Resource> Take() { return move Value; }
+            }
+            """);
+        Assert.Equal(2, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.HiddenVirtualMoveEffect));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsHiddenInterfaceAndConditionalReceiverMoveEffects()
+    {
+        Compilation hiddenInterface = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            interface IHolder { unique<Resource> Take(); }
+            struct Holder : IHolder
+            {
+                public unique<Resource> Value;
+                public unique<Resource> Take() { return move Value; }
+            }
+            """);
+        Assert.Contains(hiddenInterface.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.HiddenVirtualMoveEffect &&
+            diagnostic.Message.Contains("IHolder.Take", StringComparison.Ordinal));
+
+        Compilation conditional = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder
+            {
+                public unique<Resource> Value;
+                public unique<Resource> Take(bool consume)
+                {
+                    if (consume) return move Value;
+                    return new Resource();
+                }
+            }
+            """);
+        Assert.Contains(conditional.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.InconsistentReceiverMoveEffect &&
+            diagnostic.Message.Contains("this.Value", StringComparison.Ordinal));
+
+        Compilation stable = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder
+            {
+                public unique<Resource> Value;
+                public unique<Resource> Take(bool first)
+                {
+                    if (first) return move Value;
+                    return move Value;
+                }
+            }
+            """);
+        Assert.DoesNotContain(stable.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.InconsistentReceiverMoveEffect);
+        Assert.NotEmpty(stable.SemanticModel.GlobalNamespace.Namespaces.Single().Structs
+            .Single(type => type.Name == "Holder").LookupMethods("Take").Single().ReceiverMoveEffects);
+    }
+
+    [Fact]
+    public void Analyzer_CentrallyRejectsInheritedInterfaceMoveEffects()
+    {
+        static Compilation Create(string inheritance) => CreateCompilation($$"""
+            namespace Example;
+            struct Resource {}
+            interface IHolder { unique<Resource> Take(); }
+            struct Base
+            {
+                public unique<Resource> Value;
+                public unique<Resource> Take() { return move Value; }
+            }
+            {{inheritance}}
+            """);
+
+        Compilation inherited = Create("struct Derived : Base, IHolder {}");
+        Diagnostic inheritedDiagnostic = Assert.Single(inherited.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.HiddenVirtualMoveEffect);
+        Assert.Contains("Base.Take", inheritedDiagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("IHolder.Take", inheritedDiagnostic.Message, StringComparison.Ordinal);
+
+        Compilation multiLevel = Create("struct Middle : Base {} struct Derived : Middle, IHolder {}");
+        Diagnostic multiLevelDiagnostic = Assert.Single(multiLevel.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.HiddenVirtualMoveEffect);
+        Assert.Contains("Base.Take", multiLevelDiagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("IHolder.Take", multiLevelDiagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsRestoredInterfaceAndOverrideImplementations()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            interface IHolder { unique<Resource> Take(); }
+            struct InterfaceHolder : IHolder
+            {
+                public unique<Resource> Value;
+                public unique<Resource> Take()
+                {
+                    unique<Resource> old = move Value;
+                    Value = new Resource();
+                    return move old;
+                }
+            }
+            struct Base
+            {
+                public virtual unique<Resource> Take() { return new Resource(); }
+            }
+            struct Derived : Base
+            {
+                public unique<Resource> Value;
+                public override unique<Resource> Take()
+                {
+                    unique<Resource> old = move Value;
+                    Value = new Resource();
+                    return move old;
+                }
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_PreservesReceiverMoveEffectsInGenericStructSpecializations()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource { public int Value; }
+            struct Holder<T>
+            {
+                public unique<T> Value;
+                public Holder(unique<T> value) { Value = move value; }
+                public unique<T> Take() { return move Value; }
+            }
+            void Invalid()
+            {
+                Holder<Resource> holder = Holder<Resource>(new Resource());
+                unique<Resource> resource = holder.Take();
+                holder.Value->Value;
+            }
+            """);
+
+        FunctionSymbol specializedTake = compilation.SemanticModel.Functions
+            .Select(function => function.Symbol)
+            .Single(function => function.Name == "Take" &&
+                function.ContainingStruct?.IsGenericSpecialization == true);
+        Assert.NotEmpty(specializedTake.ReceiverMoveEffects);
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UseAfterMove &&
+            diagnostic.Message.Contains("holder.Value", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsReferencesToCurrentFrameStorageButAllowsCallerStorage()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Data { public int Value; }
+            struct Inner { public int Number; }
+            struct Outer { public Inner Inner; }
+            struct Receiver
+            {
+                public int Value;
+                public int& Get() { return Value; }
+            }
+            struct Store
+            {
+                public static int Value;
+                public static int& Get() { return Store.Value; }
+            }
+
+            int& BadLocal()
+            {
+                int value = 42;
+                return value;
+            }
+            readonly int& BadReadonlyLocal()
+            {
+                int value = 42;
+                return value;
+            }
+            int& BadField()
+            {
+                Data data = Data();
+                return data.Value;
+            }
+            int& BadNestedField()
+            {
+                Outer value = Outer();
+                return value.Inner.Number;
+            }
+            int& BadParameter(int value) { return value; }
+            int& BadAlias()
+            {
+                int value = 42;
+                int& alias = value;
+                return alias;
+            }
+            readonly Data& BadTemporary() { return Data(); }
+
+            int& Forward(int& value) { return value; }
+            readonly int& ForwardReadonly(readonly int& value) { return value; }
+            int& GetValue(Data& data) { return data.Value; }
+            int& FromPointer(int* value) { return *value; }
+            """);
+
+        Diagnostic[] escaping = compilation.Diagnostics.Where(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.EscapingLocalReference).ToArray();
+        Assert.Equal(7, escaping.Length);
+        Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("local variable 'value'", StringComparison.Ordinal));
+        Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("local variable 'data'", StringComparison.Ordinal));
+        Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("by-value parameter 'value'", StringComparison.Ordinal));
+        Assert.Contains(escaping, diagnostic => diagnostic.Message.Contains("a temporary value", StringComparison.Ordinal));
+        Assert.DoesNotContain(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.EscapingLocalReference &&
+            diagnostic.Message.Contains("reference parameter", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_DoesNotAllowReferencePassingToResurrectMovedValues()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Buffer { public int Value; }
+            void Use(Buffer& value) { value.Value; }
+            void Invalid()
+            {
+                Buffer value = Buffer();
+                Buffer moved = move value;
+                Use(value);
+            }
+            """);
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UseAfterMove &&
+            diagnostic.Message.Contains("value", StringComparison.Ordinal));
+
+        Compilation liveReference = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            void Use(unique<Resource>& value) {}
+            void Valid()
+            {
+                unique<Resource> value = new Resource();
+                Use(value);
+            }
+            """);
+        Assert.Empty(liveReference.Diagnostics);
     }
 
     [Fact]

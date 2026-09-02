@@ -1,0 +1,20 @@
+namespace Negative.InheritedInterfaceMoveEffect;
+
+struct Resource {}
+
+interface IHolder
+{
+    unique<Resource> Take();
+}
+
+struct Base
+{
+    public unique<Resource> Value;
+
+    public unique<Resource> Take()
+    {
+        return move Value;
+    }
+}
+
+struct Derived : Base, IHolder {}

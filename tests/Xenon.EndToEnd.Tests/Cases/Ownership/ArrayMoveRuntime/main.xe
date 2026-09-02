@@ -1,0 +1,91 @@
+namespace Ownership.ArrayMoveRuntime;
+
+struct Log
+{
+    public static int Drops;
+    public static int Trace;
+}
+
+struct Item
+{
+    public int Id;
+    public ~Item()
+    {
+        Log.Drops++;
+        Log.Trace = Log.Trace * 10 + Id;
+    }
+}
+
+int[] MakeHeapArray(int count)
+{
+    int[] values = new int[count];
+    values[0] = 17;
+    return move values;
+}
+
+int Main()
+{
+    int[] heapSource = new int[3];
+    heapSource[1] = 20;
+    int[] heapDestination = move heapSource;
+    if (heapDestination[1] != 20) return 1;
+    free(heapDestination);
+
+    int[] stackSource = int[3];
+    stackSource[2] = 30;
+    int[] stackDestination = move stackSource;
+    if (stackDestination[2] != 30) return 2;
+
+    int[] outer;
+    {
+        int[] inner = int[3];
+        inner[0] = 10;
+        inner[2] = 32;
+        outer = move inner;
+    }
+    if (outer[0] != 10 || outer[2] != 32) return 3;
+
+    int[] returned = MakeHeapArray(2);
+    if (returned[0] != 17) return 4;
+    free(returned);
+
+    Log.Drops = 0;
+    Log.Trace = 0;
+    {
+        Item[] relocated;
+        {
+            Item[] items = Item[2];
+            items[0].Id = 1;
+            items[1].Id = 2;
+            relocated = move items;
+        }
+        if (Log.Drops != 0) return 5;
+    }
+    if (Log.Drops != 2 || Log.Trace != 21) return 6;
+
+    Log.Drops = 0;
+    Log.Trace = 0;
+    {
+        Item[] destination = Item[1];
+        destination[0].Id = 3;
+        Item[] source = Item[1];
+        source[0].Id = 4;
+        destination = move source;
+        if (Log.Drops != 1 || Log.Trace != 3) return 7;
+    }
+    if (Log.Drops != 2 || Log.Trace != 34) return 8;
+
+    Log.Drops = 0;
+    Log.Trace = 0;
+    {
+        Item[] source = Item[1];
+        source[0].Id = 5;
+        if (true)
+        {
+            Item[] destination = move source;
+        }
+    }
+    if (Log.Drops != 1 || Log.Trace != 5) return 9;
+
+    return 42;
+}

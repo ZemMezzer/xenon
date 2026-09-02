@@ -48,6 +48,10 @@ public sealed record BoundBlockStatement(
 {
     // Function-level finalization, after local scope cleanup on every exit.
     public BoundExpression? ExitCleanup { get; init; }
+    // A stack value allocated in this lexical scope was relocated to an
+    // enclosing local.  Cleanup still runs here, but stackrestore is deferred
+    // to the enclosing destination lifetime.
+    public bool RetainsStackStorage { get; init; }
     public override BoundKind Kind => BoundKind.BlockStatement;
 }
 

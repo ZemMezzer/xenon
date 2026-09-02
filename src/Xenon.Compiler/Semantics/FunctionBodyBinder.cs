@@ -24,6 +24,9 @@ internal sealed class FunctionBodyBinder
     private BoundScope _scope = new(null);
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _localScopes = [];
     private readonly Dictionary<LocalVariableSymbol, BoundScope> _stackArrayScopes = [];
+    private readonly Dictionary<LocalVariableSymbol, MovePlace> _referenceAliases = [];
+    private readonly HashSet<BoundScope> _retainedStackScopes = [];
+    private readonly List<ImmutableArray<MovePlace>> _receiverMoveEffectExits = [];
     private int _loopDepth;
     private readonly Stack<(HashSet<VariableSymbol> Entry, Dictionary<MovePlace, TextLocation> Sites)> _loopMoveContexts = [];
     private int _switchDepth;
@@ -228,6 +231,34 @@ internal sealed class FunctionBodyBinder
         }
 
         BoundBlockStatement boundBody = BindBlockStatement(body, createScope: false);
+        if (!AlwaysReturns(boundBody)) RecordReceiverMoveEffectExit();
+        MovePlace[][] receiverExitStates = _receiverMoveEffectExits
+            .Select(exit => exit
+                .Where(place => ReferenceEquals(place.Root, _function) && !place.Fields.IsEmpty)
+                .Distinct()
+                .ToArray())
+            .ToArray();
+        HashSet<MovePlace> stableReceiverMoves = receiverExitStates.Length == 0
+            ? []
+            : [.. receiverExitStates[0]];
+        foreach (MovePlace[] exit in receiverExitStates.Skip(1))
+            stableReceiverMoves.IntersectWith(exit);
+        HashSet<MovePlace> unstableReceiverMoves = receiverExitStates
+            .SelectMany(exit => exit)
+            .Where(place => receiverExitStates.Any(exit => !exit.Contains(place)))
+            .ToHashSet();
+        foreach (MovePlace place in unstableReceiverMoves.OrderBy(place => place.DisplayName, StringComparer.Ordinal))
+            _diagnostics.Report(body.OpenBraceToken.Location,
+                $"method '{_function.Name}' does not leave receiver field '{place.DisplayName}' in a consistent move state across all reachable exits; some exits move '{place.DisplayName}' while others leave it live",
+                DiagnosticIds.InconsistentReceiverMoveEffect);
+
+        MovePlace[] orderedStableReceiverMoves = stableReceiverMoves
+            .OrderBy(place => string.Join(',', place.Fields.Select(field => field.Ordinal)), StringComparer.Ordinal)
+            .ToArray();
+        ImmutableArray<ReceiverMoveEffect> receiverMoveEffects = orderedStableReceiverMoves
+            .Select(place => new ReceiverMoveEffect(place.Fields.Select(field => field.Ordinal).ToImmutableArray()))
+            .ToImmutableArray();
+        _function.SetReceiverMoveEffects(receiverMoveEffects);
         RecordScope(body, _scope);
         if (!AlwaysReturns(boundBody)) ValidateRequiredFields(body.CloseBraceToken.Location);
         if (_function.FunctionKind == FunctionKind.Constructor &&
@@ -327,6 +358,7 @@ internal sealed class FunctionBodyBinder
             _scope = new BoundScope(previous);
         }
 
+        BoundScope boundScope = _scope;
         var statements = ImmutableArray.CreateBuilder<BoundStatement>();
         foreach (StatementSyntax statement in syntax.Statements)
         {
@@ -341,7 +373,10 @@ internal sealed class FunctionBodyBinder
             _scope = previous;
         }
 
-        return new BoundBlockStatement(statements.ToImmutable());
+        return new BoundBlockStatement(statements.ToImmutable())
+        {
+            RetainsStackStorage = _retainedStackScopes.Contains(boundScope),
+        };
     }
 
     private BoundStatement BindStatement(StatementSyntax syntax) => syntax switch
@@ -680,6 +715,8 @@ internal sealed class FunctionBodyBinder
         {
             initializer = ContextualizeConversion(initializer, type, GetLocation(syntax.Initializer!));
             SetConvertedType(syntax.Initializer!, initializer.Type);
+            if (type is ReferenceTypeSymbol && TryGetReferenceAlias(initializer, out MovePlace aliasPlace))
+                _referenceAliases[variable] = aliasPlace;
         }
 
         if (isConstant)
@@ -744,15 +781,108 @@ internal sealed class FunctionBodyBinder
             ReportCannotConvert(GetLocation(syntax.Expression!), expression.Type, _function.ReturnType);
         }
 
-        if (expression is not null && GetArrayStorage(expression) == ArrayStorageKind.Stack)
+        if (_function.ReturnType is ReferenceTypeSymbol && expression is not null)
+            ValidateReturnedReference(expression, GetLocation(syntax.Expression!));
+
+        if (expression is not null && HasCalleeStackBoundRuntimeStorage(expression))
         {
-            _diagnostics.Report(GetLocation(syntax.Expression!), "stack array cannot be returned from a function",
+            _diagnostics.Report(GetLocation(syntax.Expression!),
+                "cannot return-move this value because its backing storage belongs to the current function's stack frame and cannot outlive the function call; use heap-backed or caller-owned storage",
                 DiagnosticIds.StackArrayReturn);
         }
 
+        RecordReceiverMoveEffectExit();
         ValidateRequiredFields(syntax.ReturnKeyword.Location);
         return new BoundReturnStatement(expression);
     }
+
+    private enum ReferenceStorageKind
+    {
+        External,
+        CurrentFrameLocal,
+        CurrentFrameParameter,
+        Temporary,
+    }
+
+    private readonly record struct ReferenceStorage(ReferenceStorageKind Kind, string? Name = null);
+
+    private void ValidateReturnedReference(BoundExpression expression, TextLocation location)
+    {
+        ReferenceStorage storage = GetReferenceStorage(expression);
+        string? subject = storage.Kind switch
+        {
+            ReferenceStorageKind.CurrentFrameLocal => $"local variable '{storage.Name}'",
+            ReferenceStorageKind.CurrentFrameParameter => $"by-value parameter '{storage.Name}'",
+            ReferenceStorageKind.Temporary => "a temporary value",
+            _ => null,
+        };
+        if (subject is null) return;
+        _diagnostics.Report(location,
+            $"cannot return a reference to {subject} because the referenced storage belongs to the current function's stack frame and does not outlive the function call",
+            DiagnosticIds.EscapingLocalReference);
+    }
+
+    private ReferenceStorage GetReferenceStorage(BoundExpression expression)
+    {
+        switch (expression)
+        {
+            case BoundReferenceConversionExpression conversion:
+                return GetReferenceStorage(conversion.Source);
+            case BoundCopyExpression copy:
+                return GetReferenceStorage(copy.Source);
+            case BoundCastExpression cast:
+                return GetReferenceStorage(cast.Expression);
+            case BoundInterfaceConversionExpression conversion:
+                return GetReferenceStorage(conversion.Source);
+            case BoundReferenceDereferenceExpression dereference:
+                return GetReferenceStorage(dereference.Reference);
+            case BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken, Operand.Type: PointerTypeSymbol }:
+                // Returning T& derived through raw T* keeps the existing raw
+                // pointer contract; pointer provenance is outside this check.
+                return new ReferenceStorage(ReferenceStorageKind.External);
+            case BoundMemberAccessExpression { Receiver: BoundThisExpression }:
+            case BoundThisExpression:
+            case BoundStaticFieldExpression:
+                return new ReferenceStorage(ReferenceStorageKind.External);
+            case BoundMemberAccessExpression { IsPointerAccess: true }:
+                // Raw pointers and ownership handles have separate low-level
+                // lifetime semantics.  This focused rule does not chase them.
+                return new ReferenceStorage(ReferenceStorageKind.External);
+            case BoundMemberAccessExpression member:
+                return GetReferenceStorage(member.Receiver);
+            case BoundIndexExpression index:
+                if (GetArrayStorage(index.Receiver) == ArrayStorageKind.Heap)
+                    return new ReferenceStorage(ReferenceStorageKind.External);
+                return GetReferenceStorage(index.Receiver);
+            case BoundVariableExpression { Variable: LocalVariableSymbol local }:
+                if (_referenceAliases.TryGetValue(local, out MovePlace? alias))
+                    return GetReferenceStorage(alias);
+                return new ReferenceStorage(ReferenceStorageKind.CurrentFrameLocal, local.Name);
+            case BoundVariableExpression { Variable: ParameterSymbol parameter }:
+                return parameter.Type is ReferenceTypeSymbol
+                    ? new ReferenceStorage(ReferenceStorageKind.External, parameter.Name)
+                    : new ReferenceStorage(ReferenceStorageKind.CurrentFrameParameter, parameter.Name);
+            case BoundCallExpression { Function.ReturnType: ReferenceTypeSymbol }:
+            case BoundMethodCallExpression { Method.ReturnType: ReferenceTypeSymbol }:
+            case BoundInterfaceMethodCallExpression { Method.ReturnType: ReferenceTypeSymbol }:
+                // A reference-returning callable is validated at its declaration;
+                // forwarding its result does not create current-frame storage.
+                return new ReferenceStorage(ReferenceStorageKind.External);
+            default:
+                return new ReferenceStorage(ReferenceStorageKind.Temporary);
+        }
+    }
+
+    private ReferenceStorage GetReferenceStorage(MovePlace place) => place.Root switch
+    {
+        LocalVariableSymbol local => new ReferenceStorage(ReferenceStorageKind.CurrentFrameLocal, local.Name),
+        ParameterSymbol parameter when parameter.Type is ReferenceTypeSymbol =>
+            new ReferenceStorage(ReferenceStorageKind.External, parameter.Name),
+        ParameterSymbol parameter =>
+            new ReferenceStorage(ReferenceStorageKind.CurrentFrameParameter, parameter.Name),
+        FunctionSymbol => new ReferenceStorage(ReferenceStorageKind.External),
+        _ => new ReferenceStorage(ReferenceStorageKind.External),
+    };
 
     private BoundExpression BindExpression(ExpressionSyntax syntax)
     {
@@ -823,7 +953,11 @@ internal sealed class FunctionBodyBinder
             _diagnostics.Report(GetLocation(syntax), $"field '{fieldRead.Field.Name}' is used before it is initialized",
                 DiagnosticIds.DefiniteAssignment);
         if (validatePlaceUse && !IsInitializationTargetSyntax(syntax) && TryGetMovePlace(expression, out MovePlace place))
-            ValidateMovedPlaceUse(place, GetLocation(syntax));
+        {
+            bool throughAlias = expression is BoundVariableExpression { Variable: LocalVariableSymbol reference } &&
+                _referenceAliases.ContainsKey(reference);
+            ValidateMovedPlaceUse(place, GetLocation(syntax), reportWholeMoved: throughAlias);
+        }
         BoundExpression result = DereferenceReference(expression);
         _expressionLocations[result] = GetLocation(syntax);
         _semanticInfo.Receivers[syntax] = new ReceiverInfo(
@@ -999,7 +1133,6 @@ internal sealed class FunctionBodyBinder
         if (!TryGetMovePlace(source, out MovePlace place) ||
             place.RootVariable is null && place.Fields.IsEmpty ||
             source.Type is ReferenceTypeSymbol ||
-            source.Type is ArrayTypeSymbol ||
             !IsWritable(source))
         {
             if (!TypeIdentity.AreSame(source.Type, BuiltinTypes.Error))
@@ -1023,14 +1156,26 @@ internal sealed class FunctionBodyBinder
 
         if (place.Fields.IsEmpty && place.RootVariable is { } movedVariable)
             _definitelyAssigned.Remove(movedVariable);
+        if (place.RootVariable is LocalVariableSymbol { Type: ArrayTypeSymbol } movedArray)
+            movedArray.RequiresArrayCleanupTransfer = true;
         _movedPlaces.Add(place);
         if (_loopMoveContexts.TryPeek(out var context))
             context.Sites.TryAdd(place, syntax.MoveKeyword.Location);
-        return new BoundMoveExpression(source);
+        return new BoundMoveExpression(source)
+        {
+            TrackedVariable = place.RootVariable,
+            TrackedPath = place.Fields,
+        };
     }
 
     private bool TryGetMovePlace(BoundExpression expression, out MovePlace place)
     {
+        if (expression is BoundVariableExpression { Variable: LocalVariableSymbol reference } &&
+            _referenceAliases.TryGetValue(reference, out MovePlace? alias))
+        {
+            place = alias;
+            return true;
+        }
         if (expression is BoundVariableExpression variable &&
             variable.Variable is LocalVariableSymbol or ParameterSymbol)
         {
@@ -1050,6 +1195,25 @@ internal sealed class FunctionBodyBinder
                 receiverPlace.Fields.Add(member.Field));
             return true;
         }
+        if (expression is BoundReferenceDereferenceExpression dereference &&
+            TryGetMovePlace(dereference.Reference, out place))
+            return true;
+        if (expression is BoundReferenceConversionExpression conversion &&
+            TryGetMovePlace(conversion.Source, out place))
+            return true;
+        place = null!;
+        return false;
+    }
+
+    private bool TryGetReferenceAlias(BoundExpression expression, out MovePlace place)
+    {
+        if (expression is BoundReferenceConversionExpression conversion)
+            return TryGetMovePlace(conversion.Source, out place);
+        if (expression is BoundCopyExpression copy)
+            return TryGetReferenceAlias(copy.Source, out place);
+        if (expression is BoundVariableExpression { Variable: LocalVariableSymbol local } &&
+            _referenceAliases.TryGetValue(local, out place!))
+            return true;
         place = null!;
         return false;
     }
@@ -1069,13 +1233,13 @@ internal sealed class FunctionBodyBinder
         return moved is not null;
     }
 
-    private void ValidateMovedPlaceUse(MovePlace place, TextLocation location)
+    private void ValidateMovedPlaceUse(MovePlace place, TextLocation location, bool reportWholeMoved = false)
     {
         MovePlace? movedAncestor = _movedPlaces.FirstOrDefault(candidate => IsPlacePrefixOf(candidate, place));
         if (movedAncestor is not null)
         {
             // A whole-local move is already diagnosed while binding the root name.
-            if (!movedAncestor.Fields.IsEmpty)
+            if (!movedAncestor.Fields.IsEmpty || reportWholeMoved)
                 _diagnostics.Report(location,
                     $"cannot use '{place.DisplayName}' because '{movedAncestor.DisplayName}' has been moved",
                     DiagnosticIds.UseAfterMove);
@@ -1272,6 +1436,7 @@ internal sealed class FunctionBodyBinder
             : null;
         bool assignmentIsInsideMovedPlace = assignedPlace is not null && _movedPlaces.Any(moved =>
             moved.Fields.Length < assignedPlace.Fields.Length && IsPlacePrefixOf(moved, assignedPlace));
+        bool reinitializesMovedPlace = assignedPlace is not null && _movedPlaces.Contains(assignedPlace);
         BoundExpression expression = BindExpression(syntax.Expression);
         if (isSimpleAssignment)
         {
@@ -1351,6 +1516,7 @@ internal sealed class FunctionBodyBinder
         return new BoundAssignmentExpression(target, syntax.OperatorToken.Kind, expression)
         {
             IsInitialization = initializesField,
+            ReinitializesMovedPlace = reinitializesMovedPlace,
         };
     }
 
@@ -1560,6 +1726,9 @@ internal sealed class FunctionBodyBinder
 
             return new BoundErrorExpression();
         }
+
+        if (pointerAccess && receiver is not BoundThisExpression)
+            ValidateProjectedReceiverMove(receiver, syntax.MemberToken.Location);
 
         FieldSymbol? field = structType.FindInstanceField(syntax.MemberToken.Text);
         PropertySymbol? property = structType.FindMember<PropertySymbol>(syntax.MemberToken.Text);
@@ -2795,6 +2964,7 @@ internal sealed class FunctionBodyBinder
             }
             arguments = ValidateFunctionArguments(interfaceMethod, arguments, argumentSyntax, target.MemberToken.Location,
                 incomplete ? completedArgumentCount : null);
+            ApplyReceiverMoveEffects(receiver, interfaceMethod, pointerAccess, target.MemberToken.Location);
             return new BoundInterfaceMethodCallExpression(receiver, interfaceType, interfaceMethod, arguments, pointerAccess);
         }
         DeclaredTypeSymbol? structType = pointerAccess
@@ -2875,7 +3045,57 @@ internal sealed class FunctionBodyBinder
 
         arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, target.MemberToken.Location,
             incomplete ? completedArgumentCount : null);
+        ApplyReceiverMoveEffects(receiver, method, pointerAccess, target.MemberToken.Location);
         return new BoundMethodCallExpression(receiver, method, arguments, pointerAccess);
+    }
+
+    private void ApplyReceiverMoveEffects(
+        BoundExpression receiver,
+        FunctionSymbol method,
+        bool pointerAccess,
+        TextLocation location)
+    {
+        ImmutableArray<ReceiverMoveEffect> effects = method.ReceiverMoveEffects.IsEmpty &&
+            method.GenericDefinition is { } definition
+                ? definition.ReceiverMoveEffects
+                : method.ReceiverMoveEffects;
+        if (effects.IsEmpty) return;
+        if (pointerAccess || !TryGetMovePlace(receiver, out MovePlace receiverPlace))
+        {
+            _diagnostics.Report(location,
+                $"receiver move effect of method '{method.Name}' cannot be represented through this indirect receiver",
+                DiagnosticIds.HiddenVirtualMoveEffect);
+            return;
+        }
+
+        foreach (ReceiverMoveEffect effect in effects)
+        {
+            TypeSymbol currentType = GetMovePlaceType(receiverPlace);
+            ImmutableArray<FieldSymbol> fields = receiverPlace.Fields;
+            bool valid = true;
+            foreach (int ordinal in effect.FieldOrdinals)
+            {
+                if (currentType is not StructTypeSymbol structure ||
+                    structure.Fields.FirstOrDefault(field => field.Ordinal == ordinal) is not FieldSymbol field)
+                {
+                    valid = false;
+                    break;
+                }
+                fields = fields.Add(field);
+                currentType = field.Type;
+            }
+            if (!valid) continue;
+            var moved = new MovePlace(receiverPlace.Root, receiverPlace.RootType, receiverPlace.RootName, fields);
+            _movedPlaces.Add(moved);
+            if (_loopMoveContexts.TryPeek(out var context)) context.Sites.TryAdd(moved, location);
+        }
+    }
+
+    private static TypeSymbol GetMovePlaceType(MovePlace place)
+    {
+        TypeSymbol type = place.RootType;
+        foreach (FieldSymbol field in place.Fields) type = field.Type;
+        return type;
     }
 
     private static FunctionSymbol? FindInstanceMethod(DeclaredTypeSymbol type, string name, bool receiverIsReadonly)
@@ -3617,6 +3837,11 @@ internal sealed class FunctionBodyBinder
         _ => ArrayStorageKind.Unknown,
     };
 
+    // This is deliberately a storage/lifetime query rather than an array-type
+    // ban.  More runtime-sized inline representations can participate later.
+    private static bool HasCalleeStackBoundRuntimeStorage(BoundExpression expression) =>
+        GetArrayStorage(expression) == ArrayStorageKind.Stack;
+
     private BoundScope? GetStackArrayScope(BoundExpression expression) => expression switch
     {
         BoundArrayCreationExpression { Storage: ArrayStorageKind.Stack } => _scope,
@@ -3629,6 +3854,8 @@ internal sealed class FunctionBodyBinder
 
     private void TrackArrayAssignment(LocalVariableSymbol local, BoundExpression expression, TextLocation location)
     {
+        if (expression is BoundMoveExpression)
+            local.RequiresArrayCleanupTransfer = true;
         ArrayStorageKind storage = GetArrayStorage(expression);
         local.ArrayStorage = storage;
         if (storage != ArrayStorageKind.Stack)
@@ -3637,11 +3864,48 @@ internal sealed class FunctionBodyBinder
             return;
         }
         BoundScope origin = GetStackArrayScope(expression) ?? _scope;
+        BoundScope destination = _localScopes[local];
+        if (ReferenceEquals(origin, destination))
+        {
+            _stackArrayScopes[local] = destination;
+            return;
+        }
+
+        // A shorter-lived alias may borrow an enclosing stack allocation.  It
+        // does not take cleanup responsibility or extend the backing lifetime.
+        for (BoundScope? scope = destination.Parent; scope is not null; scope = scope.Parent)
+        {
+            if (!ReferenceEquals(scope, origin)) continue;
+            _stackArrayScopes[local] = origin;
+            return;
+        }
+
+        bool destinationContainsOrigin = false;
+        for (BoundScope? scope = origin; scope is not null; scope = scope.Parent)
+            if (ReferenceEquals(scope, destination)) { destinationContainsOrigin = true; break; }
+        if (destinationContainsOrigin && expression is BoundMoveExpression)
+        {
+            // The backing bytes remain stack allocated.  Deferring intervening
+            // stackrestore operations makes their physical lifetime match the
+            // enclosing destination; cleanup ownership is transferred by LLVM
+            // lowering together with the array descriptor.
+            for (BoundScope? scope = origin; scope is not null && !ReferenceEquals(scope, destination); scope = scope.Parent)
+                _retainedStackScopes.Add(scope);
+            _stackArrayScopes[local] = destination;
+            return;
+        }
+
         _stackArrayScopes[local] = origin;
-        for (BoundScope? scope = _localScopes[local]; scope is not null; scope = scope.Parent)
-            if (ReferenceEquals(scope, origin)) return;
-        _diagnostics.Report(location, "stack array cannot escape its allocation scope through this assignment",
+        _diagnostics.Report(location, "stack array cannot escape its allocation scope through this assignment without an explicit move relocation",
             DiagnosticIds.StackArrayEscape);
+    }
+
+    private void RecordReceiverMoveEffectExit()
+    {
+        if (!_function.HasImplicitThis) return;
+        _receiverMoveEffectExits.Add(_movedPlaces
+            .Where(place => ReferenceEquals(place.Root, _function))
+            .ToImmutableArray());
     }
 
     private readonly record struct ArrayState(ArrayStorageKind Storage, BoundScope? Scope);

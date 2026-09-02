@@ -1,0 +1,9 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [
+    { "id": "XE2228", "message": "method 'Take' does not leave receiver field 'this.Value' in a consistent move state across all reachable exits; some exits move 'this.Value' while others leave it live" }
+  ]
+}

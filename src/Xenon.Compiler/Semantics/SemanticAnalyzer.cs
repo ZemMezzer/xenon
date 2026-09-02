@@ -124,7 +124,9 @@ internal sealed class SemanticAnalyzer
                 functions.Add(new BoundFunction(symbol, boundBody));
             foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
         }
+        StabilizeMoveEffects();
         BindSpecializedStructFunctions(functions, genericSpecializer);
+        ValidateCallableMoveEffects();
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
         AddGeneratedDropFunctions(functions);
@@ -145,6 +147,139 @@ internal sealed class SemanticAnalyzer
         RecordDeclarations(_globalNamespace);
         return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), [.. _diagnostics],
             _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
+    }
+
+    private void StabilizeMoveEffects()
+    {
+        DiagnosticBag lastDiagnostics = new();
+        for (int round = 0; round <= _functionBodies.Count; round++)
+        {
+            PropagateGenericStructMoveEffects();
+            string before = string.Join('|', _functionBodies.Select(entry =>
+                string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect =>
+                    string.Join(',', effect.FieldOrdinals)))));
+            var diagnostics = new DiagnosticBag();
+            foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                var binder = new FunctionBodyBinder(symbol, scope, diagnostics, _constants,
+                    new SemanticInfoStore(), _cancellationToken);
+                _ = binder.BindBody(body);
+            }
+            PropagateGenericStructMoveEffects();
+            lastDiagnostics = diagnostics;
+            string after = string.Join('|', _functionBodies.Select(entry =>
+                string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect =>
+                    string.Join(',', effect.FieldOrdinals)))));
+            if (string.Equals(before, after, StringComparison.Ordinal)) break;
+        }
+
+        HashSet<string> ownershipEffectIds =
+            [DiagnosticIds.UseAfterMove, DiagnosticIds.PartiallyMovedUse,
+                DiagnosticIds.InconsistentReceiverMoveEffect];
+        foreach (Diagnostic diagnostic in lastDiagnostics.Where(diagnostic => ownershipEffectIds.Contains(diagnostic.Id)))
+        {
+            bool duplicate = _diagnostics.Any(existing =>
+                existing.Id == diagnostic.Id && existing.Message == diagnostic.Message &&
+                existing.Location.Span.Equals(diagnostic.Location.Span));
+            if (!duplicate) _diagnostics.AddRange([diagnostic]);
+        }
+    }
+
+    private void PropagateGenericStructMoveEffects()
+    {
+        if (_genericStructSpecializer is null) return;
+        foreach (SpecializedStructFunction entry in _genericStructSpecializer.SpecializedFunctions)
+            entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
+    }
+
+    private void ValidateCallableMoveEffects()
+    {
+        IEnumerable<StructTypeSymbol> types = _structSymbols.Values;
+        if (_genericStructSpecializer is not null)
+            types = types.Concat(_genericStructSpecializer.Specializations);
+
+        var validated = new HashSet<(FunctionSymbol Contract, FunctionSymbol Implementation)>();
+        foreach (StructTypeSymbol type in types.Distinct())
+        {
+            foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces)
+            {
+                foreach (FunctionSymbol contract in @interface.AllMethods)
+                {
+                    FunctionSymbol? implementation = type.FindInterfaceImplementation(contract);
+                    if (implementation is null || !validated.Add((contract, implementation))) continue;
+                    ValidateMoveEffectContract(contract, implementation,
+                        $"interface method '{@interface.Name}.{contract.Name}'",
+                        contract.ReceiverMoveEffects);
+                }
+            }
+
+            foreach (FunctionSymbol implementation in type.Methods.Where(method => method.IsOverride))
+            {
+                FunctionSymbol? contract = type.BaseType?.VirtualMethods.FirstOrDefault(candidate =>
+                    candidate.VTableSlot == implementation.VTableSlot && candidate.HasSameSignature(implementation));
+                if (contract is null || !validated.Add((contract, implementation))) continue;
+                ValidateMoveEffectContract(contract, implementation,
+                    $"virtual method '{contract.ContainingType!.Name}.{contract.Name}'",
+                    contract.ReceiverMoveEffects);
+            }
+
+            // Until source-level effect declarations exist, a virtual method's
+            // dispatch contract declares no destructive receiver effect.  Keep
+            // the inferred summary intact, but validate it against that empty
+            // public contract in the same centralized compatibility routine.
+            foreach (FunctionSymbol implementation in type.Methods.Where(method =>
+                         method.IsVirtual && !method.IsOverride))
+            {
+                if (!validated.Add((implementation, implementation))) continue;
+                ValidateMoveEffectContract(implementation, implementation,
+                    $"virtual method contract '{implementation.ContainingType!.Name}.{implementation.Name}'", []);
+            }
+        }
+    }
+
+    private void ValidateMoveEffectContract(
+        FunctionSymbol contract,
+        FunctionSymbol implementation,
+        string contractDisplay,
+        ImmutableArray<ReceiverMoveEffect> contractEffects)
+    {
+        ImmutableArray<ReceiverMoveEffect> implementationEffects = implementation.ReceiverMoveEffects;
+        if (AreMoveEffectsCompatible(contractEffects, implementationEffects)) return;
+
+        ReceiverMoveEffect? incompatible = implementationEffects.FirstOrDefault(effect =>
+            !contractEffects.Any(candidate => SameMoveEffect(candidate, effect)));
+        string place = incompatible is { } effect
+            ? FormatReceiverMoveEffect(implementation, effect)
+            : "this";
+        _diagnostics.Report(MemberLocation(implementation),
+            $"method '{implementation.ContainingType!.Name}.{implementation.Name}' has caller-visible receiver move effects that are not compatible with {contractDisplay}; incompatible receiver place: '{place}'",
+            DiagnosticIds.HiddenVirtualMoveEffect,
+            contract.Locations.Select(location =>
+                new RelatedDiagnosticLocation(location, "callable contract declared here")));
+    }
+
+    private static bool AreMoveEffectsCompatible(
+        ImmutableArray<ReceiverMoveEffect> contract,
+        ImmutableArray<ReceiverMoveEffect> implementation) =>
+        implementation.All(effect => contract.Any(candidate => SameMoveEffect(candidate, effect)));
+
+    private static bool SameMoveEffect(ReceiverMoveEffect left, ReceiverMoveEffect right) =>
+        left.FieldOrdinals.SequenceEqual(right.FieldOrdinals);
+
+    private static string FormatReceiverMoveEffect(FunctionSymbol method, ReceiverMoveEffect effect)
+    {
+        TypeSymbol? current = method.ContainingType;
+        var names = new List<string> { "this" };
+        foreach (int ordinal in effect.FieldOrdinals)
+        {
+            if (current is not StructTypeSymbol structure ||
+                structure.Fields.FirstOrDefault(field => field.Ordinal == ordinal) is not { } field)
+                return string.Join('.', names);
+            names.Add(field.Name);
+            current = field.Type;
+        }
+        return string.Join('.', names);
     }
 
     private void AddGeneratedDropFunctions(ImmutableArray<BoundFunction>.Builder functions)
@@ -208,6 +343,8 @@ internal sealed class SemanticAnalyzer
             changed |= ValidatePendingGenericSpecializationLayouts();
             SpecializedStructFunction[] pending = _genericStructSpecializer.SpecializedFunctions
                 .Where(entry => entry.Owner.IsConcreteType && !bound.Contains(entry.Specialized)).ToArray();
+            foreach (SpecializedStructFunction entry in pending)
+                entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
             foreach (SpecializedStructFunction entry in pending)
             {
                 changed = true;

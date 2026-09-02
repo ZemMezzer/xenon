@@ -9,6 +9,7 @@ public sealed class FunctionSymbol : Symbol
     public bool HasStackArrays { get; internal set; }
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
+    public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
 
     internal FunctionSymbol(
         string name,
@@ -266,6 +267,8 @@ public sealed class FunctionSymbol : Symbol
     public int ConstructorOverloadCount { get; private set; } = 1;
 
     internal void SetVTableSlot(int slot) => VTableSlot = slot;
+    internal void SetReceiverMoveEffects(ImmutableArray<ReceiverMoveEffect> effects) =>
+        ReceiverMoveEffects = effects;
     internal void SetGenericSpecialization(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
     {
         GenericDefinition = definition;
@@ -296,6 +299,8 @@ public sealed class FunctionSymbol : Symbol
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
         Declaration is TypeDeclarationSyntax || FunctionKind == FunctionKind.OwnershipDrop ? [] : [new(Declaration)];
 }
+
+public readonly record struct ReceiverMoveEffect(ImmutableArray<int> FieldOrdinals);
 
 public abstract class VariableSymbol : Symbol
 {
@@ -343,6 +348,7 @@ public sealed class LocalVariableSymbol : VariableSymbol
     public override bool IsDefinition => Declaration is not null;
 
     public ArrayStorageKind ArrayStorage { get; internal set; }
+    public bool RequiresArrayCleanupTransfer { get; internal set; }
     public FunctionSymbol? Destructor { get; internal set; }
     internal Binding.BoundExpression? ConstantValue { get; set; }
 }

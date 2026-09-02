@@ -1,0 +1,12 @@
+namespace Negative.ArrayUseAfterMove;
+
+void Invalid()
+{
+    int[] first = int[2];
+    int[] moved = move first;
+    first[0] = 1;
+
+    int[] second = new int[2];
+    int[] movedOnce = move second;
+    int[] movedTwice = move second;
+}

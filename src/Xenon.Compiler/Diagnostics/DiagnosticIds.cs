@@ -179,5 +179,8 @@ public static class DiagnosticIds
     public const string SharedRequiresFreshAllocation = "XE2224";
     public const string WeakRequiresSharedOwner = "XE2225";
     public const string WeakDirectAccess = "XE2226";
+    public const string HiddenVirtualMoveEffect = "XE2227";
+    public const string InconsistentReceiverMoveEffect = "XE2228";
+    public const string EscapingLocalReference = "XE2229";
     public const string RecursiveValueLayout = "XE2600";
 }

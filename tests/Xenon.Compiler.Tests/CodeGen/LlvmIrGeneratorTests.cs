@@ -2179,6 +2179,56 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("store i1 false", Body("MoveWeak"), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Generator_LowersReceiverEffectsAndRawArrayMovesWithoutSourceZeroingOrHeapCopies()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Holder
+            {
+                public unique<Resource> Value;
+                public unique<Resource> Take() { return move Value; }
+                public unique<Resource> Replace()
+                {
+                    unique<Resource> old = move Value;
+                    Value = new Resource();
+                    return move old;
+                }
+            }
+            int[] MoveArray(int[] value) { return move value; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "move-effects";
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), module);
+        string Body(string fullName)
+        {
+            string symbol = ManagedSymbol(module, fullName, "function");
+            int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"missing function {fullName}");
+            int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+            Assert.True(end > start, $"unterminated function {fullName}");
+            return ir[start..end];
+        }
+
+        string take = Body("Example.Holder.Take");
+        Assert.DoesNotContain("store ptr null", take, StringComparison.Ordinal);
+        Assert.DoesNotContain("zeroinitializer", take, StringComparison.Ordinal);
+
+        StructTypeSymbol holder = Assert.Single(Assert.Single(
+            compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Holder"));
+        var ownership = Assert.IsType<UniqueTypeSymbol>(Assert.Single(holder.Fields).Type);
+        string ownershipDrop = ManagedSymbol(module, ownership.DropFunction!.FullName, "function");
+        Assert.DoesNotContain($"call void @{ownershipDrop}", Body("Example.Holder.Replace"), StringComparison.Ordinal);
+
+        string arrayMove = Body("Example.MoveArray");
+        Assert.DoesNotContain("@malloc", arrayMove, StringComparison.Ordinal);
+        Assert.DoesNotContain("@calloc", arrayMove, StringComparison.Ordinal);
+        Assert.DoesNotContain("llvm.memcpy", arrayMove, StringComparison.Ordinal);
+    }
+
     private static Compilation CreateCompilation(string source) =>
         Compilation.Create(SourceText.From(source, "test.xe"));
 
