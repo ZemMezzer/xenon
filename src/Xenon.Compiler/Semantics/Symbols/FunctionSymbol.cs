@@ -11,6 +11,7 @@ public sealed class FunctionSymbol : Symbol
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
     public ImmutableArray<ReferenceReturnOrigin> ReferenceReturnOrigins { get; private set; } = [];
+    public ImmutableArray<ReferenceFieldOrigin> ReferenceFieldOrigins { get; private set; } = [];
 
     internal FunctionSymbol(
         string name,
@@ -190,6 +191,24 @@ public sealed class FunctionSymbol : Symbol
         OwnershipType = ownershipType;
     }
 
+    internal FunctionSymbol(
+        StorageTypeSymbol storageType,
+        NamespaceSymbol containingNamespace,
+        PointerTypeSymbol addressType,
+        SyntaxNode declaration)
+        : base(
+            $"__storage_destructor_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(storageType)))}",
+            SymbolKind.Function,
+            containingNamespace)
+    {
+        FunctionKind = FunctionKind.StorageDestructor;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = ParameterSymbol.Own([new ParameterSymbol("value", addressType, 0)], this);
+        Declaration = declaration;
+        Accessibility = Accessibility.Private;
+        StorageType = storageType;
+    }
+
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
 
     public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
@@ -200,6 +219,7 @@ public sealed class FunctionSymbol : Symbol
     public IndexerSymbol? ContainingIndexer => ContainingSymbol as IndexerSymbol;
     public InterfaceIndexerSymbol? ContainingInterfaceIndexer => ContainingSymbol as InterfaceIndexerSymbol;
     public OwnershipTypeSymbol? OwnershipType { get; }
+    public StorageTypeSymbol? StorageType { get; }
 
     public string FullName => FunctionKind switch
     {
@@ -212,6 +232,7 @@ public sealed class FunctionSymbol : Symbol
         FunctionKind.Destructor => $"{ContainingType!.FullName}.__dtor",
         FunctionKind.DestructorGlue => $"{ContainingType!.FullName}.__destructor",
         FunctionKind.OwnershipDestructor => $"{ContainingNamespace.FullName}.{Name}",
+        FunctionKind.StorageDestructor => $"{ContainingNamespace.FullName}.{Name}",
         _ => $"{ContainingNamespace.FullName}.{Name}",
     };
 
@@ -248,8 +269,8 @@ public sealed class FunctionSymbol : Symbol
     public bool IsAccessor => ContainingProperty is not null || ContainingInterfaceProperty is not null ||
         ContainingIndexer is not null || ContainingInterfaceIndexer is not null;
 
-    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor;
-    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor) && !IsAccessor;
+    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor;
+    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) && !IsAccessor;
     public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor;
     public override bool IsDefinition => Declaration switch
     {
@@ -259,6 +280,7 @@ public sealed class FunctionSymbol : Symbol
         DestructorDeclarationSyntax => true,
         _ when FunctionKind == FunctionKind.DestructorGlue => true,
         _ when FunctionKind == FunctionKind.OwnershipDestructor => true,
+        _ when FunctionKind == FunctionKind.StorageDestructor => true,
         PropertyAccessorDeclarationSyntax syntax => syntax.Body is not null,
         _ => false,
     };
@@ -272,6 +294,8 @@ public sealed class FunctionSymbol : Symbol
         ReceiverMoveEffects = effects;
     internal void SetReferenceReturnOrigins(ImmutableArray<ReferenceReturnOrigin> origins) =>
         ReferenceReturnOrigins = origins;
+    internal void SetReferenceFieldOrigins(ImmutableArray<ReferenceFieldOrigin> origins) =>
+        ReferenceFieldOrigins = origins;
     internal void SetGenericSpecialization(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
     {
         GenericDefinition = definition;
@@ -300,7 +324,7 @@ public sealed class FunctionSymbol : Symbol
 
     internal SyntaxNode Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
-        Declaration is TypeDeclarationSyntax || FunctionKind == FunctionKind.OwnershipDestructor ? [] : [new(Declaration)];
+        Declaration is TypeDeclarationSyntax || FunctionKind is FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor ? [] : [new(Declaration)];
 }
 
 public readonly record struct ReceiverMoveEffect(ImmutableArray<int> FieldOrdinals);
@@ -317,6 +341,11 @@ public readonly record struct ReferenceReturnOrigin(
     ReferenceReturnOriginKind Kind,
     int ParameterOrdinal,
     ImmutableArray<int> FieldOrdinals);
+
+public readonly record struct ReferenceFieldOrigin(
+    ImmutableArray<int> FieldOrdinals,
+    ReferenceReturnOrigin Origin,
+    bool IsReadonly);
 
 public abstract class VariableSymbol : Symbol
 {

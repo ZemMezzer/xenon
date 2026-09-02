@@ -111,6 +111,7 @@ internal sealed class SemanticAnalyzer
             .ToDictionary(entry => entry.Symbol, entry => (entry.Body, entry.Scope));
         var genericSpecializer = new GenericFunctionSpecializer(genericDefinitions, _typeFactory,
             _diagnostics, _constants, _genericStructSpecializer!, _cancellationToken);
+        StabilizeConstructorReferenceSummaries();
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
         {
@@ -145,7 +146,7 @@ internal sealed class SemanticAnalyzer
         }
 
         RecordDeclarations(_globalNamespace);
-        return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), [.. _diagnostics],
+        return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), _diagnostics.ToImmutableArray(),
             _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
     }
 
@@ -182,10 +183,43 @@ internal sealed class SemanticAnalyzer
         }
     }
 
+    private void StabilizeConstructorReferenceSummaries()
+    {
+        var constructors = _functionBodies
+            .Where(entry => entry.Symbol.FunctionKind == FunctionKind.Constructor &&
+                            entry.Symbol.ContainingStruct is { } owner &&
+                            TypeFacts.ContainsReferenceStorage(owner))
+            .ToArray();
+        for (int round = 0; round <= constructors.Length; round++)
+        {
+            PropagateGenericStructCallableSummaries();
+            string before = string.Join('|', constructors.Select(entry => string.Join(';',
+                entry.Symbol.ReferenceFieldOrigins.Select(origin =>
+                    $"{string.Join(',', origin.FieldOrdinals)}:{(int)origin.Origin.Kind}:" +
+                    $"{origin.Origin.ParameterOrdinal}:{string.Join(',', origin.Origin.FieldOrdinals)}:{origin.IsReadonly}"))));
+            foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in constructors)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                var binder = new FunctionBodyBinder(symbol, scope, new DiagnosticBag(), _constants,
+                    new SemanticInfoStore(), _cancellationToken);
+                _ = binder.BindBody(body);
+            }
+            PropagateGenericStructCallableSummaries();
+            string after = string.Join('|', constructors.Select(entry => string.Join(';',
+                entry.Symbol.ReferenceFieldOrigins.Select(origin =>
+                    $"{string.Join(',', origin.FieldOrdinals)}:{(int)origin.Origin.Kind}:" +
+                    $"{origin.Origin.ParameterOrdinal}:{string.Join(',', origin.Origin.FieldOrdinals)}:{origin.IsReadonly}"))));
+            if (string.Equals(before, after, StringComparison.Ordinal)) break;
+        }
+    }
+
     private string GetCallableSummaryFingerprint() => string.Join('|', _functionBodies.Select(entry =>
         $"{string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect => string.Join(',', effect.FieldOrdinals)))}" +
         $"/{string.Join(';', entry.Symbol.ReferenceReturnOrigins.Select(origin =>
-            $"{(int)origin.Kind}:{origin.ParameterOrdinal}:{string.Join(',', origin.FieldOrdinals)}"))}"));
+            $"{(int)origin.Kind}:{origin.ParameterOrdinal}:{string.Join(',', origin.FieldOrdinals)}"))}" +
+        $"/{string.Join(';', entry.Symbol.ReferenceFieldOrigins.Select(origin =>
+            $"{string.Join(',', origin.FieldOrdinals)}:{(int)origin.Origin.Kind}:" +
+            $"{origin.Origin.ParameterOrdinal}:{string.Join(',', origin.Origin.FieldOrdinals)}:{origin.IsReadonly}"))}"));
 
     private void PropagateGenericStructCallableSummaries()
     {
@@ -194,6 +228,7 @@ internal sealed class SemanticAnalyzer
         {
             entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
             entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+            entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
         }
     }
 
@@ -321,6 +356,18 @@ internal sealed class SemanticAnalyzer
                 new BoundExpressionStatement(new BoundOwnershipDestructionExpression(ownership, elementDestructor)),
             ])));
         }
+
+        foreach (StorageTypeSymbol storage in _typeFactory.StorageTypes)
+        {
+            if (GenericTypeFacts.ContainsGenericParameter(storage) ||
+                storage.CompleteDestructor is not { } destructor ||
+                !existing.Add(destructor))
+                continue;
+            functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
+                new BoundExpressionStatement(new BoundStorageDestructionExpression(
+                    storage, TypeFacts.GetCompleteDestructor(storage.ElementType))),
+            ])));
+        }
     }
 
     private void InitializeGenericStructSpecializer()
@@ -351,6 +398,7 @@ internal sealed class SemanticAnalyzer
             {
                 entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
                 entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+                entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
             }
             foreach (SpecializedStructFunction entry in pending)
             {
@@ -2062,10 +2110,17 @@ internal sealed class SemanticAnalyzer
             .Concat(_structSymbols.Values.SelectMany(type => type.Methods.Select(method => (method, type.Declaration.IdentifierToken.Location))))
             .Concat(_interfaceSymbols.SelectMany(entry => entry.Value.AllMethods.Select(method => (method, entry.Key.IdentifierToken.Location))));
         foreach (var (symbol, location) in signatures.DistinctBy(entry => entry.Item1))
+        {
             if (symbol.ReturnType is StructTypeSymbol { IsAbstract: true } ||
                 symbol.Parameters.Any(parameter => parameter.Type is StructTypeSymbol { IsAbstract: true }))
                 _diagnostics.Report(location, "abstract structs cannot be passed or returned by value",
                     DiagnosticIds.AbstractValueInSignature);
+            if (TypeFacts.IsPinned(symbol.ReturnType) ||
+                symbol.Parameters.Any(parameter => TypeFacts.IsPinned(parameter.Type)))
+                _diagnostics.Report(location,
+                    "pinned values and aggregates containing pinned fields cannot be passed or returned by value; use a pointer or reference",
+                    DiagnosticIds.PinnedRelocation);
+        }
     }
 
     private static bool ContainsStructByValue(

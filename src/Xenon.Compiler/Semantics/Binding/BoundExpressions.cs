@@ -61,6 +61,13 @@ public sealed record BoundOwnershipDestructionExpression(
     public override BoundKind Kind => BoundKind.OwnershipDestructionExpression;
 }
 
+public sealed record BoundStorageDestructionExpression(
+    StorageTypeSymbol StorageType,
+    FunctionSymbol? ElementDestructor) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.StorageDestructionExpression;
+}
+
 /// <summary>A fresh heap result adopted directly into its first and only owner.</summary>
 public sealed record BoundUniqueAdoptionExpression(
     BoundExpression Allocation,
@@ -217,6 +224,46 @@ public sealed record BoundReferenceDereferenceExpression(
     ReferenceTypeSymbol ReferenceType) : BoundExpression(ReferenceType.ElementType)
 {
     public override BoundKind Kind => BoundKind.ReferenceDereferenceExpression;
+}
+
+public sealed record BoundLifetimeValueExpression(
+    BoundExpression Source,
+    LifetimeModifierTypeSymbol ModifierType) : BoundExpression(ModifierType.ElementType)
+{
+    public override BoundKind Kind => BoundKind.LifetimeValueExpression;
+}
+
+public sealed record BoundDefaultValueExpression(TypeSymbol ValueType) : BoundExpression(ValueType)
+{
+    public override BoundKind Kind => BoundKind.DefaultValueExpression;
+}
+
+public sealed record BoundStorageConstructExpression(
+    BoundExpression Storage,
+    TypeSymbol ValueType,
+    BoundExpression? Value,
+    FunctionSymbol? Constructor,
+    ImmutableArray<BoundExpression> Arguments,
+    bool IsDefaultInitialization) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.StorageConstructExpression;
+}
+
+public sealed record BoundExplicitDestructExpression(
+    BoundExpression Target,
+    TypeSymbol ValueType,
+    FunctionSymbol? Destructor) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.ExplicitDestructExpression;
+    public VariableSymbol? TrackedVariable { get; init; }
+    public ImmutableArray<FieldSymbol> TrackedPath { get; init; } = [];
+}
+
+public sealed record BoundStorageMoveExpression(
+    BoundExpression Storage,
+    StorageTypeSymbol StorageType) : BoundExpression(StorageType.ElementType)
+{
+    public override BoundKind Kind => BoundKind.StorageMoveExpression;
 }
 
 public sealed record BoundInterfaceMethodCallExpression(

@@ -136,6 +136,10 @@ internal static class GenericConstraintMemberLookup
             SubstituteTemplateSelf(shared.ElementType, template, parameter, types, specializer)),
         WeakTypeSymbol weak => types.WeakOf(
             SubstituteTemplateSelf(weak.ElementType, template, parameter, types, specializer)),
+        StorageTypeSymbol storage => types.StorageOf(
+            SubstituteTemplateSelf(storage.ElementType, template, parameter, types, specializer)),
+        PinTypeSymbol pin => types.PinOf(
+            SubstituteTemplateSelf(pin.ElementType, template, parameter, types, specializer)),
         _ => type,
     };
 

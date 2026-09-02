@@ -64,6 +64,38 @@ internal static class TypeResolver
             case NamedTypeSyntax named:
             {
                 if (named.NameParts.Length == 1 && named.NameToken.Kind is
+                    SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword)
+                {
+                    string modifier = named.NameToken.Text;
+                    if (named.TypeArguments is not { } modifierArguments || modifierArguments.Arguments.Length != 1)
+                    {
+                        diagnostics.Report(named.TypeArguments?.LessToken.Location ?? named.NameToken.Location,
+                            $"Core type modifier '{modifier}' requires exactly one type argument",
+                            DiagnosticIds.GenericArityMismatch);
+                        return BuiltinTypes.Error;
+                    }
+
+                    TypeSymbol element = ResolveCore(modifierArguments.Arguments[0], scope, diagnostics);
+                    string? invalidReason = ValidateLifetimeModifierComposition(named.NameToken.Kind, element);
+                    if (invalidReason is not null)
+                    {
+                        diagnostics.Report(modifierArguments.Arguments[0].NameToken.Location,
+                            $"'{modifier}' {invalidReason}", DiagnosticIds.InvalidLifetimeModifier);
+                        return BuiltinTypes.Error;
+                    }
+
+                    TypeSymbol result = named.NameToken.Kind switch
+                    {
+                        SyntaxKind.StorageKeyword => scope.TypeFactory.StorageOf(element),
+                        SyntaxKind.PinKeyword => scope.TypeFactory.PinOf(element),
+                        _ => throw new InvalidOperationException(),
+                    };
+                    if (result is StorageTypeSymbol storage)
+                        scope.TypeFactory.EnsureStorageDestructor(storage, scope.GlobalNamespace, named);
+                    return result;
+                }
+
+                if (named.NameParts.Length == 1 && named.NameToken.Kind is
                     SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword)
                 {
                     string ownershipKind = named.NameToken.Text;
@@ -78,11 +110,14 @@ internal static class TypeResolver
 
                     TypeSymbol element = ResolveCore(ownershipArguments.Arguments[0], scope, diagnostics);
                     if (TypeIdentity.AreSame(element, BuiltinTypes.Void) ||
-                        element is ReferenceTypeSymbol or PointerTypeSymbol or OwnershipTypeSymbol)
+                        element is ReferenceTypeSymbol or PointerTypeSymbol or OwnershipTypeSymbol or LifetimeModifierTypeSymbol)
                     {
+                        string excludedKinds = element is LifetimeModifierTypeSymbol
+                            ? "pointers, references, void, ownership wrappers, or lifetime modifiers"
+                            : "pointers, references, void, or another ownership wrapper";
                         diagnostics.Report(
                             ownershipArguments.Arguments[0].NameToken.Location,
-                            $"type '{element.ToDisplayString()}' cannot be owned by '{ownershipKind}'; ownership wrappers cannot directly wrap pointers, references, void, or another ownership wrapper",
+                            $"type '{element.ToDisplayString()}' cannot be owned by '{ownershipKind}'; ownership wrappers cannot directly wrap {excludedKinds}",
                             DiagnosticIds.InvalidUniqueTypeArgument);
                         return BuiltinTypes.Error;
                     }
@@ -140,4 +175,17 @@ internal static class TypeResolver
                 throw new InvalidOperationException($"Unsupported type syntax '{syntax.Kind}'");
         }
     }
+
+    private static string? ValidateLifetimeModifierComposition(SyntaxKind modifier, TypeSymbol element) =>
+        (modifier, element) switch
+        {
+            (_, _) when TypeIdentity.AreSame(element, BuiltinTypes.Void) => "cannot be applied to 'void'",
+            (SyntaxKind.PinKeyword, OwnershipTypeSymbol) =>
+                $"cannot be applied to ownership handle '{element.ToDisplayString()}'; the owned heap value already has stable storage",
+            (SyntaxKind.StorageKeyword, PinTypeSymbol) =>
+                $"cannot contain '{element.ToDisplayString()}'; place 'pin' outside the storage modifier instead",
+            (SyntaxKind.StorageKeyword, StorageTypeSymbol) => "cannot be nested directly inside itself",
+            (SyntaxKind.PinKeyword, PinTypeSymbol) => "cannot be nested directly inside itself",
+            _ => null,
+        };
 }

@@ -9,8 +9,8 @@ int Main()
 {
     Container value = Container { 7 };
     Container& mutable = value;
-    readonly Container& readOnly = mutable;
     int& writable = mutable.Get(); writable = 42;
+    readonly Container& readOnly = mutable;
     readonly int& readable = readOnly.Get();
     return readable;
 }

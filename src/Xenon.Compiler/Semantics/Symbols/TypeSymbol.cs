@@ -133,6 +133,35 @@ public sealed class WeakTypeSymbol : OwnershipTypeSymbol
         : base("weak", elementType, storageType) { }
 }
 
+public abstract class LifetimeModifierTypeSymbol : TypeSymbol
+{
+    protected LifetimeModifierTypeSymbol(string modifierKind, TypeSymbol elementType)
+        : base(string.Empty)
+    {
+        ModifierKind = modifierKind;
+        ElementType = elementType;
+    }
+
+    public string ModifierKind { get; }
+    public TypeSymbol ElementType { get; }
+    public override string Name => ToDisplayString();
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
+        $"{ModifierKind}<{ElementType.ToDisplayString(format)}>";
+}
+
+/// <summary>Correctly aligned storage for T plus persistent runtime lifetime state.</summary>
+public sealed class StorageTypeSymbol : LifetimeModifierTypeSymbol
+{
+    internal StorageTypeSymbol(TypeSymbol elementType) : base("storage", elementType) { }
+    public FunctionSymbol? CompleteDestructor { get; internal set; }
+}
+
+/// <summary>A live T whose address must remain stable until destruction.</summary>
+public sealed class PinTypeSymbol : LifetimeModifierTypeSymbol
+{
+    internal PinTypeSymbol(TypeSymbol elementType) : base("pin", elementType) { }
+}
+
 public sealed class ErrorTypeSymbol : TypeSymbol
 {
     internal ErrorTypeSymbol() : base("<error>") { }

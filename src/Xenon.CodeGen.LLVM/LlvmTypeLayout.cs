@@ -89,6 +89,9 @@ internal sealed class LlvmTypeLayout : ITargetTypeLayout
 
     private AbiValueLayout GetLayout(TypeSymbol type, HashSet<StructTypeSymbol> building)
     {
+        if (type is StorageTypeSymbol storage)
+            return AggregateLayout([GetLayout(storage.ElementType, building), _bool]);
+        if (type is LifetimeModifierTypeSymbol modifier) return GetLayout(modifier.ElementType, building);
         if (type is EnumTypeSymbol enumeration) return GetLayout(enumeration.UnderlyingType, building);
         if (type is PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol) return _pointer;
         if (TypeIdentity.AreSame(type, BuiltinTypes.Bool)) return _bool;

@@ -182,5 +182,19 @@ public static class DiagnosticIds
     public const string HiddenVirtualMoveEffect = "XE2227";
     public const string InconsistentReceiverMoveEffect = "XE2228";
     public const string EscapingLocalReference = "XE2229";
+    public const string BorrowConflict = "XE2230";
+    public const string BorrowedPlaceAccess = "XE2231";
+    public const string BorrowedPlaceMutation = "XE2232";
+    public const string MoveWhileBorrowed = "XE2233";
+    public const string InvalidLifetimeModifier = "XE2234";
+    public const string StorageNotInitialized = "XE2235";
+    public const string StorageAlreadyInitialized = "XE2236";
+    public const string ExplicitDestructionRequiresLiveValue = "XE2237";
+    public const string PinnedRelocation = "XE2238";
+    public const string DestructWhileBorrowed = "XE2239";
+    public const string AggregateReferenceEscape = "XE2240";
+    public const string ReferenceDestructionOrder = "XE2241";
+    public const string ReferenceProvenanceMutation = "XE2242";
+    public const string FreeWhileBorrowed = "XE2243";
     public const string RecursiveValueLayout = "XE2600";
 }

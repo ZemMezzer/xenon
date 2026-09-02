@@ -2204,8 +2204,8 @@ public sealed class SemanticAnalyzerTests
             {
                 Container value = Container { 7 };
                 Container& mutable = value;
-                readonly Container& readOnly = mutable;
                 int& writable = mutable.Get();
+                readonly Container& readOnly = mutable;
                 readonly int& readable = readOnly.Get();
                 return readable;
             }
@@ -2219,7 +2219,7 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(container.Methods, method => method.IsReadonly && method.FullName == "Example.Container.Get.__readonly");
 
         BoundFunction main = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Main");
-        var mutableDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[3]);
+        var mutableDeclaration = Assert.IsType<BoundVariableDeclarationStatement>(main.Body.Statements[2]);
         var mutableConversion = Assert.IsType<BoundReferenceConversionExpression>(mutableDeclaration.Initializer);
         var mutableDereference = Assert.IsType<BoundReferenceDereferenceExpression>(mutableConversion.Source);
         var mutableCall = Assert.IsType<BoundMethodCallExpression>(mutableDereference.Reference);
@@ -3607,6 +3607,8 @@ public sealed class SemanticAnalyzerTests
     [Theory]
     [InlineData("void M() { R value = R(); }")]
     [InlineData("void M() { R value; value = R(); }")]
+    [InlineData("void M() { storage<R> value; }")]
+    [InlineData("void M() { storage<R>* value = new storage<R>(); free(value); }")]
     public void Analyzer_ChecksScalarCleanupDestructorAccessibility(string source)
     {
         Compilation compilation = CreateCompilation("namespace Example; struct R { private ~R() {} } " + source);
@@ -4355,7 +4357,7 @@ public sealed class SemanticAnalyzerTests
             }
             """);
         Assert.Contains(alias.Diagnostics, diagnostic =>
-            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.UseAfterMove &&
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.MoveWhileBorrowed &&
             diagnostic.Message.Contains("value", StringComparison.Ordinal));
     }
 

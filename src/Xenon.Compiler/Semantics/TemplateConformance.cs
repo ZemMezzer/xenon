@@ -256,6 +256,10 @@ public sealed class TemplateConformanceMatcher
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
             (WeakTypeSymbol left, WeakTypeSymbol right) =>
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
+            (StorageTypeSymbol left, StorageTypeSymbol right) =>
+                TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
+            (PinTypeSymbol left, PinTypeSymbol right) =>
+                TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
             (StructTypeSymbol { GenericDefinition: not null } left,
                 StructTypeSymbol { GenericDefinition: not null } right) =>
                 ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
@@ -378,6 +382,10 @@ public sealed class TemplateConformanceMatcher
             (SharedTypeSymbol left, SharedTypeSymbol right) =>
                 TypesMatch(left.ElementType, right.ElementType, template, concrete),
             (WeakTypeSymbol left, WeakTypeSymbol right) =>
+                TypesMatch(left.ElementType, right.ElementType, template, concrete),
+            (StorageTypeSymbol left, StorageTypeSymbol right) =>
+                TypesMatch(left.ElementType, right.ElementType, template, concrete),
+            (PinTypeSymbol left, PinTypeSymbol right) =>
                 TypesMatch(left.ElementType, right.ElementType, template, concrete),
             (StructTypeSymbol { GenericDefinition: not null } left,
                 StructTypeSymbol { GenericDefinition: not null } right) =>

@@ -22,6 +22,8 @@ public static class TypeIdentity
             (UniqueTypeSymbol a, UniqueTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
             (SharedTypeSymbol a, SharedTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
             (WeakTypeSymbol a, WeakTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
+            (StorageTypeSymbol a, StorageTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
+            (PinTypeSymbol a, PinTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
             _ => false,
         };
     }
@@ -37,6 +39,8 @@ public static class TypeIdentity
             UniqueTypeSymbol unique => HashCode.Combine(4, GetHashCode(unique.ElementType)),
             SharedTypeSymbol shared => HashCode.Combine(5, GetHashCode(shared.ElementType)),
             WeakTypeSymbol weak => HashCode.Combine(6, GetHashCode(weak.ElementType)),
+            StorageTypeSymbol storage => HashCode.Combine(7, GetHashCode(storage.ElementType)),
+            PinTypeSymbol pin => HashCode.Combine(9, GetHashCode(pin.ElementType)),
             _ => RuntimeHelpers.GetHashCode(type),
         };
     }

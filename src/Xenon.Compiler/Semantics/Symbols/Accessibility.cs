@@ -15,6 +15,7 @@ public enum FunctionKind
     Destructor,
     DestructorGlue,
     OwnershipDestructor,
+    StorageDestructor,
 }
 
 public enum ArrayStorageKind
