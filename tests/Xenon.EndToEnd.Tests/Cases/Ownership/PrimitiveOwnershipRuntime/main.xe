@@ -1,0 +1,18 @@
+namespace Ownership.PrimitiveOwnershipRuntime;
+
+int Main()
+{
+    unique<int> left = new int(40);
+    shared<int> strong = new int(2);
+    weak<int> observer = strong;
+    shared<int> locked = observer.Lock();
+    if (*left + *locked != 42) return 1;
+
+    *left = 7;
+    *locked = 9;
+    if (*left != 7 || *strong != 9) return 2;
+
+    unique<byte> zero = new byte();
+    if (*zero != cast<byte>(0)) return 3;
+    return 0;
+}

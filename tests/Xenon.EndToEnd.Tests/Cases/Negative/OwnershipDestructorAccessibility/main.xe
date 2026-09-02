@@ -1,0 +1,13 @@
+namespace Negative.OwnershipDestructorAccessibility;
+
+struct PrivateResource { private ~PrivateResource() {} }
+struct Nested { public PrivateResource Value; }
+
+void Main()
+{
+    unique<PrivateResource> uniqueValue = new PrivateResource();
+    shared<PrivateResource> sharedValue = new PrivateResource();
+    unique<PrivateResource[]> uniqueArray = new PrivateResource[1];
+    shared<PrivateResource[]> sharedArray = new PrivateResource[1];
+    unique<Nested> nested = new Nested();
+}

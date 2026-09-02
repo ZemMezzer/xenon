@@ -1,0 +1,22 @@
+namespace References.ReferenceProvenanceRuntime;
+
+struct Data { public int Value; }
+
+int& Forward(int& value) { return value; }
+int& LayerA(int& value) { return LayerB(value); }
+int& LayerB(int& value) { return Forward(value); }
+int& GetValue(Data& value) { return value.Value; }
+
+int Main()
+{
+    int value = 10;
+    int& layered = LayerA(value);
+    layered = 42;
+    if (value != 42) return 1;
+
+    Data data = Data();
+    int& field = GetValue(data);
+    field = 73;
+    if (data.Value != 73) return 2;
+    return 0;
+}

@@ -10,6 +10,7 @@ public sealed class FunctionSymbol : Symbol
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
+    public ImmutableArray<ReferenceReturnOrigin> ReferenceReturnOrigins { get; private set; } = [];
 
     internal FunctionSymbol(
         string name,
@@ -269,6 +270,8 @@ public sealed class FunctionSymbol : Symbol
     internal void SetVTableSlot(int slot) => VTableSlot = slot;
     internal void SetReceiverMoveEffects(ImmutableArray<ReceiverMoveEffect> effects) =>
         ReceiverMoveEffects = effects;
+    internal void SetReferenceReturnOrigins(ImmutableArray<ReferenceReturnOrigin> origins) =>
+        ReferenceReturnOrigins = origins;
     internal void SetGenericSpecialization(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
     {
         GenericDefinition = definition;
@@ -301,6 +304,19 @@ public sealed class FunctionSymbol : Symbol
 }
 
 public readonly record struct ReceiverMoveEffect(ImmutableArray<int> FieldOrdinals);
+
+public enum ReferenceReturnOriginKind
+{
+    Parameter,
+    Receiver,
+    Static,
+    Unknown,
+}
+
+public readonly record struct ReferenceReturnOrigin(
+    ReferenceReturnOriginKind Kind,
+    int ParameterOrdinal,
+    ImmutableArray<int> FieldOrdinals);
 
 public abstract class VariableSymbol : Symbol
 {
