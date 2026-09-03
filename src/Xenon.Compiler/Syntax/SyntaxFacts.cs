@@ -72,6 +72,8 @@ public static class SyntaxFacts
             ["storage"] = SyntaxKind.StorageKeyword,
             ["pin"] = SyntaxKind.PinKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
+    private static readonly FrozenSet<SyntaxKind> KeywordKinds = Keywords.Values.ToFrozenSet();
+    private static readonly string[] ContextualEditorKeywords = ["destruct"];
 
     public static SyntaxKind GetKeywordKind(string text) =>
         Keywords.TryGetValue(text, out SyntaxKind kind) ? kind : SyntaxKind.IdentifierToken;
@@ -79,6 +81,13 @@ public static class SyntaxFacts
     /// <summary>The canonical lexer keyword set for editor/tooling consumers.</summary>
     public static IReadOnlyList<string> GetKeywordTexts() => Keywords.Keys
         .OrderBy(keyword => keyword, StringComparer.Ordinal).ToArray();
+
+    /// <summary>Lexer keywords plus contextual built-in operations exposed as keywords by editor tooling.</summary>
+    public static IReadOnlyList<string> GetEditorKeywordTexts() => Keywords.Keys
+        .Concat(ContextualEditorKeywords)
+        .OrderBy(keyword => keyword, StringComparer.Ordinal).ToArray();
+
+    public static bool IsKeyword(SyntaxKind kind) => KeywordKinds.Contains(kind);
 
     public static bool IsTypeName(SyntaxKind kind) => kind is
         SyntaxKind.VoidKeyword or

@@ -291,7 +291,23 @@ public sealed class CoreIntelligenceHardeningTests
         JsonElement keywordCompletion = await RequestAtAsync(session, "textDocument/completion", uri,
             keywordSource, keywordSource.IndexOf("  }", StringComparison.Ordinal) + 1);
         string[] labels = Labels(keywordCompletion);
-        Assert.All(SyntaxFacts.GetKeywordTexts(), keyword => Assert.Contains(keyword, labels));
+        Assert.All(SyntaxFacts.GetEditorKeywordTexts(), keyword => Assert.Contains(keyword, labels));
+        JsonElement[] keywordItems = keywordCompletion.GetProperty("items").EnumerateArray().ToArray();
+        AssertKeywordDetails(keywordItems, ["unique", "shared", "weak", "storage", "pin"],
+            "ownership type keyword");
+        AssertKeywordDetails(keywordItems, ["new", "move", "lock"], "value expression keyword");
+        AssertKeywordDetails(keywordItems, ["free", "destruct"], "lifetime operation keyword");
+    }
+
+    private static void AssertKeywordDetails(JsonElement[] items, string[] keywords, string detail)
+    {
+        foreach (string keyword in keywords)
+        {
+            JsonElement item = Assert.Single(items.Where(candidate =>
+                candidate.GetProperty("label").GetString() == keyword));
+            Assert.Equal(14, item.GetProperty("kind").GetInt32());
+            Assert.Equal(detail, item.GetProperty("detail").GetString());
+        }
     }
 
     [Fact]

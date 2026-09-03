@@ -18,7 +18,8 @@ internal static class LspCoreIntelligence
     [
         "namespace", "type", "interface", "enum", "enumMember", "function", "method",
         "constructor", "property", "field", "parameter", "variable", "constant",
-        "typeParameter", "modifier", "keyword",
+        "typeParameter", "modifier", "keyword", "ownershipType", "valueExpression",
+        "lifetimeOperation",
     ];
     internal static readonly string[] SemanticTokenModifiers = ["declaration", "definition", "static", "readonly"];
 
@@ -254,9 +255,9 @@ internal static class LspCoreIntelligence
                 symbol.ToDisplayString(SymbolDisplayFormat.Signature)))
             .Select(symbol => CompletionItem(symbol)).ToList();
         if (access is null)
-            items.AddRange(SyntaxFacts.GetKeywordTexts().Select(keyword => new
+            items.AddRange(SyntaxFacts.GetEditorKeywordTexts().Select(keyword => new
             {
-                label = keyword, kind = 14, detail = "keyword", insertText = keyword,
+                label = keyword, kind = 14, detail = KeywordCompletionDetail(keyword), insertText = keyword,
                 sortText = "9_" + keyword, filterText = keyword,
             }));
         return new { isIncomplete = false, items = items.ToArray() };
@@ -315,7 +316,7 @@ internal static class LspCoreIntelligence
                     tokens.Add((reference.Location.Span, type,
                         SemanticModifiers(reference.Symbol, declaration: false), 1));
             }
-        AddOwnershipLanguageTokens(context.Document.SyntaxTree, tokens);
+        AddLanguageTokens(context.Document.SyntaxTree, tokens);
         var ordered = tokens.Where(item => item.Span.Length > 0)
             .GroupBy(item => item.Span).Select(group => group.OrderByDescending(item => item.Priority).First())
             .OrderBy(item => item.Span.Start).ToArray();
@@ -335,30 +336,51 @@ internal static class LspCoreIntelligence
         return new { data = data.ToArray() };
     }
 
-    private static void AddOwnershipLanguageTokens(SyntaxTree tree,
+    private static void AddLanguageTokens(SyntaxTree tree,
         List<(TextSpan Span, int Type, int Modifiers, int Priority)> tokens)
     {
-        const int keywordType = 15;
-        foreach (SyntaxToken token in tree.Tokens.Where(token => token.Kind is
-                     SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
-                     SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword))
-            tokens.Add((token.Location.Span, keywordType, 0, 3));
+        foreach (SyntaxToken token in tree.Tokens)
+        {
+            int type = LanguageTokenType(token.Kind);
+            if (type >= 0)
+                tokens.Add((token.Location.Span, type, 0, 3));
+        }
 
-        foreach (MoveExpressionSyntax move in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
-                     .OfType<MoveExpressionSyntax>())
-            tokens.Add((move.MoveKeyword.Location.Span, keywordType, 0, 3));
-        foreach (LockExpressionSyntax @lock in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
-                     .OfType<LockExpressionSyntax>())
-            tokens.Add((@lock.LockKeyword.Location.Span, keywordType, 0, 3));
-        foreach (FreeExpressionSyntax free in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
-                     .OfType<FreeExpressionSyntax>())
-            tokens.Add((free.FreeKeyword.Location.Span, keywordType, 0, 3));
         foreach (CallExpressionSyntax call in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
                      .OfType<CallExpressionSyntax>())
             if (call.TypeArguments is null && call.Target is NameExpressionSyntax name &&
                 name.IdentifierToken.Text == "destruct")
-                tokens.Add((name.IdentifierToken.Location.Span, keywordType, 0, 3));
+                tokens.Add((name.IdentifierToken.Location.Span, 18, 0, 3));
     }
+
+    private static int LanguageTokenType(SyntaxKind kind) => kind switch
+    {
+        SyntaxKind.VoidKeyword or SyntaxKind.BoolKeyword or SyntaxKind.ByteKeyword or
+            SyntaxKind.SByteKeyword or SyntaxKind.ShortKeyword or SyntaxKind.UShortKeyword or
+            SyntaxKind.IntKeyword or SyntaxKind.UIntKeyword or SyntaxKind.LongKeyword or
+            SyntaxKind.ULongKeyword or SyntaxKind.FloatKeyword or SyntaxKind.DoubleKeyword or
+            SyntaxKind.NIntKeyword or SyntaxKind.NUIntKeyword or SyntaxKind.CLongKeyword or
+            SyntaxKind.CULongKeyword => 1,
+        SyntaxKind.ConstKeyword or SyntaxKind.ReadonlyKeyword or SyntaxKind.StaticKeyword or
+            SyntaxKind.VirtualKeyword or SyntaxKind.OverrideKeyword or SyntaxKind.AbstractKeyword or
+            SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword or SyntaxKind.PublicKeyword or
+            SyntaxKind.PrivateKeyword or SyntaxKind.ThisKeyword => 14,
+        SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
+            SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword => 16,
+        SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword => 17,
+        SyntaxKind.FreeKeyword => 18,
+        SyntaxKind.GetKeyword or SyntaxKind.SetKeyword => -1,
+        _ when SyntaxFacts.IsKeyword(kind) => 15,
+        _ => -1,
+    };
+
+    private static string KeywordCompletionDetail(string keyword) => keyword switch
+    {
+        "unique" or "shared" or "weak" or "storage" or "pin" => "ownership type keyword",
+        "new" or "move" or "lock" => "value expression keyword",
+        "free" or "destruct" => "lifetime operation keyword",
+        _ => "keyword",
+    };
 
     private static async Task<object?> PrepareRenameAsync(LanguageServerAnalysisContext context,
         LspPosition lspPosition)
