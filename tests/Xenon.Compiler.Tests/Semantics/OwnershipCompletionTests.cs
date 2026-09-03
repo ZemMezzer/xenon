@@ -1997,6 +1997,318 @@ public sealed class OwnershipCompletionTests
         Assert.Equal(2, compilation.Diagnostics.Length);
     }
 
+    [Fact]
+    public void Analyzer_InvalidReferenceInitializersFromNonReferenceLocalsReportTypeMismatchWithoutCrashing()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            void Test()
+            {
+                unique<int> uniqueValue = new int();
+                shared<int> sharedValue = new int();
+                weak<int> weakValue = sharedValue;
+                int* pointer = new int();
+                bool flag = false;
+                int& fromUnique = uniqueValue;
+                int& fromShared = sharedValue;
+                int& fromWeak = weakValue;
+                int& fromPointer = pointer;
+                int& fromBool = flag;
+                free(pointer);
+            }
+            """);
+
+        Assert.Equal(5, compilation.Diagnostics.Length);
+        Assert.All(compilation.Diagnostics, diagnostic =>
+            Assert.Equal(DiagnosticIds.TypeMismatch, diagnostic.Id));
+    }
+
+    [Fact]
+    public void Analyzer_AllowsReferencesToExplicitlyDereferencedOwnershipPointees()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            void Test()
+            {
+                unique<int> uniqueValue = new int();
+                shared<int> sharedValue = new int();
+                int& fromUnique = *uniqueValue;
+                int& fromShared = *sharedValue;
+                fromUnique = 1;
+                fromShared = 2;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("unique<int> owner = new int(); int& first = *owner; int& second = *owner; first = 1; second = 2;")]
+    [InlineData("unique<int> owner = new int(); readonly int& first = *owner; int& second = *owner; int x = first; second = x;")]
+    [InlineData("shared<int> owner = new int(); int& first = *owner; int& second = *owner; first = 1; second = 2;")]
+    [InlineData("shared<int> owner = new int(); shared<int> alias = owner; int& first = *owner; int& second = *alias; first = 1; second = 2;")]
+    [InlineData("int* pointer = new int(); int& first = *pointer; int& second = *pointer; first = 1; second = 2; free(pointer);")]
+    [InlineData("int* pointer = new int(); int* alias = pointer; int& first = *pointer; int& second = *alias; first = 1; second = 2; free(pointer);")]
+    public void Analyzer_RejectsOverlappingBorrowsThroughKnownPointeeAliases(string body)
+    {
+        Compilation compilation = Create($$"""
+            namespace Example;
+            void Test()
+            {
+                {{body}}
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.BorrowConflict);
+    }
+
+    [Fact]
+    public void Analyzer_PreservesSharedBorrowIdentityThroughWeakLock()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            void Test()
+            {
+                shared<int> owner = new int();
+                weak<int> observer = owner;
+                shared<int> locked = lock observer;
+                int& first = *owner;
+                int& second = *locked;
+                first = 1;
+                second = 2;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.BorrowConflict);
+    }
+
+    [Theory]
+    [InlineData("readonly int& reference = *owner; *owner = 20; int result = reference;", DiagnosticIds.BorrowedPlaceMutation)]
+    [InlineData("int& reference = *owner; int result = *owner; reference = result;", DiagnosticIds.BorrowedPlaceAccess)]
+    public void Analyzer_RejectsDirectOwnershipPointeeAccessDuringConflictingBorrow(
+        string body,
+        string expectedDiagnostic)
+    {
+        Compilation compilation = Create($$"""
+            namespace Example;
+            void Test()
+            {
+                unique<int> owner = new int();
+                {{body}}
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == expectedDiagnostic);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsUnifiedReadonlySequentialAndDisjointPointeeBorrows()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Pair { public int First; public int Second; }
+            void Test()
+            {
+                unique<int> uniqueValue = new int();
+                int& first = *uniqueValue;
+                first = 1;
+                int& second = *uniqueValue;
+                second = 2;
+
+                shared<int> sharedValue = new int();
+                shared<int> sharedAlias = sharedValue;
+                readonly int& readerA = *sharedValue;
+                readonly int& readerB = *sharedAlias;
+                int sum = readerA + readerB;
+
+                unique<Pair> pair = new Pair();
+                int& firstField = pair->First;
+                int& secondField = pair->Second;
+                firstField = sum;
+                secondField = sum;
+
+                int* pointer = new int();
+                int& pointerFirst = *pointer;
+                pointerFirst = 1;
+                int& pointerSecond = *pointer;
+                pointerSecond = 2;
+                free(pointer);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_TransfersOwnershipBorrowIdentityAndRejectsMovingAnActiveOwner()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            void Consume(unique<int> value) {}
+            void MovedIdentity()
+            {
+                unique<int> source = new int();
+                unique<int> owner = move source;
+                int& first = *owner;
+                int& second = *owner;
+                first = 1;
+                second = 2;
+            }
+            void ActiveBorrow()
+            {
+                unique<int> owner = new int();
+                int& reference = *owner;
+                Consume(move owner);
+                reference = 1;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.BorrowConflict);
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.MoveWhileBorrowed);
+    }
+
+    [Fact]
+    public void Analyzer_UpdatesAndConservativelyMergesSharedBorrowIdentity()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            void ReassignmentIsPrecise()
+            {
+                shared<int> firstOwner = new int();
+                shared<int> secondOwner = new int();
+                shared<int> alias = firstOwner;
+                alias = secondOwner;
+                int& first = *firstOwner;
+                int& second = *alias;
+                first = 1;
+                second = 2;
+            }
+            void MergeIsConservative(bool condition)
+            {
+                shared<int> firstOwner = new int();
+                shared<int> secondOwner = new int();
+                shared<int> value = firstOwner;
+                if (condition) value = firstOwner;
+                else value = secondOwner;
+                int& first = *firstOwner;
+                int& second = *value;
+                first = 1;
+                second = 2;
+            }
+            """);
+
+        Assert.Single(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.BorrowConflict);
+    }
+
+    [Fact]
+    public void Analyzer_ComposesSharedIdentityThroughForwardingAndKeepsFreshReturnsDistinct()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            shared<T> Forward<T>(shared<T> value) { return value; }
+            shared<int> Create() { return new int(); }
+            void Forwarded()
+            {
+                shared<int> owner = new int();
+                shared<int> alias = Forward(owner);
+                int& first = *owner;
+                int& second = *alias;
+                first = 1;
+                second = 2;
+            }
+            void FreshCalls()
+            {
+                shared<int> firstOwner = Create();
+                shared<int> secondOwner = Create();
+                int& first = *firstOwner;
+                int& second = *secondOwner;
+                first = 1;
+                second = 2;
+            }
+            """);
+
+        Assert.Single(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.BorrowConflict);
+    }
+
+    [Fact]
+    public void Analyzer_UnifiesStoragePointerIndexAndUnknownSharedBorrowPlaces()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource
+            {
+                public int Value;
+                public void Update() { Value++; }
+                public int readonly Read() { return Value; }
+            }
+            void Storage()
+            {
+                storage<Resource> value = Resource();
+                Resource& first = value;
+                Resource& second = value;
+                first.Update();
+                second.Update();
+            }
+            void PointerIndex(int* pointer, int index)
+            {
+                int& first = pointer[index];
+                int& second = pointer[index];
+                first = 1;
+                second = 2;
+            }
+            void UnknownShared(shared<Resource> firstOwner, shared<Resource> secondOwner)
+            {
+                Resource& first = *firstOwner;
+                Resource& second = *secondOwner;
+                first.Update();
+                second.Update();
+            }
+            """);
+
+        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.BorrowConflict));
+    }
+
+    [Fact]
+    public void Analyzer_ValidatesSharedAliasDirectAccessByMethodMutability()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Resource
+            {
+                public int Value;
+                public void Update() { Value++; }
+                public int readonly Read() { return Value; }
+            }
+            void MutableAccess()
+            {
+                shared<Resource> owner = new Resource();
+                shared<Resource> alias = owner;
+                Resource& reference = *owner;
+                alias->Update();
+                reference.Update();
+            }
+            void ReadonlyAccess()
+            {
+                shared<Resource> owner = new Resource();
+                shared<Resource> alias = owner;
+                readonly Resource& reference = *owner;
+                int first = alias->Read();
+                int second = reference.Read();
+            }
+            """);
+
+        Assert.Single(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.BorrowedPlaceMutation);
+    }
+
     private static Compilation Create(string source) =>
         Compilation.Create(SourceText.From(source, "ownership-completion.xe"));
 }

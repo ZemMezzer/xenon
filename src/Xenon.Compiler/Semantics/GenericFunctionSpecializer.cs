@@ -92,6 +92,7 @@ internal sealed class GenericFunctionSpecializer
         specialized.SetGenericSpecialization(definition, typeArguments);
         specialized.SetReceiverMoveEffects(definition.ReceiverMoveEffects);
         specialized.SetReferenceReturnOrigins(definition.ReferenceReturnOrigins);
+        specialized.SetSharedReturnOrigins(definition.SharedReturnOrigins);
         specialized.SetReferenceFieldOrigins(definition.ReferenceFieldOrigins);
         _symbols.Add(key, specialized);
 
