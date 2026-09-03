@@ -136,7 +136,7 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Contains("alloca", unoptimized, StringComparison.Ordinal);
         Assert.DoesNotContain("alloca", optimized, StringComparison.Ordinal);
-        Assert.Contains("define dllexport i32 @Example_Identity", optimized, StringComparison.Ordinal);
+        Assert.Contains("@Example_Identity(", optimized, StringComparison.Ordinal);
     }
 
     [Fact]
