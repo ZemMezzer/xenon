@@ -1067,6 +1067,7 @@ public sealed class LlvmIrGenerator
         private readonly Dictionary<BoundArrayCreationExpression, LLVMValueRef> _arrayCreationCleanupNodes = new(ReferenceEqualityComparer.Instance);
         private Dictionary<BoundExpression, FullExpressionTemporarySlot>? _fullExpressionTemporaries;
         private LLVMTypeRef _cleanupNodeType;
+        private const int MaxDirectOwnershipCleanupUnits = 16;
         private bool _useDirectOwnershipCleanup;
         private bool _terminated;
         private BoundExpression? _exitCleanup;
@@ -1296,7 +1297,7 @@ public sealed class LlvmIrGenerator
             foreach (ParameterSymbol parameter in _function.Parameters)
             {
                 if (TypeFacts.GetCompleteDestructor(parameter.Type) is null) continue;
-                if (parameter.Type is not OwnershipTypeSymbol) return false;
+                if (!CanUseDirectOwnershipCleanup(parameter.Type)) return false;
                 found = true;
             }
 
@@ -1313,7 +1314,8 @@ public sealed class LlvmIrGenerator
                     case BoundVariableDeclarationStatement variable:
                         if (variable.Variable.RequiresArrayCleanupTransfer) return false;
                         if (TypeFacts.GetCompleteDestructor(variable.Variable.Type) is null) return true;
-                        if (variable.Variable.Type is not OwnershipTypeSymbol || variable.Initializer is null)
+                        if (variable.Initializer is null ||
+                            !CanUseDirectOwnershipCleanup(variable.Variable.Type))
                             return false;
                         foundOwnership = true;
                         return true;
@@ -1332,6 +1334,39 @@ public sealed class LlvmIrGenerator
                     default:
                         return true;
                 }
+            }
+        }
+
+        private static bool CanUseDirectOwnershipCleanup(TypeSymbol type)
+        {
+            // Transparent aggregates have a fixed destruction plan: flatten them to ownership
+            // fields and reuse the same per-field active flags as scalar owners. Keep a cap so
+            // duplicated exit cleanup cannot cause unbounded IR growth.
+            if (!IsTransparentOwnershipShape(type)) return false;
+            ImmutableArray<(ImmutableArray<FieldSymbol> Path, TypeSymbol ValueType, FunctionSymbol Destructor)> units =
+                GetScalarDestructionUnits(type);
+            return units is { Length: > 0 and <= MaxDirectOwnershipCleanupUnits } &&
+                units.All(unit => unit.ValueType is OwnershipTypeSymbol);
+
+            static bool IsTransparentOwnershipShape(TypeSymbol current)
+            {
+                if (current is OwnershipTypeSymbol) return true;
+                if (current is not StructTypeSymbol structure || structure.FindDestructor() is not null)
+                    return false;
+
+                bool foundOwnership = false;
+                if (structure.BaseType is { } baseType && TypeFacts.GetCompleteDestructor(baseType) is not null)
+                {
+                    if (!IsTransparentOwnershipShape(baseType)) return false;
+                    foundOwnership = true;
+                }
+                foreach (FieldSymbol field in structure.Fields)
+                {
+                    if (TypeFacts.GetCompleteDestructor(field.Type) is null) continue;
+                    if (!IsTransparentOwnershipShape(field.Type)) return false;
+                    foundOwnership = true;
+                }
+                return foundOwnership;
             }
         }
 
