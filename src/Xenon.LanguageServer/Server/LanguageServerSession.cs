@@ -57,12 +57,8 @@ public sealed class LanguageServerSession : IAsyncDisposable
         _diagnostics = new DiagnosticScheduler(_analysisContexts,
             AnalyzeDiagnosticsAsync,
             (uri, result) => sendNotification("textDocument/publishDiagnostics",
-                new
-                {
-                    uri,
-                    version = LspDocumentVersions.ToLsp(result.Version),
-                    diagnostics = result.Value ?? Array.Empty<object>()
-                }),
+                new LspPublishDiagnostics(uri, LspDocumentVersions.ToLsp(result.Version),
+                    (LspDiagnostic[]?)result.Value ?? [])),
             diagnosticDebounce, AcquireDiagnosticContext, CanPublishDiagnostics,
             PublishDiagnosticsIfCurrentAsync);
     }
@@ -158,7 +154,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
         lock (_publicationGate)
         {
             _runtimeHooks?.BeforeAnalysisAcquisition?.Invoke();
-            if (_workspaces.Length == 0) return Array.Empty<object>();
+            if (_workspaces.Length == 0) return Array.Empty<LspWorkspaceSymbol>();
             request = _workspaces[0].CreateAnalysisRequest(staleSensitive: true,
                 cancellationToken);
         }
@@ -226,12 +222,8 @@ public sealed class LanguageServerSession : IAsyncDisposable
                     return false;
             }
             await _sendNotification("textDocument/publishDiagnostics",
-                new
-                {
-                    uri,
-                    version = LspDocumentVersions.ToLsp(result.Version),
-                    diagnostics = result.Value ?? Array.Empty<object>()
-                }).ConfigureAwait(false);
+                new LspPublishDiagnostics(uri, LspDocumentVersions.ToLsp(result.Version),
+                    (LspDiagnostic[]?)result.Value ?? [])).ConfigureAwait(false);
             return true;
         }
         finally
@@ -341,11 +333,8 @@ public sealed class LanguageServerSession : IAsyncDisposable
             }
         }
         State = LanguageServerLifecycleState.InitializeResponded;
-        return new
-        {
-            capabilities = ServerCapabilities.Create(),
-            serverInfo = new { name = "Xenon Language Server", version = XenonBuildInfo.Version },
-        };
+        return new LspInitializeResult(ServerCapabilities.CreateTyped(),
+            new LspServerInfo("Xenon Language Server", XenonBuildInfo.Version));
     }
 
     private static string? GetFirstWorkspaceFolderUri(JsonElement initializeParams)
@@ -474,7 +463,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
         _openUris.Remove(DocumentUri.ToNormalizedPath(uri));
         Volatile.Write(ref _knownUriCount, _openUris.Count);
         await _sendNotification("textDocument/publishDiagnostics",
-            new { uri, diagnostics = Array.Empty<object>() }).ConfigureAwait(false);
+            new LspPublishDiagnostics(uri, null, [])).ConfigureAwait(false);
         PruneClosedAuxiliaryWorkspaces();
     }
 
