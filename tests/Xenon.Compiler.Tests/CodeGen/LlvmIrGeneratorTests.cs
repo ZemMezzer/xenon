@@ -2204,11 +2204,13 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
-    public void Generator_UsesDirectCleanupForScalarOwnershipOnlyFunctions()
+    public void Generator_UsesDirectCleanupForScalarAndTransparentAggregateOwnership()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
             struct Resource { public int Value; public Resource(int value) { Value = value; } }
+            struct Wrapper { public shared<Resource> Value; public weak<Resource> Observer; }
+            struct Outer { public Wrapper Nested; }
             shared<Resource> Forward(shared<Resource> value) { return move value; }
             int Use(shared<Resource> root, weak<Resource> observer)
             {
@@ -2216,6 +2218,19 @@ public sealed class LlvmIrGeneratorTests
                 shared<Resource> locked = lock observer;
                 if (locked == null) return copy->Value;
                 return copy->Value + locked->Value;
+            }
+            int UseAggregate(shared<Resource> root, weak<Resource> observer)
+            {
+                Wrapper source = Wrapper { root, observer };
+                Wrapper destination = move source;
+                shared<Resource> extracted = move destination.Value;
+                destination.Value = root;
+                return extracted->Value + destination.Value->Value;
+            }
+            int UseNestedAggregate(shared<Resource> root, weak<Resource> observer)
+            {
+                Outer value = Outer { Wrapper { root, observer } };
+                return value.Nested.Value->Value;
             }
             """);
 
@@ -2244,29 +2259,53 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("store i1 false", forward, StringComparison.Ordinal);
         Assert.DoesNotContain("local.cleanup.node", forward, StringComparison.Ordinal);
         Assert.DoesNotContain("stack.cleanup.field", forward, StringComparison.Ordinal);
+
+        string aggregate = Body("Example.UseAggregate");
+        Assert.Contains("ownership.cleanup.active", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("local.cleanup.node", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("stack.cleanup.field", aggregate, StringComparison.Ordinal);
+        Assert.DoesNotContain("llvm.stacksave", aggregate, StringComparison.Ordinal);
+
+        string nested = Body("Example.UseNestedAggregate");
+        Assert.Contains("ownership.cleanup.active", nested, StringComparison.Ordinal);
+        Assert.DoesNotContain("local.cleanup.node", nested, StringComparison.Ordinal);
+        Assert.DoesNotContain("stack.cleanup.field", nested, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Generator_RetainsGenericCleanupFallbackForDeferredAndAggregateOwnership()
+    public void Generator_RetainsGenericCleanupFallbackForDeferredNonTransparentAndStackOwnership()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
             struct Resource {}
-            struct Wrapper { public shared<Resource> Value; }
+            struct Tracked { public ~Tracked() {} }
+            struct CustomWrapper
+            {
+                public shared<Resource> Value;
+                public ~CustomWrapper() {}
+            }
             void Deferred(bool initialize)
             {
                 shared<Resource> value;
                 if (initialize) value = new Resource();
             }
-            void Aggregate(shared<Resource> value)
+            void CustomAggregate(shared<Resource> value)
             {
-                Wrapper wrapper = Wrapper { value };
+                CustomWrapper wrapper = CustomWrapper { value };
             }
             void MixedStackArray(int count)
             {
                 unique<Resource> value = new Resource();
                 int[] scratch = int[count];
                 scratch[0] = 1;
+            }
+            void Pinned()
+            {
+                pin<Tracked> value = Tracked();
+            }
+            void Stored()
+            {
+                storage<Tracked> value;
             }
             """);
 
@@ -2286,11 +2325,49 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Contains("local.cleanup.node", Body("Example.Deferred"), StringComparison.Ordinal);
         Assert.Contains("stack.cleanup.field", Body("Example.Deferred"), StringComparison.Ordinal);
-        Assert.Contains("local.cleanup.node", Body("Example.Aggregate"), StringComparison.Ordinal);
-        Assert.Contains("stack.cleanup.field", Body("Example.Aggregate"), StringComparison.Ordinal);
+        Assert.Contains("local.cleanup.node", Body("Example.CustomAggregate"), StringComparison.Ordinal);
+        Assert.Contains("stack.cleanup.field", Body("Example.CustomAggregate"), StringComparison.Ordinal);
         Assert.Contains("local.cleanup.node", Body("Example.MixedStackArray"), StringComparison.Ordinal);
         Assert.Contains("stack.cleanup.field", Body("Example.MixedStackArray"), StringComparison.Ordinal);
         Assert.Contains("llvm.stacksave", Body("Example.MixedStackArray"), StringComparison.Ordinal);
+        Assert.Contains("local.cleanup.node", Body("Example.Pinned"), StringComparison.Ordinal);
+        Assert.Contains("stack.cleanup.field", Body("Example.Pinned"), StringComparison.Ordinal);
+        Assert.Contains("local.cleanup.node", Body("Example.Stored"), StringComparison.Ordinal);
+        Assert.Contains("stack.cleanup.field", Body("Example.Stored"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_RetainsGenericCleanupFallbackForOversizedTransparentAggregate()
+    {
+        string fields = string.Join(Environment.NewLine,
+            Enumerable.Range(0, 17).Select(index => $"public shared<Resource> Value{index};"));
+        string values = string.Join(", ", Enumerable.Repeat("value", 17));
+        Compilation compilation = CreateCompilation($$"""
+            namespace Example;
+            struct Resource {}
+            struct LargeWrapper
+            {
+                {{fields}}
+            }
+            void Use(shared<Resource> value)
+            {
+                LargeWrapper wrapper = LargeWrapper { {{values}} };
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "oversized-ownership-cleanup";
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), module);
+        string symbol = ManagedSymbol(module, "Example.Use", "function");
+        int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+        Assert.True(end > start);
+        string body = ir[start..end];
+
+        Assert.Contains("local.cleanup.node", body, StringComparison.Ordinal);
+        Assert.Contains("stack.cleanup.field", body, StringComparison.Ordinal);
     }
 
     [Fact]

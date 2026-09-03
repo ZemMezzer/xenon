@@ -4,6 +4,7 @@ struct Log
 {
     public static int Count;
     public static int Sum;
+    public static int Trace;
 }
 
 struct Resource
@@ -14,6 +15,18 @@ struct Resource
     {
         Log.Count++;
         Log.Sum += Id;
+        Log.Trace = Log.Trace * 100 + Id;
+    }
+}
+
+struct OwnerBundle
+{
+    public shared<Resource> Strong;
+    public weak<Resource> Observer;
+    public OwnerBundle(shared<Resource> strong, weak<Resource> observer)
+    {
+        Strong = move strong;
+        Observer = move observer;
     }
 }
 
@@ -26,6 +39,8 @@ shared<Resource> ForwardShared(shared<Resource> value)
 {
     return move value;
 }
+
+void ConsumeShared(shared<Resource> value) {}
 
 int ReturnFromScope(int id, bool early)
 {
@@ -56,7 +71,13 @@ int MoveReinitializeAndDestruct()
 int SharedAndWeak()
 {
     shared<Resource> root = new Resource(8);
+    root = root;
+    shared<Resource> alias = root;
+    root = alias;
+    destruct(alias);
+    if (root == null || root->Id != 8) return 5;
     weak<Resource> observer = root;
+    ConsumeShared(lock observer);
     {
         shared<Resource> copy = ForwardShared(root);
         shared<Resource> locked = lock observer;
@@ -70,10 +91,37 @@ int SharedAndWeak()
     return 0;
 }
 
+void LeaveSwitch()
+{
+    switch (1)
+    {
+        case 1:
+            unique<Resource> first = new Resource(9);
+            unique<Resource> second = new Resource(10);
+            break;
+        default:
+            return;
+    }
+}
+
+int AggregateOwnership()
+{
+    shared<Resource> root = new Resource(11);
+    weak<Resource> observer = root;
+    OwnerBundle source = OwnerBundle(root, observer);
+    OwnerBundle destination = move source;
+    shared<Resource> extracted = move destination.Strong;
+    destination.Strong = root;
+    shared<Resource> locked = lock destination.Observer;
+    if (locked == null || extracted->Id != 11 || destination.Strong->Id != 11) return 1;
+    return 0;
+}
+
 int Main()
 {
     Log.Count = 0;
     Log.Sum = 0;
+    Log.Trace = 0;
 
     if (ReturnFromScope(1, true) != 10) return 1;
     if (ReturnFromScope(2, false) != 20) return 2;
@@ -87,6 +135,14 @@ int Main()
 
     if (SharedAndWeak() != 0) return 7;
     if (Log.Count != 8 || Log.Sum != 36) return 8;
+
+    Log.Trace = 0;
+    LeaveSwitch();
+    if (Log.Count != 10 || Log.Sum != 55 || Log.Trace != 1009) return 9;
+
+    Log.Trace = 0;
+    if (AggregateOwnership() != 0) return 10;
+    if (Log.Count != 11 || Log.Sum != 66 || Log.Trace != 11) return 11;
 
     return 42;
 }
