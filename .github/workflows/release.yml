@@ -140,6 +140,7 @@ jobs:
 
       - name: Verify native distribution
         env:
+          RID: ${{ matrix.rid }}
           EXECUTABLE: ${{ matrix.executable }}
           VERSION: ${{ needs.build-and-test.outputs.version }}
           PUBLISH_DIR: ${{ runner.temp }}/xenon-${{ needs.build-and-test.outputs.version }}-${{ matrix.rid }}
