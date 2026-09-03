@@ -41,6 +41,8 @@ public sealed class OwnershipIntelligenceTests
                 mutableRef.Count = 1;
                 int observed = readonlyRef.GetCount();
                 unique<Resource> moved = move owned;
+                weak<Resource> observer = shared;
+                shared<Resource> locked = lock observer;
                 destruct(slot);
                 Resource* raw = new Resource(1);
                 free(raw);
@@ -49,7 +51,21 @@ public sealed class OwnershipIntelligenceTests
         using var directory = new TestDirectory();
         string file = directory.Write("main.xe", source);
         string uri = DocumentUri.FromPath(file).AbsoluteUri;
-        await using var session = await CreateSessionAsync(uri, source);
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        JsonElement initialize = Result(await session.HandleRequestAsync("initialize",
+            LspTestProtocol.Json(new { rootUri = uri }), default));
+        string[] tokenTypes = initialize.GetProperty("capabilities").GetProperty("semanticTokensProvider")
+            .GetProperty("legend").GetProperty("tokenTypes").EnumerateArray()
+            .Select(item => item.GetString()!).ToArray();
+        Assert.Equal("ownershipType", tokenTypes[16]);
+        Assert.Equal("valueExpression", tokenTypes[17]);
+        Assert.Equal("lifetimeOperation", tokenTypes[18]);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
 
         JsonElement tokensResponse = Result(await session.HandleRequestAsync(
             "textDocument/semanticTokens/full",
@@ -58,9 +74,21 @@ public sealed class OwnershipIntelligenceTests
             DecodeTokens(source, tokensResponse.GetProperty("data"));
 
         Assert.True(tokens.Count(token => token.Text == "Resource" && token.Type == 1) >= 10);
-        foreach (string keyword in new[] { "unique", "shared", "weak", "storage", "pin", "move", "destruct", "free" })
+        foreach (string keyword in new[] { "unique", "shared", "weak", "storage", "pin" })
+            Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 16),
+                $"Missing semantic ownership-type token '{keyword}'.");
+        foreach (string keyword in new[] { "new", "move", "lock" })
+            Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 17),
+                $"Missing semantic value-expression token '{keyword}'.");
+        foreach (string keyword in new[] { "free", "destruct" })
+            Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 18),
+                $"Missing semantic lifetime-operation token '{keyword}'.");
+        foreach (string keyword in new[] { "namespace", "struct", "return" })
             Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 15),
-                $"Missing semantic keyword token '{keyword}'.");
+                $"Missing ordinary semantic keyword token '{keyword}'.");
+        Assert.Contains(tokens, token => token.Text == "int" && token.Type == 1);
+        Assert.Contains(tokens, token => token.Text == "public" && token.Type == 14);
+        Assert.Contains(tokens, token => token.Text == "readonly" && token.Type == 14);
         foreach (string field in new[] { "Owned", "Shared", "Weak", "Slot", "Pinned" })
             Assert.Contains(tokens, token => token.Text == field && token.Type == 9);
         Assert.Contains(tokens, token => token.Text == "Count" && token.Type == 9);
@@ -653,7 +681,7 @@ public sealed class OwnershipIntelligenceTests
             LspTestProtocol.Json(new { textDocument = new { uri } }), default));
         IReadOnlyList<(string Text, int Type, int Modifiers)> tokens =
             DecodeTokens(source, tokensResponse.GetProperty("data"));
-        Assert.Contains(tokens, token => token.Text == "lock" && token.Type == 15);
+        Assert.Contains(tokens, token => token.Text == "lock" && token.Type == 17);
         Assert.Contains(tokens, token => token.Text == "Use" && token.Type == 6);
         Assert.DoesNotContain(tokens, token => token.Text == "Lock" && token.Type == 6);
     }
