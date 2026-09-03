@@ -86,6 +86,7 @@ jobs:
       - name: Smoke-test native executable
         shell: pwsh
         env:
+          RID: ${{ matrix.rid }}
           EXECUTABLE: ${{ matrix.executable }}
           PUBLISH_DIR: ${{ runner.temp }}/xenon-native-aot
         run: |
