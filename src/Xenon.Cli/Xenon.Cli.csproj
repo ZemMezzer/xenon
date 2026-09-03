@@ -13,6 +13,12 @@
     <None Include="../../LICENSE" Link="LICENSE" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">
+    <!-- Native AOT calls dlopen directly. Let dyld resolve the bundled LLVM runtime
+         from the directory that contains the xenon executable. -->
+    <LinkerArg Include="-Wl,-rpath,@executable_path" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="../Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
     <ProjectReference Include="../Xenon.Compiler/Xenon.Compiler.csproj" />

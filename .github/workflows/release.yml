@@ -155,6 +155,10 @@ jobs:
           if ($managedAssemblies.Count -ne 0) {
             throw "Managed assemblies leaked into the Native AOT distribution: $($managedAssemblies.Name -join ', ')"
           }
+          $llvmName = if ($env:RID -eq 'osx-arm64') { 'libLLVM.dylib' } else { 'libLLVM.dll' }
+          if (-not (Test-Path -LiteralPath (Join-Path $env:PUBLISH_DIR $llvmName))) {
+            throw "The native LLVM runtime '$llvmName' is missing from the distribution."
+          }
           $smokeDirectory = Join-Path $env:RUNNER_TEMP 'xenon-compiler-smoke'
           New-Item -ItemType Directory -Force -Path $smokeDirectory | Out-Null
           Copy-Item -LiteralPath 'tests/Xenon.EndToEnd.Tests/Cases/Basics/Hello/main.xe' `
