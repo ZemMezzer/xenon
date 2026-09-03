@@ -101,7 +101,7 @@ public sealed class NativeLinker
                 : Path.Combine(temporaryDirectory, Path.GetFileName(finalImportLibraryPath));
 
         LinkerCommand command = CreateHostCommand(
-            objectPath, temporaryPath, targetTriple, kind, options, temporaryImportLibraryPath);
+            objectPath, temporaryPath, artifactPath, targetTriple, kind, options, temporaryImportLibraryPath);
         NativeProcessResult? processResult = null;
         try
         {
@@ -152,6 +152,7 @@ public sealed class NativeLinker
     private static LinkerCommand CreateHostCommand(
         string objectPath,
         string outputPath,
+        string finalOutputPath,
         string targetTriple,
         NativeArtifactKind kind,
         NativeLinkOptions options,
@@ -165,7 +166,7 @@ public sealed class NativeLinker
 
         return kind is NativeArtifactKind.StaticLibrary
             ? CreateUnixArchiveCommand(objectPath, outputPath)
-            : CreateUnixLinkCommand(objectPath, outputPath, kind, options);
+            : CreateUnixLinkCommand(objectPath, outputPath, finalOutputPath, kind, options);
     }
 
     private static LinkerCommand CreateWindowsCommand(
@@ -250,6 +251,7 @@ public sealed class NativeLinker
     private static LinkerCommand CreateUnixLinkCommand(
         string objectPath,
         string outputPath,
+        string finalOutputPath,
         NativeArtifactKind kind,
         NativeLinkOptions options)
     {
@@ -264,6 +266,18 @@ public sealed class NativeLinker
         if (kind is NativeArtifactKind.SharedLibrary)
         {
             arguments.Add(OperatingSystem.IsMacOS() ? "-dynamiclib" : "-shared");
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            // Artifacts are linked to a temporary path and atomically renamed after success.
+            // Give Mach-O libraries their final identity so dependants never record the
+            // disposable .tmp.dylib path, and resolve colocated project libraries at runtime.
+            arguments.Add("-Wl,-rpath,@loader_path");
+            if (kind is NativeArtifactKind.SharedLibrary)
+            {
+                arguments.Add($"-Wl,-install_name,@rpath/{Path.GetFileName(finalOutputPath)}");
+            }
         }
 
         arguments.Add(objectPath);
