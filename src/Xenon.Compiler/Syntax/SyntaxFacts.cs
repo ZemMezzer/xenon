@@ -89,6 +89,24 @@ public static class SyntaxFacts
 
     public static bool IsKeyword(SyntaxKind kind) => KeywordKinds.Contains(kind);
 
+    public static bool IsPrimitiveTypeKeyword(SyntaxKind kind) => kind is
+        SyntaxKind.VoidKeyword or
+        SyntaxKind.BoolKeyword or
+        SyntaxKind.ByteKeyword or
+        SyntaxKind.SByteKeyword or
+        SyntaxKind.ShortKeyword or
+        SyntaxKind.UShortKeyword or
+        SyntaxKind.IntKeyword or
+        SyntaxKind.UIntKeyword or
+        SyntaxKind.LongKeyword or
+        SyntaxKind.ULongKeyword or
+        SyntaxKind.FloatKeyword or
+        SyntaxKind.DoubleKeyword or
+        SyntaxKind.NIntKeyword or
+        SyntaxKind.NUIntKeyword or
+        SyntaxKind.CLongKeyword or
+        SyntaxKind.CULongKeyword;
+
     public static bool IsTypeName(SyntaxKind kind) => kind is
         SyntaxKind.VoidKeyword or
         SyntaxKind.BoolKeyword or

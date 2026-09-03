@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xenon.LanguageServer.Protocol;
@@ -189,6 +190,7 @@ public sealed class CoreIntelligenceHardeningTests
             """);
         const string source = """
             namespace App;
+            template Equatable { void Equal(); }
             enum State { Ready }
             interface IService { int Value { get; set; } }
             const int Global = 1;
@@ -201,7 +203,7 @@ public sealed class CoreIntelligenceHardeningTests
                 public Library() {}
                 public void Run() {}
             }
-            void Test(Library box) { box.; State.; }
+            void Test<T>(Library box, T value) where T : Equatable { int local = 0; box.; State.; }
             """;
         string file = directory.Write("App/src/main.xe", source);
         string uri = DocumentUri.FromPath(file).AbsoluteUri;
@@ -211,22 +213,38 @@ public sealed class CoreIntelligenceHardeningTests
         JsonElement general = await RequestAtAsync(session, "textDocument/completion", uri, source,
             generalPosition);
         JsonElement[] libraries = general.GetProperty("items").EnumerateArray().Where(item =>
-            item.GetProperty("label").GetString() == "Library").ToArray();
+            item.GetProperty("filterText").GetString() == "Library").ToArray();
         Assert.Contains(libraries, item => item.GetProperty("kind").GetInt32() == 9);  // Module
         Assert.Contains(libraries, item => item.GetProperty("kind").GetInt32() == 22); // Struct
         Assert.DoesNotContain(general.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Hidden");
+            item.GetProperty("filterText").GetString() == "Hidden");
 
         JsonElement members = await RequestAtAsync(session, "textDocument/completion", uri, source,
             source.IndexOf("box.;", StringComparison.Ordinal) + "box.".Length);
         Assert.Contains(members.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Run" && item.GetProperty("kind").GetInt32() == 2);
+            item.GetProperty("filterText").GetString() == "Run" && item.GetProperty("kind").GetInt32() == 3);
         Assert.Contains(members.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Value" && item.GetProperty("kind").GetInt32() == 10);
+            item.GetProperty("filterText").GetString() == "Value" && item.GetProperty("kind").GetInt32() == 10);
         JsonElement enumMembers = await RequestAtAsync(session, "textDocument/completion", uri, source,
             source.IndexOf("State.;", StringComparison.Ordinal) + "State.".Length);
         Assert.Contains(enumMembers.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Ready" && item.GetProperty("kind").GetInt32() == 20);
+            item.GetProperty("filterText").GetString() == "Ready" && item.GetProperty("kind").GetInt32() == 20);
+
+        AssertCompletionItem(general, "Library", 9, "namespace");
+        AssertCompletionItem(general, "Library", 22, "struct");
+        AssertCompletionItem(general, "IService", 8, "interface");
+        AssertCompletionItem(general, "Equatable", 18, "template");
+        AssertCompletionItem(general, "State", 13, "enum");
+        AssertCompletionItem(general, "Global", 21, "constant");
+        AssertCompletionItem(general, "Free", 3, "function");
+        AssertCompletionItem(general, "box", 12, "parameter");
+        AssertCompletionItem(general, "local", 6, "local");
+        AssertCompletionItem(general, "T", 25, "type parameter");
+        AssertCompletionItem(members, "Field", 5, "field");
+        AssertCompletionItem(members, "Value", 10, "property");
+        AssertCompletionItem(members, "this", 23, "indexer");
+        AssertCompletionItem(members, "Run", 3, "method");
+        AssertCompletionItem(enumMembers, "Ready", 20, "enum member");
 
         JsonElement outline = Result(await session.HandleRequestAsync("textDocument/documentSymbol",
             LspTestProtocol.Json(new { textDocument = new { uri } }), default));
@@ -297,15 +315,19 @@ public sealed class CoreIntelligenceHardeningTests
             "ownership type keyword");
         AssertKeywordDetails(keywordItems, ["new", "move", "lock"], "value expression keyword");
         AssertKeywordDetails(keywordItems, ["free", "destruct"], "lifetime operation keyword");
+        AssertKeywordDetails(keywordItems,
+            ["void", "bool", "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong",
+                "float", "double", "nint", "nuint", "clong", "culong"],
+            "primitive type", 22);
     }
 
-    private static void AssertKeywordDetails(JsonElement[] items, string[] keywords, string detail)
+    private static void AssertKeywordDetails(JsonElement[] items, string[] keywords, string detail, int kind = 14)
     {
         foreach (string keyword in keywords)
         {
             JsonElement item = Assert.Single(items.Where(candidate =>
                 candidate.GetProperty("label").GetString() == keyword));
-            Assert.Equal(14, item.GetProperty("kind").GetInt32());
+            Assert.Equal(kind, item.GetProperty("kind").GetInt32());
             Assert.Equal(detail, item.GetProperty("detail").GetString());
         }
     }
@@ -513,6 +535,22 @@ public sealed class CoreIntelligenceHardeningTests
             hover.GetProperty("contents").GetProperty("value").GetString());
     }
 
+    [Fact]
+    public async Task ConstructorAndDestructorUseTheSameTypeSemanticTokenGroup()
+    {
+        const string source = "namespace App; struct Resource { Resource() {} ~Resource() {} }";
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+
+        Assert.Equal(3, tokens.Count(token => token.Text == "Resource" && token.Type == 1));
+    }
+
     private static string Project(string name) => $"""
         [project]
         name = "{name}"
@@ -546,7 +584,42 @@ public sealed class CoreIntelligenceHardeningTests
         }), default);
 
     private static string[] Labels(JsonElement completion) => completion.GetProperty("items")
-        .EnumerateArray().Select(item => item.GetProperty("label").GetString()!).ToArray();
+        .EnumerateArray().Select(item => item.GetProperty("filterText").GetString()!).ToArray();
+
+    private static void AssertCompletionItem(JsonElement completion, string name, int kind,
+        string xenonKind)
+    {
+        JsonElement item = Assert.Single(completion.GetProperty("items").EnumerateArray().Where(candidate =>
+            candidate.GetProperty("filterText").GetString() == name &&
+            candidate.GetProperty("kind").GetInt32() == kind));
+        Assert.Equal(name, item.GetProperty("label").GetString());
+        Assert.Equal(name, item.GetProperty("insertText").GetString());
+        Assert.Contains(xenonKind, item.GetProperty("detail").GetString());
+    }
+
+    [Theory]
+    [InlineData(EditorSymbolKind.Namespace, 9)]
+    [InlineData(EditorSymbolKind.Struct, 22)]
+    [InlineData(EditorSymbolKind.Interface, 8)]
+    [InlineData(EditorSymbolKind.Template, 18)]
+    [InlineData(EditorSymbolKind.Function, 3)]
+    [InlineData(EditorSymbolKind.Method, 3)]
+    [InlineData(EditorSymbolKind.Constructor, 4)]
+    [InlineData(EditorSymbolKind.Destructor, 24)]
+    [InlineData(EditorSymbolKind.Field, 5)]
+    [InlineData(EditorSymbolKind.Property, 10)]
+    [InlineData(EditorSymbolKind.Indexer, 23)]
+    [InlineData(EditorSymbolKind.LocalVariable, 6)]
+    [InlineData(EditorSymbolKind.Parameter, 12)]
+    [InlineData(EditorSymbolKind.Constant, 21)]
+    [InlineData(EditorSymbolKind.TypeParameter, 25)]
+    [InlineData(EditorSymbolKind.Enum, 13)]
+    [InlineData(EditorSymbolKind.EnumMember, 20)]
+    [InlineData(EditorSymbolKind.Type, 22)]
+    public void CompletionKindAdapterUsesNativeLspPresentation(EditorSymbolKind kind, int expected)
+    {
+        Assert.Equal(expected, LspCompletionItemKindAdapter.ToCompletionItemKind(kind));
+    }
 
     private static bool HasKind(JsonElement item, string name, int kind) =>
         item.GetProperty("name").GetString() == name && item.GetProperty("kind").GetInt32() == kind;

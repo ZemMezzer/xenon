@@ -257,7 +257,8 @@ internal static class LspCoreIntelligence
         if (access is null)
             items.AddRange(SyntaxFacts.GetEditorKeywordTexts().Select(keyword => new
             {
-                label = keyword, kind = 14, detail = KeywordCompletionDetail(keyword), insertText = keyword,
+                label = keyword, kind = KeywordCompletionKind(keyword), detail = KeywordCompletionDetail(keyword),
+                insertText = keyword,
                 sortText = "9_" + keyword, filterText = keyword,
             }));
         return new { isIncomplete = false, items = items.ToArray() };
@@ -374,13 +375,21 @@ internal static class LspCoreIntelligence
         _ => -1,
     };
 
-    private static string KeywordCompletionDetail(string keyword) => keyword switch
+    private static int KeywordCompletionKind(string keyword) =>
+        SyntaxFacts.IsPrimitiveTypeKeyword(SyntaxFacts.GetKeywordKind(keyword)) ? 22 : 14;
+
+    private static string KeywordCompletionDetail(string keyword)
     {
-        "unique" or "shared" or "weak" or "storage" or "pin" => "ownership type keyword",
-        "new" or "move" or "lock" => "value expression keyword",
-        "free" or "destruct" => "lifetime operation keyword",
-        _ => "keyword",
-    };
+        if (SyntaxFacts.IsPrimitiveTypeKeyword(SyntaxFacts.GetKeywordKind(keyword)))
+            return "primitive type";
+        return keyword switch
+        {
+            "unique" or "shared" or "weak" or "storage" or "pin" => "ownership type keyword",
+            "new" or "move" or "lock" => "value expression keyword",
+            "free" or "destruct" => "lifetime operation keyword",
+            _ => "keyword",
+        };
+    }
 
     private static async Task<object?> PrepareRenameAsync(LanguageServerAnalysisContext context,
         LspPosition lspPosition)
@@ -561,34 +570,20 @@ internal static class LspCoreIntelligence
         return token is null ? null : ToRange(tree.Source, token.Location.Span);
     }
 
-    private static object CompletionItem(Symbol symbol) => new
+    private static object CompletionItem(Symbol symbol)
     {
-        label = symbol.Name,
-        kind = CompletionKind(EditorSymbolClassifier.GetKind(symbol)),
-        detail = symbol.ToDisplayString(SymbolDisplayFormat.Signature),
-        insertText = symbol.Name,
-        sortText = "0_" + symbol.Name,
-        filterText = symbol.Name,
-    };
-
-    private static int CompletionKind(EditorSymbolKind kind) => kind switch
-    {
-        EditorSymbolKind.Method => 2,
-        EditorSymbolKind.Function => 3,
-        EditorSymbolKind.Constructor => 4,
-        EditorSymbolKind.Field => 5,
-        EditorSymbolKind.LocalVariable or EditorSymbolKind.Parameter => 6,
-        EditorSymbolKind.Type => 7,
-        EditorSymbolKind.Interface or EditorSymbolKind.Template => 8,
-        EditorSymbolKind.Namespace => 9,
-        EditorSymbolKind.Property => 10,
-        EditorSymbolKind.Enum => 13,
-        EditorSymbolKind.EnumMember => 20,
-        EditorSymbolKind.Constant => 21,
-        EditorSymbolKind.Struct => 22,
-        EditorSymbolKind.TypeParameter => 25,
-        _ => 1,
-    };
+        EditorSymbolKind kind = EditorSymbolClassifier.GetKind(symbol);
+        return new
+        {
+            label = symbol.Name,
+            kind = LspCompletionItemKindAdapter.ToCompletionItemKind(kind),
+            detail = $"{symbol.ToDisplayString(SymbolDisplayFormat.Signature)} · " +
+                LspCompletionItemKindAdapter.XenonKindName(kind),
+            insertText = symbol.Name,
+            sortText = "0_" + symbol.Name,
+            filterText = symbol.Name,
+        };
+    }
 
     private static int SymbolKindNumber(EditorSymbolKind kind) => kind switch
     {
@@ -600,7 +595,9 @@ internal static class LspCoreIntelligence
         EditorSymbolKind.Function => 12,
         EditorSymbolKind.Method => 6,
         EditorSymbolKind.Constructor => 9,
+        EditorSymbolKind.Destructor => 12,
         EditorSymbolKind.Property => 7,
+        EditorSymbolKind.Indexer => 7,
         EditorSymbolKind.Field => 8,
         EditorSymbolKind.Constant => 14,
         EditorSymbolKind.Parameter or EditorSymbolKind.LocalVariable => 13,
@@ -619,8 +616,9 @@ internal static class LspCoreIntelligence
         EditorSymbolKind.Method => 6,
         // Constructors are spelled with their containing type's name and should
         // therefore receive the same editor color as that type.
-        EditorSymbolKind.Constructor => 1,
+        EditorSymbolKind.Constructor or EditorSymbolKind.Destructor => 1,
         EditorSymbolKind.Property => 8,
+        EditorSymbolKind.Indexer => 8,
         EditorSymbolKind.Field => 9,
         EditorSymbolKind.Parameter => 10,
         EditorSymbolKind.LocalVariable => 11,
