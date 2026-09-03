@@ -2204,6 +2204,96 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_UsesDirectCleanupForScalarOwnershipOnlyFunctions()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource { public int Value; public Resource(int value) { Value = value; } }
+            shared<Resource> Forward(shared<Resource> value) { return move value; }
+            int Use(shared<Resource> root, weak<Resource> observer)
+            {
+                shared<Resource> copy = Forward(root);
+                shared<Resource> locked = lock observer;
+                if (locked == null) return copy->Value;
+                return copy->Value + locked->Value;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "direct-ownership-cleanup";
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), module);
+        string Body(string fullName)
+        {
+            string symbol = ManagedSymbol(module, fullName, "function");
+            int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"missing function {fullName}");
+            int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+            Assert.True(end > start, $"unterminated function {fullName}");
+            return ir[start..end];
+        }
+
+        string use = Body("Example.Use");
+        Assert.Contains("ownership.cleanup.active", use, StringComparison.Ordinal);
+        Assert.Contains("ownership.cleanup.destroy", use, StringComparison.Ordinal);
+        Assert.DoesNotContain("local.cleanup.node", use, StringComparison.Ordinal);
+        Assert.DoesNotContain("stack.cleanup.field", use, StringComparison.Ordinal);
+        Assert.DoesNotContain("llvm.stacksave", use, StringComparison.Ordinal);
+
+        string forward = Body("Example.Forward");
+        Assert.Contains("store i1 false", forward, StringComparison.Ordinal);
+        Assert.DoesNotContain("local.cleanup.node", forward, StringComparison.Ordinal);
+        Assert.DoesNotContain("stack.cleanup.field", forward, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_RetainsGenericCleanupFallbackForDeferredAndAggregateOwnership()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            struct Wrapper { public shared<Resource> Value; }
+            void Deferred(bool initialize)
+            {
+                shared<Resource> value;
+                if (initialize) value = new Resource();
+            }
+            void Aggregate(shared<Resource> value)
+            {
+                Wrapper wrapper = Wrapper { value };
+            }
+            void MixedStackArray(int count)
+            {
+                unique<Resource> value = new Resource();
+                int[] scratch = int[count];
+                scratch[0] = 1;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "generic-ownership-cleanup";
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), module);
+        string Body(string fullName)
+        {
+            string symbol = ManagedSymbol(module, fullName, "function");
+            int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"missing function {fullName}");
+            int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+            Assert.True(end > start, $"unterminated function {fullName}");
+            return ir[start..end];
+        }
+
+        Assert.Contains("local.cleanup.node", Body("Example.Deferred"), StringComparison.Ordinal);
+        Assert.Contains("stack.cleanup.field", Body("Example.Deferred"), StringComparison.Ordinal);
+        Assert.Contains("local.cleanup.node", Body("Example.Aggregate"), StringComparison.Ordinal);
+        Assert.Contains("stack.cleanup.field", Body("Example.Aggregate"), StringComparison.Ordinal);
+        Assert.Contains("local.cleanup.node", Body("Example.MixedStackArray"), StringComparison.Ordinal);
+        Assert.Contains("stack.cleanup.field", Body("Example.MixedStackArray"), StringComparison.Ordinal);
+        Assert.Contains("llvm.stacksave", Body("Example.MixedStackArray"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_LowersReceiverEffectsAndRawArrayMovesWithoutSourceZeroingOrHeapCopies()
     {
         Compilation compilation = CreateCompilation("""
@@ -2245,7 +2335,10 @@ public sealed class LlvmIrGeneratorTests
             compilation.SemanticModel.GlobalNamespace.Namespaces).Structs.Where(type => type.Name == "Holder"));
         var ownership = Assert.IsType<UniqueTypeSymbol>(Assert.Single(holder.Fields).Type);
         string ownershipDestructor = ManagedSymbol(module, ownership.CompleteDestructor!.FullName, "function");
-        Assert.DoesNotContain($"call void @{ownershipDestructor}", Body("Example.Holder.Replace"), StringComparison.Ordinal);
+        string replace = Body("Example.Holder.Replace");
+        Assert.Contains("store i1 false", replace, StringComparison.Ordinal);
+        Assert.Contains("ownership.cleanup.active", replace, StringComparison.Ordinal);
+        Assert.Contains($"call void @{ownershipDestructor}", replace, StringComparison.Ordinal);
 
         string arrayMove = Body("Example.MoveArray");
         Assert.DoesNotContain("@malloc", arrayMove, StringComparison.Ordinal);

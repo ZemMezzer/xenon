@@ -1,0 +1,92 @@
+namespace Ownership.DirectCleanupRuntime;
+
+struct Log
+{
+    public static int Count;
+    public static int Sum;
+}
+
+struct Resource
+{
+    public int Id;
+    public Resource(int id) { Id = id; }
+    public ~Resource()
+    {
+        Log.Count++;
+        Log.Sum += Id;
+    }
+}
+
+unique<Resource> ForwardUnique(unique<Resource> value)
+{
+    return move value;
+}
+
+shared<Resource> ForwardShared(shared<Resource> value)
+{
+    return move value;
+}
+
+int ReturnFromScope(int id, bool early)
+{
+    unique<Resource> value = new Resource(id);
+    if (early) return 10;
+    return 20;
+}
+
+void LeaveLoopScopes()
+{
+    for (int i = 3; i <= 6; i++)
+    {
+        unique<Resource> value = new Resource(i);
+        if (i == 3) continue;
+        if (i == 5) break;
+    }
+}
+
+int MoveReinitializeAndDestruct()
+{
+    unique<Resource> source = new Resource(6);
+    unique<Resource> destination = ForwardUnique(move source);
+    source = new Resource(7);
+    destruct(destination);
+    return source->Id;
+}
+
+int SharedAndWeak()
+{
+    shared<Resource> root = new Resource(8);
+    weak<Resource> observer = root;
+    {
+        shared<Resource> copy = ForwardShared(root);
+        shared<Resource> locked = lock observer;
+        if (copy == null || locked == null || copy->Id != 8 || locked->Id != 8) return 1;
+    }
+    if (Log.Count != 7) return 2;
+    destruct(root);
+    if (Log.Count != 8 || Log.Sum != 36) return 3;
+    shared<Resource> expired = lock observer;
+    if (expired != null) return 4;
+    return 0;
+}
+
+int Main()
+{
+    Log.Count = 0;
+    Log.Sum = 0;
+
+    if (ReturnFromScope(1, true) != 10) return 1;
+    if (ReturnFromScope(2, false) != 20) return 2;
+    if (Log.Count != 2 || Log.Sum != 3) return 3;
+
+    LeaveLoopScopes();
+    if (Log.Count != 5 || Log.Sum != 15) return 4;
+
+    if (MoveReinitializeAndDestruct() != 7) return 5;
+    if (Log.Count != 7 || Log.Sum != 28) return 6;
+
+    if (SharedAndWeak() != 0) return 7;
+    if (Log.Count != 8 || Log.Sum != 36) return 8;
+
+    return 42;
+}
