@@ -52,7 +52,11 @@ public sealed class SemanticModelTests
             Assert.False(EditorSymbolClassifier.IsEditorVisible(accessor));
         });
         Assert.All(declarations.Where(symbol => symbol is IndexerSymbol or InterfaceIndexerSymbol),
-            indexer => Assert.False(indexer.HasUserEditableIdentifier));
+            indexer =>
+            {
+                Assert.False(indexer.HasUserEditableIdentifier);
+                Assert.Equal(EditorSymbolKind.Indexer, EditorSymbolClassifier.GetKind(indexer));
+            });
         Assert.True(declarations.OfType<PropertySymbol>().Single().HasUserEditableIdentifier);
         Assert.True(declarations.OfType<FunctionSymbol>().Single(function => function.Name == "Run")
             .HasUserEditableIdentifier);

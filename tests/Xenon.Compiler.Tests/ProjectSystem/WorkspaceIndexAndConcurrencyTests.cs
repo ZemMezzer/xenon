@@ -116,8 +116,10 @@ public sealed class WorkspaceIndexAndConcurrencyTests
             {
                 public int Field;
                 public int Property { get { return Field; } }
+                public int this[int index] { get { return index; } }
                 const int MemberConstant = 2;
                 public Widget() {}
+                ~Widget() {}
                 public void Method() {}
             }
             """)]);
@@ -142,12 +144,16 @@ public sealed class WorkspaceIndexAndConcurrencyTests
             index.Search(qualifiedName: "App.Widget.Field").Single().EditorKind);
         Assert.Equal(EditorSymbolKind.Property,
             index.Search(qualifiedName: "App.Widget.Property").Single().EditorKind);
+        Assert.Equal(EditorSymbolKind.Indexer,
+            index.Search(qualifiedName: "App.Widget.this").Single().EditorKind);
         Assert.Equal(EditorSymbolKind.Constant,
             index.Search(qualifiedName: "App.Widget.MemberConstant").Single().EditorKind);
         SymbolIndexEntry constructor = index.Entries.Single(entry =>
             entry.FunctionKind == FunctionKind.Constructor);
         Assert.Equal(EditorSymbolKind.Constructor, constructor.EditorKind);
         Assert.Equal(widget.Id, constructor.ContainingSymbolId);
+        Assert.Equal(EditorSymbolKind.Destructor, index.Entries.Single(entry =>
+            entry.FunctionKind == FunctionKind.Destructor).EditorKind);
         Assert.Equal(EditorSymbolKind.Method,
             index.Search(qualifiedName: "App.Widget.Method").Single().EditorKind);
         Assert.DoesNotContain(index.Entries, entry => entry.Name == "__init_fields");

@@ -30,6 +30,7 @@ public sealed class OwnershipIntelligenceTests
                 public storage<Resource> Slot;
                 public pin<Resource> Pinned;
             }
+            void HolderCompletion(Holder holder) { holder.; }
             void Test(unique<Resource> owned, shared<Resource> shared,
                 Resource& mutableRef, readonly Resource& readonlyRef)
             {
@@ -66,6 +67,25 @@ public sealed class OwnershipIntelligenceTests
         {
             textDocument = new { uri, version = 1, text = source },
         }), default);
+
+        int holderCompletionPosition = source.IndexOf("holder.;", StringComparison.Ordinal) + "holder.".Length;
+        JsonElement holderCompletion = await RequestAtAsync(session, "textDocument/completion", uri, source,
+            holderCompletionPosition);
+        foreach ((string field, string type) in new[]
+                 {
+                     ("Owned", "unique<Resource>"),
+                     ("Shared", "shared<Resource>"),
+                     ("Weak", "weak<Resource>"),
+                     ("Slot", "storage<Resource>"),
+                     ("Pinned", "pin<Resource>"),
+                 })
+        {
+            JsonElement item = Assert.Single(holderCompletion.GetProperty("items").EnumerateArray().Where(candidate =>
+                candidate.GetProperty("label").GetString() == field));
+            Assert.Equal(5, item.GetProperty("kind").GetInt32()); // Field
+            Assert.Contains(type, item.GetProperty("detail").GetString());
+            Assert.Contains("field", item.GetProperty("detail").GetString());
+        }
 
         JsonElement tokensResponse = Result(await session.HandleRequestAsync(
             "textDocument/semanticTokens/full",
@@ -179,7 +199,7 @@ public sealed class OwnershipIntelligenceTests
             int position = source.IndexOf(marker, StringComparison.Ordinal) + prefix.Length;
             JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source, position);
             string[] labels = completion.GetProperty("items").EnumerateArray()
-                .Select(item => item.GetProperty("label").GetString()!).ToArray();
+                .Select(item => item.GetProperty("filterText").GetString()!).ToArray();
             Assert.Contains("Count", labels);
             Assert.Contains("Use", labels);
         }
@@ -189,7 +209,7 @@ public sealed class OwnershipIntelligenceTests
         JsonElement sharedCompletion = await RequestAtAsync(session, "textDocument/completion", uri, source,
             sharedPosition);
         Assert.Contains(sharedCompletion.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Use");
+            item.GetProperty("filterText").GetString() == "Use");
 
         int signaturePosition = source.LastIndexOf("Resource(", StringComparison.Ordinal) + "Resource(".Length;
         JsonElement signature = await RequestAtAsync(session, "textDocument/signatureHelp", uri, source,
@@ -254,7 +274,7 @@ public sealed class OwnershipIntelligenceTests
             JsonElement completion = await RequestAtAsync(completionSession, "textDocument/completion",
                 completionUri, completionSource, completionSource.Length);
             Assert.Contains(completion.GetProperty("items").EnumerateArray(), item =>
-                item.GetProperty("label").GetString() == "Resource");
+                item.GetProperty("filterText").GetString() == "Resource");
         }
     }
 
@@ -634,14 +654,14 @@ public sealed class OwnershipIntelligenceTests
             JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
                 position, requestContext: new { triggerKind = 2, triggerCharacter = ">" });
             Assert.Contains(completion.GetProperty("items").EnumerateArray(), item =>
-                item.GetProperty("label").GetString() == "Use");
+                item.GetProperty("filterText").GetString() == "Use");
         }
 
         int directPosition = source.IndexOf("direct.Use", StringComparison.Ordinal) + "direct.".Length;
         JsonElement directCompletion = await RequestAtAsync(session, "textDocument/completion", uri, source,
             directPosition, requestContext: new { triggerKind = 2, triggerCharacter = "." });
         Assert.Contains(directCompletion.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Use");
+            item.GetProperty("filterText").GetString() == "Use");
 
         int weakDot = source.IndexOf("weakValue.Lock", StringComparison.Ordinal) + "weakValue.".Length;
         JsonElement weakCompletion = await RequestAtAsync(session, "textDocument/completion", uri, source,

@@ -46,7 +46,7 @@ public sealed class CoreIntelligenceTests
         int completionPosition = source.IndexOf("{ }", StringComparison.Ordinal) + 1;
         JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source, completionPosition);
         string[] labels = completion.GetProperty("items").EnumerateArray()
-            .Select(item => item.GetProperty("label").GetString() ?? string.Empty).ToArray();
+            .Select(item => item.GetProperty("filterText").GetString() ?? string.Empty).ToArray();
         Assert.Contains("template", labels);
         Assert.Contains("where", labels);
 
@@ -54,7 +54,7 @@ public sealed class CoreIntelligenceTests
         JsonElement genericMemberCompletion = await RequestAtAsync(session, "textDocument/completion", uri,
             source, genericMemberPosition);
         string[] genericMemberLabels = genericMemberCompletion.GetProperty("items").EnumerateArray()
-            .Select(item => item.GetProperty("label").GetString() ?? string.Empty).ToArray();
+            .Select(item => item.GetProperty("filterText").GetString() ?? string.Empty).ToArray();
         Assert.Contains("Run", genericMemberLabels);
 
         int genericCall = source.LastIndexOf("Identity<int>", StringComparison.Ordinal);
@@ -68,7 +68,7 @@ public sealed class CoreIntelligenceTests
         JsonElement genericStructCompletion = await RequestAtAsync(session, "textDocument/completion", uri,
             source, genericStructMemberPosition);
         string[] genericStructLabels = genericStructCompletion.GetProperty("items").EnumerateArray()
-            .Select(item => item.GetProperty("label").GetString() ?? string.Empty).ToArray();
+            .Select(item => item.GetProperty("filterText").GetString() ?? string.Empty).ToArray();
         Assert.Contains("value", genericStructLabels);
         Assert.Contains("Get", genericStructLabels);
 
@@ -76,7 +76,7 @@ public sealed class CoreIntelligenceTests
         JsonElement nestedGenericCompletion = await RequestAtAsync(session, "textDocument/completion", uri,
             source, nestedGenericPosition);
         Assert.Contains(nestedGenericCompletion.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "pair");
+            item.GetProperty("filterText").GetString() == "pair");
 
         JsonElement semanticTokens = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
             LspTestProtocol.Json(new { textDocument = new { uri } }), default));
@@ -162,7 +162,7 @@ public sealed class CoreIntelligenceTests
         int memberPosition = source.IndexOf("player.Health", StringComparison.Ordinal) + "player.".Length;
         JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source, memberPosition);
         Assert.Contains(completion.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Health");
+            item.GetProperty("filterText").GetString() == "Health");
 
         int argumentPosition = source.LastIndexOf("local", StringComparison.Ordinal) + 2;
         JsonElement signature = await RequestAtAsync(session, "textDocument/signatureHelp", uri, source,
@@ -247,7 +247,7 @@ public sealed class CoreIntelligenceTests
         JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri,
             memberSource, memberSource.Length);
         Assert.Contains(completion.GetProperty("items").EnumerateArray(), item =>
-            item.GetProperty("label").GetString() == "Health");
+            item.GetProperty("filterText").GetString() == "Health");
 
         await session.HandleNotificationAsync("textDocument/didChange", LspTestProtocol.Json(new
         {

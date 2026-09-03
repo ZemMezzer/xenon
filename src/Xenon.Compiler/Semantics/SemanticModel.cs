@@ -181,6 +181,13 @@ public sealed class SemanticModel
             }
 
         FunctionSymbol? function = scopes.FirstOrDefault()?.Function;
+        if (function is not null)
+            foreach (GenericParameterSymbol parameter in function.TypeParameters)
+                if (names.Add(parameter.Name)) result.Add(parameter);
+        DeclaredTypeSymbol? lexicalType = function?.ContainingType ?? GetContainingTypeAtPosition(position);
+        if (lexicalType is StructTypeSymbol genericType)
+            foreach (GenericParameterSymbol parameter in genericType.TypeParameters)
+                if (names.Add(parameter.Name)) result.Add(parameter);
         if (function?.ContainingType is DeclaredTypeSymbol containingType)
             foreach (Symbol member in AllMembers(containingType)
                 .Where(member => IsUnqualifiedCompletionMember(member, function))
