@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using Xenon.Compiler.Text;
 
@@ -80,10 +81,17 @@ public static class SyntaxNavigator
         }
     }
 
-    private static PropertyInfo[] Properties(Type type) => ChildProperties.GetOrAdd(type,
-        static value => value.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+    private static PropertyInfo[] Properties(
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] Type type)
+    {
+        if (ChildProperties.TryGetValue(type, out PropertyInfo[]? properties)) return properties;
+
+        PropertyInfo[] discovered = type
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
             .Where(property => property.GetIndexParameters().Length == 0)
-            .ToArray());
+            .ToArray();
+        return ChildProperties.GetOrAdd(type, discovered);
+    }
 
     private static bool Contains(TextSpan span, int position) =>
         position >= span.Start && (position < span.End || span.Length == 0 && position == span.Start);

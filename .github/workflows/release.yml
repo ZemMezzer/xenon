@@ -98,17 +98,23 @@ jobs:
   package:
     name: Package ${{ matrix.rid }}
     needs: build-and-test
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        rid:
-          - osx-arm64
-          - win-x64
-          - win-arm64
+        include:
+          - rid: win-x64
+            runner: windows-2022
+            executable: xenon.exe
+          - rid: win-arm64
+            runner: windows-11-arm
+            executable: xenon.exe
+          - rid: osx-arm64
+            runner: macos-15
+            executable: xenon
 
     steps:
       - name: Check out repository
@@ -119,36 +125,72 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Publish self-contained distribution
+      - name: Publish Native AOT distribution
         env:
           RID: ${{ matrix.rid }}
           VERSION: ${{ needs.build-and-test.outputs.version }}
-        shell: bash
+          PUBLISH_DIR: ${{ runner.temp }}/xenon-${{ needs.build-and-test.outputs.version }}-${{ matrix.rid }}
+        shell: pwsh
+        run: >-
+          dotnet publish src/Xenon.Cli/Xenon.Cli.csproj
+          --configuration Release
+          --runtime $env:RID
+          -p:XenonVersion=$env:VERSION
+          --output $env:PUBLISH_DIR
+
+      - name: Verify native distribution
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          VERSION: ${{ needs.build-and-test.outputs.version }}
+          PUBLISH_DIR: ${{ runner.temp }}/xenon-${{ needs.build-and-test.outputs.version }}-${{ matrix.rid }}
+        shell: pwsh
         run: |
-          publish_dir="${RUNNER_TEMP}/xenon-${VERSION}-${RID}"
-          dotnet publish src/Xenon.Cli/Xenon.Cli.csproj \
-            --configuration Release \
-            --runtime "${RID}" \
-            --self-contained true \
-            -p:XenonVersion="${VERSION}" \
-            --output "${publish_dir}"
+          $actual = & (Join-Path $env:PUBLISH_DIR $env:EXECUTABLE) --version
+          $expected = "xenon $env:VERSION"
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) {
+            throw "Expected '$expected', got '$actual'."
+          }
+          $managedAssemblies = @(Get-ChildItem -LiteralPath $env:PUBLISH_DIR -Recurse -Filter '*.dll' |
+            Where-Object Name -ne 'libLLVM.dll')
+          if ($managedAssemblies.Count -ne 0) {
+            throw "Managed assemblies leaked into the Native AOT distribution: $($managedAssemblies.Name -join ', ')"
+          }
+          $smokeDirectory = Join-Path $env:RUNNER_TEMP 'xenon-compiler-smoke'
+          New-Item -ItemType Directory -Force -Path $smokeDirectory | Out-Null
+          Copy-Item -LiteralPath 'tests/Xenon.EndToEnd.Tests/Cases/Basics/Hello/main.xe' `
+            -Destination $smokeDirectory
+          & (Join-Path $env:PUBLISH_DIR $env:EXECUTABLE) run $smokeDirectory --release
+          if ($LASTEXITCODE -ne 0) { throw 'Native compiler smoke test failed.' }
 
-          mkdir -p release
-          if [[ "${RID}" == win-* ]]; then
-            archive="${GITHUB_WORKSPACE}/release/xenon-${VERSION}-${RID}.zip"
-            (cd "${publish_dir}" && zip -qr "${archive}" .)
-          else
-            archive="${GITHUB_WORKSPACE}/release/xenon-${VERSION}-${RID}.tar.gz"
-            tar -C "${publish_dir}" -czf "${archive}" .
-          fi
-
-          echo "archive=${archive}" >> "${GITHUB_ENV}"
+      - name: Remove debug symbols and create archive
+        id: archive
+        env:
+          RID: ${{ matrix.rid }}
+          VERSION: ${{ needs.build-and-test.outputs.version }}
+          PUBLISH_DIR: ${{ runner.temp }}/xenon-${{ needs.build-and-test.outputs.version }}-${{ matrix.rid }}
+        shell: pwsh
+        run: |
+          Get-ChildItem -LiteralPath $env:PUBLISH_DIR -Recurse |
+            Where-Object { $_.Name -like '*.pdb' -or $_.Name -like '*.dbg' -or $_.Name -like '*.dSYM' } |
+            Remove-Item -Recurse -Force
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE 'release'
+          New-Item -ItemType Directory -Force -Path $releaseDirectory | Out-Null
+          if ($env:RID.StartsWith('win-')) {
+            $archive = Join-Path $releaseDirectory "xenon-$env:VERSION-$env:RID.zip"
+            Compress-Archive -Path (Join-Path $env:PUBLISH_DIR '*') -DestinationPath $archive
+          }
+          else {
+            $archive = Join-Path $releaseDirectory "xenon-$env:VERSION-$env:RID.tar.gz"
+            tar -C $env:PUBLISH_DIR -czf $archive .
+            if ($LASTEXITCODE -ne 0) { throw 'tar failed.' }
+          }
+          "path=$archive" >> $env:GITHUB_OUTPUT
 
       - name: Upload distribution artifact
         uses: actions/upload-artifact@v4
         with:
           name: xenon-${{ needs.build-and-test.outputs.version }}-${{ matrix.rid }}
-          path: ${{ env.archive }}
+          path: ${{ steps.archive.outputs.path }}
           if-no-files-found: error
           retention-days: 14
 
