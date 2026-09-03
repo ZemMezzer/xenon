@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace Xenon.LanguageServer.Protocol;
 
@@ -65,10 +66,7 @@ public sealed class LspMessageReader(Stream input, int maximumContentLength = 16
 
 public sealed class LspMessageWriter(Stream output) : IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-    };
+    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
     private readonly SemaphoreSlim _writeGate = new(1, 1);
 
     public Task WriteResultAsync(JsonElement id, object? result,
@@ -82,11 +80,12 @@ public sealed class LspMessageWriter(Stream output) : IDisposable
 
     public Task WriteNotificationAsync(string method, object? parameters,
         CancellationToken cancellationToken = default) =>
-        WriteAsync(new { jsonrpc = "2.0", method, @params = parameters }, cancellationToken);
+        WriteAsync(new JsonRpcNotification("2.0", method, parameters), cancellationToken);
 
     private async Task WriteAsync(object message, CancellationToken cancellationToken)
     {
-        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions);
+        JsonTypeInfo typeInfo = JsonOptions.GetTypeInfo(message.GetType());
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(message, typeInfo);
         byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -100,20 +99,17 @@ public sealed class LspMessageWriter(Stream output) : IDisposable
 
     public void Dispose() => _writeGate.Dispose();
 
-    private sealed record JsonRpcSuccessResponse(
-        [property: JsonPropertyName("jsonrpc")] string JsonRpc,
-        [property: JsonPropertyName("id")] JsonElement Id,
-        [property: JsonPropertyName("result"), JsonIgnore(Condition = JsonIgnoreCondition.Never)]
-        object? Result);
-
-    private sealed record JsonRpcErrorResponse(
-        [property: JsonPropertyName("jsonrpc")] string JsonRpc,
-        [property: JsonPropertyName("id"), JsonIgnore(Condition = JsonIgnoreCondition.Never)]
-        JsonElement? Id,
-        [property: JsonPropertyName("error")] JsonRpcError Error);
-
-    private sealed record JsonRpcError(
-        [property: JsonPropertyName("code")] int Code,
-        [property: JsonPropertyName("message")] string Message,
-        [property: JsonPropertyName("data")] object? Data);
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        };
+        options.TypeInfoResolverChain.Add(LspJsonSerializerContext.Default);
+        // Keep test-only/custom handlers flexible on CoreCLR. This feature switch is false and
+        // the fallback is removed when Xenon is trimmed for Native AOT.
+        if (JsonSerializer.IsReflectionEnabledByDefault)
+            options.TypeInfoResolverChain.Add(new DefaultJsonTypeInfoResolver());
+        return options;
+    }
 }

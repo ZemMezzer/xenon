@@ -1,5 +1,8 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Xenon.Compiler.Syntax;
 
+[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)]
 public abstract record SyntaxNode
 {
     public abstract SyntaxKind Kind { get; }

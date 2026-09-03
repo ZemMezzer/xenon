@@ -2,7 +2,7 @@
 
 **A statically typed, LLVM-backed language for building native applications and libraries.**
 
-[![Tests](https://img.shields.io/github/actions/workflow/status/ZemMezzer/xenon/release.yml?label=tests)](https://github.com/ZemMezzer/xenon/actions/workflows/release.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/ZemMezzer/xenon/ci.yml?branch=main&label=tests)](https://github.com/ZemMezzer/xenon/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/ZemMezzer/xenon?display_name=tag&sort=semver&label=release)](https://github.com/ZemMezzer/xenon/releases/latest)
 [![Documentation](https://img.shields.io/badge/documentation-xenonlang.com-2563eb)](https://xenonlang.com/)
 [![License](https://img.shields.io/badge/license-Apache_2.0-D22128)](LICENSE)
@@ -24,7 +24,9 @@ The repository contains the compiler, LLVM code generator, build driver, project
 
 Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)** and add the extracted `xenon` executable to your `PATH`.
 
-Xenon produces native binaries, so a host linker is also required:
+Release archives are Native AOT distributions for Windows x64/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
+
+Xenon itself still uses LLVM 20 for code generation. Each release archive includes the matching native LLVM runtime (`libLLVM.dll` on Windows or `libLLVM.dylib` on macOS), which must remain next to the `xenon` executable. Xenon also produces native binaries, so a host linker is required:
 
 - **Windows:** Visual Studio 2022 Build Tools with the **Desktop development with C++** workload;
 - **macOS:** Xcode Command Line Tools.
@@ -119,7 +121,7 @@ Run `xenon --help` to see all available options.
 
 ## Building Xenon from source
 
-Building the compiler requires the .NET SDK version selected in [`global.json`](global.json), plus the native toolchain listed in [Quick start](#quick-start).
+Building the compiler requires the .NET SDK version selected in [`global.json`](global.json), plus the native toolchain listed in [Quick start](#quick-start). These are build-time requirements only; users of a release archive do not need .NET.
 
 ```console
 dotnet restore Xenon.sln
@@ -128,6 +130,18 @@ dotnet test Xenon.sln --configuration Release --no-build
 ```
 
 Build outputs are written to the `out/` directory.
+
+Publish a Native AOT distribution on the matching operating system and architecture:
+
+```console
+# Windows x64
+dotnet publish src/Xenon.Cli/Xenon.Cli.csproj -c Release -r win-x64
+
+# Apple Silicon macOS
+dotnet publish src/Xenon.Cli/Xenon.Cli.csproj -c Release -r osx-arm64
+```
+
+The supported release RIDs are `win-x64`, `win-arm64`, and `osx-arm64`. Native AOT distributions are built by GitHub Actions on matching native runners rather than cross-compiled from Linux. Intel macOS (`osx-x64`) is not currently released because the LLVM 20 runtime package used by Xenon does not provide that target.
 
 ## License
 

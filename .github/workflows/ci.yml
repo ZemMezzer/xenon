@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+          - name: macOS Arm64
+            runner: macos-15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore dependencies
+        run: dotnet restore Xenon.sln
+
+      - name: Build
+        run: dotnet build Xenon.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Xenon.sln --configuration Release --no-build --no-restore
+
+  native-aot:
+    name: Native AOT ${{ matrix.rid }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            runner: windows-2022
+            executable: xenon.exe
+          - rid: win-arm64
+            runner: windows-11-arm
+            executable: xenon.exe
+          - rid: osx-arm64
+            runner: macos-15
+            executable: xenon
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Publish Native AOT
+        shell: pwsh
+        env:
+          RID: ${{ matrix.rid }}
+          PUBLISH_DIR: ${{ runner.temp }}/xenon-native-aot
+        run: >-
+          dotnet publish src/Xenon.Cli/Xenon.Cli.csproj
+          --configuration Release
+          --runtime $env:RID
+          --output $env:PUBLISH_DIR
+
+      - name: Smoke-test native executable
+        shell: pwsh
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          PUBLISH_DIR: ${{ runner.temp }}/xenon-native-aot
+        run: |
+          $output = & (Join-Path $env:PUBLISH_DIR $env:EXECUTABLE) --version
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch '^xenon ') {
+            throw "Native executable smoke test failed: $output"
+          }
+          $managedAssemblies = @(Get-ChildItem -LiteralPath $env:PUBLISH_DIR -Recurse -Filter '*.dll' |
+            Where-Object Name -ne 'libLLVM.dll')
+          if ($managedAssemblies.Count -ne 0) {
+            throw "Managed assemblies leaked into the Native AOT distribution: $($managedAssemblies.Name -join ', ')"
+          }
+          $smokeDirectory = Join-Path $env:RUNNER_TEMP 'xenon-compiler-smoke'
+          New-Item -ItemType Directory -Force -Path $smokeDirectory | Out-Null
+          Copy-Item -LiteralPath 'tests/Xenon.EndToEnd.Tests/Cases/Basics/Hello/main.xe' `
+            -Destination $smokeDirectory
+          & (Join-Path $env:PUBLISH_DIR $env:EXECUTABLE) run $smokeDirectory --release
+          if ($LASTEXITCODE -ne 0) { throw 'Native compiler smoke test failed.' }

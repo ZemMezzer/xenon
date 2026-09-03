@@ -56,13 +56,11 @@ internal static class LspCoreIntelligence
             .OrderBy(item => item.Rank).ThenBy(item => item.Entry.Name, StringComparer.Ordinal)
             .ThenBy(item => item.Entry.QualifiedName, StringComparer.Ordinal)
             .ThenBy(item => item.Entry.Id.ProjectId)
-            .Select(item => new
-            {
-                name = item.Entry.Name,
-                kind = SymbolKindNumber(item.Entry.EditorKind),
-                location = ToLocation(snapshot, item.Entry.Declaration),
-                containerName = ContainerName(item.Entry.QualifiedName),
-            }).ToArray();
+            .Select(item => new LspWorkspaceSymbol(
+                item.Entry.Name,
+                SymbolKindNumber(item.Entry.EditorKind),
+                ToLocation(snapshot, item.Entry.Declaration),
+                ContainerName(item.Entry.QualifiedName))).ToArray();
     }
 
     public static async Task<object?> DiagnosticsAsync(LanguageServerAnalysisContext context)
@@ -71,21 +69,18 @@ internal static class LspCoreIntelligence
             context.CancellationToken).ConfigureAwait(false);
         return model.GetDiagnostics(context.CancellationToken)
             .Where(diagnostic => diagnostic.Location.Source.FileId == context.Document.SourceFileId)
-            .Select(diagnostic => new
-            {
-                range = ToRange(diagnostic.Location.Source, diagnostic.Location.Span),
-                severity = diagnostic.Severity == DiagnosticSeverity.Error ? 1 : 2,
-                code = diagnostic.Id,
-                source = "xenon",
-                message = diagnostic.Message,
-                relatedInformation = diagnostic.RelatedLocations.IsEmpty ? null :
-                    diagnostic.RelatedLocations.Select(related => new
-                    {
-                        location = new LspLocation(DocumentUri.FromPath(related.Location.Path).AbsoluteUri,
-                            ToRange(related.Location.Source, related.Location.Span)),
-                        message = related.Message ?? diagnostic.Message,
-                    }).ToArray(),
-            }).ToArray();
+            .Select(diagnostic => new LspDiagnostic(
+                ToRange(diagnostic.Location.Source, diagnostic.Location.Span),
+                diagnostic.Severity == DiagnosticSeverity.Error ? 1 : 2,
+                diagnostic.Id,
+                "xenon",
+                diagnostic.Message,
+                diagnostic.RelatedLocations.IsEmpty ? null :
+                    diagnostic.RelatedLocations.Select(related =>
+                        new LspDiagnosticRelatedInformation(
+                            new LspLocation(DocumentUri.FromPath(related.Location.Path).AbsoluteUri,
+                                ToRange(related.Location.Source, related.Location.Span)),
+                            related.Message ?? diagnostic.Message)).ToArray())).ToArray();
     }
 
     private static async Task<object?> HoverAsync(LanguageServerAnalysisContext context, LspPosition lspPosition)
@@ -102,19 +97,14 @@ internal static class LspCoreIntelligence
             if (@lock is null) return null;
             TypeSymbol type = model.GetTypeInfo(@lock, context.CancellationToken).Type;
             if (type is ErrorTypeSymbol) return null;
-            return new
-            {
-                contents = new { kind = "markdown", value = $"```xenon\n{type.ToDisplayString()}\n```" },
-                range = ToRange(context.Document.EffectiveText, @lock.LockKeyword.Location.Span),
-            };
+            return new LspHover(
+                new LspMarkupContent("markdown", $"```xenon\n{type.ToDisplayString()}\n```"),
+                ToRange(context.Document.EffectiveText, @lock.LockKeyword.Location.Span));
         }
         symbol = UnwrapAlias(symbol);
         string display = HoverDisplay(symbol);
-        return new
-        {
-            contents = new { kind = "markdown", value = $"```xenon\n{display}\n```" },
-            range = SymbolRangeAtPosition(model, context.Document.SyntaxTree, position),
-        };
+        return new LspHover(new LspMarkupContent("markdown", $"```xenon\n{display}\n```"),
+            SymbolRangeAtPosition(model, context.Document.SyntaxTree, position));
     }
 
     private static async Task<object?> DefinitionAsync(LanguageServerAnalysisContext context,
@@ -241,7 +231,7 @@ internal static class LspCoreIntelligence
         if (IsTriggerCharacter(parameters, ">") &&
             (position < 2 || context.Document.EffectiveText[position - 2] != '-' ||
              context.Document.EffectiveText[position - 1] != '>'))
-            return new { isIncomplete = false, items = Array.Empty<object>() };
+            return new LspCompletionList(false, []);
         MemberAccessExpressionSyntax? access = SyntaxNavigator.DescendantNodesAndSelf(context.Document.SyntaxTree.Root)
             .OfType<MemberAccessExpressionSyntax>()
             .Where(candidate => candidate.OperatorToken.Location.Span.End <= position &&
@@ -255,13 +245,10 @@ internal static class LspCoreIntelligence
                 symbol.ToDisplayString(SymbolDisplayFormat.Signature)))
             .Select(symbol => CompletionItem(symbol)).ToList();
         if (access is null)
-            items.AddRange(SyntaxFacts.GetEditorKeywordTexts().Select(keyword => new
-            {
-                label = keyword, kind = KeywordCompletionKind(keyword), detail = KeywordCompletionDetail(keyword),
-                insertText = keyword,
-                sortText = "9_" + keyword, filterText = keyword,
-            }));
-        return new { isIncomplete = false, items = items.ToArray() };
+            items.AddRange(SyntaxFacts.GetEditorKeywordTexts().Select(keyword =>
+                new LspCompletionItem(keyword, KeywordCompletionKind(keyword),
+                    KeywordCompletionDetail(keyword), keyword, "9_" + keyword, keyword)));
+        return new LspCompletionList(false, items.ToArray());
     }
 
     private static async Task<object?> SignatureHelpAsync(LanguageServerAnalysisContext context,
@@ -281,17 +268,13 @@ internal static class LspCoreIntelligence
             .Where(seenCandidates.Add).ToArray();
         if (candidates.Length == 0) return null;
         int activeParameter = Commas(call).Count(token => token.Location.Span.Start < position);
-        var signatures = candidates.Select(candidate => new
-        {
-            label = candidate.ToDisplayString(SymbolDisplayFormat.Signature),
-            parameters = Parameters(candidate).Select(parameter => new
-            {
-                label = parameter.ToDisplayString(SymbolDisplayFormat.Signature),
-            }).ToArray(),
-        }).ToArray();
-        int maxParameter = signatures.Max(signature => signature.parameters.Length);
-        return new { signatures, activeSignature = 0,
-            activeParameter = maxParameter == 0 ? 0 : Math.Min(activeParameter, maxParameter - 1) };
+        LspSignatureInformation[] signatures = candidates.Select(candidate =>
+            new LspSignatureInformation(candidate.ToDisplayString(SymbolDisplayFormat.Signature),
+                Parameters(candidate).Select(parameter => new LspParameterInformation(
+                    parameter.ToDisplayString(SymbolDisplayFormat.Signature))).ToArray())).ToArray();
+        int maxParameter = signatures.Max(signature => signature.Parameters.Length);
+        return new LspSignatureHelp(signatures, 0,
+            maxParameter == 0 ? 0 : Math.Min(activeParameter, maxParameter - 1));
     }
 
     private static async Task<object?> SemanticTokensAsync(LanguageServerAnalysisContext context)
@@ -334,7 +317,7 @@ internal static class LspCoreIntelligence
             data.Add(item.Modifiers);
             previousLine = range.Start.Line; previousCharacter = range.Start.Character;
         }
-        return new { data = data.ToArray() };
+        return new LspSemanticTokens(data.ToArray());
     }
 
     private static void AddLanguageTokens(SyntaxTree tree,
@@ -398,8 +381,8 @@ internal static class LspCoreIntelligence
         Symbol? symbol = FindSymbol(model, context.Document.SyntaxTree, position);
         symbol = GetRenameTarget(symbol);
         EnsureRenameable(symbol);
-        return new { range = SymbolRangeAtPosition(model, context.Document.SyntaxTree, position),
-            placeholder = symbol!.Name };
+        return new LspPrepareRename(
+            SymbolRangeAtPosition(model, context.Document.SyntaxTree, position), symbol!.Name);
     }
 
     private static async Task<object?> RenameAsync(LanguageServerAnalysisContext context,
@@ -411,7 +394,8 @@ internal static class LspCoreIntelligence
         symbol = GetRenameTarget(symbol);
         EnsureRenameable(symbol);
         Symbol target = symbol!;
-        if (string.Equals(target.Name, newName, StringComparison.Ordinal)) return new { changes = new { } };
+        if (string.Equals(target.Name, newName, StringComparison.Ordinal))
+            return new LspWorkspaceEdit(new Dictionary<string, LspTextEdit[]>(StringComparer.Ordinal));
         if (!context.Snapshot.TryGetSymbolId(target, out WorkspaceSymbolId id))
             throw InvalidParams("The symbol has no editable Workspace identity.");
         WorkspaceSymbolIndex symbols = await context.Snapshot.GetSymbolIndexAsync(context.CancellationToken)
@@ -490,7 +474,7 @@ internal static class LspCoreIntelligence
                 group => group.OrderByDescending(item => item.Span.Start)
                     .Select(item => new LspTextEdit(ToRange(context.Snapshot.GetDocument(item.DocumentId).EffectiveText,
                         item.Span), newName)).ToArray(), StringComparer.Ordinal);
-        return new { changes };
+        return new LspWorkspaceEdit(changes);
 
         static (string Uri, TextSpan Span) PhysicalKey(SourceReference source) =>
             (DocumentUri.FromPath(source.Path).AbsoluteUri, source.Span);
@@ -570,19 +554,17 @@ internal static class LspCoreIntelligence
         return token is null ? null : ToRange(tree.Source, token.Location.Span);
     }
 
-    private static object CompletionItem(Symbol symbol)
+    private static LspCompletionItem CompletionItem(Symbol symbol)
     {
         EditorSymbolKind kind = EditorSymbolClassifier.GetKind(symbol);
-        return new
-        {
-            label = symbol.Name,
-            kind = LspCompletionItemKindAdapter.ToCompletionItemKind(kind),
-            detail = $"{symbol.ToDisplayString(SymbolDisplayFormat.Signature)} · " +
+        return new LspCompletionItem(
+            symbol.Name,
+            LspCompletionItemKindAdapter.ToCompletionItemKind(kind),
+            $"{symbol.ToDisplayString(SymbolDisplayFormat.Signature)} · " +
                 LspCompletionItemKindAdapter.XenonKindName(kind),
-            insertText = symbol.Name,
-            sortText = "0_" + symbol.Name,
-            filterText = symbol.Name,
-        };
+            symbol.Name,
+            "0_" + symbol.Name,
+            symbol.Name);
     }
 
     private static int SymbolKindNumber(EditorSymbolKind kind) => kind switch
