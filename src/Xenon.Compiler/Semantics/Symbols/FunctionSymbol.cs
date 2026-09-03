@@ -11,6 +11,7 @@ public sealed class FunctionSymbol : Symbol
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
     public ImmutableArray<ReferenceReturnOrigin> ReferenceReturnOrigins { get; private set; } = [];
+    public ImmutableArray<SharedReturnOrigin> SharedReturnOrigins { get; private set; } = [];
     public ImmutableArray<ReferenceFieldOrigin> ReferenceFieldOrigins { get; private set; } = [];
 
     internal FunctionSymbol(
@@ -294,6 +295,8 @@ public sealed class FunctionSymbol : Symbol
         ReceiverMoveEffects = effects;
     internal void SetReferenceReturnOrigins(ImmutableArray<ReferenceReturnOrigin> origins) =>
         ReferenceReturnOrigins = origins;
+    internal void SetSharedReturnOrigins(ImmutableArray<SharedReturnOrigin> origins) =>
+        SharedReturnOrigins = origins;
     internal void SetReferenceFieldOrigins(ImmutableArray<ReferenceFieldOrigin> origins) =>
         ReferenceFieldOrigins = origins;
     internal void SetGenericSpecialization(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
@@ -341,6 +344,17 @@ public readonly record struct ReferenceReturnOrigin(
     ReferenceReturnOriginKind Kind,
     int ParameterOrdinal,
     ImmutableArray<int> FieldOrdinals);
+
+public enum SharedReturnOriginKind
+{
+    Fresh,
+    Parameter,
+    Unknown,
+}
+
+public readonly record struct SharedReturnOrigin(
+    SharedReturnOriginKind Kind,
+    int ParameterOrdinal);
 
 public readonly record struct ReferenceFieldOrigin(
     ImmutableArray<int> FieldOrdinals,

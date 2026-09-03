@@ -3443,13 +3443,16 @@ public sealed class NativeLinkerTests
             }
             int Main()
             {
-                D* d = new D(); A* a = d; B& b = *d; C& c = *d;
-                d->N = 10; if (a->Read() != 10 || b.Value != 10 || c[2] != 12) return 1;
-                b.Value = 20; if (a->Read() != 20) return 2;
-                c[2] = 40; if (a->Read() != 38) return 3;
+                D* d = new D(); A* a = d;
+                d->N = 10; if (a->Read() != 10) return 1;
+                B& b = *d; if (b.Value != 10) return 2; b.Value = 20;
+                if (a->Read() != 20) return 3;
+                C& c = *d; if (c[2] != 22) return 4; c[2] = 40;
+                if (a->Read() != 38) return 5;
                 Both view = *a; if (view.Read() != 38 || view[2] != 40) return 4;
-                view.Value = 40; if (c[2] != 42) return 5;
-                view[1] = 43; if (b.Value != 42) return 6;
+                view.Value = 40;
+                C& finalC = *d; if (finalC[2] != 42) return 6; finalC[1] = 43;
+                B& finalB = *d; if (finalB.Value != 42) return 7;
                 free(a); return 42;
             }
             """, optimization));

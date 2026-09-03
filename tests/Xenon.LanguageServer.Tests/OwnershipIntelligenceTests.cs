@@ -706,6 +706,75 @@ public sealed class OwnershipIntelligenceTests
         Assert.DoesNotContain(tokens, token => token.Text == "Lock" && token.Type == 6);
     }
 
+    [Fact]
+    public async Task InvalidOwnershipHandleReferenceInitializerDoesNotCrashSemanticRequests()
+    {
+        const string source = """
+            namespace App;
+            void Test()
+            {
+                unique<int> uniqueValue = new int();
+                unique<int> secondPointer = move uniqueValue;
+                int& mutableValue = secondPointer;
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, source);
+
+        JsonElement symbols = Result(await session.HandleRequestAsync("textDocument/documentSymbol",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        JsonElement tokens = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
+            source.IndexOf("mutableValue", StringComparison.Ordinal));
+
+        Assert.Equal(JsonValueKind.Array, symbols.ValueKind);
+        Assert.True(tokens.GetProperty("data").GetArrayLength() > 0);
+        Assert.Equal(JsonValueKind.Object, completion.ValueKind);
+    }
+
+    [Fact]
+    public async Task UnifiedPointeeBorrowDiagnosticsArePublishedByTheLanguageServer()
+    {
+        const string source = """
+            namespace App;
+            void Test()
+            {
+                unique<int> uniqueOwner = new int();
+                int& uniqueFirst = *uniqueOwner;
+                int& uniqueSecond = *uniqueOwner;
+                uniqueFirst = 1;
+                uniqueSecond = 2;
+
+                shared<int> sharedOwner = new int();
+                shared<int> sharedAlias = sharedOwner;
+                int& sharedFirst = *sharedOwner;
+                int& sharedSecond = *sharedAlias;
+                sharedFirst = 1;
+                sharedSecond = 2;
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("borrow-diagnostics.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        var notifications = Channel.CreateUnbounded<JsonElement>();
+        await using var session = new LanguageServerSession((method, value) =>
+        {
+            if (method == "textDocument/publishDiagnostics")
+                notifications.Writer.TryWrite(Result(value));
+            return Task.CompletedTask;
+        }, diagnosticDebounce: TimeSpan.Zero);
+
+        await InitializeAsync(session, uri, source);
+        JsonElement published = await ReadDiagnosticsAsync(notifications.Reader, version: 1);
+        string[] codes = published.GetProperty("diagnostics").EnumerateArray()
+            .Select(diagnostic => diagnostic.GetProperty("code").GetString()!).ToArray();
+
+        Assert.Equal(2, codes.Count(code => code == DiagnosticIds.BorrowConflict));
+    }
+
     private static async Task<LanguageServerSession> CreateSessionAsync(string uri, string source)
     {
         var session = new LanguageServerSession((_, _) => Task.CompletedTask,

@@ -2180,6 +2180,30 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_UnifiedBorrowIdentityAddsNoRuntimeBorrowRepresentation()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Pair { public int First; public int Second; }
+            int UsePointees(unique<Pair> uniqueValue, shared<Pair> sharedValue)
+            {
+                readonly int& uniqueReference = uniqueValue->First;
+                int first = uniqueReference;
+                readonly int& sharedReference = sharedValue->Second;
+                return first + sharedReference;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), "borrow-layout");
+
+        Assert.DoesNotContain("borrow_count", ir, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("borrow_registry", ir, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("borrow.table", ir, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Generator_LowersReceiverEffectsAndRawArrayMovesWithoutSourceZeroingOrHeapCopies()
     {
         Compilation compilation = CreateCompilation("""

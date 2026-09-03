@@ -217,6 +217,8 @@ internal sealed class SemanticAnalyzer
         $"{string.Join(';', entry.Symbol.ReceiverMoveEffects.Select(effect => string.Join(',', effect.FieldOrdinals)))}" +
         $"/{string.Join(';', entry.Symbol.ReferenceReturnOrigins.Select(origin =>
             $"{(int)origin.Kind}:{origin.ParameterOrdinal}:{string.Join(',', origin.FieldOrdinals)}"))}" +
+        $"/{string.Join(';', entry.Symbol.SharedReturnOrigins.Select(origin =>
+            $"{(int)origin.Kind}:{origin.ParameterOrdinal}"))}" +
         $"/{string.Join(';', entry.Symbol.ReferenceFieldOrigins.Select(origin =>
             $"{string.Join(',', origin.FieldOrdinals)}:{(int)origin.Origin.Kind}:" +
             $"{origin.Origin.ParameterOrdinal}:{string.Join(',', origin.Origin.FieldOrdinals)}:{origin.IsReadonly}"))}"));
@@ -228,6 +230,7 @@ internal sealed class SemanticAnalyzer
         {
             entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
             entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+            entry.Specialized.SetSharedReturnOrigins(entry.Definition.SharedReturnOrigins);
             entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
         }
     }
@@ -398,6 +401,7 @@ internal sealed class SemanticAnalyzer
             {
                 entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
                 entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+                entry.Specialized.SetSharedReturnOrigins(entry.Definition.SharedReturnOrigins);
                 entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
             }
             foreach (SpecializedStructFunction entry in pending)
