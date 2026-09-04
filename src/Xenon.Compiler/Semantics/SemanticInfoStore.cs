@@ -55,6 +55,11 @@ internal sealed class SemanticInfoStore
                 Types[arguments] = new TypeInfo(BuiltinTypes.Error, BuiltinTypes.Error);
                 RecordType(arguments.Arguments[0], ownership.ElementType);
                 break;
+            case NamedTypeSyntax { NameToken.Kind: SyntaxKind.AtomicKeyword, TypeArguments: { } arguments }
+                when type is AtomicTypeSymbol atomic && arguments.Arguments.Length == 1:
+                Types[arguments] = new TypeInfo(BuiltinTypes.Error, BuiltinTypes.Error);
+                RecordType(arguments.Arguments[0], atomic.ElementType);
+                break;
             case NamedTypeSyntax { NameToken.Kind: SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword, TypeArguments: { } arguments }
                 when type is LifetimeModifierTypeSymbol modifier && arguments.Arguments.Length == 1:
                 Types[arguments] = new TypeInfo(BuiltinTypes.Error, BuiltinTypes.Error);

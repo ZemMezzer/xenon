@@ -14,6 +14,11 @@ internal sealed record CopyabilityFailure(
     ImmutableArray<FieldSymbol> FieldPath,
     Copyability Kind);
 
+internal sealed record ValueEqualityFailure(
+    TypeSymbol Type,
+    ImmutableArray<FieldSymbol> FieldPath,
+    bool ContainsAtomicStorage);
+
 public static class TypeFacts
 {
     public static bool CanCopy(TypeSymbol type) => GetCopyability(type) == Copyability.Copyable;
@@ -46,6 +51,11 @@ public static class TypeFacts
         }
         if (type is ReferenceTypeSymbol)
             return Copyability.Copyable;
+        if (type is AtomicTypeSymbol)
+        {
+            failure = new CopyabilityFailure(type, [], Copyability.NonCopyable);
+            return Copyability.NonCopyable;
+        }
         if (type is SharedTypeSymbol or WeakTypeSymbol)
             return Copyability.Copyable;
         if (type is StorageTypeSymbol or PinTypeSymbol)
@@ -87,8 +97,59 @@ public static class TypeFacts
 
     public static bool CanMove(TypeSymbol type) => !IsPinned(type);
 
-    public static bool CanRelocate(TypeSymbol type) => CanMove(type) &&
+    public static bool CanRelocate(TypeSymbol type) => CanMove(type) && !ContainsAtomicStorage(type) &&
         (type is not StructTypeSymbol structure || !structure.AllInstanceFields.Any(field => IsPinned(field.Type)));
+
+    /// <summary>
+    /// True when the value physically contains atomic wrapper storage. Pointer,
+    /// array and ownership handles do not inline the storage they refer to.
+    /// </summary>
+    public static bool ContainsAtomicStorage(TypeSymbol type) => ContainsAtomicStorage(type, []);
+
+    private static bool ContainsAtomicStorage(TypeSymbol type, HashSet<TypeSymbol> visited)
+    {
+        if (type is AtomicTypeSymbol) return true;
+        if (type is StorageTypeSymbol storage) return ContainsAtomicStorage(storage.ElementType, visited);
+        if (type is PinTypeSymbol pin) return ContainsAtomicStorage(pin.ElementType, visited);
+        if (type is not StructTypeSymbol structure || !visited.Add(structure)) return false;
+        try
+        {
+            return structure.BaseType is not null && ContainsAtomicStorage(structure.BaseType, visited) ||
+                structure.Fields.Any(field => ContainsAtomicStorage(field.Type, visited));
+        }
+        finally
+        {
+            visited.Remove(structure);
+        }
+    }
+
+    /// <summary>Follows native pointer/reference boundaries to prevent exposing atomic layout.</summary>
+    public static bool ExposesAtomicStorageToNativeAbi(TypeSymbol type) =>
+        ExposesAtomicStorageToNativeAbi(type, []);
+
+    private static bool ExposesAtomicStorageToNativeAbi(TypeSymbol type, HashSet<TypeSymbol> visited)
+    {
+        if (type is AtomicTypeSymbol) return true;
+        if (type is PointerTypeSymbol pointer)
+            return ExposesAtomicStorageToNativeAbi(pointer.ElementType, visited);
+        if (type is ReferenceTypeSymbol reference)
+            return ExposesAtomicStorageToNativeAbi(reference.ElementType, visited);
+        if (type is StorageTypeSymbol storage)
+            return ExposesAtomicStorageToNativeAbi(storage.ElementType, visited);
+        if (type is PinTypeSymbol pin)
+            return ExposesAtomicStorageToNativeAbi(pin.ElementType, visited);
+        if (type is not StructTypeSymbol structure || !visited.Add(structure)) return false;
+        try
+        {
+            return structure.BaseType is not null &&
+                    ExposesAtomicStorageToNativeAbi(structure.BaseType, visited) ||
+                structure.Fields.Any(field => ExposesAtomicStorageToNativeAbi(field.Type, visited));
+        }
+        finally
+        {
+            visited.Remove(structure);
+        }
+    }
 
     public static bool HasAutomaticDestructor(TypeSymbol type) => GetCompleteDestructor(type) is not null;
 
@@ -111,6 +172,7 @@ public static class TypeFacts
 
     private static bool RequiresDestruction(TypeSymbol type, HashSet<TypeSymbol> visited)
     {
+        if (type is AtomicTypeSymbol atomic) return RequiresDestruction(atomic.ElementType, visited);
         if (type is StorageTypeSymbol storage) return RequiresDestruction(storage.ElementType, visited);
         if (type is PinTypeSymbol pin) return RequiresDestruction(pin.ElementType, visited);
         if (type is OwnershipTypeSymbol) return true;
@@ -122,6 +184,7 @@ public static class TypeFacts
 
     public static FunctionSymbol? GetCompleteDestructor(TypeSymbol type) => type switch
     {
+        AtomicTypeSymbol atomic => GetCompleteDestructor(atomic.ElementType),
         UniqueTypeSymbol unique => unique.CompleteDestructor,
         SharedTypeSymbol shared => shared.CompleteDestructor,
         WeakTypeSymbol weak => weak.CompleteDestructor,
@@ -146,11 +209,41 @@ public static class TypeFacts
 
     public static bool IsInteger(TypeSymbol type) => type is PrimitiveTypeSymbol { IsInteger: true };
 
+    internal static ValueEqualityFailure? GetValueEqualityFailure(TypeSymbol type) =>
+        GetValueEqualityFailure(type, []);
+
+    private static ValueEqualityFailure? GetValueEqualityFailure(
+        TypeSymbol type,
+        HashSet<TypeSymbol> visited)
+    {
+        if (type is AtomicTypeSymbol)
+            return new ValueEqualityFailure(type, [], ContainsAtomicStorage: true);
+        if ((type is PrimitiveTypeSymbol primitive && !TypeIdentity.AreSame(primitive, BuiltinTypes.Void)) ||
+            type is EnumTypeSymbol or PointerTypeSymbol or ArrayTypeSymbol or SharedTypeSymbol or WeakTypeSymbol)
+            return null;
+        if (type is not StructTypeSymbol structure || !visited.Add(structure))
+            return new ValueEqualityFailure(type, [], ContainsAtomicStorage: false);
+        try
+        {
+            if (structure.BaseType is { } baseType &&
+                GetValueEqualityFailure(baseType, visited) is { } baseFailure)
+                return baseFailure;
+            foreach (FieldSymbol field in structure.Fields)
+            {
+                if (GetValueEqualityFailure(field.Type, visited) is not { } failure) continue;
+                return failure with { FieldPath = [field, .. failure.FieldPath] };
+            }
+            return null;
+        }
+        finally
+        {
+            visited.Remove(structure);
+        }
+    }
+
     public static bool CanCompareEquality(TypeSymbol left, TypeSymbol right)
     {
-        if (TypeIdentity.AreSame(left, right) && (IsNumeric(left) || left is EnumTypeSymbol || TypeIdentity.AreSame(left, BuiltinTypes.Bool)))
-            return true;
-        if (TypeIdentity.AreSame(left, right) && left is SharedTypeSymbol or WeakTypeSymbol)
+        if (TypeIdentity.AreSame(left, right) && GetValueEqualityFailure(left) is null)
             return true;
         if (left is PointerTypeSymbol && TypeIdentity.AreSame(right, BuiltinTypes.Null) ||
             right is PointerTypeSymbol && TypeIdentity.AreSame(left, BuiltinTypes.Null))
@@ -184,6 +277,10 @@ public static class TypeFacts
         {
             return 0;
         }
+
+        if (source is AtomicTypeSymbol atomic && AtomicTypeRules.SupportsOperations(atomic.ElementType) &&
+            GetImplicitConversionCost(destination, atomic.ElementType) is int atomicReadCost)
+            return atomicReadCost + 1;
 
         if (destination is PinTypeSymbol pin && TypeIdentity.AreSame(pin.ElementType, source))
             return 1;

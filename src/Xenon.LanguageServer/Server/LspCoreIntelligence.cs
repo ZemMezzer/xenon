@@ -18,8 +18,9 @@ internal static class LspCoreIntelligence
     [
         "namespace", "type", "interface", "enum", "enumMember", "function", "method",
         "constructor", "property", "field", "parameter", "variable", "constant",
-        "typeParameter", "modifier", "keyword", "ownershipType", "valueExpression",
-        "lifetimeOperation",
+        "typeParameter", "modifier", "keyword", "typeKeyword", "valueKeyword",
+        "lifetimeOperation", "controlKeyword", "declarationKeyword", "expressionKeyword",
+        "baseTypeKeyword", "literalKeyword",
     ];
     internal static readonly string[] SemanticTokenModifiers = ["declaration", "definition", "static", "readonly"];
 
@@ -344,16 +345,26 @@ internal static class LspCoreIntelligence
             SyntaxKind.IntKeyword or SyntaxKind.UIntKeyword or SyntaxKind.LongKeyword or
             SyntaxKind.ULongKeyword or SyntaxKind.FloatKeyword or SyntaxKind.DoubleKeyword or
             SyntaxKind.NIntKeyword or SyntaxKind.NUIntKeyword or SyntaxKind.CLongKeyword or
-            SyntaxKind.CULongKeyword => 1,
-        SyntaxKind.ConstKeyword or SyntaxKind.ReadonlyKeyword or SyntaxKind.StaticKeyword or
+            SyntaxKind.CULongKeyword => 22,
+        SyntaxKind.ConstKeyword or SyntaxKind.ReadonlyKeyword or SyntaxKind.StaticKeyword or SyntaxKind.ThreadLocalKeyword or
             SyntaxKind.VirtualKeyword or SyntaxKind.OverrideKeyword or SyntaxKind.AbstractKeyword or
             SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword or SyntaxKind.PublicKeyword or
-            SyntaxKind.PrivateKeyword or SyntaxKind.ThisKeyword => 14,
+            SyntaxKind.PrivateKeyword => 14,
         SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
-            SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword => 16,
+            SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword or SyntaxKind.AtomicKeyword => 16,
         SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword => 17,
         SyntaxKind.FreeKeyword => 18,
-        SyntaxKind.GetKeyword or SyntaxKind.SetKeyword => -1,
+        SyntaxKind.SwitchKeyword or SyntaxKind.CaseKeyword or SyntaxKind.DefaultKeyword or
+            SyntaxKind.IfKeyword or SyntaxKind.ElseKeyword or SyntaxKind.WhileKeyword or
+            SyntaxKind.ForKeyword or SyntaxKind.BreakKeyword or SyntaxKind.ContinueKeyword or
+            SyntaxKind.ReturnKeyword => 19,
+        SyntaxKind.UsingKeyword or SyntaxKind.NamespaceKeyword or SyntaxKind.StructKeyword or
+            SyntaxKind.InterfaceKeyword or SyntaxKind.TemplateKeyword or SyntaxKind.WhereKeyword or
+            SyntaxKind.EnumKeyword => 20,
+        SyntaxKind.GetKeyword or SyntaxKind.SetKeyword or SyntaxKind.BaseKeyword or
+            SyntaxKind.ThisKeyword or SyntaxKind.SizeOfKeyword or SyntaxKind.AlignOfKeyword or
+            SyntaxKind.OffsetOfKeyword or SyntaxKind.CastKeyword or SyntaxKind.BitCastKeyword => 21,
+        SyntaxKind.TrueKeyword or SyntaxKind.FalseKeyword or SyntaxKind.NullKeyword => 23,
         _ when SyntaxFacts.IsKeyword(kind) => 15,
         _ => -1,
     };
@@ -367,9 +378,11 @@ internal static class LspCoreIntelligence
             return "primitive type";
         return keyword switch
         {
-            "unique" or "shared" or "weak" or "storage" or "pin" => "ownership type keyword",
-            "new" or "move" or "lock" => "value expression keyword",
+            "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" =>
+                "type-forming keyword",
+            "new" or "move" or "lock" => "value-forming keyword",
             "free" or "destruct" => "lifetime operation keyword",
+            "true" or "false" or "null" => "literal keyword",
             _ => "keyword",
         };
     }

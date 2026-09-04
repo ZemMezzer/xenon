@@ -63,6 +63,27 @@ internal static class TypeResolver
             }
             case NamedTypeSyntax named:
             {
+                if (named.NameParts.Length == 1 && named.NameToken.Kind == SyntaxKind.AtomicKeyword)
+                {
+                    if (named.TypeArguments is not { } atomicArguments || atomicArguments.Arguments.Length != 1)
+                    {
+                        diagnostics.Report(named.TypeArguments?.LessToken.Location ?? named.NameToken.Location,
+                            "Core type 'atomic' requires exactly one type argument",
+                            DiagnosticIds.GenericArityMismatch);
+                        return BuiltinTypes.Error;
+                    }
+
+                    TypeSymbol element = ResolveCore(atomicArguments.Arguments[0], scope, diagnostics);
+                    if (TypeIdentity.AreSame(element, BuiltinTypes.Error)) return BuiltinTypes.Error;
+                    if (AtomicTypeRules.ValidateElement(element) is { } failure)
+                    {
+                        diagnostics.Report(atomicArguments.Arguments[0].NameToken.Location,
+                            failure.Message, failure.Id);
+                        return BuiltinTypes.Error;
+                    }
+                    return scope.TypeFactory.AtomicOf(element);
+                }
+
                 if (named.NameParts.Length == 1 && named.NameToken.Kind is
                     SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword)
                 {

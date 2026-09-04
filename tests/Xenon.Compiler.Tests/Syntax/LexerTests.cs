@@ -61,11 +61,44 @@ public sealed class LexerTests
     }
 
     [Fact]
+    public void Lexer_RecognizesAtomicAsCoreTypeKeyword()
+    {
+        LexedSource source = LexedSource.Lex(SourceText.From("atomic<int>"));
+
+        Assert.Empty(source.Diagnostics);
+        Assert.Equal(SyntaxKind.AtomicKeyword, source.Tokens[0].Kind);
+        Assert.Contains("atomic", SyntaxFacts.GetEditorKeywordTexts());
+    }
+
+    [Fact]
+    public void Lexer_RecognizesThreadLocalAsFieldModifierKeyword()
+    {
+        LexedSource source = LexedSource.Lex(SourceText.From("static threadlocal int Value;"));
+
+        Assert.Empty(source.Diagnostics);
+        Assert.Equal(SyntaxKind.StaticKeyword, source.Tokens[0].Kind);
+        Assert.Equal(SyntaxKind.ThreadLocalKeyword, source.Tokens[1].Kind);
+        Assert.Contains("threadlocal", SyntaxFacts.GetEditorKeywordTexts());
+    }
+
+    [Fact]
+    public void Lexer_DoesNotExposeMemoryOrderingAsSourceKeywords()
+    {
+        string[] futureOrderingNames =
+            ["MemoryOrder", "Relaxed", "Acquire", "Release", "AcqRel", "SeqCst", "Fence"];
+
+        foreach (string name in futureOrderingNames)
+            Assert.Equal(SyntaxKind.IdentifierToken, SyntaxFacts.GetKeywordKind(name));
+    }
+
+    [Fact]
     public void Lexer_UsesLongestOperatorMatch()
     {
-        const string source = "<<= >>= -> ++ -- == != <= >= && || += -= *= /= %= &= |= ^=";
+        const string source = "<-> --> <<= >>= -> ++ -- == != <= >= && || += -= *= /= %= &= |= ^=";
         SyntaxKind[] expected =
         [
+            SyntaxKind.SwapToken,
+            SyntaxKind.CompareExchangeArrowToken,
             SyntaxKind.LessLessEqualsToken,
             SyntaxKind.GreaterGreaterEqualsToken,
             SyntaxKind.ArrowToken,

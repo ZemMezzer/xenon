@@ -29,6 +29,7 @@ public sealed class OwnershipIntelligenceTests
                 public weak<Resource> Weak;
                 public storage<Resource> Slot;
                 public pin<Resource> Pinned;
+                public atomic<int> Atomic;
             }
             void HolderCompletion(Holder holder) { holder.; }
             void Test(unique<Resource> owned, shared<Resource> shared,
@@ -44,6 +45,9 @@ public sealed class OwnershipIntelligenceTests
                 unique<Resource> moved = move owned;
                 weak<Resource> observer = shared;
                 shared<Resource> locked = lock observer;
+                bool ready = true;
+                bool stopped = false;
+                Resource* missing = null;
                 destruct(slot);
                 Resource* raw = new Resource(1);
                 free(raw);
@@ -59,9 +63,15 @@ public sealed class OwnershipIntelligenceTests
         string[] tokenTypes = initialize.GetProperty("capabilities").GetProperty("semanticTokensProvider")
             .GetProperty("legend").GetProperty("tokenTypes").EnumerateArray()
             .Select(item => item.GetString()!).ToArray();
-        Assert.Equal("ownershipType", tokenTypes[16]);
-        Assert.Equal("valueExpression", tokenTypes[17]);
+        Assert.Equal("typeKeyword", tokenTypes[16]);
+        Assert.Equal("valueKeyword", tokenTypes[17]);
         Assert.Equal("lifetimeOperation", tokenTypes[18]);
+        Assert.Equal("controlKeyword", tokenTypes[19]);
+        Assert.Equal("declarationKeyword", tokenTypes[20]);
+        Assert.Equal("expressionKeyword", tokenTypes[21]);
+        Assert.Equal("baseTypeKeyword", tokenTypes[22]);
+        Assert.Equal("literalKeyword", tokenTypes[23]);
+        Assert.Equal(24, tokenTypes.Length);
         await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
         await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
         {
@@ -78,6 +88,7 @@ public sealed class OwnershipIntelligenceTests
                      ("Weak", "weak<Resource>"),
                      ("Slot", "storage<Resource>"),
                      ("Pinned", "pin<Resource>"),
+                     ("Atomic", "atomic<int>"),
                  })
         {
             JsonElement item = Assert.Single(holderCompletion.GetProperty("items").EnumerateArray().Where(candidate =>
@@ -94,22 +105,25 @@ public sealed class OwnershipIntelligenceTests
             DecodeTokens(source, tokensResponse.GetProperty("data"));
 
         Assert.True(tokens.Count(token => token.Text == "Resource" && token.Type == 1) >= 10);
-        foreach (string keyword in new[] { "unique", "shared", "weak", "storage", "pin" })
+        foreach (string keyword in new[] { "unique", "shared", "weak", "storage", "pin", "atomic" })
             Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 16),
-                $"Missing semantic ownership-type token '{keyword}'.");
+                $"Missing semantic type-forming keyword token '{keyword}'.");
         foreach (string keyword in new[] { "new", "move", "lock" })
             Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 17),
                 $"Missing semantic value-expression token '{keyword}'.");
         foreach (string keyword in new[] { "free", "destruct" })
             Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 18),
                 $"Missing semantic lifetime-operation token '{keyword}'.");
-        foreach (string keyword in new[] { "namespace", "struct", "return" })
-            Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 15),
-                $"Missing ordinary semantic keyword token '{keyword}'.");
-        Assert.Contains(tokens, token => token.Text == "int" && token.Type == 1);
+        foreach (string keyword in new[] { "namespace", "struct" })
+            Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 20),
+                $"Missing semantic declaration keyword token '{keyword}'.");
+        Assert.Contains(tokens, token => token.Text == "return" && token.Type == 19);
+        Assert.Contains(tokens, token => token.Text == "int" && token.Type == 22);
+        foreach (string keyword in new[] { "true", "false", "null" })
+            Assert.Contains(tokens, token => token.Text == keyword && token.Type == 23);
         Assert.Contains(tokens, token => token.Text == "public" && token.Type == 14);
         Assert.Contains(tokens, token => token.Text == "readonly" && token.Type == 14);
-        foreach (string field in new[] { "Owned", "Shared", "Weak", "Slot", "Pinned" })
+        foreach (string field in new[] { "Owned", "Shared", "Weak", "Slot", "Pinned", "Atomic" })
             Assert.Contains(tokens, token => token.Text == field && token.Type == 9);
         Assert.Contains(tokens, token => token.Text == "Count" && token.Type == 9);
         Assert.Contains(tokens, token => token.Text == "Use" && token.Type == 6);
@@ -149,6 +163,50 @@ public sealed class OwnershipIntelligenceTests
         JsonElement rename = await RequestAtAsync(session, "textDocument/rename", uri, source,
             projectedField, newName: "Total");
         Assert.True(rename.GetProperty("changes").GetProperty(uri).GetArrayLength() >= 4);
+    }
+
+    [Fact]
+    public async Task ConcurrencyTypesModifiersAndExpressionsHaveCompilerBackedEditorIdentity()
+    {
+        const string source = """
+            namespace App;
+            struct State
+            {
+                public static threadlocal atomic<int> Current;
+            }
+            void Update()
+            {
+                int snapshot = State.Current;
+                int replacement = snapshot + 1;
+                State.Current <-> replacement;
+                bool changed = State.Current : replacement --> snapshot;
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("concurrency.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, source);
+
+        int currentUse = source.IndexOf("State.Current;", StringComparison.Ordinal) + "State.".Length;
+        JsonElement currentHover = await RequestAtAsync(
+            session, "textDocument/hover", uri, source, currentUse);
+        Assert.Contains("public static threadlocal atomic<int> Current",
+            currentHover.GetProperty("contents").GetProperty("value").GetString());
+
+        int changedUse = source.IndexOf("changed =", StringComparison.Ordinal);
+        JsonElement changedHover = await RequestAtAsync(
+            session, "textDocument/hover", uri, source, changedUse);
+        Assert.Contains("bool changed",
+            changedHover.GetProperty("contents").GetProperty("value").GetString());
+
+        JsonElement tokensResponse = Result(await session.HandleRequestAsync(
+            "textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        IReadOnlyList<(string Text, int Type, int Modifiers)> tokens =
+            DecodeTokens(source, tokensResponse.GetProperty("data"));
+        Assert.Contains(tokens, token => token.Text == "threadlocal" && token.Type == 14);
+        Assert.Contains(tokens, token => token.Text == "atomic" && token.Type == 16);
+        Assert.True(tokens.Count(token => token.Text == "Current" && token.Type == 9) >= 4);
     }
 
     [Fact]

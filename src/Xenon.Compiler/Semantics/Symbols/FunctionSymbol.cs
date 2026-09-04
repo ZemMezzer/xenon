@@ -9,6 +9,8 @@ public sealed class FunctionSymbol : Symbol
     public bool HasStackArrays { get; internal set; }
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
+    public bool DelegatesToThisConstructor =>
+        Declaration is ConstructorDeclarationSyntax { HasThisInitializer: true };
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
     public ImmutableArray<ReferenceReturnOrigin> ReferenceReturnOrigins { get; private set; } = [];
     public ImmutableArray<SharedReturnOrigin> SharedReturnOrigins { get; private set; } = [];
@@ -174,6 +176,19 @@ public sealed class FunctionSymbol : Symbol
         IsOverride = declaration is DestructorDeclarationSyntax { IsOverride: true };
     }
 
+    internal FunctionSymbol(FieldSymbol threadLocalField)
+        : base($"__init_threadlocal_{threadLocalField.Name}", SymbolKind.Function,
+            threadLocalField.ContainingType)
+    {
+        FunctionKind = FunctionKind.ThreadLocalInitializer;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = [];
+        Declaration = threadLocalField.Declaration;
+        Accessibility = Accessibility.Private;
+        IsStatic = true;
+        ThreadLocalField = threadLocalField;
+    }
+
     internal FunctionSymbol(
         OwnershipTypeSymbol ownershipType,
         NamespaceSymbol containingNamespace,
@@ -221,6 +236,7 @@ public sealed class FunctionSymbol : Symbol
     public InterfaceIndexerSymbol? ContainingInterfaceIndexer => ContainingSymbol as InterfaceIndexerSymbol;
     public OwnershipTypeSymbol? OwnershipType { get; }
     public StorageTypeSymbol? StorageType { get; }
+    public FieldSymbol? ThreadLocalField { get; }
 
     public string FullName => FunctionKind switch
     {
@@ -230,6 +246,7 @@ public sealed class FunctionSymbol : Symbol
         FunctionKind.Method => $"{ContainingInterface!.FullName}.{Name}",
         FunctionKind.Constructor => ConstructorOverloadCount == 1 ? $"{ContainingType!.FullName}.__ctor" : $"{ContainingType!.FullName}.__ctor.{ConstructorOverload}",
         FunctionKind.InstanceInitializer => $"{ContainingType!.FullName}.__init_fields",
+        FunctionKind.ThreadLocalInitializer => $"{ContainingType!.FullName}.__init_threadlocal.{ThreadLocalField!.Name}",
         FunctionKind.Destructor => $"{ContainingType!.FullName}.__dtor",
         FunctionKind.DestructorGlue => $"{ContainingType!.FullName}.__destructor",
         FunctionKind.OwnershipDestructor => $"{ContainingNamespace.FullName}.{Name}",
@@ -270,8 +287,8 @@ public sealed class FunctionSymbol : Symbol
     public bool IsAccessor => ContainingProperty is not null || ContainingInterfaceProperty is not null ||
         ContainingIndexer is not null || ContainingInterfaceIndexer is not null;
 
-    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor;
-    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) && !IsAccessor;
+    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor;
+    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) && !IsAccessor;
     public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor;
     public override bool IsDefinition => Declaration switch
     {
@@ -280,6 +297,7 @@ public sealed class FunctionSymbol : Symbol
         ConstructorDeclarationSyntax => true,
         DestructorDeclarationSyntax => true,
         _ when FunctionKind == FunctionKind.DestructorGlue => true,
+        _ when FunctionKind == FunctionKind.ThreadLocalInitializer => true,
         _ when FunctionKind == FunctionKind.OwnershipDestructor => true,
         _ when FunctionKind == FunctionKind.StorageDestructor => true,
         PropertyAccessorDeclarationSyntax syntax => syntax.Body is not null,
