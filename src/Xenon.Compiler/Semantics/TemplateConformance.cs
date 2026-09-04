@@ -250,6 +250,8 @@ public sealed class TemplateConformanceMatcher
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) => left.Rank == right.Rank &&
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
+            (AtomicTypeSymbol left, AtomicTypeSymbol right) =>
+                TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
             (UniqueTypeSymbol left, UniqueTypeSymbol right) =>
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
             (SharedTypeSymbol left, SharedTypeSymbol right) =>
@@ -377,6 +379,8 @@ public sealed class TemplateConformanceMatcher
                 left.IsReadonly == right.IsReadonly && TypesMatch(left.ElementType, right.ElementType, template, concrete),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) =>
                 left.Rank == right.Rank && TypesMatch(left.ElementType, right.ElementType, template, concrete),
+            (AtomicTypeSymbol left, AtomicTypeSymbol right) =>
+                TypesMatch(left.ElementType, right.ElementType, template, concrete),
             (UniqueTypeSymbol left, UniqueTypeSymbol right) =>
                 TypesMatch(left.ElementType, right.ElementType, template, concrete),
             (SharedTypeSymbol left, SharedTypeSymbol right) =>

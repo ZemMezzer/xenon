@@ -82,9 +82,9 @@ internal sealed class GenericFunctionSpecializer
 
         var substitutions = definition.TypeParameters.Zip(typeArguments)
             .ToDictionary(pair => pair.First, pair => pair.Second);
-        TypeSymbol returnType = Substitute(definition.ReturnType, substitutions);
+        TypeSymbol returnType = Substitute(definition.ReturnType, substitutions, location);
         ImmutableArray<ParameterSymbol> parameters = definition.Parameters.Select(parameter =>
-            new ParameterSymbol(parameter.Name, Substitute(parameter.Type, substitutions), parameter.Ordinal,
+            new ParameterSymbol(parameter.Name, Substitute(parameter.Type, substitutions, location), parameter.Ordinal,
                 parameter.IsReadonly, declaration: parameter.Declaration)).ToImmutableArray();
         string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
         var specialized = new FunctionSymbol(name, definition.ContainingNamespace, returnType, parameters,
@@ -124,8 +124,9 @@ internal sealed class GenericFunctionSpecializer
     }
 
     private TypeSymbol Substitute(TypeSymbol type,
-        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions) =>
-        _structSpecializer.Substitute(type, substitutions);
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        TextLocation location) =>
+        _structSpecializer.Substitute(type, substitutions, location);
 
     private bool TryInfer(TypeSymbol pattern, TypeSymbol actual,
         IDictionary<GenericParameterSymbol, TypeSymbol> inferred)
@@ -149,6 +150,8 @@ internal sealed class GenericFunctionSpecializer
             (ReferenceTypeSymbol left, _) =>
                 TryInfer(left.ElementType, actual, inferred),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) when left.Rank == right.Rank =>
+                TryInfer(left.ElementType, right.ElementType, inferred),
+            (AtomicTypeSymbol left, AtomicTypeSymbol right) =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
             (UniqueTypeSymbol left, UniqueTypeSymbol right) =>
                 TryInfer(left.ElementType, right.ElementType, inferred),

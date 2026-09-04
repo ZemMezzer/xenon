@@ -91,6 +91,10 @@ internal sealed class LlvmTypeLayout : ITargetTypeLayout
     {
         if (type is StorageTypeSymbol storage)
             return AggregateLayout([GetLayout(storage.ElementType, building), _bool]);
+        if (type is AtomicTypeSymbol atomic)
+            return LlvmAtomicStorage.RequiresLock(atomic.ElementType)
+                ? AggregateLayout([_int8, GetLayout(atomic.ElementType, building)])
+                : GetLayout(atomic.ElementType, building);
         if (type is LifetimeModifierTypeSymbol modifier) return GetLayout(modifier.ElementType, building);
         if (type is EnumTypeSymbol enumeration) return GetLayout(enumeration.UnderlyingType, building);
         if (type is PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol) return _pointer;

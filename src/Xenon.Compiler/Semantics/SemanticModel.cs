@@ -687,6 +687,7 @@ public sealed class SemanticModel
                 case PointerTypeSymbol pointer: type = pointer.ElementType; continue;
                 case ReferenceTypeSymbol reference: type = reference.ElementType; continue;
                 case ArrayTypeSymbol array: type = array.ElementType; continue;
+                case AtomicTypeSymbol atomic: type = atomic.ElementType; continue;
                 case OwnershipTypeSymbol ownership: type = ownership.ElementType; continue;
                 case LifetimeModifierTypeSymbol modifier: type = modifier.ElementType; continue;
                 case StructTypeSymbol { GenericDefinition: { } definition }:
@@ -700,7 +701,8 @@ public sealed class SemanticModel
 
     private static bool IsLifetimeOrOwnershipModifierSyntax(SyntaxNode syntax) => syntax is
         NamedTypeSyntax { NameToken.Kind: SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or
-            SyntaxKind.WeakKeyword or SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword };
+            SyntaxKind.WeakKeyword or SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword or
+            SyntaxKind.AtomicKeyword };
 
     private sealed class ResolvedReferenceIdentityComparer :
         IEqualityComparer<(Symbol Symbol, SourceFileId File, TextSpan Span)>

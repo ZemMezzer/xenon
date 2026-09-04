@@ -63,6 +63,7 @@ internal sealed class Lexer
             '+' when Lookahead == '+' => SyntaxKind.PlusPlusToken,
             '+' when Lookahead == '=' => SyntaxKind.PlusEqualsToken,
             '+' => SyntaxKind.PlusToken,
+            '-' when Lookahead == '-' && Peek(2) == '>' => SyntaxKind.CompareExchangeArrowToken,
             '-' when Lookahead == '>' => SyntaxKind.ArrowToken,
             '-' when Lookahead == '-' => SyntaxKind.MinusMinusToken,
             '-' when Lookahead == '=' => SyntaxKind.MinusEqualsToken,
@@ -77,6 +78,7 @@ internal sealed class Lexer
             '=' => SyntaxKind.EqualsToken,
             '!' when Lookahead == '=' => SyntaxKind.BangEqualsToken,
             '!' => SyntaxKind.BangToken,
+            '<' when Lookahead == '-' && Peek(2) == '>' => SyntaxKind.SwapToken,
             '<' when Lookahead == '<' && Peek(2) == '=' => SyntaxKind.LessLessEqualsToken,
             '<' when Lookahead == '<' => SyntaxKind.LessLessToken,
             '<' when Lookahead == '=' => SyntaxKind.LessOrEqualsToken,
@@ -96,7 +98,8 @@ internal sealed class Lexer
             _ => SyntaxKind.BadToken,
         };
 
-        int width = kind is SyntaxKind.LessLessEqualsToken or SyntaxKind.GreaterGreaterEqualsToken
+        int width = kind is SyntaxKind.SwapToken or SyntaxKind.CompareExchangeArrowToken or
+            SyntaxKind.LessLessEqualsToken or SyntaxKind.GreaterGreaterEqualsToken
             ? 3
             : IsTwoCharacterToken(kind) ? 2 : 1;
 

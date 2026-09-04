@@ -382,6 +382,7 @@ internal sealed class GenericStructSpecializer
         PointerTypeSymbol pointer => _types.PointerTo(Substitute(pointer.ElementType, substitutions, origin), pointer.IsReadonly),
         ReferenceTypeSymbol reference => _types.ReferenceTo(Substitute(reference.ElementType, substitutions, origin), reference.IsReadonly),
         ArrayTypeSymbol array => _types.ArrayOf(Substitute(array.ElementType, substitutions, origin), array.Rank),
+        AtomicTypeSymbol atomic => SubstituteAtomic(atomic, substitutions, origin),
         UniqueTypeSymbol unique => SubstituteUnique(unique, substitutions, origin),
         SharedTypeSymbol shared => SubstituteOwnership(shared, substitutions, origin),
         WeakTypeSymbol weak => SubstituteOwnership(weak, substitutions, origin),
@@ -389,6 +390,16 @@ internal sealed class GenericStructSpecializer
         PinTypeSymbol pin => _types.PinOf(Substitute(pin.ElementType, substitutions, origin)),
         _ => type,
     };
+
+    private TypeSymbol SubstituteAtomic(AtomicTypeSymbol atomic,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
+    {
+        TypeSymbol element = Substitute(atomic.ElementType, substitutions, origin);
+        if (AtomicTypeRules.ValidateElement(element) is not { } failure) return _types.AtomicOf(element);
+        if (origin is { } location)
+            _diagnostics.Report(location, failure.Message, failure.Id);
+        return BuiltinTypes.Error;
+    }
 
     private TypeSymbol SubstituteUnique(UniqueTypeSymbol unique,
         IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)

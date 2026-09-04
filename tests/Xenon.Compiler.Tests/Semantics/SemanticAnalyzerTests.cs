@@ -3474,16 +3474,23 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Theory]
-    [InlineData("struct Data { public int X; } bool M(Data a, Data b) { return a == b; }")]
-    [InlineData("struct Data { public int X; } bool M(Data a, Data b) { return a != b; }")]
     [InlineData("interface I {} bool M(I a, I b) { return a == b; }")]
     [InlineData("void F() {} bool M() { return F() != F(); }")]
     [InlineData("bool M(int* a, float* b) { return a == b; }")]
-    [InlineData("bool M(int[] a, int[] b) { return a == b; }")]
     public void Analyzer_RejectsUnsupportedEquality(string source)
     {
         Compilation compilation = CreateCompilation("namespace Example; " + source);
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("binary operator", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("struct Data { public int X; } bool M(Data a, Data b) { return a == b; }")]
+    [InlineData("struct Data { public int X; } bool M(Data a, Data b) { return a != b; }")]
+    [InlineData("bool M(int[] a, int[] b) { return a == b; }")]
+    public void Analyzer_AcceptsValueStructAndArrayHandleEquality(string source)
+    {
+        Compilation compilation = CreateCompilation("namespace Example; " + source);
+        Assert.Empty(compilation.Diagnostics);
     }
 
     [Theory]

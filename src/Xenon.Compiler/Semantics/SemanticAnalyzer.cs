@@ -111,6 +111,7 @@ internal sealed class SemanticAnalyzer
             .ToDictionary(entry => entry.Symbol, entry => (entry.Body, entry.Scope));
         var genericSpecializer = new GenericFunctionSpecializer(genericDefinitions, _typeFactory,
             _diagnostics, _constants, _genericStructSpecializer!, _cancellationToken);
+        BindThreadLocalFieldInitializers(genericSpecializer);
         StabilizeConstructorReferenceSummaries();
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
         foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
@@ -487,7 +488,11 @@ internal sealed class SemanticAnalyzer
                 field.Declaration.Initializer is not null && _boundSpecializedStaticInitializers.Add(field)))
             {
                 changed = true;
-                BindStaticFieldInitializer(field, type, scope);
+                if (field.IsThreadLocal)
+                    BindThreadLocalFieldInitializer(field, scope, semanticInfo,
+                        genericFunctionSpecializer, functions.Add);
+                else
+                    BindStaticFieldInitializer(field, type, scope);
             }
         }
         return changed;
@@ -918,8 +923,38 @@ internal sealed class SemanticAnalyzer
         // Layout queries are safe only after every struct's fields and layout are known.
         foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in
             _structSymbols.Where(entry => !entry.Value.IsGenericDefinition))
-        foreach (FieldSymbol field in type.StaticFields.Where(field => field.Declaration.Initializer is not null))
+        foreach (FieldSymbol field in type.StaticFields.Where(field =>
+            !field.IsThreadLocal && field.Declaration.Initializer is not null))
             BindStaticFieldInitializer(field, type, _structScopes[declaration]);
+    }
+
+    private void BindThreadLocalFieldInitializers(GenericFunctionSpecializer genericFunctionSpecializer)
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in
+            _structSymbols.Where(entry => !entry.Value.IsGenericDefinition))
+        foreach (FieldSymbol field in type.StaticFields.Where(field =>
+            field.IsThreadLocal && field.Declaration.Initializer is not null))
+            BindThreadLocalFieldInitializer(field, _structScopes[declaration], _semanticInfo,
+                genericFunctionSpecializer, _synthesizedFunctions.Add);
+    }
+
+    private void BindThreadLocalFieldInitializer(
+        FieldSymbol field,
+        FileSymbolScope scope,
+        SemanticInfoStore semanticInfo,
+        GenericFunctionSpecializer genericFunctionSpecializer,
+        Action<BoundFunction> addFunction)
+    {
+        var initializerFunction = new FunctionSymbol(field);
+        var binder = new FunctionBodyBinder(initializerFunction, scope, _diagnostics, _constants,
+            semanticInfo, genericFunctionSpecializer, _cancellationToken);
+        if (binder.BindFieldInitializer(field) is not BoundExpression initializer)
+            return;
+        field.SetInitializer(initializer);
+        addFunction(new BoundFunction(initializerFunction,
+            new BoundBlockStatement([binder.CreateThreadLocalFieldInitializerStatement(field)])));
+        foreach (var entry in binder.ExpressionLocations)
+            _expressionLocations.TryAdd(entry.Key, entry.Value);
     }
 
     private void BindStaticFieldInitializer(FieldSymbol field, StructTypeSymbol type, FileSymbolScope scope)
@@ -935,7 +970,10 @@ internal sealed class SemanticAnalyzer
         if (status == ConstantFoldStatus.Invalid)
             _diagnostics.Report(syntax.IdentifierToken.Location, "static field initializers must be compile-time constants",
                 DiagnosticIds.ConstantValueRequired);
-        else if (TypeIdentity.AreSame(constantType, BuiltinTypes.Error) || !TypeFacts.CanAssign(field.Type, constantType))
+        else if (TypeIdentity.AreSame(constantType, BuiltinTypes.Error) ||
+                 !TypeFacts.CanAssign(
+                     field.Type is AtomicTypeSymbol atomic ? atomic.ElementType : field.Type,
+                     constantType))
             _diagnostics.Report(syntax.IdentifierToken.Location, $"cannot implicitly convert '{constantType.Name}' to '{field.Type.ToDisplayString()}'",
                 DiagnosticIds.TypeMismatch);
         else if (!IsSupportedStaticInitializer(field.Type, value))
@@ -1486,6 +1524,9 @@ internal sealed class SemanticAnalyzer
     }
 
     private static bool IsSupportedStaticInitializer(TypeSymbol type, object? value) =>
+        type is AtomicTypeSymbol atomic
+            ? IsSupportedStaticInitializer(atomic.ElementType, value)
+            :
         value is null ||
         (TypeIdentity.AreSame(type, BuiltinTypes.Bool) && value is bool) ||
         (type is PrimitiveTypeSymbol { IsInteger: true } && value is not bool) ||
@@ -2596,7 +2637,15 @@ internal sealed class SemanticAnalyzer
                 DiagnosticIds.UnsupportedNativeOwnershipType);
         }
 
-        if (function.ReturnType is StructTypeSymbol returnStruct)
+        if (TypeFacts.ExposesAtomicStorageToNativeAbi(function.ReturnType))
+        {
+            _diagnostics.Report(
+                declaration.ReturnType.NameToken.Location,
+                $"external ABI does not define a representation for type '{function.ReturnType.ToDisplayString()}' because it exposes atomic storage",
+                DiagnosticIds.UnsupportedNativeAtomicType);
+        }
+
+        else if (function.ReturnType is StructTypeSymbol returnStruct)
         {
             _diagnostics.Report(
                 declaration.ReturnType.NameToken.Location,
@@ -2621,6 +2670,13 @@ internal sealed class SemanticAnalyzer
                     declaration.Parameters[index].Type.NameToken.Location,
                     $"external ABI does not support ownership type '{parameterOwnership.OwnershipKind}'; use a raw pointer instead",
                     DiagnosticIds.UnsupportedNativeOwnershipType);
+            }
+            else if (TypeFacts.ExposesAtomicStorageToNativeAbi(parameterType))
+            {
+                _diagnostics.Report(
+                    declaration.Parameters[index].Type.NameToken.Location,
+                    $"external ABI does not define a representation for type '{parameterType.ToDisplayString()}' because it exposes atomic storage",
+                    DiagnosticIds.UnsupportedNativeAtomicType);
             }
             else if (parameterType is StructTypeSymbol parameterStruct)
             {
