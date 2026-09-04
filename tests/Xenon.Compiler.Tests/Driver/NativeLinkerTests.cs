@@ -21,6 +21,16 @@ public sealed class NativeLinkerTests
     [DllImport("kernel32.dll")]
     private static extern uint SetErrorMode(uint mode);
 
+    [DllImport("/usr/lib/system/libsystem_pthread.dylib", EntryPoint = "pthread_create")]
+    private static extern int MacOsPthreadCreate(
+        out nint thread,
+        nint attributes,
+        nint startRoutine,
+        nint argument);
+
+    [DllImport("/usr/lib/system/libsystem_pthread.dylib", EntryPoint = "pthread_join")]
+    private static extern int MacOsPthreadJoin(nint thread, out nint result);
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int AddDelegate(int left, int right);
 
@@ -534,6 +544,7 @@ public sealed class NativeLinkerTests
             {
                 public static atomic<int> Initializations;
                 public static atomic<int> Destructions;
+                public static atomic<int> OwnerResult;
                 public static int Trace;
             }
 
@@ -574,6 +585,12 @@ public sealed class NativeLinkerTests
             export int Initializations() { return Counters.Initializations; }
             export int Destructions() { return Counters.Destructions; }
             export int Trace() { return Counters.Trace; }
+            export void* NativeOwnerThread(void* argument)
+            {
+                Counters.OwnerResult = State.TouchOwners();
+                return argument;
+            }
+            export int OwnerResult() { return Counters.OwnerResult; }
             """, "thread-local-runtime.xe"));
         string objectPath = Path.Combine(directory,
             "thread-local-runtime" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
@@ -589,6 +606,8 @@ public sealed class NativeLinkerTests
             "ThreadLocalRuntime_Initializations",
             "ThreadLocalRuntime_Destructions",
             "ThreadLocalRuntime_Trace",
+            "ThreadLocalRuntime_NativeOwnerThread",
+            "ThreadLocalRuntime_OwnerResult",
         ];
 
         try
@@ -636,14 +655,32 @@ public sealed class NativeLinkerTests
                 untouched.Join();
                 Assert.Equal(3, initializations());
 
-                int owners = 0;
-                var ownerThread = new Thread(() => owners = touchOwners());
-                ownerThread.Start();
-                ownerThread.Join();
+                int owners;
+                if (OperatingSystem.IsMacOS())
+                {
+                    // CoreCLR implements managed Thread with a detached pthread on Unix, so its
+                    // Join does not synchronize the completion of every pthread TSD destructor.
+                    // Use a joinable native pthread to test the native thread-exit contract.
+                    nint startRoutine = NativeLibrary.GetExport(handle, exports[6]);
+                    Assert.Equal(0, MacOsPthreadCreate(
+                        out nint ownerThread,
+                        nint.Zero,
+                        startRoutine,
+                        nint.Zero));
+                    Assert.Equal(0, MacOsPthreadJoin(ownerThread, out _));
+                    ParameterlessIntDelegate ownerResult =
+                        LoadDelegate<ParameterlessIntDelegate>(handle, exports[7]);
+                    owners = ownerResult();
+                }
+                else
+                {
+                    owners = 0;
+                    var ownerThread = new Thread(() => owners = touchOwners());
+                    ownerThread.Start();
+                    ownerThread.Join();
+                }
+
                 Assert.Equal(12, owners);
-                // CoreCLR's Unix PAL uses a detached pthread and may signal Thread.Join from its
-                // own TSD destructor before pthread runs destructors registered under other keys.
-                // Keep the module loaded until Xenon's thread-exit callback has completed.
                 Assert.True(SpinWait.SpinUntil(
                     () => destructions() == 2,
                     TimeSpan.FromSeconds(10)),
