@@ -641,7 +641,13 @@ public sealed class NativeLinkerTests
                 ownerThread.Start();
                 ownerThread.Join();
                 Assert.Equal(12, owners);
-                Assert.Equal(2, destructions());
+                // CoreCLR's Unix PAL uses a detached pthread and may signal Thread.Join from its
+                // own TSD destructor before pthread runs destructors registered under other keys.
+                // Keep the module loaded until Xenon's thread-exit callback has completed.
+                Assert.True(SpinWait.SpinUntil(
+                    () => destructions() == 2,
+                    TimeSpan.FromSeconds(10)),
+                    $"Expected 2 TLS destructions, but observed {destructions()}.");
                 Assert.Equal(21, trace());
             }
             finally
