@@ -413,6 +413,10 @@ public sealed class FieldSymbol : Symbol
 
     public bool IsStatic { get; }
 
+    public bool IsThreadLocal => Declaration.IsThreadLocal;
+
+    public bool HasInitializer => Declaration.Initializer is not null;
+
     public bool IsReadonly { get; }
 
     public object? ConstantValue { get; private set; }

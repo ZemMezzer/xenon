@@ -5,7 +5,8 @@ namespace Xenon.Driver;
 public sealed record NativeLinkOptions(
     IReadOnlyList<string>? Libraries = null,
     IReadOnlyList<string>? LibraryPaths = null,
-    IReadOnlyList<string>? ExportedSymbols = null);
+    IReadOnlyList<string>? ExportedSymbols = null,
+    bool RequiresThreadingRuntime = false);
 
 public sealed record LinkedExecutable(string Path, string LinkerPath)
 {
@@ -289,6 +290,11 @@ public sealed class NativeLinker
         foreach (string library in options.Libraries ?? [])
         {
             arguments.Add(GetUnixLibraryArgument(library));
+        }
+
+        if (options.RequiresThreadingRuntime)
+        {
+            arguments.Add("-pthread");
         }
 
         arguments.Add("-o");

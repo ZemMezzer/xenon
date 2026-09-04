@@ -125,11 +125,38 @@ public sealed record BoundBinaryExpression(
 public sealed record BoundAssignmentExpression(
     BoundExpression Target,
     SyntaxKind OperatorKind,
-    BoundExpression Expression) : BoundExpression(Target.Type)
+    BoundExpression Expression) : BoundExpression(
+        Target.Type is AtomicTypeSymbol atomic ? atomic.ElementType : Target.Type)
 {
     public override BoundKind Kind => BoundKind.AssignmentExpression;
     public bool IsInitialization { get; init; }
-    public bool ReinitializesMovedPlace { get; init; }
+    public MovedPlaceReinitializationState MovedPlaceReinitialization { get; init; }
+    public bool ReinitializesMovedPlace =>
+        MovedPlaceReinitialization != MovedPlaceReinitializationState.Live;
+    public FieldSymbol? ConstructorField { get; init; }
+    public bool RequiresRuntimeInitializationCheck { get; init; }
+}
+
+public enum MovedPlaceReinitializationState
+{
+    Live,
+    DefinitelyMoved,
+    MaybeMoved,
+}
+
+public sealed record BoundCompareExchangeExpression(
+    BoundExpression Target,
+    BoundExpression Expected,
+    BoundExpression Desired) : BoundExpression(BuiltinTypes.Bool)
+{
+    public override BoundKind Kind => BoundKind.CompareExchangeExpression;
+}
+
+public sealed record BoundSwapExpression(
+    BoundExpression Left,
+    BoundExpression Right) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.SwapExpression;
 }
 
 public sealed record BoundCompoundAccessorAssignmentExpression(

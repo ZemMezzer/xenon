@@ -2180,6 +2180,46 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_ConditionallyMovedReassignmentUsesExistingCleanupActivityFlag()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource {}
+            void Consume(shared<Resource> value) {}
+            void Maybe(bool take)
+            {
+                shared<Resource> value = new Resource();
+                if (take) Consume(move value);
+                value = new Resource();
+            }
+            void Definite(bool take)
+            {
+                shared<Resource> value = new Resource();
+                if (take) Consume(move value);
+                else Consume(move value);
+                value = new Resource();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), "conditional-move-reinitialization");
+        string Body(string name)
+        {
+            string symbol = ManagedSymbol("conditional-move-reinitialization", $"Example.{name}", "function");
+            int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"missing function {name}");
+            int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+            Assert.True(end > start, $"unterminated function {name}");
+            return ir[start..end];
+        }
+
+        Assert.Contains("local.destructor.active", Body("Maybe"), StringComparison.Ordinal);
+        Assert.Contains("local.destroy", Body("Maybe"), StringComparison.Ordinal);
+        Assert.DoesNotContain("local.destructor.active", Body("Definite"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_UnifiedBorrowIdentityAddsNoRuntimeBorrowRepresentation()
     {
         Compilation compilation = CreateCompilation("""

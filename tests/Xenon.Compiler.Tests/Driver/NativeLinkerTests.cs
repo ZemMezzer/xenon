@@ -28,7 +28,46 @@ public sealed class NativeLinkerTests
     private delegate float SumVectorDelegate(ref NativeVector2 value);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void FloatVoidDelegate(float value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int FloatPairIntDelegate(float expected, float desired);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void DoubleVoidDelegate(double value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int DoublePairIntDelegate(double expected, double desired);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate nint AddressDelegate(nint value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate nint ParameterlessAddressDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate nint Int32AddressDelegate(int value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void AddressVoidDelegate(nint value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int AddressIntDelegate(nint value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int TwoAddressIntDelegate(nint first, nint second);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int ParameterlessIntDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ParameterlessVoidDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void Int32VoidDelegate(int value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int Int32IntDelegate(int value);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeVector2
@@ -336,6 +375,1986 @@ public sealed class NativeLinkerTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_UninitializedLockBackedAtomicsAndAtomicFieldsPreserveLifetimes(int optimization)
+    {
+        const int workerCount = 8;
+        const int iterationsPerWorker = 1_000;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace AtomicInitializationRuntime;
+
+            struct Counters
+            {
+                public static atomic<int> Destroyed;
+                public static atomic<int> Failures;
+            }
+
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource() { Counters.Destroyed++; }
+            }
+
+            struct Snapshot
+            {
+                public int First;
+                public int Second;
+                public int Third;
+                public int Fourth;
+            }
+
+            struct AtomicHolder
+            {
+                public atomic<shared<Resource>> Owner;
+                public AtomicHolder(shared<Resource> owner) { Owner = owner; }
+            }
+
+            struct Nested
+            {
+                public AtomicHolder Inner;
+                public Nested(shared<Resource> owner) { Inner = AtomicHolder(owner); }
+            }
+
+            export void Reset()
+            {
+                Counters.Destroyed = 0;
+                Counters.Failures = 0;
+            }
+
+            export void Exercise(int worker, int iterations)
+            {
+                for (int iteration = 0; iteration < iterations; iteration++)
+                {
+                    int token = worker * iterations + iteration + 1;
+                    {
+                        atomic<Snapshot> value;
+                        value = Snapshot { token, token, token, token };
+                        Snapshot observed = value;
+                        if (observed.First != token || observed.Second != token ||
+                            observed.Third != token || observed.Fourth != token)
+                            Counters.Failures++;
+                    }
+                    {
+                        shared<Resource> owner = new Resource(token);
+
+                        atomic<shared<Resource>> strong;
+                        strong = owner;
+                        shared<Resource> strongSnapshot = strong;
+                        if (strongSnapshot == null || strongSnapshot->Id != token)
+                            Counters.Failures++;
+
+                        weak<Resource> observer = owner;
+                        atomic<weak<Resource>> weakSlot;
+                        weakSlot = observer;
+                        weak<Resource> weakSnapshot = weakSlot;
+                        shared<Resource> upgraded = lock weakSnapshot;
+                        if (upgraded == null || upgraded->Id != token)
+                            Counters.Failures++;
+
+                        Nested nested = Nested(owner);
+                        shared<Resource> nestedSnapshot = nested.Inner.Owner;
+                        if (nestedSnapshot == null || nestedSnapshot->Id != token)
+                            Counters.Failures++;
+                    }
+                }
+            }
+
+            export int Destroyed() { return Counters.Destroyed; }
+            export int Failures() { return Counters.Failures; }
+            """, "atomic-initialization-runtime.xe"));
+        string objectPath = Path.Combine(directory,
+            "atomic-initialization-runtime" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "atomic-initialization-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "atomic-initialization-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "AtomicInitializationRuntime_Reset",
+            "AtomicInitializationRuntime_Exercise",
+            "AtomicInitializationRuntime_Destroyed",
+            "AtomicInitializationRuntime_Failures",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "atomic-initialization-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path, libraryPath, target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports), importLibraryPath);
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                ParameterlessVoidDelegate reset = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[0]);
+                AddDelegate exercise = LoadDelegate<AddDelegate>(handle, exports[1]);
+                ParameterlessIntDelegate destroyed = LoadDelegate<ParameterlessIntDelegate>(handle, exports[2]);
+                ParameterlessIntDelegate failures = LoadDelegate<ParameterlessIntDelegate>(handle, exports[3]);
+
+                reset();
+                RunParallel(workerCount, worker => exercise(worker, iterationsPerWorker));
+                Assert.Equal(0, failures());
+                Assert.Equal(workerCount * iterationsPerWorker, destroyed());
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ThreadLocalStateIsIsolatedAndOwnedValuesDieAtNativeThreadExit(int optimization)
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace ThreadLocalRuntime;
+
+            struct Counters
+            {
+                public static atomic<int> Initializations;
+                public static atomic<int> Destructions;
+                public static int Trace;
+            }
+
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource()
+                {
+                    Counters.Trace = Counters.Trace * 10 + Id;
+                    Counters.Destructions++;
+                }
+            }
+
+            int InitializeValue()
+            {
+                Counters.Initializations++;
+                return 41;
+            }
+
+            struct State
+            {
+                public static threadlocal int Value = InitializeValue();
+                private static threadlocal unique<Resource> First = new Resource(1);
+                private static threadlocal unique<Resource> Second = new Resource(2);
+
+                public static int TouchOwners()
+                {
+                    int first = State.First->Id;
+                    int second = State.Second->Id;
+                    return first * 10 + second;
+                }
+            }
+
+            export int Read() { return State.Value; }
+            export void Write(int value) { State.Value = value; }
+            export int TouchOwners() { return State.TouchOwners(); }
+            export int Initializations() { return Counters.Initializations; }
+            export int Destructions() { return Counters.Destructions; }
+            export int Trace() { return Counters.Trace; }
+            """, "thread-local-runtime.xe"));
+        string objectPath = Path.Combine(directory,
+            "thread-local-runtime" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "thread-local-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "thread-local-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "ThreadLocalRuntime_Read",
+            "ThreadLocalRuntime_Write",
+            "ThreadLocalRuntime_TouchOwners",
+            "ThreadLocalRuntime_Initializations",
+            "ThreadLocalRuntime_Destructions",
+            "ThreadLocalRuntime_Trace",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "thread-local-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path, libraryPath, target.Triple,
+                new NativeLinkOptions(
+                    ExportedSymbols: exports,
+                    RequiresThreadingRuntime:
+                        LlvmIrGenerator.RequiresNativeThreadingRuntime(compilation)),
+                importLibraryPath);
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                ParameterlessIntDelegate read = LoadDelegate<ParameterlessIntDelegate>(handle, exports[0]);
+                Int32VoidDelegate write = LoadDelegate<Int32VoidDelegate>(handle, exports[1]);
+                ParameterlessIntDelegate touchOwners = LoadDelegate<ParameterlessIntDelegate>(handle, exports[2]);
+                ParameterlessIntDelegate initializations = LoadDelegate<ParameterlessIntDelegate>(handle, exports[3]);
+                ParameterlessIntDelegate destructions = LoadDelegate<ParameterlessIntDelegate>(handle, exports[4]);
+                ParameterlessIntDelegate trace = LoadDelegate<ParameterlessIntDelegate>(handle, exports[5]);
+
+                Assert.Equal(41, read());
+                write(99);
+                int[] before = new int[2];
+                int[] after = new int[2];
+                Thread[] workers = Enumerable.Range(0, 2).Select(index => new Thread(() =>
+                {
+                    before[index] = read();
+                    write(100 + index);
+                    after[index] = read();
+                })).ToArray();
+                foreach (Thread worker in workers) worker.Start();
+                foreach (Thread worker in workers) worker.Join();
+
+                Assert.Equal([41, 41], before);
+                Assert.Equal([100, 101], after);
+                Assert.Equal(99, read());
+                Assert.Equal(3, initializations());
+
+                var untouched = new Thread(() => { });
+                untouched.Start();
+                untouched.Join();
+                Assert.Equal(3, initializations());
+
+                int owners = 0;
+                var ownerThread = new Thread(() => owners = touchOwners());
+                ownerThread.Start();
+                ownerThread.Join();
+                Assert.Equal(12, owners);
+                Assert.Equal(2, destructions());
+                Assert.Equal(21, trace());
+            }
+            finally
+            {
+                // Every native worker that initialized destructible TLS is joined above. Keep this
+                // ordering: the module owns the callbacks that run when those threads terminate.
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_BuiltinAllocationIsSafeAcrossNativeThreads(int optimization)
+    {
+        const int workerCount = 8;
+        const int iterations = 2_000;
+        const int crossThreadAllocationsPerWorker = 256;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace ConcurrentAllocationRuntime;
+
+            struct Counters
+            {
+                public static atomic<int> Created;
+                public static atomic<int> Destroyed;
+                public static atomic<int> Failures;
+            }
+
+            int MarkCreated()
+            {
+                Counters.Created++;
+                return 1;
+            }
+
+            struct Item
+            {
+                public int Marker = MarkCreated();
+                public int Worker;
+                public int Sequence;
+
+                public Item(int worker, int sequence)
+                {
+                    Worker = worker;
+                    Sequence = sequence;
+                }
+
+                public ~Item() { Counters.Destroyed++; }
+            }
+
+            void Check(bool condition)
+            {
+                if (!condition) Counters.Failures++;
+            }
+
+            export void Reset()
+            {
+                Counters.Created = 0;
+                Counters.Destroyed = 0;
+                Counters.Failures = 0;
+            }
+
+            export int Exercise(int worker, int iterations)
+            {
+                for (int iteration = 0; iteration < iterations; iteration++)
+                {
+                    Item* raw = new Item(worker, iteration);
+                    Check(raw->Marker == 1 && raw->Worker == worker && raw->Sequence == iteration);
+                    free(raw);
+
+                    int length = (iteration & 15) + 1;
+                    Item[] items = new Item[length];
+                    for (int index = 0; index < length; index++)
+                    {
+                        Check(items[index].Marker == 1);
+                        items[index].Worker = worker;
+                        items[index].Sequence = iteration + index;
+                        Check(items[index].Worker == worker && items[index].Sequence == iteration + index);
+                    }
+                    free(items);
+
+                    int[] values = new int[length];
+                    Check(values[0] == 0 && values[length - 1] == 0);
+                    for (int index = 0; index < length; index++) values[index] = worker + iteration + index;
+                    Check(values[length - 1] == worker + iteration + length - 1);
+                    free(values);
+
+                    {
+                        unique<Item> owned = new Item(worker, iteration);
+                        Check(owned->Marker == 1 && owned->Worker == worker);
+                    }
+
+                    {
+                        unique<int[]> owned = new int[length];
+                        owned[length - 1] = worker;
+                        Check(owned[length - 1] == worker);
+                    }
+
+                    {
+                        shared<Item> owner = new Item(worker, iteration);
+                        weak<Item> observer = owner;
+                        shared<Item> snapshot = lock observer;
+                        Check(snapshot != null && snapshot->Worker == worker && snapshot->Sequence == iteration);
+                    }
+                }
+                return Counters.Failures;
+            }
+
+            export Item* Allocate(int token) { return new Item(token, token); }
+            export void Release(Item* value) { free(value); }
+            export int Created() { return Counters.Created; }
+            export int Destroyed() { return Counters.Destroyed; }
+            export int Failures() { return Counters.Failures; }
+            """, "concurrent-allocation-runtime.xe"));
+        string objectPath = Path.Combine(directory,
+            "concurrent-allocation-runtime" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "concurrent-allocation-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "concurrent-allocation-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "ConcurrentAllocationRuntime_Reset",
+            "ConcurrentAllocationRuntime_Exercise",
+            "ConcurrentAllocationRuntime_Allocate",
+            "ConcurrentAllocationRuntime_Release",
+            "ConcurrentAllocationRuntime_Created",
+            "ConcurrentAllocationRuntime_Destroyed",
+            "ConcurrentAllocationRuntime_Failures",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "concurrent-allocation-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path, libraryPath, target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports), importLibraryPath);
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                ParameterlessVoidDelegate reset = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[0]);
+                AddDelegate exercise = LoadDelegate<AddDelegate>(handle, exports[1]);
+                Int32AddressDelegate allocate = LoadDelegate<Int32AddressDelegate>(handle, exports[2]);
+                AddressVoidDelegate release = LoadDelegate<AddressVoidDelegate>(handle, exports[3]);
+                ParameterlessIntDelegate created = LoadDelegate<ParameterlessIntDelegate>(handle, exports[4]);
+                ParameterlessIntDelegate destroyed = LoadDelegate<ParameterlessIntDelegate>(handle, exports[5]);
+                ParameterlessIntDelegate failures = LoadDelegate<ParameterlessIntDelegate>(handle, exports[6]);
+
+                reset();
+                RunParallel(workerCount, worker => Assert.Equal(0, exercise(worker, iterations)));
+                Assert.Equal(0, failures());
+
+                var allocations = new nint[workerCount, crossThreadAllocationsPerWorker];
+                RunParallel(workerCount, worker =>
+                {
+                    for (int index = 0; index < crossThreadAllocationsPerWorker; index++)
+                        allocations[worker, index] = allocate(worker * crossThreadAllocationsPerWorker + index);
+                });
+                RunParallel(workerCount, worker =>
+                {
+                    int source = (worker + 1) % workerCount;
+                    for (int index = 0; index < crossThreadAllocationsPerWorker; index++)
+                        release(allocations[source, index]);
+                });
+
+                int completeCycles = iterations / 16;
+                int remainder = iterations % 16;
+                int arrayElementsPerWorker = completeCycles * 136 + remainder * (remainder + 1) / 2;
+                int expected = workerCount * (arrayElementsPerWorker + iterations * 3) +
+                    workerCount * crossThreadAllocationsPerWorker;
+                Assert.Equal(expected, created());
+                Assert.Equal(expected, destroyed());
+                Assert.Equal(0, failures());
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ConcurrentOwnershipRetainReleaseAndWeakUpgradeAreSafe(int optimization)
+    {
+        const int workerCount = 8;
+        const int iterationsPerWorker = 25_000;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace Concurrency;
+
+            struct State
+            {
+                public static shared<Resource> Strong;
+                public static weak<Resource> Observer;
+                public static int Destroyed;
+            }
+
+            struct Resource
+            {
+                public int Marker;
+                public Resource(int marker) { Marker = marker; }
+                public ~Resource() { State.Destroyed++; }
+            }
+
+            export void Initialize()
+            {
+                shared<Resource> value = new Resource(42);
+                State.Strong = value;
+                State.Observer = value;
+            }
+
+            export int CopyShared()
+            {
+                shared<Resource> local = State.Strong;
+                return local->Marker;
+            }
+
+            export int CopyWeakAndLock()
+            {
+                weak<Resource> local = State.Observer;
+                shared<Resource> strong = lock local;
+                if (strong == null) return 0;
+                return strong->Marker;
+            }
+
+            export void ReleaseStrong() { State.Strong = null; }
+            export int ReadDestroyed() { return State.Destroyed; }
+
+            export void ReleaseWeak()
+            {
+                shared<Resource> empty = null;
+                State.Observer = empty;
+            }
+            """, "ownership-concurrency.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"ownership-concurrency{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "ownership-concurrency", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "ownership-concurrency", "debug", target.Triple);
+        string[] exports =
+        [
+            "Concurrency_Initialize",
+            "Concurrency_CopyShared",
+            "Concurrency_CopyWeakAndLock",
+            "Concurrency_ReleaseStrong",
+            "Concurrency_ReadDestroyed",
+            "Concurrency_ReleaseWeak",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "ownership-concurrency");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                ParameterlessVoidDelegate initialize = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[0]);
+                ParameterlessIntDelegate copyShared = LoadDelegate<ParameterlessIntDelegate>(handle, exports[1]);
+                ParameterlessIntDelegate copyWeakAndLock = LoadDelegate<ParameterlessIntDelegate>(handle, exports[2]);
+                ParameterlessVoidDelegate releaseStrong = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[3]);
+                ParameterlessIntDelegate readDestroyed = LoadDelegate<ParameterlessIntDelegate>(handle, exports[4]);
+                ParameterlessVoidDelegate releaseWeak = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[5]);
+
+                initialize();
+
+                Task[] sharedWorkers = Enumerable.Range(0, workerCount).Select(_ => Task.Run(() =>
+                {
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                        Assert.Equal(42, copyShared());
+                })).ToArray();
+                Task.WaitAll(sharedWorkers);
+
+                using var ready = new CountdownEvent(workerCount);
+                using var gate = new ManualResetEventSlim();
+                int completedAttempts = 0;
+                Task[] weakWorkers = Enumerable.Range(0, workerCount).Select(_ => Task.Run(() =>
+                {
+                    ready.Signal();
+                    gate.Wait();
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                    {
+                        int result = copyWeakAndLock();
+                        Assert.True(result is 0 or 42, $"Unexpected weak-lock result: {result}");
+                        Interlocked.Increment(ref completedAttempts);
+                    }
+                })).ToArray();
+
+                ready.Wait();
+                gate.Set();
+                Assert.True(SpinWait.SpinUntil(
+                    () => Volatile.Read(ref completedAttempts) >= 1_000,
+                    TimeSpan.FromSeconds(10)));
+                releaseStrong();
+                Task.WaitAll(weakWorkers);
+
+                Assert.Equal(1, readDestroyed());
+                for (int iteration = 0; iteration < 1_000; iteration++)
+                    Assert.Equal(0, copyWeakAndLock());
+                releaseWeak();
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_PrimitiveAtomicRmwIsIndivisibleAcrossNativeThreads(int optimization)
+    {
+        const int workerCount = 8;
+        const int iterationsPerWorker = 10_000;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace PrimitiveAtomics;
+
+            struct State
+            {
+                public static atomic<int> Counter;
+                public static atomic<int> Bits;
+            }
+
+            export void ResetCounter(int value) { State.Counter = value; }
+            export int ReadCounter() { return State.Counter; }
+            export int PostIncrement() { return State.Counter++; }
+            export int PreIncrement() { return ++State.Counter; }
+            export void AddTwo() { State.Counter += 2; }
+            export void SubtractOne() { State.Counter -= 1; }
+            export void ResetBits(int value) { State.Bits = value; }
+            export int ReadBits() { return State.Bits; }
+            export void OrBits(int value) { State.Bits |= value; }
+            export void AndBits(int value) { State.Bits &= value; }
+            export void XorBits(int value) { State.Bits ^= value; }
+            """, "primitive-atomics.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"primitive-atomics{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "primitive-atomics", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "primitive-atomics", "debug", target.Triple);
+        string[] exports =
+        [
+            "PrimitiveAtomics_ResetCounter",
+            "PrimitiveAtomics_ReadCounter",
+            "PrimitiveAtomics_PostIncrement",
+            "PrimitiveAtomics_PreIncrement",
+            "PrimitiveAtomics_AddTwo",
+            "PrimitiveAtomics_SubtractOne",
+            "PrimitiveAtomics_ResetBits",
+            "PrimitiveAtomics_ReadBits",
+            "PrimitiveAtomics_OrBits",
+            "PrimitiveAtomics_AndBits",
+            "PrimitiveAtomics_XorBits",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "primitive-atomics");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                Int32VoidDelegate resetCounter = LoadDelegate<Int32VoidDelegate>(handle, exports[0]);
+                ParameterlessIntDelegate readCounter = LoadDelegate<ParameterlessIntDelegate>(handle, exports[1]);
+                ParameterlessIntDelegate postIncrement = LoadDelegate<ParameterlessIntDelegate>(handle, exports[2]);
+                ParameterlessIntDelegate preIncrement = LoadDelegate<ParameterlessIntDelegate>(handle, exports[3]);
+                ParameterlessVoidDelegate addTwo = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[4]);
+                ParameterlessVoidDelegate subtractOne = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[5]);
+                Int32VoidDelegate resetBits = LoadDelegate<Int32VoidDelegate>(handle, exports[6]);
+                ParameterlessIntDelegate readBits = LoadDelegate<ParameterlessIntDelegate>(handle, exports[7]);
+                Int32VoidDelegate orBits = LoadDelegate<Int32VoidDelegate>(handle, exports[8]);
+                Int32VoidDelegate andBits = LoadDelegate<Int32VoidDelegate>(handle, exports[9]);
+                Int32VoidDelegate xorBits = LoadDelegate<Int32VoidDelegate>(handle, exports[10]);
+
+                resetCounter(40);
+                Assert.Equal(40, postIncrement());
+                Assert.Equal(42, preIncrement());
+
+                resetCounter(0);
+                RunParallel(workerCount, _ =>
+                {
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                    {
+                        postIncrement();
+                        addTwo();
+                        subtractOne();
+                    }
+                });
+                Assert.Equal(workerCount * iterationsPerWorker * 2, readCounter());
+
+                const int firstSentinel = 0x13579bdf;
+                const int secondSentinel = 0x2468ace0;
+                resetCounter(firstSentinel);
+                RunParallel(workerCount, worker =>
+                {
+                    if ((worker & 1) == 0)
+                    {
+                        for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                            resetCounter((iteration & 1) == 0 ? firstSentinel : secondSentinel);
+                        return;
+                    }
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                    {
+                        int observed = readCounter();
+                        Assert.True(observed is firstSentinel or secondSentinel,
+                            $"Observed torn atomic write: 0x{observed:x8}");
+                    }
+                });
+
+                resetBits(0);
+                RunParallel(workerCount, worker =>
+                {
+                    int bit = 1 << worker;
+                    for (int iteration = 0; iteration < 1_001; iteration++) orBits(bit);
+                });
+                Assert.Equal(0xff, readBits());
+
+                resetBits(-1);
+                RunParallel(workerCount, worker => andBits(~(1 << worker)));
+                Assert.Equal(~0xff, readBits());
+
+                resetBits(0);
+                RunParallel(workerCount, worker =>
+                {
+                    int bit = 1 << worker;
+                    for (int iteration = 0; iteration < 1_001; iteration++) xorBits(bit);
+                });
+                Assert.Equal(0xff, readBits());
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_SwapPreservesMoveOnlyValuesAndUsesAtomicExchange(int optimization)
+    {
+        const int workerCount = 8;
+        const int iterationsPerWorker = 10_000;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace SwapRuntime;
+
+            struct State
+            {
+                public static int Trace;
+                public static atomic<int> Current;
+            }
+
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource() { State.Trace = State.Trace * 10 + Id; }
+            }
+
+            export int OrdinarySwap()
+            {
+                int first = 10;
+                int second = 20;
+                first <-> second;
+                return first * 100 + second;
+            }
+
+            export int UniqueSwap()
+            {
+                State.Trace = 0;
+                {
+                    unique<Resource> first = new Resource(1);
+                    unique<Resource> second = new Resource(2);
+                    first <-> second;
+                }
+                return State.Trace;
+            }
+
+            export void ResetAtomic(int value) { State.Current = value; }
+            export int ReadAtomic() { return State.Current; }
+            export int Exchange(int replacement)
+            {
+                State.Current <-> replacement;
+                return replacement;
+            }
+            export int ExchangeSymmetric(int replacement)
+            {
+                replacement <-> State.Current;
+                return replacement;
+            }
+            """, "swap-runtime.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"swap-runtime{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "swap-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "swap-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "SwapRuntime_OrdinarySwap",
+            "SwapRuntime_UniqueSwap",
+            "SwapRuntime_ResetAtomic",
+            "SwapRuntime_ReadAtomic",
+            "SwapRuntime_Exchange",
+            "SwapRuntime_ExchangeSymmetric",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "swap-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                ParameterlessIntDelegate ordinarySwap = LoadDelegate<ParameterlessIntDelegate>(handle, exports[0]);
+                ParameterlessIntDelegate uniqueSwap = LoadDelegate<ParameterlessIntDelegate>(handle, exports[1]);
+                Int32VoidDelegate resetAtomic = LoadDelegate<Int32VoidDelegate>(handle, exports[2]);
+                ParameterlessIntDelegate readAtomic = LoadDelegate<ParameterlessIntDelegate>(handle, exports[3]);
+                Int32IntDelegate exchange = LoadDelegate<Int32IntDelegate>(handle, exports[4]);
+                Int32IntDelegate exchangeSymmetric = LoadDelegate<Int32IntDelegate>(handle, exports[5]);
+
+                Assert.Equal(2010, ordinarySwap());
+                Assert.Equal(12, uniqueSwap());
+
+                resetAtomic(10);
+                Assert.Equal(10, exchange(20));
+                Assert.Equal(20, readAtomic());
+                Assert.Equal(20, exchangeSymmetric(30));
+                Assert.Equal(30, readAtomic());
+
+                resetAtomic(0);
+                RunParallel(workerCount, worker =>
+                {
+                    int replacement = worker + 1;
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                    {
+                        int previous = exchange(replacement);
+                        Assert.InRange(previous, 0, workerCount);
+                    }
+                });
+                Assert.InRange(readAtomic(), 1, workerCount);
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_CompareExchangeHasValueSemanticsAndOneContentionWinner(int optimization)
+    {
+        const int workerCount = 8;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace CompareExchangeRuntime;
+
+            struct State
+            {
+                public static atomic<int> Current;
+                public static int Calls;
+            }
+
+            int Expected() { State.Calls = State.Calls * 10 + 1; return 10; }
+            int Desired() { State.Calls = State.Calls * 10 + 2; return 20; }
+
+            export void Reset(int value) { State.Current = value; }
+            export int Read() { return State.Current; }
+
+            export int EvaluateOnce()
+            {
+                State.Current = 10;
+                State.Calls = 0;
+                bool succeeded = State.Current : Expected() --> Desired();
+                if (!succeeded) return -1;
+                return State.Calls * 100 + State.Current;
+            }
+
+            export int SuccessPreservesOperands()
+            {
+                State.Current = 10;
+                int expected = 10;
+                int desired = 20;
+                bool succeeded = State.Current : expected --> desired;
+                if (!succeeded) return -1;
+                return State.Current * 10000 + expected * 100 + desired;
+            }
+
+            export int FailurePreservesOperands()
+            {
+                State.Current = 11;
+                int expected = 10;
+                int desired = 20;
+                bool succeeded = State.Current : expected --> desired;
+                if (succeeded) return -1;
+                return State.Current * 10000 + expected * 100 + desired;
+            }
+
+            export int TryWin(int desired)
+            {
+                if (State.Current : 0 --> desired) return 1;
+                return 0;
+            }
+            """, "compare-exchange-runtime.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"compare-exchange-runtime{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "compare-exchange-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "compare-exchange-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "CompareExchangeRuntime_Reset",
+            "CompareExchangeRuntime_Read",
+            "CompareExchangeRuntime_EvaluateOnce",
+            "CompareExchangeRuntime_SuccessPreservesOperands",
+            "CompareExchangeRuntime_FailurePreservesOperands",
+            "CompareExchangeRuntime_TryWin",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "compare-exchange-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                Int32VoidDelegate reset = LoadDelegate<Int32VoidDelegate>(handle, exports[0]);
+                ParameterlessIntDelegate read = LoadDelegate<ParameterlessIntDelegate>(handle, exports[1]);
+                ParameterlessIntDelegate evaluateOnce = LoadDelegate<ParameterlessIntDelegate>(handle, exports[2]);
+                ParameterlessIntDelegate success = LoadDelegate<ParameterlessIntDelegate>(handle, exports[3]);
+                ParameterlessIntDelegate failure = LoadDelegate<ParameterlessIntDelegate>(handle, exports[4]);
+                Int32IntDelegate tryWin = LoadDelegate<Int32IntDelegate>(handle, exports[5]);
+
+                Assert.Equal(1220, evaluateOnce());
+                Assert.Equal(201020, success());
+                Assert.Equal(111020, failure());
+
+                reset(0);
+                int winnerCount = 0;
+                RunParallel(workerCount, worker =>
+                {
+                    if (tryWin(worker + 1) == 1) Interlocked.Increment(ref winnerCount);
+                });
+                Assert.Equal(1, winnerCount);
+                Assert.InRange(read(), 1, workerCount);
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_FloatingCompareExchangeUsesValueEqualityForNativeAndFallbackStorage(int optimization)
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace FloatingCompareExchangeRuntime;
+
+            struct FloatBox { public float Value; }
+            struct DoubleBox { public double Value; }
+            struct Globals
+            {
+                public static atomic<float> FloatValue;
+                public static atomic<FloatBox> FloatFallback;
+                public static atomic<double> DoubleValue;
+                public static atomic<DoubleBox> DoubleFallback;
+            }
+
+            export void SetFloat(float value)
+            {
+                Globals.FloatValue = value;
+                Globals.FloatFallback = FloatBox { value };
+            }
+            export int CompareFloat(float expected, float desired)
+            {
+                int result = 0;
+                if (Globals.FloatValue : expected --> desired) result += 1;
+                FloatBox oldValue = FloatBox { expected };
+                FloatBox newValue = FloatBox { desired };
+                if (Globals.FloatFallback : oldValue --> newValue) result += 2;
+                return result;
+            }
+            export int FloatIsNan()
+            {
+                float scalar = Globals.FloatValue;
+                FloatBox fallback = Globals.FloatFallback;
+                if (scalar != scalar && fallback.Value != fallback.Value) return 1;
+                return 0;
+            }
+
+            export void SetDouble(double value)
+            {
+                Globals.DoubleValue = value;
+                Globals.DoubleFallback = DoubleBox { value };
+            }
+            export int CompareDouble(double expected, double desired)
+            {
+                int result = 0;
+                if (Globals.DoubleValue : expected --> desired) result += 1;
+                DoubleBox oldValue = DoubleBox { expected };
+                DoubleBox newValue = DoubleBox { desired };
+                if (Globals.DoubleFallback : oldValue --> newValue) result += 2;
+                return result;
+            }
+            export int DoubleIsNan()
+            {
+                double scalar = Globals.DoubleValue;
+                DoubleBox fallback = Globals.DoubleFallback;
+                if (scalar != scalar && fallback.Value != fallback.Value) return 1;
+                return 0;
+            }
+            """, "floating-compare-exchange-runtime.xe"));
+        string objectPath = Path.Combine(directory,
+            "floating-compare-exchange-runtime" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "floating-compare-exchange-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "floating-compare-exchange-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "FloatingCompareExchangeRuntime_SetFloat",
+            "FloatingCompareExchangeRuntime_CompareFloat",
+            "FloatingCompareExchangeRuntime_FloatIsNan",
+            "FloatingCompareExchangeRuntime_SetDouble",
+            "FloatingCompareExchangeRuntime_CompareDouble",
+            "FloatingCompareExchangeRuntime_DoubleIsNan",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "floating-compare-exchange-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path, libraryPath, target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports), importLibraryPath);
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                FloatVoidDelegate setFloat = LoadDelegate<FloatVoidDelegate>(handle, exports[0]);
+                FloatPairIntDelegate compareFloat = LoadDelegate<FloatPairIntDelegate>(handle, exports[1]);
+                ParameterlessIntDelegate floatIsNan = LoadDelegate<ParameterlessIntDelegate>(handle, exports[2]);
+                DoubleVoidDelegate setDouble = LoadDelegate<DoubleVoidDelegate>(handle, exports[3]);
+                DoublePairIntDelegate compareDouble = LoadDelegate<DoublePairIntDelegate>(handle, exports[4]);
+                ParameterlessIntDelegate doubleIsNan = LoadDelegate<ParameterlessIntDelegate>(handle, exports[5]);
+
+                setFloat(+0.0f);
+                Assert.Equal(3, compareFloat(-0.0f, 1.0f));
+                setFloat(-0.0f);
+                Assert.Equal(3, compareFloat(+0.0f, 2.0f));
+                setFloat(5.0f);
+                Assert.Equal(3, compareFloat(5.0f, 6.0f));
+                Assert.Equal(0, compareFloat(5.0f, 7.0f));
+                setFloat(float.NaN);
+                Assert.Equal(0, compareFloat(float.NaN, 8.0f));
+                Assert.Equal(1, floatIsNan());
+
+                setDouble(+0.0);
+                Assert.Equal(3, compareDouble(-0.0, 1.0));
+                setDouble(-0.0);
+                Assert.Equal(3, compareDouble(+0.0, 2.0));
+                setDouble(5.0);
+                Assert.Equal(3, compareDouble(5.0, 6.0));
+                Assert.Equal(0, compareDouble(5.0, 7.0));
+                setDouble(double.NaN);
+                Assert.Equal(0, compareDouble(double.NaN, 8.0));
+                Assert.Equal(1, doubleIsNan());
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_AtomicPointersRemainRawAndAreIndivisibleUnderContention(int optimization)
+    {
+        const int workerCount = 8;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace AtomicPointerRuntime;
+
+            struct Node { public int Value; }
+            struct State { public static atomic<Node*> Current; }
+
+            export void Reset(Node* value) { State.Current = value; }
+            export Node* Read() { return State.Current; }
+            export Node* Exchange(Node* replacement)
+            {
+                State.Current <-> replacement;
+                return replacement;
+            }
+            export int Replace(Node* expected, Node* desired)
+            {
+                if (State.Current : expected --> desired) return 1;
+                return 0;
+            }
+            export int Clear(Node* expected)
+            {
+                if (State.Current : expected --> null) return 1;
+                return 0;
+            }
+            """, "atomic-pointer-runtime.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"atomic-pointer-runtime{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "atomic-pointer-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "atomic-pointer-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "AtomicPointerRuntime_Reset",
+            "AtomicPointerRuntime_Read",
+            "AtomicPointerRuntime_Exchange",
+            "AtomicPointerRuntime_Replace",
+            "AtomicPointerRuntime_Clear",
+        ];
+        nint initial = Marshal.AllocHGlobal(sizeof(int));
+        nint replacement = Marshal.AllocHGlobal(sizeof(int));
+        nint[] contenders = Enumerable.Range(0, workerCount)
+            .Select(_ => Marshal.AllocHGlobal(sizeof(int)))
+            .ToArray();
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "atomic-pointer-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                AddressVoidDelegate reset = LoadDelegate<AddressVoidDelegate>(handle, exports[0]);
+                ParameterlessAddressDelegate read = LoadDelegate<ParameterlessAddressDelegate>(handle, exports[1]);
+                AddressDelegate exchange = LoadDelegate<AddressDelegate>(handle, exports[2]);
+                TwoAddressIntDelegate replace = LoadDelegate<TwoAddressIntDelegate>(handle, exports[3]);
+                AddressIntDelegate clear = LoadDelegate<AddressIntDelegate>(handle, exports[4]);
+
+                reset(initial);
+                Assert.Equal(initial, read());
+                Assert.Equal(initial, exchange(replacement));
+                Assert.Equal(replacement, read());
+                Assert.Equal(0, replace(initial, contenders[0]));
+                Assert.Equal(replacement, read());
+                Assert.Equal(1, replace(replacement, contenders[0]));
+                Assert.Equal(contenders[0], read());
+                Assert.Equal(1, clear(contenders[0]));
+                Assert.Equal(nint.Zero, read());
+
+                reset(initial);
+                int winnerCount = 0;
+                RunParallel(workerCount, worker =>
+                {
+                    if (replace(initial, contenders[worker]) == 1)
+                        Interlocked.Increment(ref winnerCount);
+                });
+                Assert.Equal(1, winnerCount);
+                Assert.Contains(read(), contenders);
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(initial);
+            Marshal.FreeHGlobal(replacement);
+            foreach (nint contender in contenders) Marshal.FreeHGlobal(contender);
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_CompositeAtomicsDoNotTearAndPreserveDestruction(int optimization)
+    {
+        const int workerCount = 8;
+        const int iterationsPerWorker = 10_000;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace CompositeAtomicRuntime;
+
+            struct Snapshot
+            {
+                public int First;
+                public int Second;
+                public int Third;
+                public int Fourth;
+            }
+
+            struct Globals
+            {
+                public static atomic<Snapshot> Current;
+                public static int Trace;
+            }
+
+            struct Tracked
+            {
+                public int Id;
+                public ~Tracked() { Globals.Trace = Globals.Trace * 10 + Id; }
+            }
+
+            export void Write(int value)
+            {
+                Globals.Current = Snapshot { value, value, value, value };
+            }
+
+            export int IsConsistent()
+            {
+                Snapshot value = Globals.Current;
+                if (value.First != value.Second) return 0;
+                if (value.First != value.Third) return 0;
+                if (value.First != value.Fourth) return 0;
+                return 1;
+            }
+
+            export int ReadGeneration()
+            {
+                Snapshot value = Globals.Current;
+                return value.First;
+            }
+
+            export int TryTransition(int expected, int desired)
+            {
+                Snapshot oldValue = Snapshot { expected, expected, expected, expected };
+                Snapshot newValue = Snapshot { desired, desired, desired, desired };
+                if (Globals.Current : oldValue --> newValue) return 1;
+                return 0;
+            }
+
+            export int Exchange(int desired)
+            {
+                Snapshot replacement = Snapshot { desired, desired, desired, desired };
+                Globals.Current <-> replacement;
+                return replacement.First;
+            }
+
+            export int AtomicSize() { return cast<int>(sizeof(atomic<Snapshot>)); }
+            export int ValueSize() { return cast<int>(sizeof(Snapshot)); }
+
+            export int LocalCleanup()
+            {
+                Globals.Trace = 0;
+                {
+                    atomic<Tracked> current = Tracked { 1 };
+                    current = Tracked { 2 };
+                }
+                return Globals.Trace;
+            }
+            """, "composite-atomic-runtime.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"composite-atomic-runtime{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "composite-atomic-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "composite-atomic-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "CompositeAtomicRuntime_Write",
+            "CompositeAtomicRuntime_IsConsistent",
+            "CompositeAtomicRuntime_ReadGeneration",
+            "CompositeAtomicRuntime_TryTransition",
+            "CompositeAtomicRuntime_Exchange",
+            "CompositeAtomicRuntime_AtomicSize",
+            "CompositeAtomicRuntime_ValueSize",
+            "CompositeAtomicRuntime_LocalCleanup",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "composite-atomic-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                Int32VoidDelegate write = LoadDelegate<Int32VoidDelegate>(handle, exports[0]);
+                ParameterlessIntDelegate isConsistent = LoadDelegate<ParameterlessIntDelegate>(handle, exports[1]);
+                ParameterlessIntDelegate read = LoadDelegate<ParameterlessIntDelegate>(handle, exports[2]);
+                AddDelegate transition = LoadDelegate<AddDelegate>(handle, exports[3]);
+                Int32IntDelegate exchange = LoadDelegate<Int32IntDelegate>(handle, exports[4]);
+                ParameterlessIntDelegate atomicSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[5]);
+                ParameterlessIntDelegate valueSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[6]);
+                ParameterlessIntDelegate localCleanup = LoadDelegate<ParameterlessIntDelegate>(handle, exports[7]);
+
+                Assert.True(atomicSize() > valueSize());
+                Assert.Equal(12, localCleanup());
+
+                const int firstSentinel = 0x13579bdf;
+                const int secondSentinel = 0x2468ace0;
+                write(firstSentinel);
+                RunParallel(workerCount, worker =>
+                {
+                    if ((worker & 1) == 0)
+                    {
+                        for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                            write((iteration & 1) == 0 ? firstSentinel : secondSentinel);
+                        return;
+                    }
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                        Assert.Equal(1, isConsistent());
+                });
+
+                write(0);
+                int winnerCount = 0;
+                RunParallel(workerCount, worker =>
+                {
+                    if (transition(0, worker + 1) == 1) Interlocked.Increment(ref winnerCount);
+                });
+                Assert.Equal(1, winnerCount);
+                Assert.InRange(read(), 1, workerCount);
+
+                int beforeExchange = read();
+                Assert.Equal(beforeExchange, exchange(42));
+                Assert.Equal(42, read());
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_AtomicOwnershipPublishesSafelyAndBalancesLifetimes(int optimization)
+    {
+        const int workerCount = 8;
+        const int writerCount = workerCount / 2;
+        const int iterationsPerWriter = 1_500;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace AtomicOwnershipRuntime;
+
+            struct Counters
+            {
+                public static atomic<int> Destroyed;
+            }
+
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource() { Counters.Destroyed++; }
+            }
+
+            struct Snapshot
+            {
+                public shared<Resource> Object;
+                public int Generation;
+            }
+
+            struct Globals
+            {
+                public static atomic<shared<Resource>> Current;
+                public static atomic<weak<Resource>> Observer;
+                public static atomic<Snapshot> Published;
+                public static weak<Resource> EmptyWeak;
+            }
+
+            export void ResetDestroyed() { Counters.Destroyed = 0; }
+            export int ReadDestroyed() { return Counters.Destroyed; }
+
+            export void PublishShared(int id)
+            {
+                shared<Resource> replacement = new Resource(id);
+                Globals.Current = replacement;
+            }
+
+            export int ReadShared()
+            {
+                shared<Resource> snapshot = Globals.Current;
+                if (snapshot == null) return 0;
+                return snapshot->Id;
+            }
+
+            export void ClearShared() { Globals.Current = null; }
+
+            export int ExchangeShared(int id)
+            {
+                shared<Resource> replacement = new Resource(id);
+                Globals.Current <-> replacement;
+                if (replacement == null) return 0;
+                return replacement->Id;
+            }
+
+            export int SharedCasSuccess(int id)
+            {
+                shared<Resource> expected = Globals.Current;
+                shared<Resource> desired = new Resource(id);
+                if (Globals.Current : expected --> desired) return 1;
+                return 0;
+            }
+
+            export int SharedCasFailure(int id)
+            {
+                shared<Resource> expected = new Resource(-1);
+                shared<Resource> desired = new Resource(id);
+                if (Globals.Current : expected --> desired) return 1;
+                return 0;
+            }
+
+            export void PublishWeak(int id)
+            {
+                shared<Resource> replacement = new Resource(id);
+                Globals.Observer = replacement;
+                Globals.Current = replacement;
+            }
+
+            export int ReadWeak()
+            {
+                weak<Resource> snapshot = Globals.Observer;
+                shared<Resource> strong = lock snapshot;
+                if (strong == null) return 0;
+                return strong->Id;
+            }
+
+            export void ClearWeak()
+            {
+                weak<Resource> empty = Globals.EmptyWeak;
+                Globals.Observer <-> empty;
+            }
+
+            export void PublishState(int generation)
+            {
+                shared<Resource> value = new Resource(generation);
+                Snapshot replacement = Snapshot { value, generation };
+                Globals.Published = replacement;
+            }
+
+            export int IsStateConsistent()
+            {
+                Snapshot snapshot = Globals.Published;
+                if (snapshot.Object == null)
+                {
+                    if (snapshot.Generation == 0) return 1;
+                    return 0;
+                }
+                if (snapshot.Object->Id == snapshot.Generation) return 1;
+                return 0;
+            }
+
+            export void ClearState()
+            {
+                Snapshot empty = Snapshot { null, 0 };
+                Globals.Published = empty;
+            }
+
+            export int AtomicSharedSize() { return cast<int>(sizeof(atomic<shared<Resource>>)); }
+            export int SharedSize() { return cast<int>(sizeof(shared<Resource>)); }
+
+            export int LocalAtomicCleanup()
+            {
+                Counters.Destroyed = 0;
+                {
+                    atomic<shared<Resource>> strong = new Resource(1);
+                    shared<Resource> strongSnapshot = strong;
+                }
+                {
+                    shared<Resource> owner = new Resource(2);
+                    weak<Resource> observer = owner;
+                    atomic<weak<Resource>> weakValue = observer;
+                    weak<Resource> weakSnapshot = weakValue;
+                }
+                return Counters.Destroyed;
+            }
+            """, "atomic-ownership-runtime.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"atomic-ownership-runtime{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "atomic-ownership-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "atomic-ownership-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "AtomicOwnershipRuntime_ResetDestroyed",
+            "AtomicOwnershipRuntime_ReadDestroyed",
+            "AtomicOwnershipRuntime_PublishShared",
+            "AtomicOwnershipRuntime_ReadShared",
+            "AtomicOwnershipRuntime_ClearShared",
+            "AtomicOwnershipRuntime_ExchangeShared",
+            "AtomicOwnershipRuntime_SharedCasSuccess",
+            "AtomicOwnershipRuntime_SharedCasFailure",
+            "AtomicOwnershipRuntime_PublishWeak",
+            "AtomicOwnershipRuntime_ReadWeak",
+            "AtomicOwnershipRuntime_ClearWeak",
+            "AtomicOwnershipRuntime_PublishState",
+            "AtomicOwnershipRuntime_IsStateConsistent",
+            "AtomicOwnershipRuntime_ClearState",
+            "AtomicOwnershipRuntime_AtomicSharedSize",
+            "AtomicOwnershipRuntime_SharedSize",
+            "AtomicOwnershipRuntime_LocalAtomicCleanup",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "atomic-ownership-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                ParameterlessVoidDelegate resetDestroyed = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[0]);
+                ParameterlessIntDelegate readDestroyed = LoadDelegate<ParameterlessIntDelegate>(handle, exports[1]);
+                Int32VoidDelegate publishShared = LoadDelegate<Int32VoidDelegate>(handle, exports[2]);
+                ParameterlessIntDelegate readShared = LoadDelegate<ParameterlessIntDelegate>(handle, exports[3]);
+                ParameterlessVoidDelegate clearShared = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[4]);
+                Int32IntDelegate exchangeShared = LoadDelegate<Int32IntDelegate>(handle, exports[5]);
+                Int32IntDelegate casSuccess = LoadDelegate<Int32IntDelegate>(handle, exports[6]);
+                Int32IntDelegate casFailure = LoadDelegate<Int32IntDelegate>(handle, exports[7]);
+                Int32VoidDelegate publishWeak = LoadDelegate<Int32VoidDelegate>(handle, exports[8]);
+                ParameterlessIntDelegate readWeak = LoadDelegate<ParameterlessIntDelegate>(handle, exports[9]);
+                ParameterlessVoidDelegate clearWeak = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[10]);
+                Int32VoidDelegate publishState = LoadDelegate<Int32VoidDelegate>(handle, exports[11]);
+                ParameterlessIntDelegate isStateConsistent = LoadDelegate<ParameterlessIntDelegate>(handle, exports[12]);
+                ParameterlessVoidDelegate clearState = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[13]);
+                ParameterlessIntDelegate atomicSharedSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[14]);
+                ParameterlessIntDelegate sharedSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[15]);
+                ParameterlessIntDelegate localAtomicCleanup = LoadDelegate<ParameterlessIntDelegate>(handle, exports[16]);
+
+                Assert.True(atomicSharedSize() > sharedSize());
+                Assert.Equal(2, localAtomicCleanup());
+
+                resetDestroyed();
+                RunParallel(workerCount, worker =>
+                {
+                    if (worker < writerCount)
+                    {
+                        for (int iteration = 0; iteration < iterationsPerWriter; iteration++)
+                            publishShared(worker * iterationsPerWriter + iteration + 1);
+                        return;
+                    }
+                    for (int iteration = 0; iteration < iterationsPerWriter; iteration++)
+                        Assert.InRange(readShared(), 0, writerCount * iterationsPerWriter);
+                });
+                clearShared();
+                Assert.Equal(writerCount * iterationsPerWriter, readDestroyed());
+
+                resetDestroyed();
+                RunParallel(workerCount, worker =>
+                {
+                    if (worker < writerCount)
+                    {
+                        for (int iteration = 0; iteration < iterationsPerWriter; iteration++)
+                            publishWeak(worker * iterationsPerWriter + iteration + 1);
+                        return;
+                    }
+                    for (int iteration = 0; iteration < iterationsPerWriter; iteration++)
+                        Assert.InRange(readWeak(), 0, writerCount * iterationsPerWriter);
+                });
+                clearShared();
+                Assert.Equal(0, readWeak());
+                clearWeak();
+                Assert.Equal(writerCount * iterationsPerWriter, readDestroyed());
+
+                resetDestroyed();
+                clearState();
+                RunParallel(workerCount, worker =>
+                {
+                    if (worker < writerCount)
+                    {
+                        for (int iteration = 0; iteration < iterationsPerWriter; iteration++)
+                            publishState(worker * iterationsPerWriter + iteration + 1);
+                        return;
+                    }
+                    for (int iteration = 0; iteration < iterationsPerWriter; iteration++)
+                        Assert.Equal(1, isStateConsistent());
+                });
+                clearState();
+                Assert.Equal(writerCount * iterationsPerWriter, readDestroyed());
+
+                resetDestroyed();
+                publishShared(11);
+                Assert.Equal(11, exchangeShared(22));
+                Assert.Equal(22, readShared());
+                Assert.Equal(1, readDestroyed());
+                Assert.Equal(0, casFailure(33));
+                Assert.Equal(3, readDestroyed());
+                Assert.Equal(1, casSuccess(44));
+                Assert.Equal(44, readShared());
+                Assert.Equal(4, readDestroyed());
+                clearShared();
+                Assert.Equal(5, readDestroyed());
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_AtomicArraysPreserveElementLayoutAndHandleSemantics(int optimization)
+    {
+        const int workerCount = 8;
+        const int iterationsPerWorker = 5_000;
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: optimization,
+            positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace AtomicArrayRuntime;
+
+            struct State
+            {
+                public int First = 7;
+                public int Second = 7;
+                public int Third = 7;
+                public int Fourth = 7;
+            }
+
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource() { Globals.Destroyed++; }
+            }
+
+            struct Globals
+            {
+                public static atomic<int>[] Counters;
+                public static atomic<State>[] States;
+                public static atomic<shared<Resource>>[] Owned;
+                public static atomic<int[]> Current;
+                public static int[] FirstHandle;
+                public static int[] SecondHandle;
+                public static atomic<int> Destroyed;
+            }
+
+            export void SetupCounters(int count) { Globals.Counters = new atomic<int>[count]; }
+            export void IncrementCounters(int index)
+            {
+                Globals.Counters[0]++;
+                Globals.Counters[index + 1]++;
+            }
+            export int ReadCounter(int index) { return Globals.Counters[index]; }
+            export void FreeCounters() { free(Globals.Counters); }
+
+            export void SetupStates(int count) { Globals.States = new atomic<State>[count]; }
+            export int IsDefaultState(int index)
+            {
+                State value = Globals.States[index];
+                if (value.First != 7) return 0;
+                if (value.Second != 7) return 0;
+                if (value.Third != 7) return 0;
+                if (value.Fourth != 7) return 0;
+                return 1;
+            }
+            export void WriteState(int value)
+            {
+                Globals.States[0] = State { value, value, value, value };
+            }
+            export int IsStateConsistent()
+            {
+                State value = Globals.States[0];
+                if (value.First != value.Second) return 0;
+                if (value.First != value.Third) return 0;
+                if (value.First != value.Fourth) return 0;
+                return 1;
+            }
+            export void FreeStates() { free(Globals.States); }
+
+            export void SetupOwned(int count)
+            {
+                Globals.Destroyed = 0;
+                Globals.Owned = new atomic<shared<Resource>>[count];
+                for (int index = 0; index < count; index++)
+                    Globals.Owned[index] = new Resource(index);
+            }
+            export int FreeOwned()
+            {
+                free(Globals.Owned);
+                return Globals.Destroyed;
+            }
+            export int StackOwned(int count)
+            {
+                Globals.Destroyed = 0;
+                {
+                    atomic<shared<Resource>>[] values = atomic<shared<Resource>>[count];
+                    for (int index = 0; index < count; index++)
+                        values[index] = new Resource(index);
+                }
+                return Globals.Destroyed;
+            }
+
+            export void SetupHandles()
+            {
+                Globals.FirstHandle = new int[4];
+                Globals.SecondHandle = new int[4];
+                for (int index = 0; index < 4; index++)
+                {
+                    Globals.FirstHandle[index] = 11;
+                    Globals.SecondHandle[index] = 22;
+                }
+                Globals.Current = Globals.FirstHandle;
+            }
+            export void PublishHandle(int which)
+            {
+                if (which == 1) Globals.Current = Globals.FirstHandle;
+                else Globals.Current = Globals.SecondHandle;
+            }
+            export int IsHandleConsistent()
+            {
+                int[] snapshot = Globals.Current;
+                int first = snapshot[0];
+                if (snapshot[1] != first) return 0;
+                if (snapshot[2] != first) return 0;
+                if (snapshot[3] != first) return 0;
+                return 1;
+            }
+            export int TryFirstToSecond()
+            {
+                if (Globals.Current : Globals.FirstHandle --> Globals.SecondHandle) return 1;
+                return 0;
+            }
+            export int ExchangeToFirst()
+            {
+                int[] replacement = Globals.FirstHandle;
+                Globals.Current <-> replacement;
+                return replacement[0];
+            }
+            export void FreeHandles()
+            {
+                free(Globals.FirstHandle);
+                free(Globals.SecondHandle);
+            }
+
+            export int AtomicStateSize() { return cast<int>(sizeof(atomic<State>)); }
+            export int StateSize() { return cast<int>(sizeof(State)); }
+            export int AtomicHandleSize() { return cast<int>(sizeof(atomic<int[]>)); }
+            export int HandleSize() { return cast<int>(sizeof(int[])); }
+            """, "atomic-array-runtime.xe"));
+        string objectPath = Path.Combine(
+            directory,
+            $"atomic-array-runtime{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "atomic-array-runtime", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "atomic-array-runtime", "debug", target.Triple);
+        string[] exports =
+        [
+            "AtomicArrayRuntime_SetupCounters",
+            "AtomicArrayRuntime_IncrementCounters",
+            "AtomicArrayRuntime_ReadCounter",
+            "AtomicArrayRuntime_FreeCounters",
+            "AtomicArrayRuntime_SetupStates",
+            "AtomicArrayRuntime_IsDefaultState",
+            "AtomicArrayRuntime_WriteState",
+            "AtomicArrayRuntime_IsStateConsistent",
+            "AtomicArrayRuntime_FreeStates",
+            "AtomicArrayRuntime_SetupOwned",
+            "AtomicArrayRuntime_FreeOwned",
+            "AtomicArrayRuntime_StackOwned",
+            "AtomicArrayRuntime_SetupHandles",
+            "AtomicArrayRuntime_PublishHandle",
+            "AtomicArrayRuntime_IsHandleConsistent",
+            "AtomicArrayRuntime_TryFirstToSecond",
+            "AtomicArrayRuntime_ExchangeToFirst",
+            "AtomicArrayRuntime_FreeHandles",
+            "AtomicArrayRuntime_AtomicStateSize",
+            "AtomicArrayRuntime_StateSize",
+            "AtomicArrayRuntime_AtomicHandleSize",
+            "AtomicArrayRuntime_HandleSize",
+        ];
+
+        try
+        {
+            Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "atomic-array-runtime");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                Int32VoidDelegate setupCounters = LoadDelegate<Int32VoidDelegate>(handle, exports[0]);
+                Int32VoidDelegate incrementCounters = LoadDelegate<Int32VoidDelegate>(handle, exports[1]);
+                Int32IntDelegate readCounter = LoadDelegate<Int32IntDelegate>(handle, exports[2]);
+                ParameterlessVoidDelegate freeCounters = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[3]);
+                Int32VoidDelegate setupStates = LoadDelegate<Int32VoidDelegate>(handle, exports[4]);
+                Int32IntDelegate isDefaultState = LoadDelegate<Int32IntDelegate>(handle, exports[5]);
+                Int32VoidDelegate writeState = LoadDelegate<Int32VoidDelegate>(handle, exports[6]);
+                ParameterlessIntDelegate isStateConsistent = LoadDelegate<ParameterlessIntDelegate>(handle, exports[7]);
+                ParameterlessVoidDelegate freeStates = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[8]);
+                Int32VoidDelegate setupOwned = LoadDelegate<Int32VoidDelegate>(handle, exports[9]);
+                ParameterlessIntDelegate freeOwned = LoadDelegate<ParameterlessIntDelegate>(handle, exports[10]);
+                Int32IntDelegate stackOwned = LoadDelegate<Int32IntDelegate>(handle, exports[11]);
+                ParameterlessVoidDelegate setupHandles = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[12]);
+                Int32VoidDelegate publishHandle = LoadDelegate<Int32VoidDelegate>(handle, exports[13]);
+                ParameterlessIntDelegate isHandleConsistent = LoadDelegate<ParameterlessIntDelegate>(handle, exports[14]);
+                ParameterlessIntDelegate tryFirstToSecond = LoadDelegate<ParameterlessIntDelegate>(handle, exports[15]);
+                ParameterlessIntDelegate exchangeToFirst = LoadDelegate<ParameterlessIntDelegate>(handle, exports[16]);
+                ParameterlessVoidDelegate freeHandles = LoadDelegate<ParameterlessVoidDelegate>(handle, exports[17]);
+                ParameterlessIntDelegate atomicStateSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[18]);
+                ParameterlessIntDelegate stateSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[19]);
+                ParameterlessIntDelegate atomicHandleSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[20]);
+                ParameterlessIntDelegate handleSize = LoadDelegate<ParameterlessIntDelegate>(handle, exports[21]);
+
+                Assert.True(atomicStateSize() > stateSize());
+                Assert.Equal(handleSize(), atomicHandleSize());
+
+                setupCounters(workerCount + 1);
+                RunParallel(workerCount, worker =>
+                {
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                        incrementCounters(worker);
+                });
+                Assert.Equal(workerCount * iterationsPerWorker, readCounter(0));
+                for (int worker = 0; worker < workerCount; worker++)
+                    Assert.Equal(iterationsPerWorker, readCounter(worker + 1));
+                freeCounters();
+
+                setupStates(4);
+                for (int index = 0; index < 4; index++) Assert.Equal(1, isDefaultState(index));
+                RunParallel(workerCount, worker =>
+                {
+                    if ((worker & 1) == 0)
+                    {
+                        for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                            writeState((worker + 1) * iterationsPerWorker + iteration);
+                        return;
+                    }
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                        Assert.Equal(1, isStateConsistent());
+                });
+                freeStates();
+
+                setupOwned(128);
+                Assert.Equal(128, freeOwned());
+                Assert.Equal(64, stackOwned(64));
+
+                setupHandles();
+                RunParallel(workerCount, worker =>
+                {
+                    if ((worker & 1) == 0)
+                    {
+                        for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                            publishHandle((iteration & 1) + 1);
+                        return;
+                    }
+                    for (int iteration = 0; iteration < iterationsPerWorker; iteration++)
+                        Assert.Equal(1, isHandleConsistent());
+                });
+                publishHandle(1);
+                int winners = 0;
+                RunParallel(workerCount, _ =>
+                {
+                    if (tryFirstToSecond() == 1) Interlocked.Increment(ref winners);
+                });
+                Assert.Equal(1, winners);
+                Assert.Equal(22, exchangeToFirst());
+                Assert.Equal(1, isHandleConsistent());
+                freeHandles();
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
         }
     }
 
@@ -4231,6 +6250,470 @@ public sealed class NativeLinkerTests
         Assert.NotEqual(42, exit);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_StructValueEqualityAndCompositeCasUseTheSameFieldSemantics(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Resource { public int Value; }
+            struct Position { public int X; public int Y; }
+            struct Inner
+            {
+                public Position Position;
+                public Resource* Pointer;
+                public int[] Array;
+            }
+            struct Outer { public int Id; public Inner Inner; }
+            struct Floating { public float Value; }
+            struct Ownership
+            {
+                public shared<Resource> Strong;
+                public weak<Resource> Weak;
+            }
+            struct Pair<T>
+            {
+                public T First;
+                public T Second;
+                public Pair(T first, T second) { First = move first; Second = move second; }
+            }
+
+            int Main()
+            {
+                Position firstPosition = Position { 1, 2 };
+                Position samePosition = Position { 1, 2 };
+                Position otherPosition = Position { 1, 3 };
+                if (!(firstPosition == samePosition) || firstPosition != samePosition) return 1;
+                if (firstPosition == otherPosition || !(firstPosition != otherPosition)) return 2;
+
+                Resource* firstPointer = new Resource { 7 };
+                Resource* sameAddress = firstPointer;
+                Resource* otherPointer = new Resource { 7 };
+                int[] firstArray = new int[2];
+                int[] sameArrayHandle = firstArray;
+                int[] otherArray = new int[2];
+                firstArray[0] = 10;
+                otherArray[0] = 10;
+
+                Outer first = Outer { 5, Inner { firstPosition, firstPointer, firstArray } };
+                Outer same = Outer { 5, Inner { samePosition, sameAddress, sameArrayHandle } };
+                Outer differentPointer = Outer { 5, Inner { samePosition, otherPointer, sameArrayHandle } };
+                Outer differentArray = Outer { 5, Inner { samePosition, sameAddress, otherArray } };
+                if (!(first == same)) return 3;
+                if (first == differentPointer || first == differentArray) return 4;
+
+                Inner nullLeft = Inner { firstPosition, null, firstArray };
+                Inner nullRight = Inner { samePosition, null, sameArrayHandle };
+                if (!(nullLeft == nullRight)) return 5;
+
+                Floating positiveZero = Floating { +0.0f };
+                Floating negativeZero = Floating { -0.0f };
+                if (!(positiveZero == negativeZero)) return 6;
+                float nan = 0.0f / 0.0f;
+                Floating nanLeft = Floating { nan };
+                Floating nanRight = Floating { nan };
+                if (nanLeft == nanRight || !(nanLeft != nanRight)) return 7;
+
+                Pair<int> pair = Pair<int>(8, 9);
+                Pair<int> samePair = Pair<int>(8, 9);
+                if (!(pair == samePair)) return 8;
+
+                shared<Resource> owner = new Resource { 11 };
+                shared<Resource> sameOwner = owner;
+                weak<Resource> observer = owner;
+                weak<Resource> sameObserver = observer;
+                Ownership owned = Ownership { owner, observer };
+                Ownership sameOwned = Ownership { sameOwner, sameObserver };
+                if (!(owned == sameOwned)) return 9;
+
+                atomic<Outer> state = first;
+                Outer desired = Outer { 6, Inner { otherPosition, otherPointer, otherArray } };
+                if (!(state : same --> desired)) return 10;
+                state = first;
+                if (state : differentPointer --> desired) return 11;
+
+                atomic<Floating> floating = positiveZero;
+                if (!(floating : negativeZero --> Floating { 1.0f })) return 12;
+                floating = nanLeft;
+                if (floating : nanRight --> Floating { 2.0f }) return 13;
+
+                free(firstArray);
+                free(otherArray);
+                free(firstPointer);
+                free(otherPointer);
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RepeatedConstructorFieldAssignmentReleasesPreviousSharedValues(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Counters
+            {
+                public static int First;
+                public static int Second;
+                public static int Third;
+                public static int Fourth;
+            }
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource()
+                {
+                    if (Id == 1) Counters.First++;
+                    else if (Id == 2) Counters.Second++;
+                    else if (Id == 3) Counters.Third++;
+                    else if (Id == 4) Counters.Fourth++;
+                }
+            }
+            struct NormalHolder
+            {
+                public shared<Resource> Value;
+                public NormalHolder(shared<Resource> first, shared<Resource> second)
+                {
+                    Value = first;
+                    Value = second;
+                }
+            }
+            struct AtomicHolder
+            {
+                public atomic<shared<Resource>> Value;
+                public AtomicHolder(shared<Resource> first, shared<Resource> second)
+                {
+                    Value = first;
+                    Value = second;
+                }
+            }
+            void ExerciseNormal()
+            {
+                shared<Resource> first = new Resource(1);
+                shared<Resource> second = new Resource(2);
+                NormalHolder holder = NormalHolder(first, second);
+            }
+            void ExerciseAtomic()
+            {
+                shared<Resource> first = new Resource(3);
+                shared<Resource> second = new Resource(4);
+                AtomicHolder holder = AtomicHolder(first, second);
+            }
+            int Main()
+            {
+                ExerciseNormal();
+                if (Counters.First != 1 || Counters.Second != 1) return 1;
+                ExerciseAtomic();
+                if (Counters.Third != 1 || Counters.Fourth != 1) return 2;
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ConstructorFieldInitializationRemainsCorrectAcrossPartialBranchesAndLoops(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Counters
+            {
+                public static int Count;
+                public static int Sum;
+                public static int SumSquares;
+            }
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource()
+                {
+                    Counters.Count++;
+                    Counters.Sum += Id;
+                    Counters.SumSquares += Id * Id;
+                }
+            }
+            struct PartialNormal
+            {
+                public shared<Resource> Value;
+                public PartialNormal(bool choose, shared<Resource> first, shared<Resource> second)
+                {
+                    if (choose) Value = first;
+                    Value = second;
+                }
+            }
+            struct PartialAtomic
+            {
+                public atomic<shared<Resource>> Value;
+                public PartialAtomic(bool choose, shared<Resource> first, shared<Resource> second)
+                {
+                    if (choose) Value = first;
+                    Value = second;
+                }
+            }
+            struct LoopNormal
+            {
+                public shared<Resource> Value;
+                public LoopNormal(int count, shared<Resource> first, shared<Resource> second)
+                {
+                    int index = 0;
+                    while (index < count)
+                    {
+                        Value = first;
+                        index++;
+                    }
+                    Value = second;
+                }
+            }
+            struct LoopAtomic
+            {
+                public atomic<shared<Resource>> Value;
+                public LoopAtomic(int count, shared<Resource> first, shared<Resource> second)
+                {
+                    int index = 0;
+                    while (index < count)
+                    {
+                        Value = first;
+                        index++;
+                    }
+                    Value = second;
+                }
+            }
+            void PartialNormalTrue()
+            {
+                shared<Resource> first = new Resource(1);
+                shared<Resource> second = new Resource(2);
+                PartialNormal holder = PartialNormal(true, first, second);
+            }
+            void PartialNormalFalse()
+            {
+                shared<Resource> first = new Resource(3);
+                shared<Resource> second = new Resource(4);
+                PartialNormal holder = PartialNormal(false, first, second);
+            }
+            void PartialAtomicTrue()
+            {
+                shared<Resource> first = new Resource(5);
+                shared<Resource> second = new Resource(6);
+                PartialAtomic holder = PartialAtomic(true, first, second);
+            }
+            void PartialAtomicFalse()
+            {
+                shared<Resource> first = new Resource(7);
+                shared<Resource> second = new Resource(8);
+                PartialAtomic holder = PartialAtomic(false, first, second);
+            }
+            void LoopNormalTwice()
+            {
+                shared<Resource> first = new Resource(9);
+                shared<Resource> second = new Resource(10);
+                LoopNormal holder = LoopNormal(2, first, second);
+            }
+            void LoopAtomicTwice()
+            {
+                shared<Resource> first = new Resource(11);
+                shared<Resource> second = new Resource(12);
+                LoopAtomic holder = LoopAtomic(2, first, second);
+            }
+            void LoopNormalZero()
+            {
+                shared<Resource> first = new Resource(13);
+                shared<Resource> second = new Resource(14);
+                LoopNormal holder = LoopNormal(0, first, second);
+            }
+            void LoopAtomicZero()
+            {
+                shared<Resource> first = new Resource(15);
+                shared<Resource> second = new Resource(16);
+                LoopAtomic holder = LoopAtomic(0, first, second);
+            }
+            int Main()
+            {
+                PartialNormalTrue();
+                PartialNormalFalse();
+                PartialAtomicTrue();
+                PartialAtomicFalse();
+                LoopNormalTwice();
+                LoopAtomicTwice();
+                LoopNormalZero();
+                LoopAtomicZero();
+                if (Counters.Count != 16) return 1;
+                if (Counters.Sum != 136) return 2;
+                if (Counters.SumSquares != 1496) return 3;
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_ConditionalMoveReassignmentUsesRuntimeLifetimeState(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Counters
+            {
+                public static int ResourceCount;
+                public static int ResourceSum;
+                public static int ResourceSquares;
+                public static int LastResource;
+                public static int BoxCount;
+                public static int BoxSum;
+                public static int LastBox;
+            }
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource()
+                {
+                    Counters.ResourceCount++;
+                    Counters.ResourceSum += Id;
+                    Counters.ResourceSquares += Id * Id;
+                    Counters.LastResource = Id;
+                }
+            }
+            struct Box
+            {
+                public int Id;
+                public Box(int id) { Id = id; }
+                public ~Box()
+                {
+                    Counters.BoxCount++;
+                    Counters.BoxSum += Id;
+                    Counters.LastBox = Id;
+                }
+            }
+            struct State { public shared<Resource> Value; }
+            struct Inner { public shared<Resource> Value; }
+            struct Outer { public Inner Inner; }
+
+            int SharedCase(bool take, int firstId, int secondId)
+            {
+                Counters.LastResource = 0;
+                shared<Resource> value = new Resource(firstId);
+                shared<Resource> moved;
+                if (take) moved = move value;
+                value = new Resource(secondId);
+                if (!take && Counters.LastResource != firstId) return 1;
+                if (take && Counters.LastResource == firstId) return 2;
+                return 0;
+            }
+
+            int UniqueCase(bool take, int firstId, int secondId)
+            {
+                Counters.LastResource = 0;
+                unique<Resource> value = new Resource(firstId);
+                unique<Resource> moved;
+                if (take) moved = move value;
+                value = new Resource(secondId);
+                if (!take && Counters.LastResource != firstId) return 1;
+                if (take && Counters.LastResource == firstId) return 2;
+                return 0;
+            }
+
+            int WeakCase(bool take, int firstId, int secondId)
+            {
+                shared<Resource> first = new Resource(firstId);
+                shared<Resource> second = new Resource(secondId);
+                weak<Resource> value = first;
+                weak<Resource> moved;
+                if (take) moved = move value;
+                value = second;
+                shared<Resource> promoted = lock value;
+                if (promoted != second) return 1;
+                return 0;
+            }
+
+            int FieldCase(bool take, int firstId, int secondId)
+            {
+                Counters.LastResource = 0;
+                State state = State { new Resource(firstId) };
+                shared<Resource> moved;
+                if (take) moved = move state.Value;
+                state.Value = new Resource(secondId);
+                if (!take && Counters.LastResource != firstId) return 1;
+                if (take && Counters.LastResource == firstId) return 2;
+                return 0;
+            }
+
+            int BoxCase(bool take, int firstId, int secondId)
+            {
+                Counters.LastBox = 0;
+                Box value = Box(firstId);
+                Box moved;
+                if (take) moved = move value;
+                value = Box(secondId);
+                if (!take && Counters.LastBox != firstId) return 1;
+                if (take && Counters.LastBox == firstId) return 2;
+                return 0;
+            }
+
+            int LoopSharedCase(bool take, int firstId, int secondId)
+            {
+                Counters.LastResource = 0;
+                shared<Resource> value = new Resource(firstId);
+                shared<Resource> moved;
+                int index = 0;
+                while (index < 1)
+                {
+                    if (take)
+                    {
+                        moved = move value;
+                        break;
+                    }
+                    index++;
+                }
+                value = new Resource(secondId);
+                if (!take && Counters.LastResource != firstId) return 1;
+                if (take && Counters.LastResource == firstId) return 2;
+                return 0;
+            }
+
+            int NestedCase(bool take, int firstId, int secondId)
+            {
+                Counters.LastResource = 0;
+                Outer value = Outer { Inner { new Resource(firstId) } };
+                Outer moved;
+                if (take) moved = move value;
+                value = Outer { Inner { new Resource(secondId) } };
+                if (!take && Counters.LastResource != firstId) return 1;
+                if (take && Counters.LastResource == firstId) return 2;
+                return 0;
+            }
+
+            int Main()
+            {
+                if (SharedCase(false, 1, 2) != 0) return 1;
+                if (SharedCase(true, 3, 4) != 0) return 2;
+                if (UniqueCase(false, 5, 6) != 0) return 3;
+                if (UniqueCase(true, 7, 8) != 0) return 4;
+                if (WeakCase(false, 9, 10) != 0) return 5;
+                if (WeakCase(true, 11, 12) != 0) return 6;
+                if (FieldCase(false, 13, 14) != 0) return 7;
+                if (FieldCase(true, 15, 16) != 0) return 8;
+                if (BoxCase(false, 101, 102) != 0) return 9;
+                if (BoxCase(true, 103, 104) != 0) return 10;
+                if (LoopSharedCase(false, 17, 18) != 0) return 11;
+                if (LoopSharedCase(true, 19, 20) != 0) return 12;
+                if (NestedCase(false, 21, 22) != 0) return 13;
+                if (NestedCase(true, 23, 24) != 0) return 14;
+                if (Counters.ResourceCount != 24) return 15;
+                if (Counters.ResourceSum != 300) return 16;
+                if (Counters.ResourceSquares != 4900) return 17;
+                if (Counters.BoxCount != 4) return 18;
+                if (Counters.BoxSum != 410) return 19;
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
     private static int RunIterationFourProgram(string source, int optimization)
     {
         Compilation compilation = CreateExecutableCompilation(
@@ -4280,6 +6763,25 @@ public sealed class NativeLinkerTests
             return left + right;
         }
         """, "math.xe"));
+
+    private static TDelegate LoadDelegate<TDelegate>(nint library, string export)
+        where TDelegate : Delegate =>
+        Marshal.GetDelegateForFunctionPointer<TDelegate>(NativeLibrary.GetExport(library, export));
+
+    private static void RunParallel(int workerCount, Action<int> action)
+    {
+        using var ready = new CountdownEvent(workerCount);
+        using var gate = new ManualResetEventSlim();
+        Task[] workers = Enumerable.Range(0, workerCount).Select(worker => Task.Run(() =>
+        {
+            ready.Signal();
+            gate.Wait();
+            action(worker);
+        })).ToArray();
+        ready.Wait();
+        gate.Set();
+        Task.WaitAll(workers);
+    }
 
     private static Compilation CreateExecutableCompilation(params SourceText[] sources) =>
         Compilation.Create(

@@ -52,6 +52,24 @@ public sealed record AssignmentExpressionSyntax(
     public override SyntaxKind Kind => SyntaxKind.AssignmentExpression;
 }
 
+public sealed record CompareExchangeExpressionSyntax(
+    ExpressionSyntax Target,
+    SyntaxToken ColonToken,
+    ExpressionSyntax Expected,
+    SyntaxToken ArrowToken,
+    ExpressionSyntax Desired) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.CompareExchangeExpression;
+}
+
+public sealed record SwapExpressionSyntax(
+    ExpressionSyntax Left,
+    SyntaxToken OperatorToken,
+    ExpressionSyntax Right) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.SwapExpression;
+}
+
 public sealed record CallExpressionSyntax(
     ExpressionSyntax Target,
     TypeArgumentListSyntax? TypeArguments,

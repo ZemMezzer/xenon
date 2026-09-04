@@ -128,9 +128,17 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                         export.IsData && IsWindowsTarget(triple) ? $"{export.Name},DATA" : export.Name)
                     : compilation.SemanticModel.Functions.Select(function => function.Symbol)
                         .Where(symbol => symbol.IsExport).Select(NativeSymbolNames.Get);
-                var options = new NativeLinkOptions(project.NativeLibraries.AddRange(dependencyArtifacts),
+                bool requiresThreadingRuntime =
+                    LlvmIrGenerator.RequiresNativeThreadingRuntime(compilation) ||
+                    graph.GetNativeLinkOrder(project)
+                        .Where(dependency => dependency.Type == XenonProjectType.StaticLibrary)
+                        .Any(dependency => LlvmIrGenerator.RequiresNativeThreadingRuntime(
+                            compilations[dependency.Identity]));
+                var options = new NativeLinkOptions(
+                    project.NativeLibraries.AddRange(dependencyArtifacts),
                     project.NativeLibraryPaths,
-                    exportedSymbols.Distinct(StringComparer.Ordinal).ToArray());
+                    exportedSymbols.Distinct(StringComparer.Ordinal).ToArray(),
+                    RequiresThreadingRuntime: requiresThreadingRuntime);
                 LinkedNativeArtifact artifact;
                 if (project.Type == XenonProjectType.Executable)
                 {

@@ -32,6 +32,7 @@ public static class SyntaxFacts
             ["template"] = SyntaxKind.TemplateKeyword,
             ["where"] = SyntaxKind.WhereKeyword,
             ["static"] = SyntaxKind.StaticKeyword,
+            ["threadlocal"] = SyntaxKind.ThreadLocalKeyword,
             ["virtual"] = SyntaxKind.VirtualKeyword,
             ["override"] = SyntaxKind.OverrideKeyword,
             ["abstract"] = SyntaxKind.AbstractKeyword,
@@ -71,6 +72,7 @@ public static class SyntaxFacts
             ["weak"] = SyntaxKind.WeakKeyword,
             ["storage"] = SyntaxKind.StorageKeyword,
             ["pin"] = SyntaxKind.PinKeyword,
+            ["atomic"] = SyntaxKind.AtomicKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
     private static readonly FrozenSet<SyntaxKind> KeywordKinds = Keywords.Values.ToFrozenSet();
     private static readonly string[] ContextualEditorKeywords = ["destruct"];
@@ -129,6 +131,7 @@ public static class SyntaxFacts
         SyntaxKind.WeakKeyword or
         SyntaxKind.StorageKeyword or
         SyntaxKind.PinKeyword or
+        SyntaxKind.AtomicKeyword or
         SyntaxKind.IdentifierToken;
 
     public static bool IsAssignmentOperator(SyntaxKind kind) => kind is

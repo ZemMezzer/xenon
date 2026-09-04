@@ -12,6 +12,7 @@ public sealed class TypeFactory
     private readonly ConcurrentDictionary<(TypeSymbol Element, bool Readonly), PointerTypeSymbol> _pointers = new();
     private readonly ConcurrentDictionary<(TypeSymbol Element, bool Readonly), ReferenceTypeSymbol> _references = new();
     private readonly ConcurrentDictionary<(TypeSymbol Element, int Rank), ArrayTypeSymbol> _arrays = new();
+    private readonly ConcurrentDictionary<TypeSymbol, AtomicTypeSymbol> _atomic = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, UniqueTypeSymbol> _unique = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, SharedTypeSymbol> _shared = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, WeakTypeSymbol> _weak = new(TypeIdentity.Comparer);
@@ -29,6 +30,9 @@ public sealed class TypeFactory
         ArgumentOutOfRangeException.ThrowIfLessThan(rank, 1);
         return _arrays.GetOrAdd((Intern(elementType), rank), static key => new ArrayTypeSymbol(key.Element, key.Rank));
     }
+
+    public AtomicTypeSymbol AtomicOf(TypeSymbol elementType) =>
+        _atomic.GetOrAdd(Intern(elementType), static value => new AtomicTypeSymbol(value));
 
     public UniqueTypeSymbol UniqueOf(TypeSymbol elementType)
     {
@@ -107,6 +111,7 @@ public sealed class TypeFactory
             PointerTypeSymbol pointer => PointerTo(pointer.ElementType, pointer.IsReadonly),
             ReferenceTypeSymbol reference => ReferenceTo(reference.ElementType, reference.IsReadonly),
             ArrayTypeSymbol array => ArrayOf(array.ElementType, array.Rank),
+            AtomicTypeSymbol atomic => AtomicOf(atomic.ElementType),
             UniqueTypeSymbol unique => UniqueOf(unique.ElementType),
             SharedTypeSymbol shared => SharedOf(shared.ElementType),
             WeakTypeSymbol weak => WeakOf(weak.ElementType),

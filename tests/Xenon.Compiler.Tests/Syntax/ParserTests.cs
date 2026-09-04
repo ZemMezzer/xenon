@@ -8,6 +8,89 @@ namespace Xenon.Compiler.Tests.Syntax;
 public sealed class ParserTests
 {
     [Fact]
+    public void Parser_PreservesThreadLocalStaticFieldModifierInEitherOrder()
+    {
+        SyntaxTree tree = Parse("namespace Example; struct State { public static threadlocal int First; threadlocal static int Second; }");
+
+        Assert.Empty(tree.Diagnostics);
+        FieldDeclarationSyntax[] fields = Assert.IsType<StructDeclarationSyntax>(
+            Assert.Single(tree.Root.Members)).Fields.ToArray();
+        Assert.Equal(2, fields.Length);
+        Assert.All(fields, field =>
+        {
+            Assert.True(field.IsStatic);
+            Assert.True(field.IsThreadLocal);
+            Assert.Equal(SyntaxKind.ThreadLocalKeyword, field.ThreadLocalKeyword!.Kind);
+        });
+    }
+
+    [Theory]
+    [InlineData("struct State { threadlocal int Value; }")]
+    [InlineData("struct State { static threadlocal void Run() {} }")]
+    [InlineData("struct State { static threadlocal int Value { get { return 0; } } }")]
+    [InlineData("void Run() { threadlocal int value; }")]
+    [InlineData("void Run() { static threadlocal int value; }")]
+    public void Parser_ReportsDedicatedDiagnosticForInvalidThreadLocalPlacement(string declaration)
+    {
+        SyntaxTree tree = Parse("namespace Example; " + declaration);
+
+        Assert.Contains(tree.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.InvalidThreadLocalPlacement);
+    }
+
+    [Fact]
+    public void Parser_ParsesCompareExchangeAsOneCompleteExpression()
+    {
+        SyntaxTree tree = Parse("namespace Example; bool Try(atomic<int>& value, int expected, int desired) { return value : expected --> desired; }");
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var statement = Assert.IsType<ReturnStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var compareExchange = Assert.IsType<CompareExchangeExpressionSyntax>(statement.Expression);
+        Assert.Equal(SyntaxKind.ColonToken, compareExchange.ColonToken.Kind);
+        Assert.Equal(SyntaxKind.CompareExchangeArrowToken, compareExchange.ArrowToken.Kind);
+        Assert.Equal("value", Assert.IsType<NameExpressionSyntax>(compareExchange.Target).IdentifierToken.Text);
+        Assert.Equal("expected", Assert.IsType<NameExpressionSyntax>(compareExchange.Expected).IdentifierToken.Text);
+        Assert.Equal("desired", Assert.IsType<NameExpressionSyntax>(compareExchange.Desired).IdentifierToken.Text);
+    }
+
+    [Fact]
+    public void Parser_PreservesSwitchLabelColonAndAllowsCompareExchangeCaseValue()
+    {
+        SyntaxTree tree = Parse("namespace Example; int Identity(int value) { return value; } int F(int value, atomic<int>& current) { switch (value) { case 0: return 1; case current : Identity(1) --> Identity(2): return 2; default: return 3; } }");
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        var statement = Assert.IsType<SwitchStatementSyntax>(Assert.Single(function.Body!.Statements));
+        Assert.IsType<LiteralExpressionSyntax>(statement.Sections[0].Value);
+        Assert.IsType<CompareExchangeExpressionSyntax>(statement.Sections[1].Value);
+    }
+
+    [Theory]
+    [InlineData("value : 0 -> 1;", DiagnosticIds.MalformedCompareExchange)]
+    [InlineData("value : 0 --> 1 : 1 --> 2;", DiagnosticIds.ChainedCompareExchange)]
+    public void Parser_ReportsMalformedOrChainedCompareExchange(string expression, string diagnosticId)
+    {
+        SyntaxTree tree = Parse($"namespace Example; void F(atomic<int>& value) {{ {expression} }}");
+
+        Assert.Contains(tree.Diagnostics, diagnostic => diagnostic.Id == diagnosticId);
+    }
+
+    [Fact]
+    public void Parser_ParsesSwapAsOneCompleteExpression()
+    {
+        SyntaxTree tree = Parse("namespace Example; void Swap(int& a, int& b) { a <-> b; }");
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var statement = Assert.IsType<ExpressionStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var swap = Assert.IsType<SwapExpressionSyntax>(statement.Expression);
+        Assert.Equal(SyntaxKind.SwapToken, swap.OperatorToken.Kind);
+        Assert.Equal("a", Assert.IsType<NameExpressionSyntax>(swap.Left).IdentifierToken.Text);
+        Assert.Equal("b", Assert.IsType<NameExpressionSyntax>(swap.Right).IdentifierToken.Text);
+    }
+
+    [Fact]
     public void Parser_BuildsMinimalCompilationUnit()
     {
         SyntaxTree tree = Parse("""
@@ -592,6 +675,21 @@ public sealed class ParserTests
             Assert.IsType<ExpressionStatementSyntax>(function.Body.Statements[2]).Expression);
     }
 
+    [Fact]
+    public void Parser_ParsesStackArraysWithAtomicElementTypes()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+            void Build() { atomic<int>[] values = atomic<int>[4]; }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var declaration = Assert.IsType<VariableDeclarationStatementSyntax>(Assert.Single(function.Body!.Statements));
+        var allocation = Assert.IsType<StackArrayCreationExpressionSyntax>(declaration.Initializer);
+        Assert.Equal(SyntaxKind.AtomicKeyword, Assert.IsType<NamedTypeSyntax>(allocation.ElementType).NameToken.Kind);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
@@ -1031,7 +1129,7 @@ public sealed class ParserTests
     [Fact]
     public void Parser_ParsesOwnershipTypesIncludingArrays()
     {
-        SyntaxTree tree = Parse("namespace Example; void Own(unique<Resource> item, unique<int[]> values, shared<Resource> strong, weak<Resource> observer) {}");
+        SyntaxTree tree = Parse("namespace Example; void Own(unique<Resource> item, unique<int[]> values, shared<Resource> strong, weak<Resource> observer, atomic<int> counter, atomic<Resource*> pointer, atomic<int>[] counters, atomic<int[]> handle) {}");
 
         Assert.Empty(tree.Diagnostics);
         var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
@@ -1044,6 +1142,14 @@ public sealed class ParserTests
             Assert.IsType<NamedTypeSyntax>(function.Parameters[2].Type).NameToken.Kind);
         Assert.Equal(SyntaxKind.WeakKeyword,
             Assert.IsType<NamedTypeSyntax>(function.Parameters[3].Type).NameToken.Kind);
+        var counter = Assert.IsType<NamedTypeSyntax>(function.Parameters[4].Type);
+        Assert.Equal(SyntaxKind.AtomicKeyword, counter.NameToken.Kind);
+        Assert.Equal("int", Assert.Single(counter.TypeArguments!.Arguments).Name);
+        Assert.IsType<PointerTypeSyntax>(Assert.Single(
+            Assert.IsType<NamedTypeSyntax>(function.Parameters[5].Type).TypeArguments!.Arguments));
+        Assert.IsType<NamedTypeSyntax>(Assert.IsType<ArrayTypeSyntax>(function.Parameters[6].Type).ElementType);
+        Assert.IsType<ArrayTypeSyntax>(Assert.Single(
+            Assert.IsType<NamedTypeSyntax>(function.Parameters[7].Type).TypeArguments!.Arguments));
     }
 
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));

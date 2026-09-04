@@ -12,6 +12,7 @@ public enum FunctionKind
     Method,
     Constructor,
     InstanceInitializer,
+    ThreadLocalInitializer,
     Destructor,
     DestructorGlue,
     OwnershipDestructor,
