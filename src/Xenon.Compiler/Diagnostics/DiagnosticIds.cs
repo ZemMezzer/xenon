@@ -204,5 +204,19 @@ public static class DiagnosticIds
     public const string ReferenceParameterLifetimeMutation = "XE2249";
     public const string UnresolvedLifetimeOwner = "XE2250";
     public const string PartialDestructWithDestructor = "XE2251";
+    public const string AtomicUniqueTypeNotSupported = "XE2252";
+    public const string AtomicReferenceTypeNotSupported = "XE2253";
+    public const string InvalidAtomicTypeArgument = "XE2254";
+    public const string UnsupportedNativeAtomicType = "XE2255";
+    public const string AtomicToAtomicSwap = "XE2256";
+    public const string CompareExchangeRequiresAtomicTarget = "XE2257";
+    public const string CompareExchangeOperandTypeMismatch = "XE2258";
+    public const string MalformedCompareExchange = "XE2259";
+    public const string ChainedCompareExchange = "XE2260";
+    public const string InvalidThreadLocalPlacement = "XE2261";
+    public const string AtomicStorageNotRelocatable = "XE2262";
+    public const string StructValueEqualityNotSupported = "XE2263";
+    public const string AmbiguousConstructorFieldInitialization = "XE2264";
+    public const string ConditionalMoveReinitializationNotTracked = "XE2265";
     public const string RecursiveValueLayout = "XE2600";
 }

@@ -92,6 +92,7 @@ public sealed record EnumMemberDeclarationSyntax(
 public sealed record FieldDeclarationSyntax(
     SyntaxToken? AccessModifierToken,
     SyntaxToken? StaticKeyword,
+    SyntaxToken? ThreadLocalKeyword,
     SyntaxToken? ReadonlyKeyword,
     TypeSyntax Type,
     SyntaxToken IdentifierToken,
@@ -105,6 +106,7 @@ public sealed record FieldDeclarationSyntax(
 
     public bool IsPrivate => !IsPublic;
     public bool IsStatic => StaticKeyword is not null;
+    public bool IsThreadLocal => ThreadLocalKeyword is not null;
     public bool IsReadonly => ReadonlyKeyword is not null;
 }
 

@@ -134,7 +134,7 @@ public static class SymbolDisplay
         NamespaceSymbol => "namespace ",
         FunctionSymbol function => MemberModifiers(function.Accessibility, function.IsStatic, function.IsAbstract,
             function.IsVirtual, function.IsOverride) + (function.IsExtern ? "extern " : function.IsExport ? "export " : ""),
-        FieldSymbol field => MemberModifiers(field.Accessibility, field.IsStatic),
+        FieldSymbol field => MemberModifiers(field.Accessibility, field.IsStatic) + (field.IsThreadLocal ? "threadlocal " : ""),
         PropertySymbol property => MemberModifiers(property.Accessibility, property.Declaration.IsStatic,
             property.Declaration.IsAbstract, property.Declaration.IsVirtual, property.Declaration.IsOverride)
             + (property.Declaration.IsReadonly ? "readonly " : ""),

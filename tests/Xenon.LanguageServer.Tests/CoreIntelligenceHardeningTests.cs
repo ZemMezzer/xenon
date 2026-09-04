@@ -265,7 +265,8 @@ public sealed class CoreIntelligenceHardeningTests
         Assert.Contains(tokens, token => token.Text == "Value");
         Assert.Contains(tokens, token => token.Text == "this");
         Assert.Contains(tokens, token => token.Text == "Run");
-        Assert.DoesNotContain(tokens, token => token.Text is "get" or "set");
+        Assert.All(tokens.Where(token => token.Text is "get" or "set"),
+            token => Assert.Equal(21, token.Type));
     }
 
     [Fact]
@@ -311,10 +312,11 @@ public sealed class CoreIntelligenceHardeningTests
         string[] labels = Labels(keywordCompletion);
         Assert.All(SyntaxFacts.GetEditorKeywordTexts(), keyword => Assert.Contains(keyword, labels));
         JsonElement[] keywordItems = keywordCompletion.GetProperty("items").EnumerateArray().ToArray();
-        AssertKeywordDetails(keywordItems, ["unique", "shared", "weak", "storage", "pin"],
-            "ownership type keyword");
-        AssertKeywordDetails(keywordItems, ["new", "move", "lock"], "value expression keyword");
+        AssertKeywordDetails(keywordItems, ["unique", "shared", "weak", "storage", "pin", "atomic"],
+            "type-forming keyword");
+        AssertKeywordDetails(keywordItems, ["new", "move", "lock"], "value-forming keyword");
         AssertKeywordDetails(keywordItems, ["free", "destruct"], "lifetime operation keyword");
+        AssertKeywordDetails(keywordItems, ["true", "false", "null"], "literal keyword");
         AssertKeywordDetails(keywordItems,
             ["void", "bool", "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong",
                 "float", "double", "nint", "nuint", "clong", "culong"],
@@ -502,7 +504,9 @@ public sealed class CoreIntelligenceHardeningTests
         var lists = tokens.Where(token => token.Text == "List").ToArray();
         Assert.Equal(4, lists.Length);
         Assert.All(lists, token => Assert.Equal(1, token.Type)); // type and constructor spellings share a color
-        Assert.Equal(14, tokens.Single(token => token.Text == "this").Type); // contextual modifier
+        Assert.Equal(21, tokens.Single(token => token.Text == "this").Type); // expression keyword
+        Assert.All(tokens.Where(token => token.Text is "get" or "set"),
+            token => Assert.Equal(21, token.Type));
         Assert.Equal(2, tokens.Count(token => token.Text == "value"));
         Assert.All(tokens.Where(token => token.Text == "value"),
             token => Assert.Equal(14, token.Type)); // contextual modifier

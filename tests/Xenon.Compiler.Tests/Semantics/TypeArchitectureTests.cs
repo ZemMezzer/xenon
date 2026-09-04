@@ -107,6 +107,7 @@ public sealed class TypeArchitectureTests
         Assert.Same(factory.PointerTo(type), factory.PointerTo(type));
         Assert.Same(factory.ReferenceTo(type, true), factory.ReferenceTo(type, true));
         Assert.Same(factory.ArrayOf(type, 3), factory.ArrayOf(type, 3));
+        Assert.Same(factory.AtomicOf(type), factory.AtomicOf(type));
         Assert.Same(factory.UniqueOf(type), factory.UniqueOf(type));
         Assert.Same(factory.SharedOf(type), factory.SharedOf(type));
         Assert.Same(factory.WeakOf(type), factory.WeakOf(type));
@@ -120,11 +121,14 @@ public sealed class TypeArchitectureTests
         Assert.True(TypeIdentity.AreSame(factory.UniqueOf(type), other.UniqueOf(type)));
         Assert.True(TypeIdentity.AreSame(factory.SharedOf(type), other.SharedOf(type)));
         Assert.True(TypeIdentity.AreSame(factory.WeakOf(type), other.WeakOf(type)));
+        Assert.True(TypeIdentity.AreSame(factory.AtomicOf(type), other.AtomicOf(type)));
         Assert.False(TypeIdentity.AreSame(factory.UniqueOf(type), factory.SharedOf(type)));
         Assert.False(TypeIdentity.AreSame(factory.SharedOf(type), factory.WeakOf(type)));
+        Assert.False(TypeIdentity.AreSame(factory.AtomicOf(type), type));
         Assert.Equal("unique<Example.S>", factory.UniqueOf(type).ToDisplayString(TypeDisplayFormat.FullyQualified));
         Assert.Equal("shared<Example.S>", factory.SharedOf(type).ToDisplayString(TypeDisplayFormat.FullyQualified));
         Assert.Equal("weak<Example.S>", factory.WeakOf(type).ToDisplayString(TypeDisplayFormat.FullyQualified));
+        Assert.Equal("atomic<Example.S>", factory.AtomicOf(type).ToDisplayString(TypeDisplayFormat.FullyQualified));
         Assert.Throws<ArgumentOutOfRangeException>(() => factory.ArrayOf(type, 0));
         Assert.Throws<ArgumentNullException>(() => factory.PointerTo(null!));
     }
@@ -135,7 +139,8 @@ public sealed class TypeArchitectureTests
         var factory = new TypeFactory();
         var results = new TypeSymbol[128];
         Parallel.For(0, results.Length, index =>
-            results[index] = factory.ArrayOf(factory.ReferenceTo(factory.PointerTo(BuiltinTypes.Int, true), true), 2));
+            results[index] = factory.AtomicOf(
+                factory.ArrayOf(factory.ReferenceTo(factory.PointerTo(BuiltinTypes.Int, true), true), 2)));
         Assert.All(results, type => Assert.Same(results[0], type));
     }
 

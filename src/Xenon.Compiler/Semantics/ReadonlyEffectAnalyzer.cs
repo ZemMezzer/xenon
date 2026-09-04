@@ -197,6 +197,30 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     RegisterScalarCleanup(local);
                 return value;
             }
+            case BoundCompareExchangeExpression compareExchange:
+            {
+                HashSet<object> target = Address(compareExchange.Target);
+                HashSet<object> current = Read(target,
+                    ((AtomicTypeSymbol)compareExchange.Target.Type).ElementType);
+                Evaluate(compareExchange.Expected);
+                HashSet<object> desired = Evaluate(compareExchange.Desired);
+                current.UnionWith(desired);
+                CheckWrite(target, compareExchange);
+                StoreValue(target, current, compareExchange.Target.Type);
+                return [];
+            }
+            case BoundSwapExpression swap:
+            {
+                HashSet<object> leftAddress = Address(swap.Left);
+                HashSet<object> rightAddress = Address(swap.Right);
+                HashSet<object> leftValue = Read(leftAddress, swap.Left.Type);
+                HashSet<object> rightValue = Read(rightAddress, swap.Right.Type);
+                CheckWrite(leftAddress, swap);
+                CheckWrite(rightAddress, swap);
+                StoreValue(leftAddress, rightValue, swap.Left.Type);
+                StoreValue(rightAddress, leftValue, swap.Right.Type);
+                return [];
+            }
             case BoundIndexExpression index:
                 return Read(Address(index), index.Type);
             case BoundArrayMetadataExpression metadata:

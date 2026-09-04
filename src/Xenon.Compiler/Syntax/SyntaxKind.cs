@@ -21,6 +21,8 @@ public enum SyntaxKind
     ColonToken,
     DotToken,
     ArrowToken,
+    CompareExchangeArrowToken,
+    SwapToken,
 
     PlusToken,
     MinusToken,
@@ -81,6 +83,7 @@ public enum SyntaxKind
     TemplateKeyword,
     WhereKeyword,
     StaticKeyword,
+    ThreadLocalKeyword,
     VirtualKeyword,
     OverrideKeyword,
     AbstractKeyword,
@@ -120,6 +123,7 @@ public enum SyntaxKind
     WeakKeyword,
     StorageKeyword,
     PinKeyword,
+    AtomicKeyword,
 
     CompilationUnit,
     UsingDirective,
@@ -169,6 +173,8 @@ public enum SyntaxKind
     PostfixUnaryExpression,
     BinaryExpression,
     AssignmentExpression,
+    CompareExchangeExpression,
+    SwapExpression,
     CallExpression,
     MemberAccessExpression,
     IndexExpression,

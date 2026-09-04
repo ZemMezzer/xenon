@@ -90,6 +90,21 @@ public sealed class ArrayTypeSymbol : TypeSymbol
 }
 
 /// <summary>
+/// Core atomic storage for one value. Atomicity changes access semantics and may
+/// require a backend-specific representation; it does not create ownership.
+/// </summary>
+public sealed class AtomicTypeSymbol : TypeSymbol
+{
+    internal AtomicTypeSymbol(TypeSymbol elementType)
+        : base(string.Empty) => ElementType = elementType;
+
+    public TypeSymbol ElementType { get; }
+    public override string Name => ToDisplayString();
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
+        $"atomic<{ElementType.ToDisplayString(format)}>";
+}
+
+/// <summary>
 /// A single-owner handle for one fresh heap allocation. Its runtime value has the
 /// same representation as <see cref="StorageType"/>, while its distinct semantic
 /// identity prevents implicit raw-pointer adoption and ordinary copying.

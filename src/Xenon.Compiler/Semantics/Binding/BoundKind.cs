@@ -23,6 +23,8 @@ public enum BoundKind
     CopyExpression,
     BinaryExpression,
     AssignmentExpression,
+    CompareExchangeExpression,
+    SwapExpression,
     CompoundAccessorAssignmentExpression,
     CallExpression,
     MethodCallExpression,
