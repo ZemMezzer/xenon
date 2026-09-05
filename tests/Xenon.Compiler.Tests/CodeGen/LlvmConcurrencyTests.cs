@@ -186,7 +186,7 @@ public sealed class LlvmConcurrencyTests
     [Theory]
     [InlineData("x86_64-unknown-linux-gnu")]
     [InlineData("x86_64-apple-darwin")]
-    public void UnixThreadLocalCleanup_UsesLazyPthreadKeyWithoutCxxRuntime(string triple)
+    public void UnixThreadLocalCleanup_UsesPlatformRuntimeWithoutCxxRuntime(string triple)
     {
         Compilation compilation = Compilation.Create(SourceText.From("""
             namespace ThreadLocalCleanup;
@@ -213,11 +213,20 @@ public sealed class LlvmConcurrencyTests
             new LlvmTargetOptions(triple, PositionIndependentCode: true),
             "thread-local-cleanup");
 
-        Assert.Contains("pthread_key_create", ir, StringComparison.Ordinal);
-        Assert.Contains("pthread_key_delete", ir, StringComparison.Ordinal);
-        Assert.Contains("pthread_getspecific", ir, StringComparison.Ordinal);
-        Assert.Contains("pthread_setspecific", ir, StringComparison.Ordinal);
-        Assert.Contains("threadlocal_pthread_cleanup", ir, StringComparison.Ordinal);
+        if (triple.Contains("darwin", StringComparison.Ordinal))
+        {
+            Assert.Contains("_tlv_atexit", ir, StringComparison.Ordinal);
+            Assert.DoesNotContain("pthread_key_create", ir, StringComparison.Ordinal);
+            Assert.DoesNotContain("threadlocal_pthread_cleanup", ir, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("pthread_key_create", ir, StringComparison.Ordinal);
+            Assert.Contains("pthread_key_delete", ir, StringComparison.Ordinal);
+            Assert.Contains("pthread_getspecific", ir, StringComparison.Ordinal);
+            Assert.Contains("pthread_setspecific", ir, StringComparison.Ordinal);
+            Assert.Contains("threadlocal_pthread_cleanup", ir, StringComparison.Ordinal);
+        }
         Assert.DoesNotContain("__cxa_thread_atexit", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("__dso_handle", ir, StringComparison.Ordinal);
     }
