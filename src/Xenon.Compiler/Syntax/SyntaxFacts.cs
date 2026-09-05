@@ -73,6 +73,7 @@ public static class SyntaxFacts
             ["storage"] = SyntaxKind.StorageKeyword,
             ["pin"] = SyntaxKind.PinKeyword,
             ["atomic"] = SyntaxKind.AtomicKeyword,
+            ["function"] = SyntaxKind.FunctionKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
     private static readonly FrozenSet<SyntaxKind> KeywordKinds = Keywords.Values.ToFrozenSet();
     private static readonly string[] ContextualEditorKeywords = ["destruct"];
@@ -132,6 +133,7 @@ public static class SyntaxFacts
         SyntaxKind.StorageKeyword or
         SyntaxKind.PinKeyword or
         SyntaxKind.AtomicKeyword or
+        SyntaxKind.FunctionKeyword or
         SyntaxKind.IdentifierToken;
 
     public static bool IsAssignmentOperator(SyntaxKind kind) => kind is

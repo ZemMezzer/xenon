@@ -209,6 +209,294 @@ public sealed class LlvmIrGeneratorTests
         Assert.DoesNotContain("sub ptr", ir, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("x86_64-pc-windows-msvc", "define dllexport i32 @Example_A(i32", "define dllexport i64 @Example_C(i64", "define dllexport void @Example_D(ptr sret(%Example.D) align 8", "define dllexport void @Example_E(ptr sret(%Example.E) align 8", "define dllexport void @Example_F(ptr sret(%Example.F) align 8", "ptr %0")]
+    [InlineData("x86_64-pc-linux-gnu", "define i32 @Example_A(i32", "define <2 x float> @Example_C(<2 x float>", "define { double, double } @Example_D(double", "define { i64, i64 } @Example_E(i64", "define void @Example_F(ptr sret(%Example.F) align 8", "ptr byval(%Example.F) align 8 %1")]
+    [InlineData("aarch64-pc-linux-gnu", "define i32 @Example_A(i64", "define %Example.C @Example_C([2 x float] alignstack(8)", "define %Example.D @Example_D([2 x double] alignstack(8)", "define [2 x i64] @Example_E([2 x i64]", "define void @Example_F(ptr sret(%Example.F) align 8", "ptr %1")]
+    [InlineData("arm64-apple-macosx14.0.0", "define i32 @Example_A(i64", "define %Example.C @Example_C([2 x float] %0", "define %Example.D @Example_D([2 x double] %0", "define [2 x i64] @Example_E([2 x i64]", "define void @Example_F(ptr sret(%Example.F) align 8", "ptr %1")]
+    [InlineData("aarch64-pc-windows-msvc", "define dllexport i32 @Example_A(i64", "define dllexport %Example.C @Example_C([2 x float] %0", "define dllexport %Example.D @Example_D([2 x double] %0", "define dllexport [2 x i64] @Example_E([2 x i64]", "define dllexport void @Example_F(ptr sret(%Example.F) align 8", "ptr %1")]
+    public void Generator_ClassifiesCStructValuesLikeClangForSupportedTargets(
+        string triple,
+        string aSignature,
+        string cSignature,
+        string dSignature,
+        string eSignature,
+        string fSignature,
+        string fParameter)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct A { public int X; }
+            struct B { public int X; public int Y; }
+            struct C { public float X; public float Y; }
+            struct D { public double X; public double Y; }
+            struct E { public int A; public float B; public long C; }
+            struct F { public long A; public long B; public long C; }
+            extern E Native(E value);
+            E CallNative(E value) { return Native(value); }
+            export A A(A value) { return value; }
+            export B B(B value) { return value; }
+            export C C(C value) { return value; }
+            export D D(D value) { return value; }
+            export E E(E value) { return value; }
+            export F F(F value) { return value; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            new LlvmTargetOptions(triple),
+            "struct-c-abi");
+
+        Assert.Contains(aSignature, ir, StringComparison.Ordinal);
+        Assert.Contains(cSignature, ir, StringComparison.Ordinal);
+        Assert.Contains(dSignature, ir, StringComparison.Ordinal);
+        Assert.Contains(eSignature, ir, StringComparison.Ordinal);
+        Assert.Contains(fSignature, ir, StringComparison.Ordinal);
+        Assert.Contains(fParameter, ir, StringComparison.Ordinal);
+        Assert.Contains("@Native", ir, StringComparison.Ordinal);
+        Assert.Contains("abi.result", ir, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("aarch64-pc-linux-gnu", true)]
+    [InlineData("arm64-apple-macosx14.0.0", false)]
+    [InlineData("aarch64-pc-windows-msvc", false)]
+    public void Generator_DistinguishesAArch64PlatformAggregateDetails(
+        string triple,
+        bool expectsLinuxHfaStackAlignment)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Floats { public float X; public float Y; }
+            struct Bytes { public byte A; public byte B; public byte C; }
+            export Floats Floats(Floats value) { return value; }
+            export Bytes Bytes(Bytes value) { return value; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            new LlvmTargetOptions(triple),
+            "aarch64-platform-abi");
+
+        Assert.Contains("i24 @Example_Bytes(i64", ir, StringComparison.Ordinal);
+        Assert.Equal(
+            expectsLinuxHfaStackAlignment,
+            ir.Contains("[2 x float] alignstack(8)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Generator_SysVAmd64UsesExactPartialEightbyteCoercions()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Tail8 { public long Head; public byte Tail; }
+            struct Tail16 { public long Head; public short Tail; }
+            struct Tail32 { public long Head; public int Tail; }
+            struct ThreeInts { public int A; public int B; public int C; }
+            struct MultiTail { public int A; public int B; public short C; public short D; }
+            struct Tiny { public byte A; public byte B; public byte C; }
+            struct FloatTail { public double Head; public float Tail; }
+            struct FloatFloatInt { public float A; public float B; public int C; }
+            struct ByteTail { public float A; public float B; public byte C; public byte D; }
+            export Tail8 Tail8(Tail8 value) { return value; }
+            export Tail16 Tail16(Tail16 value) { return value; }
+            export Tail32 Tail32(Tail32 value) { return value; }
+            export ThreeInts ThreeInts(ThreeInts value) { return value; }
+            export MultiTail MultiTail(MultiTail value) { return value; }
+            export Tiny Tiny(Tiny value) { return value; }
+            export FloatTail FloatTail(FloatTail value) { return value; }
+            export FloatFloatInt FloatFloatInt(FloatFloatInt value) { return value; }
+            export ByteTail ByteTail(ByteTail value) { return value; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            new LlvmTargetOptions("x86_64-pc-linux-gnu"),
+            "sysv-partial-eightbytes");
+
+        Assert.Contains("define { i64, i8 } @Example_Tail8(i64 %0, i8 %1)", ir, StringComparison.Ordinal);
+        Assert.Contains("define { i64, i16 } @Example_Tail16(i64 %0, i16 %1)", ir, StringComparison.Ordinal);
+        Assert.Contains("define { i64, i32 } @Example_Tail32(i64 %0, i32 %1)", ir, StringComparison.Ordinal);
+        Assert.Contains("define { i64, i32 } @Example_ThreeInts(i64 %0, i32 %1)", ir, StringComparison.Ordinal);
+        Assert.Contains("define { i64, i32 } @Example_MultiTail(i64 %0, i32 %1)", ir, StringComparison.Ordinal);
+        Assert.Contains("define i24 @Example_Tiny(i24 %0)", ir, StringComparison.Ordinal);
+        Assert.Contains("define { double, float } @Example_FloatTail(double %0, float %1)", ir, StringComparison.Ordinal);
+        Assert.Contains(
+            "define { <2 x float>, i32 } @Example_FloatFloatInt(<2 x float> %0, i32 %1)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "define { <2 x float>, i32 } @Example_ByteTail(<2 x float> %0, i32 %1)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("@Example_ThreeInts(i64 %0, i64 %1)", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("@Example_MultiTail(i64 %0, i64 %1)", ir, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("aarch64-pc-linux-gnu", true)]
+    [InlineData("arm64-apple-macosx14.0.0", false)]
+    [InlineData("aarch64-pc-windows-msvc", false)]
+    public void Generator_AArch64HfaAfterFpRegisterExhaustionUsesPlatformStackRules(
+        string triple,
+        bool expectsLinuxStackAlignment)
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Float2 { public float X; public float Y; }
+            extern void Exhausted(
+                double a, double b, double c, double d,
+                double e, double f, double g, double h,
+                int before, Float2 value, int after);
+            void Call(Float2 value)
+            {
+                Exhausted(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9, value, 10);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            new LlvmTargetOptions(triple),
+            "aarch64-exhausted-hfa");
+
+        const string prefix =
+            "@Exhausted(double, double, double, double, double, double, double, double, i32, ";
+        string expectedAggregate = expectsLinuxStackAlignment
+            ? "[2 x float] alignstack(8), i32)"
+            : "[2 x float], i32)";
+        Assert.Contains(prefix + expectedAggregate, ir, StringComparison.Ordinal);
+        Assert.Equal(
+            expectsLinuxStackAlignment,
+            ir.Contains("[2 x float] alignstack(8)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Generator_WindowsArm64ClassifiesRepresentativeAggregates()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Float2 { public float X; public float Y; }
+            struct Double2 { public double X; public double Y; }
+            struct Mixed { public int A; public float B; }
+            export Float2 Float2(Float2 value) { return value; }
+            export Double2 Double2(Double2 value) { return value; }
+            export Mixed Mixed(Mixed value) { return value; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            new LlvmTargetOptions("aarch64-pc-windows-msvc"),
+            "windows-arm64-aggregates");
+
+        Assert.Contains(
+            "define dllexport %Example.Float2 @Example_Float2([2 x float] %0)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "define dllexport %Example.Double2 @Example_Double2([2 x double] %0)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "define dllexport i64 @Example_Mixed(i64 %0)",
+            ir,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_SysVAmd64MovesWholeAggregateToMemoryWhenArgumentRegistersAreExhausted()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Pair { public long A; public long B; }
+            struct Mixed { public long Integer; public double Floating; }
+            struct Doubles { public double A; public double B; }
+            struct Single { public long Value; }
+            struct Large { public long A; public long B; public long C; }
+
+            extern void IntegerExhaustion(
+                int a, int b, int c, int d, int e, Pair value, Single tail);
+            extern void ExactIntegerFit(int a, int b, int c, int d, Pair value);
+            extern void SseExhaustion(
+                double a, double b, double c, double d, double e, double f, double g,
+                Doubles value);
+            extern void ExactSseFit(
+                double a, double b, double c, double d, double e, double f, Doubles value);
+            extern void MixedExhaustion(
+                int a, int b, int c, int d, int e,
+                double f0, double f1, double f2, double f3,
+                double f4, double f5, double f6, double f7,
+                Mixed value, Single tail);
+            extern Large IndirectResultExhaustion(
+                int a, int b, int c, int d, int e, Pair value);
+
+            void CallInteger(Pair value, Single tail)
+            {
+                IntegerExhaustion(1, 2, 3, 4, 5, value, tail);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            new LlvmTargetOptions("x86_64-pc-linux-gnu"),
+            "sysv-register-exhaustion");
+
+        Assert.Contains(
+            "declare void @IntegerExhaustion(i32, i32, i32, i32, i32, " +
+            "ptr byval(%Example.Pair) align 8, i64)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "declare void @SseExhaustion(double, double, double, double, double, double, double, " +
+            "ptr byval(%Example.Doubles) align 8)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "declare void @ExactIntegerFit(i32, i32, i32, i32, i64, i64)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "declare void @ExactSseFit(double, double, double, double, double, double, double, double)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ptr byval(%Example.Mixed) align 8, i64)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "declare void @IndirectResultExhaustion(ptr sret(%Example.Large) align 8, " +
+            "i32, i32, i32, i32, i32, ptr byval(%Example.Pair) align 8)",
+            ir,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "call void @IntegerExhaustion(i32 1, i32 2, i32 3, i32 4, i32 5, " +
+            "ptr byval(%Example.Pair) align 8 %abi.argument.copy, i64 %abi.argument)",
+            ir,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_RejectsStructValueBoundariesOnUnimplementedTargetsOnlyWhenUsed()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Value { public int Data; }
+            export Value Echo(Value value) { return value; }
+            """);
+
+        LlvmCodeGenerationException exception = Assert.Throws<LlvmCodeGenerationException>(() =>
+            new LlvmIrGenerator().GenerateForTarget(
+                compilation,
+                new LlvmTargetOptions("i686-pc-windows-msvc")));
+
+        Assert.Contains("Unsupported C ABI target", exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Generator_ChecksAllHeapAllocationsBeforeInitialization()
     {
@@ -2461,6 +2749,26 @@ public sealed class LlvmIrGeneratorTests
         Assert.DoesNotContain("@malloc", arrayMove, StringComparison.Ordinal);
         Assert.DoesNotContain("@calloc", arrayMove, StringComparison.Ordinal);
         Assert.DoesNotContain("llvm.memcpy", arrayMove, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsFunctionAddressesAndIndirectCalls()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int Add(int left, int right) { return left + right; }
+            int Run()
+            {
+                function int(int, int)* callback = &Add;
+                if (callback == null) { return 0; }
+                return callback(20, 22);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(), "function-pointers");
+        Assert.Contains("indirect.call", ir, StringComparison.Ordinal);
+        Assert.Contains("call i32 %", ir, StringComparison.Ordinal);
     }
 
     private static Compilation CreateCompilation(string source) =>

@@ -127,11 +127,85 @@ public static class TypeFacts
     public static bool ExposesAtomicStorageToNativeAbi(TypeSymbol type) =>
         ExposesAtomicStorageToNativeAbi(type, []);
 
+    /// <summary>
+    /// Returns the first representation-level reason a by-value struct cannot be
+    /// described by an ordinary C struct. Raw pointers and function pointers are
+    /// handles; nested structs are checked recursively.
+    /// </summary>
+    public static string? GetCAbiStructIncompatibility(StructTypeSymbol type) =>
+        GetCAbiStructIncompatibility(type, [], type.Name);
+
+    public static string? GetCAbiTypeIncompatibility(TypeSymbol type) =>
+        GetCAbiTypeIncompatibility(type, [], type.ToDisplayString());
+
+    private static string? GetCAbiStructIncompatibility(
+        StructTypeSymbol type,
+        HashSet<StructTypeSymbol> visited,
+        string path)
+    {
+        // Recursive by-value layouts are rejected by the general layout pass. Re-entering
+        // here can also be legitimate through a function-pointer signature, which is a
+        // storage boundary just like an ordinary pointer.
+        if (!visited.Add(type)) return null;
+        try
+        {
+            if (type.BaseType is not null)
+                return $"'{path}' uses struct inheritance";
+            if (type.HasVirtualDispatch)
+                return $"'{path}' contains Xenon virtual-dispatch storage";
+            if (type.Destructor is not null)
+                return $"'{path}' has a Xenon destructor";
+            if (type.Fields.IsEmpty)
+                return $"'{path}' is empty, which has no portable C representation";
+            foreach (FieldSymbol field in type.Fields)
+            {
+                string fieldPath = $"{path}.{field.Name}";
+                if (GetCAbiTypeIncompatibility(field.Type, visited, fieldPath) is { } failure)
+                    return failure;
+            }
+            return null;
+        }
+        finally
+        {
+            visited.Remove(type);
+        }
+    }
+
+    private static string? GetCAbiTypeIncompatibility(
+        TypeSymbol type,
+        HashSet<StructTypeSymbol> visited,
+        string path)
+    {
+        if (type is PrimitiveTypeSymbol primitive)
+            return TypeIdentity.AreSame(primitive, BuiltinTypes.Void)
+                ? $"'{path}' has type 'void'"
+                : null;
+        if (type is EnumTypeSymbol or PointerTypeSymbol)
+            return null;
+        if (type is FunctionPointerTypeSymbol function)
+        {
+            if (!TypeIdentity.AreSame(function.ReturnType, BuiltinTypes.Void) &&
+                GetCAbiTypeIncompatibility(function.ReturnType, visited, $"{path} return") is { } returnFailure)
+                return returnFailure;
+            for (int index = 0; index < function.ParameterTypes.Length; index++)
+                if (GetCAbiTypeIncompatibility(
+                        function.ParameterTypes[index], visited, $"{path} parameter {index + 1}") is { } parameterFailure)
+                    return parameterFailure;
+            return null;
+        }
+        if (type is StructTypeSymbol structure)
+            return GetCAbiStructIncompatibility(structure, visited, path);
+        return $"'{path}' uses Xenon-only type '{type.ToDisplayString()}'";
+    }
+
     private static bool ExposesAtomicStorageToNativeAbi(TypeSymbol type, HashSet<TypeSymbol> visited)
     {
         if (type is AtomicTypeSymbol) return true;
         if (type is PointerTypeSymbol pointer)
             return ExposesAtomicStorageToNativeAbi(pointer.ElementType, visited);
+        if (type is FunctionPointerTypeSymbol function)
+            return ExposesAtomicStorageToNativeAbi(function.ReturnType, visited) ||
+                function.ParameterTypes.Any(parameter => ExposesAtomicStorageToNativeAbi(parameter, visited));
         if (type is ReferenceTypeSymbol reference)
             return ExposesAtomicStorageToNativeAbi(reference.ElementType, visited);
         if (type is StorageTypeSymbol storage)
@@ -219,7 +293,7 @@ public static class TypeFacts
         if (type is AtomicTypeSymbol)
             return new ValueEqualityFailure(type, [], ContainsAtomicStorage: true);
         if ((type is PrimitiveTypeSymbol primitive && !TypeIdentity.AreSame(primitive, BuiltinTypes.Void)) ||
-            type is EnumTypeSymbol or PointerTypeSymbol or ArrayTypeSymbol or SharedTypeSymbol or WeakTypeSymbol)
+            type is EnumTypeSymbol or PointerTypeSymbol or FunctionPointerTypeSymbol or ArrayTypeSymbol or SharedTypeSymbol or WeakTypeSymbol)
             return null;
         if (type is not StructTypeSymbol structure || !visited.Add(structure))
             return new ValueEqualityFailure(type, [], ContainsAtomicStorage: false);
@@ -245,8 +319,8 @@ public static class TypeFacts
     {
         if (TypeIdentity.AreSame(left, right) && GetValueEqualityFailure(left) is null)
             return true;
-        if (left is PointerTypeSymbol && TypeIdentity.AreSame(right, BuiltinTypes.Null) ||
-            right is PointerTypeSymbol && TypeIdentity.AreSame(left, BuiltinTypes.Null))
+        if (left is PointerTypeSymbol or FunctionPointerTypeSymbol && TypeIdentity.AreSame(right, BuiltinTypes.Null) ||
+            right is PointerTypeSymbol or FunctionPointerTypeSymbol && TypeIdentity.AreSame(left, BuiltinTypes.Null))
             return true;
         if (left is SharedTypeSymbol && TypeIdentity.AreSame(right, BuiltinTypes.Null) ||
             right is SharedTypeSymbol && TypeIdentity.AreSame(left, BuiltinTypes.Null))
@@ -285,7 +359,7 @@ public static class TypeFacts
         if (destination is PinTypeSymbol pin && TypeIdentity.AreSame(pin.ElementType, source))
             return 1;
 
-        if (destination is PointerTypeSymbol && TypeIdentity.AreSame(source, BuiltinTypes.Null))
+        if (destination is PointerTypeSymbol or FunctionPointerTypeSymbol && TypeIdentity.AreSame(source, BuiltinTypes.Null))
             return 1000;
 
         if (destination is SharedTypeSymbol && TypeIdentity.AreSame(source, BuiltinTypes.Null))

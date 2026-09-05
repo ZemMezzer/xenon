@@ -187,6 +187,11 @@ public sealed class TemplateConformanceMatcher
         {
             (PointerTypeSymbol left, PointerTypeSymbol right) => left.IsReadonly == right.IsReadonly &&
                 TemplateTypeMatchesNominal(left.ElementType, right.ElementType, requiredTemplate),
+            (FunctionPointerTypeSymbol left, FunctionPointerTypeSymbol right) =>
+                TemplateTypeMatchesNominal(left.ReturnType, right.ReturnType, requiredTemplate) &&
+                left.ParameterTypes.Length == right.ParameterTypes.Length &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TemplateTypeMatchesNominal(pair.First, pair.Second, requiredTemplate)),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) => left.IsReadonly == right.IsReadonly &&
                 TemplateTypeMatchesNominal(left.ElementType, right.ElementType, requiredTemplate),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) => left.Rank == right.Rank &&
@@ -246,6 +251,11 @@ public sealed class TemplateConformanceMatcher
         {
             (PointerTypeSymbol left, PointerTypeSymbol right) => left.IsReadonly == right.IsReadonly &&
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
+            (FunctionPointerTypeSymbol left, FunctionPointerTypeSymbol right) =>
+                TemplateTypesMatch(left.ReturnType, right.ReturnType, requiredTemplate, availableTemplate) &&
+                left.ParameterTypes.Length == right.ParameterTypes.Length &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TemplateTypesMatch(pair.First, pair.Second, requiredTemplate, availableTemplate)),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) => left.IsReadonly == right.IsReadonly &&
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) => left.Rank == right.Rank &&
@@ -375,6 +385,11 @@ public sealed class TemplateConformanceMatcher
         {
             (PointerTypeSymbol left, PointerTypeSymbol right) =>
                 left.IsReadonly == right.IsReadonly && TypesMatch(left.ElementType, right.ElementType, template, concrete),
+            (FunctionPointerTypeSymbol left, FunctionPointerTypeSymbol right) =>
+                TypesMatch(left.ReturnType, right.ReturnType, template, concrete) &&
+                left.ParameterTypes.Length == right.ParameterTypes.Length &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TypesMatch(pair.First, pair.Second, template, concrete)),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) =>
                 left.IsReadonly == right.IsReadonly && TypesMatch(left.ElementType, right.ElementType, template, concrete),
             (ArrayTypeSymbol left, ArrayTypeSymbol right) =>

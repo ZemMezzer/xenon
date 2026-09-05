@@ -41,6 +41,11 @@ internal sealed class SemanticInfoStore
             case PointerTypeSyntax pointer when type is PointerTypeSymbol pointerType:
                 RecordType(pointer.ElementType, pointerType.ElementType);
                 break;
+            case FunctionPointerTypeSyntax function when type is FunctionPointerTypeSymbol functionType:
+                RecordType(function.ReturnType, functionType.ReturnType);
+                foreach ((TypeSyntax parameterSyntax, TypeSymbol parameterType) in function.ParameterTypes.Zip(functionType.ParameterTypes))
+                    RecordType(parameterSyntax, parameterType);
+                break;
             case ReferenceTypeSyntax reference when type is ReferenceTypeSymbol referenceType:
                 RecordType(reference.ElementType, referenceType.ElementType);
                 break;
