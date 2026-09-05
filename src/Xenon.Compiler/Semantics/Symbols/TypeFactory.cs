@@ -18,12 +18,30 @@ public sealed class TypeFactory
     private readonly ConcurrentDictionary<TypeSymbol, WeakTypeSymbol> _weak = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, StorageTypeSymbol> _storage = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, PinTypeSymbol> _pin = new(TypeIdentity.Comparer);
+    private readonly List<FunctionPointerTypeSymbol> _functionPointers = [];
 
     public PointerTypeSymbol PointerTo(TypeSymbol elementType, bool isReadonly = false) =>
         _pointers.GetOrAdd((Intern(elementType), isReadonly), static key => new PointerTypeSymbol(key.Element, key.Readonly));
 
     public ReferenceTypeSymbol ReferenceTo(TypeSymbol elementType, bool isReadonly = false) =>
         _references.GetOrAdd((Intern(elementType), isReadonly), static key => new ReferenceTypeSymbol(key.Element, key.Readonly));
+
+    public FunctionPointerTypeSymbol FunctionPointer(TypeSymbol returnType, IEnumerable<TypeSymbol> parameterTypes)
+    {
+        TypeSymbol internedReturn = Intern(returnType);
+        TypeSymbol[] internedParameters = parameterTypes.Select(Intern).ToArray();
+        lock (_functionPointers)
+        {
+            FunctionPointerTypeSymbol? existing = _functionPointers.FirstOrDefault(candidate =>
+                TypeIdentity.AreSame(candidate.ReturnType, internedReturn) &&
+                candidate.ParameterTypes.Length == internedParameters.Length &&
+                candidate.ParameterTypes.Zip(internedParameters).All(pair => TypeIdentity.AreSame(pair.First, pair.Second)));
+            if (existing is not null) return existing;
+            var created = new FunctionPointerTypeSymbol(internedReturn, [.. internedParameters]);
+            _functionPointers.Add(created);
+            return created;
+        }
+    }
 
     public ArrayTypeSymbol ArrayOf(TypeSymbol elementType, int rank = 1)
     {
@@ -109,6 +127,7 @@ public sealed class TypeFactory
         return type switch
         {
             PointerTypeSymbol pointer => PointerTo(pointer.ElementType, pointer.IsReadonly),
+            FunctionPointerTypeSymbol function => FunctionPointer(function.ReturnType, function.ParameterTypes),
             ReferenceTypeSymbol reference => ReferenceTo(reference.ElementType, reference.IsReadonly),
             ArrayTypeSymbol array => ArrayOf(array.ElementType, array.Rank),
             AtomicTypeSymbol atomic => AtomicOf(atomic.ElementType),

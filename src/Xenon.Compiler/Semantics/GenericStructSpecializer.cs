@@ -380,6 +380,9 @@ internal sealed class GenericStructSpecializer
         GenericParameterSymbol parameter when substitutions.TryGetValue(parameter, out TypeSymbol? replacement) => replacement,
         StructTypeSymbol { GenericDefinition: not null } constructed => SubstituteConstructed(constructed, substitutions, origin),
         PointerTypeSymbol pointer => _types.PointerTo(Substitute(pointer.ElementType, substitutions, origin), pointer.IsReadonly),
+        FunctionPointerTypeSymbol function => _types.FunctionPointer(
+            Substitute(function.ReturnType, substitutions, origin),
+            function.ParameterTypes.Select(parameter => Substitute(parameter, substitutions, origin))),
         ReferenceTypeSymbol reference => _types.ReferenceTo(Substitute(reference.ElementType, substitutions, origin), reference.IsReadonly),
         ArrayTypeSymbol array => _types.ArrayOf(Substitute(array.ElementType, substitutions, origin), array.Rank),
         AtomicTypeSymbol atomic => SubstituteAtomic(atomic, substitutions, origin),

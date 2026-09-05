@@ -79,12 +79,91 @@ public sealed class NativeLinkerTests
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int Int32IntDelegate(int value);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int AddressInt32IntDelegate(nint callback, int value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int CallbackApiIntDelegate(ref NativeCallbackApi api, int value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void CallbackApiVoidDelegate(ref NativeCallbackApi api);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeVector2
     {
         public float X;
         public float Y;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiA { public int X; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiB { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiC { public float X; public float Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiD { public double X; public double Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiE { public int A; public float B; public long C; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiNested { public NativeAbiB Integers; public NativeAbiC Floats; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiCallbacks
+    {
+        public nint Transform;
+        public nint Notify;
+        public nint Context;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeAbiCallbacksAlignment
+    {
+        public byte Prefix;
+        public NativeAbiCallbacks Value;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiA AbiACallback(NativeAbiA value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiA AbiARoundTrip(nint callback, NativeAbiA value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiB AbiBCallback(NativeAbiB value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiB AbiBRoundTrip(nint callback, NativeAbiB value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiC AbiCCallback(NativeAbiC value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiC AbiCRoundTrip(nint callback, NativeAbiC value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiD AbiDCallback(NativeAbiD value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiD AbiDRoundTrip(nint callback, NativeAbiD value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiE AbiECallback(NativeAbiE value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiE AbiERoundTrip(nint callback, NativeAbiE value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiNested AbiNestedCallback(NativeAbiNested value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiNested AbiNestedRoundTrip(nint callback, NativeAbiNested value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int AbiNotify(int value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiCallbacks AbiCallbacksRoundTrip(NativeAbiCallbacks value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeAbiCallbacks AbiCallbacksCreate();
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int AbiCallbacksInvoke(NativeAbiCallbacks value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int AbiCallbacksPointerInvoke(ref NativeAbiCallbacks value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void AbiCallbacksFill(ref NativeAbiCallbacks value);
 
     [Fact]
     public void Linker_CreatesAndRunsHostExecutable()
@@ -381,6 +460,793 @@ public sealed class NativeLinkerTests
             {
                 NativeLibrary.Free(handle);
             }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeCallbackApi
+    {
+        public nint Transform;
+        public nint Context;
+    }
+
+    [Fact]
+    public void Linker_FunctionPointersRoundTripThroughTheNativeCAbi()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace FunctionPointerInterop;
+
+            int Twice(int value) { return value * 2; }
+
+            export int Invoke(function int(int)* callback, int value)
+            {
+                return callback(value);
+            }
+
+            export function int(int)* GetCallback()
+            {
+                return &Twice;
+            }
+
+            struct CallbackApi
+            {
+                public function int(int)* Transform;
+                public void* Context;
+            }
+
+            export int InvokeApi(CallbackApi* api, int value)
+            {
+                return api->Transform(value);
+            }
+
+            export void FillApi(CallbackApi* api)
+            {
+                api->Transform = &Twice;
+                api->Context = null;
+            }
+            """, "function-pointers.xe"));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        string objectPath = Path.Combine(directory,
+            "function-pointers" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "function-pointers", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "function-pointers", "debug", target.Triple);
+
+        try
+        {
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "function-pointers");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols:
+                    ["FunctionPointerInterop_Invoke", "FunctionPointerInterop_GetCallback",
+                     "FunctionPointerInterop_InvokeApi", "FunctionPointerInterop_FillApi"]),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                AddressInt32IntDelegate invoke = LoadDelegate<AddressInt32IntDelegate>(
+                    handle, "FunctionPointerInterop_Invoke");
+                ParameterlessAddressDelegate getCallback = LoadDelegate<ParameterlessAddressDelegate>(
+                    handle, "FunctionPointerInterop_GetCallback");
+                Int32IntDelegate nativeCallback = value => value + 7;
+                nint nativeAddress = Marshal.GetFunctionPointerForDelegate(nativeCallback);
+
+                Assert.Equal(42, invoke(nativeAddress, 35));
+                Int32IntDelegate xenonCallback = Marshal.GetDelegateForFunctionPointer<Int32IntDelegate>(getCallback());
+                Assert.Equal(42, xenonCallback(21));
+
+                CallbackApiIntDelegate invokeApi = LoadDelegate<CallbackApiIntDelegate>(
+                    handle, "FunctionPointerInterop_InvokeApi");
+                CallbackApiVoidDelegate fillApi = LoadDelegate<CallbackApiVoidDelegate>(
+                    handle, "FunctionPointerInterop_FillApi");
+                var api = new NativeCallbackApi { Transform = nativeAddress, Context = (nint)1234 };
+                Assert.Equal(42, invokeApi(ref api, 35));
+                fillApi(ref api);
+                Assert.Equal(nint.Zero, api.Context);
+                Assert.Equal(42, Marshal.GetDelegateForFunctionPointer<Int32IntDelegate>(api.Transform)(21));
+                Assert.Equal(IntPtr.Size * 2, Marshal.SizeOf<NativeCallbackApi>());
+                Assert.Equal(IntPtr.Size, Marshal.OffsetOf<NativeCallbackApi>(nameof(NativeCallbackApi.Context)).ToInt32());
+                GC.KeepAlive(nativeCallback);
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Clang_SysVAggregateShapesMatchXenonLowering()
+    {
+        string directory = CreateTemporaryDirectory();
+        string cPath = Path.Combine(directory, "sysv-aggregate-shapes.c");
+        string clangIrPath = Path.Combine(directory, "sysv-aggregate-shapes.ll");
+
+        try
+        {
+            File.WriteAllText(cPath, """
+                typedef struct ThreeInts { int A; int B; int C; } ThreeInts;
+                typedef struct MultiTail { int A; int B; short C; short D; } MultiTail;
+                typedef struct FloatFloatInt { float A; float B; int C; } FloatFloatInt;
+                typedef struct ByteTail { float A; float B; unsigned char C; unsigned char D; } ByteTail;
+
+                ThreeInts ThreeIntsIdentity(ThreeInts value) { return value; }
+                MultiTail MultiTailIdentity(MultiTail value) { return value; }
+                FloatFloatInt FloatFloatIntIdentity(FloatFloatInt value) { return value; }
+                ByteTail ByteTailIdentity(ByteTail value) { return value; }
+                """);
+
+            string clang = FindHostClang();
+            NativeProcessResult clangCompilation = new NativeProcessRunner().RunAsync(
+                new NativeProcessRequest(
+                    clang,
+                    [
+                        "-target", "x86_64-unknown-linux-gnu", "-std=c11", "-O0",
+                        "-S", "-emit-llvm", cPath, "-o", clangIrPath,
+                    ],
+                    directory,
+                    TimeSpan.FromMinutes(1))).GetAwaiter().GetResult();
+            Assert.True(
+                clangCompilation.StartError is null && !clangCompilation.TimedOut &&
+                clangCompilation.TerminationError is null && clangCompilation.ExitCode == 0,
+                $"Clang SysV ABI fixture failed with '{clang}': {clangCompilation.StartError}; " +
+                $"timeout={clangCompilation.TimedOut}; {clangCompilation.TerminationError}\n" +
+                $"stdout: {clangCompilation.Stdout}\nstderr: {clangCompilation.Stderr}");
+
+            string clangIr = File.ReadAllText(clangIrPath);
+            Compilation xenonCompilation = Compilation.Create(SourceText.From("""
+                namespace SysVShapes;
+                struct ThreeInts { public int A; public int B; public int C; }
+                struct MultiTail { public int A; public int B; public short C; public short D; }
+                struct FloatFloatInt { public float A; public float B; public int C; }
+                struct ByteTail { public float A; public float B; public byte C; public byte D; }
+                export ThreeInts ThreeIntsIdentity(ThreeInts value) { return value; }
+                export MultiTail MultiTailIdentity(MultiTail value) { return value; }
+                export FloatFloatInt FloatFloatIntIdentity(FloatFloatInt value) { return value; }
+                export ByteTail ByteTailIdentity(ByteTail value) { return value; }
+                """, "sysv-aggregate-shapes.xe"));
+            Assert.False(
+                xenonCompilation.HasErrors,
+                string.Join(Environment.NewLine, xenonCompilation.Diagnostics));
+            string xenonIr = new LlvmIrGenerator().GenerateForTarget(
+                xenonCompilation,
+                new LlvmTargetOptions("x86_64-unknown-linux-gnu"),
+                "sysv-aggregate-shapes");
+
+            Assert.Contains(
+                "{ i64, i32 } @ThreeIntsIdentity(i64 %0, i32 %1)",
+                clangIr,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "{ i64, i32 } @MultiTailIdentity(i64 %0, i32 %1)",
+                clangIr,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "{ <2 x float>, i32 } @FloatFloatIntIdentity(<2 x float> %0, i32 %1)",
+                clangIr,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "{ <2 x float>, i32 } @ByteTailIdentity(<2 x float> %0, i32 %1)",
+                clangIr,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "{ i64, i32 } @SysVShapes_ThreeIntsIdentity(i64 %0, i32 %1)",
+                xenonIr,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "{ i64, i32 } @SysVShapes_MultiTailIdentity(i64 %0, i32 %1)",
+                xenonIr,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "{ <2 x float>, i32 } @SysVShapes_FloatFloatIntIdentity(<2 x float> %0, i32 %1)",
+                xenonIr,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "{ <2 x float>, i32 } @SysVShapes_ByteTailIdentity(<2 x float> %0, i32 %1)",
+                xenonIr,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_FunctionPointersAndCallbackStructsRoundTripWithCompiledC()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
+            namespace NativeCallbackInterop;
+
+            struct CallbackApi
+            {
+                public function int(int, void*)* Transform;
+                public function void(int, void*)* Notify;
+                public void* Context;
+            }
+
+            extern int CProbe();
+            extern int CConsume(CallbackApi value, int input);
+            extern int CConsumePointer(CallbackApi* value, int input);
+            extern function int(int)* get_native_callback();
+            extern void* CGetContext();
+            extern void CRecordXenonNotification(int value, void* context);
+            extern nuint CCallbackApiSize();
+            extern nuint CCallbackApiAlignment();
+            extern nuint CCallbackApiTransformOffset();
+            extern nuint CCallbackApiNotifyOffset();
+            extern nuint CCallbackApiContextOffset();
+            extern nuint CFunctionPointerSize();
+            extern nuint CFunctionPointerAlignment();
+            extern nuint CDataPointerSize();
+            extern nuint CDataPointerAlignment();
+
+            int Twice(int value) { return value * 2; }
+            int TransformWithContext(int value, void* context)
+            {
+                return value * 2;
+            }
+            void NotifyWithContext(int value, void* context)
+            {
+                CRecordXenonNotification(value, context);
+            }
+            int TwiceIgnoringContext(int value, void* context) { return value * 2; }
+            void Ignore(int value, void* context) {}
+
+            export int Invoke(function int(int)* callback, int value) { return callback(value); }
+            export function int(int)* GetCallback() { return &Twice; }
+
+            export int InvokeApi(CallbackApi value, int input)
+            {
+                int transformed = value.Transform(input, value.Context);
+                value.Notify(transformed, value.Context);
+                return transformed;
+            }
+
+            export int InvokeApiPointer(CallbackApi* value, int input)
+            {
+                int transformed = value->Transform(input, value->Context);
+                value->Notify(transformed, value->Context);
+                return transformed;
+            }
+
+            export void FillApi(CallbackApi* value)
+            {
+                value->Transform = &TwiceIgnoringContext;
+                value->Notify = &Ignore;
+                value->Context = null;
+            }
+
+            export CallbackApi RoundTripApi(CallbackApi value) { return value; }
+            export CallbackApi CreateApi()
+            {
+                return CallbackApi { &TwiceIgnoringContext, &Ignore, null };
+            }
+
+            int Main()
+            {
+                CallbackApi callbacks = CallbackApi {
+                    &TransformWithContext, &NotifyWithContext, CGetContext()
+                };
+                if (CConsume(callbacks, 21) != 42) return 1;
+                if (CConsumePointer(&callbacks, 21) != 42) return 2;
+                function int(int)* nativeCallback = get_native_callback();
+                if (nativeCallback(21) != 42) return 3;
+                if (CCallbackApiSize() != sizeof(CallbackApi)) return 4;
+                if (CCallbackApiAlignment() != alignof(CallbackApi)) return 5;
+                if (CCallbackApiTransformOffset() != offsetof(CallbackApi, Transform)) return 6;
+                if (CCallbackApiNotifyOffset() != offsetof(CallbackApi, Notify)) return 7;
+                if (CCallbackApiContextOffset() != offsetof(CallbackApi, Context)) return 8;
+                if (CFunctionPointerSize() != sizeof(function int(int, void*)*)) return 9;
+                if (CFunctionPointerAlignment() != alignof(function int(int, void*)*)) return 10;
+                if (CDataPointerSize() != sizeof(void*)) return 11;
+                if (CDataPointerAlignment() != alignof(void*)) return 12;
+                if (CProbe() != 0) return 13;
+                return 42;
+            }
+            """, "native-callback-interop.xe"));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        string cPath = Path.Combine(directory, "native-callback-interop.c");
+        string cObjectPath = Path.Combine(
+            directory,
+            "native-callback-interop-c" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string xenonObjectPath = Path.Combine(
+            directory,
+            "native-callback-interop-xenon" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "native-callback-interop", "debug", target.Triple);
+
+        try
+        {
+            File.WriteAllText(cPath, """
+                #include <stddef.h>
+                #include <stdint.h>
+
+                typedef int32_t (*Unary)(int32_t);
+                typedef int32_t (*Transform)(int32_t, void *);
+                typedef void (*Notify)(int32_t, void *);
+
+                typedef struct CallbackApi {
+                    Transform transform;
+                    Notify notify;
+                    void *context;
+                } CallbackApi;
+
+                extern int32_t NativeCallbackInterop_Invoke(Unary callback, int32_t value);
+                extern Unary NativeCallbackInterop_GetCallback(void);
+                extern int32_t NativeCallbackInterop_InvokeApi(CallbackApi value, int32_t input);
+                extern int32_t NativeCallbackInterop_InvokeApiPointer(
+                    CallbackApi *value, int32_t input);
+                extern void NativeCallbackInterop_FillApi(CallbackApi *value);
+                extern CallbackApi NativeCallbackInterop_RoundTripApi(CallbackApi value);
+                extern CallbackApi NativeCallbackInterop_CreateApi(void);
+
+                static int32_t notified;
+                static int32_t xenon_notified;
+                static int32_t xenon_context;
+                static int32_t AddSeven(int32_t value) { return value + 7; }
+                static int32_t native_double(int32_t value) { return value * 2; }
+
+                Unary get_native_callback(void)
+                {
+                    return &native_double;
+                }
+
+                void *CGetContext(void) { return &xenon_context; }
+                void CRecordXenonNotification(int32_t value, void *context)
+                {
+                    xenon_notified = context == &xenon_context ? value : -1;
+                }
+
+                static int32_t AddContext(int32_t value, void *context)
+                {
+                    return value + (int32_t)(intptr_t)context;
+                }
+                static void RecordNotification(int32_t value, void *context)
+                {
+                    notified = value + (int32_t)(intptr_t)context;
+                }
+
+                int32_t CConsume(CallbackApi value, int32_t input)
+                {
+                    if (value.context != &xenon_context)
+                        return -1;
+                    xenon_notified = 0;
+                    int32_t transformed = value.transform(input, value.context);
+                    value.notify(transformed, value.context);
+                    return xenon_notified == transformed ? transformed : -2;
+                }
+
+                int32_t CConsumePointer(CallbackApi *value, int32_t input)
+                {
+                    if (!value || value->context != &xenon_context)
+                        return -1;
+                    xenon_notified = 0;
+                    int32_t transformed = value->transform(input, value->context);
+                    value->notify(transformed, value->context);
+                    return xenon_notified == transformed ? transformed : -2;
+                }
+
+                uintptr_t CCallbackApiSize(void) { return sizeof(CallbackApi); }
+                uintptr_t CCallbackApiAlignment(void) { return _Alignof(CallbackApi); }
+                uintptr_t CCallbackApiTransformOffset(void)
+                {
+                    return offsetof(CallbackApi, transform);
+                }
+                uintptr_t CCallbackApiNotifyOffset(void)
+                {
+                    return offsetof(CallbackApi, notify);
+                }
+                uintptr_t CCallbackApiContextOffset(void)
+                {
+                    return offsetof(CallbackApi, context);
+                }
+                uintptr_t CFunctionPointerSize(void) { return sizeof(Transform); }
+                uintptr_t CFunctionPointerAlignment(void) { return _Alignof(Transform); }
+                uintptr_t CDataPointerSize(void) { return sizeof(void *); }
+                uintptr_t CDataPointerAlignment(void) { return _Alignof(void *); }
+
+                int32_t CProbe(void)
+                {
+                    if (NativeCallbackInterop_Invoke(AddSeven, 35) != 42)
+                        return 1;
+                    if (NativeCallbackInterop_GetCallback()(21) != 42)
+                        return 2;
+
+                    CallbackApi callbacks = { AddContext, RecordNotification, (void *)(intptr_t)7 };
+                    notified = 0;
+                    if (NativeCallbackInterop_InvokeApi(callbacks, 28) != 35 || notified != 42)
+                        return 3;
+
+                    notified = 0;
+                    if (NativeCallbackInterop_InvokeApiPointer(&callbacks, 28) != 35 || notified != 42)
+                        return 4;
+
+                    CallbackApi filled = { 0 };
+                    NativeCallbackInterop_FillApi(&filled);
+                    if (!filled.transform || !filled.notify || filled.context != 0)
+                        return 5;
+                    if (filled.transform(21, filled.context) != 42)
+                        return 6;
+
+                    CallbackApi roundTrip = NativeCallbackInterop_RoundTripApi(callbacks);
+                    if (roundTrip.transform != callbacks.transform ||
+                        roundTrip.notify != callbacks.notify || roundTrip.context != callbacks.context)
+                        return 7;
+
+                    CallbackApi created = NativeCallbackInterop_CreateApi();
+                    if (!created.transform || !created.notify || created.context != 0)
+                        return 8;
+                    return created.transform(21, created.context) == 42 ? 0 : 9;
+                }
+                """);
+
+            string cCompiler = FindHostCCompiler();
+            NativeProcessResult cCompilation = new NativeProcessRunner().RunAsync(
+                new NativeProcessRequest(
+                    cCompiler,
+                    ["-std=c11", "-O0", "-c", cPath, "-o", cObjectPath],
+                    directory,
+                    TimeSpan.FromMinutes(1))).GetAwaiter().GetResult();
+            Assert.True(
+                cCompilation.StartError is null && !cCompilation.TimedOut &&
+                cCompilation.TerminationError is null && cCompilation.ExitCode == 0,
+                $"C callback fixture compilation failed with '{cCompiler}': {cCompilation.StartError}; " +
+                $"timeout={cCompilation.TimedOut}; {cCompilation.TerminationError}\n" +
+                $"stdout: {cCompilation.Stdout}\nstderr: {cCompilation.Stderr}");
+
+            LlvmObjectFile xenonObject = new LlvmObjectEmitter().Emit(
+                compilation, xenonObjectPath, target, "native-callback-interop");
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                xenonObject.Path,
+                executablePath,
+                target.Triple,
+                new NativeLinkOptions(Libraries: [cObjectPath]));
+            NativeProcessResult process = new NativeProcessRunner().RunAsync(
+                new NativeProcessRequest(
+                    executable.Path,
+                    [],
+                    directory,
+                    TimeSpan.FromMinutes(1))).GetAwaiter().GetResult();
+
+            Assert.True(
+                process.StartError is null && !process.TimedOut && process.TerminationError is null,
+                $"Native C callback fixture failed: {process.StartError}; timeout={process.TimedOut}; " +
+                $"{process.TerminationError}\nstdout: {process.Stdout}\nstderr: {process.Stderr}");
+            Assert.Equal(42, process.ExitCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_StructValuesAndCallbackStructsRoundTripThroughTheNativeCAbi()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace StructValueInterop;
+
+            struct A { public int X; }
+            struct B { public int X; public int Y; }
+            struct C { public float X; public float Y; }
+            struct D { public double X; public double Y; }
+            struct E { public int A; public float B; public long C; }
+            struct Nested { public B Integers; public C Floats; }
+
+            export A RoundTripA(function A(A)* callback, A value) { return callback(value); }
+            export B RoundTripB(function B(B)* callback, B value) { return callback(value); }
+            export C RoundTripC(function C(C)* callback, C value) { return callback(value); }
+            export D RoundTripD(function D(D)* callback, D value) { return callback(value); }
+            export E RoundTripE(function E(E)* callback, E value) { return callback(value); }
+            export Nested RoundTripNested(function Nested(Nested)* callback, Nested value)
+            {
+                return callback(value);
+            }
+
+            int Twice(int value) { return value * 2; }
+            int Ignore(int value) { return value; }
+            E IncrementE(E value)
+            {
+                value.A += 1;
+                value.B += 2.0f;
+                value.C += cast<long>(3);
+                return value;
+            }
+
+            export function E(E)* GetECallback() { return &IncrementE; }
+
+            struct NativeCallbacks
+            {
+                public function int(int)* Transform;
+                public function int(int)* Notify;
+                public void* Context;
+            }
+
+            export NativeCallbacks RoundTripCallbacks(NativeCallbacks value)
+            {
+                return value;
+            }
+
+            export int InvokeCallbacks(NativeCallbacks value)
+            {
+                return value.Notify(value.Transform(20));
+            }
+
+            export int InvokeCallbacksPointer(NativeCallbacks* value)
+            {
+                return value->Notify(value->Transform(20));
+            }
+
+            export void FillCallbacks(NativeCallbacks* value)
+            {
+                value->Transform = &Twice;
+                value->Notify = &Ignore;
+                value->Context = null;
+            }
+
+            export NativeCallbacks CreateCallbacks()
+            {
+                NativeCallbacks value = NativeCallbacks { &Twice, &Ignore, null };
+                return value;
+            }
+            """, "struct-values.xe"));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        string objectPath = Path.Combine(directory,
+            "struct-values" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "struct-values", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "struct-values", "debug", target.Triple);
+        string[] exports =
+        [
+            "StructValueInterop_RoundTripA", "StructValueInterop_RoundTripB",
+            "StructValueInterop_RoundTripC", "StructValueInterop_RoundTripD",
+            "StructValueInterop_RoundTripE", "StructValueInterop_RoundTripNested",
+            "StructValueInterop_RoundTripCallbacks", "StructValueInterop_InvokeCallbacks",
+            "StructValueInterop_InvokeCallbacksPointer", "StructValueInterop_FillCallbacks",
+            "StructValueInterop_CreateCallbacks", "StructValueInterop_GetECallback",
+        ];
+
+        try
+        {
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "struct-values");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path,
+                libraryPath,
+                target.Triple,
+                new NativeLinkOptions(ExportedSymbols: exports),
+                importLibraryPath);
+
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                AbiACallback aCallback = value => new NativeAbiA { X = value.X + 1 };
+                AbiBCallback bCallback = value => new NativeAbiB { X = value.X + 1, Y = value.Y + 2 };
+                AbiCCallback cCallback = value => new NativeAbiC { X = value.X + 1, Y = value.Y + 2 };
+                AbiDCallback dCallback = value => new NativeAbiD { X = value.X + 1, Y = value.Y + 2 };
+                AbiECallback eCallback = value => new NativeAbiE { A = value.A + 1, B = value.B + 2, C = value.C + 3 };
+                AbiNestedCallback nestedCallback = value => new NativeAbiNested
+                {
+                    Integers = new NativeAbiB { X = value.Integers.X + 1, Y = value.Integers.Y + 2 },
+                    Floats = new NativeAbiC { X = value.Floats.X + 3, Y = value.Floats.Y + 4 },
+                };
+
+                NativeAbiA a = LoadDelegate<AbiARoundTrip>(handle, exports[0])(
+                    Marshal.GetFunctionPointerForDelegate(aCallback), new NativeAbiA { X = 10 });
+                NativeAbiB b = LoadDelegate<AbiBRoundTrip>(handle, exports[1])(
+                    Marshal.GetFunctionPointerForDelegate(bCallback), new NativeAbiB { X = 10, Y = 20 });
+                NativeAbiC c = LoadDelegate<AbiCRoundTrip>(handle, exports[2])(
+                    Marshal.GetFunctionPointerForDelegate(cCallback), new NativeAbiC { X = 10, Y = 20 });
+                NativeAbiD d = LoadDelegate<AbiDRoundTrip>(handle, exports[3])(
+                    Marshal.GetFunctionPointerForDelegate(dCallback), new NativeAbiD { X = 10, Y = 20 });
+                NativeAbiE e = LoadDelegate<AbiERoundTrip>(handle, exports[4])(
+                    Marshal.GetFunctionPointerForDelegate(eCallback), new NativeAbiE { A = 10, B = 20, C = 30 });
+                NativeAbiNested nested = LoadDelegate<AbiNestedRoundTrip>(handle, exports[5])(
+                    Marshal.GetFunctionPointerForDelegate(nestedCallback), new NativeAbiNested
+                    {
+                        Integers = new NativeAbiB { X = 10, Y = 20 },
+                        Floats = new NativeAbiC { X = 30, Y = 40 },
+                    });
+
+                Assert.Equal(11, a.X);
+                Assert.Equal((11, 22), (b.X, b.Y));
+                Assert.Equal((11f, 22f), (c.X, c.Y));
+                Assert.Equal((11d, 22d), (d.X, d.Y));
+                Assert.Equal((11, 22f, 33L), (e.A, e.B, e.C));
+                Assert.Equal((11, 22, 33f, 44f),
+                    (nested.Integers.X, nested.Integers.Y, nested.Floats.X, nested.Floats.Y));
+
+                AbiNotify transform = value => value + 1;
+                AbiNotify notify = value => value + 2;
+                var callbackTable = new NativeAbiCallbacks
+                {
+                    Transform = Marshal.GetFunctionPointerForDelegate(transform),
+                    Notify = Marshal.GetFunctionPointerForDelegate(notify),
+                    Context = (nint)99,
+                };
+                NativeAbiCallbacks callbackResult = LoadDelegate<AbiCallbacksRoundTrip>(
+                    handle, exports[6])(callbackTable);
+                Assert.Equal((nint)99, callbackResult.Context);
+                Assert.Equal(23, LoadDelegate<AbiCallbacksInvoke>(handle, exports[7])(callbackTable));
+                Assert.Equal(23, LoadDelegate<AbiCallbacksPointerInvoke>(handle, exports[8])(ref callbackTable));
+                LoadDelegate<AbiCallbacksFill>(handle, exports[9])(ref callbackTable);
+                Assert.Equal(nint.Zero, callbackTable.Context);
+                Assert.Equal(42, Marshal.GetDelegateForFunctionPointer<AbiNotify>(callbackTable.Transform)(21));
+
+                NativeAbiCallbacks created = LoadDelegate<AbiCallbacksCreate>(handle, exports[10])();
+                Assert.Equal(IntPtr.Size * 3, Marshal.SizeOf<NativeAbiCallbacks>());
+                Assert.Equal(IntPtr.Size * 2,
+                    Marshal.OffsetOf<NativeAbiCallbacks>(nameof(NativeAbiCallbacks.Context)).ToInt32());
+                Assert.Equal(IntPtr.Size,
+                    Marshal.OffsetOf<NativeAbiCallbacksAlignment>(nameof(NativeAbiCallbacksAlignment.Value)).ToInt32());
+                Assert.Equal(42, Marshal.GetDelegateForFunctionPointer<AbiNotify>(created.Transform)(21));
+                nint eCallbackAddress = LoadDelegate<ParameterlessAddressDelegate>(handle, exports[11])();
+                NativeAbiE fromXenon = Marshal.GetDelegateForFunctionPointer<AbiECallback>(eCallbackAddress)(
+                    new NativeAbiE { A = 10, B = 20, C = 30 });
+                Assert.Equal((11, 22f, 33L), (fromXenon.A, fromXenon.B, fromXenon.C));
+                GC.KeepAlive(aCallback);
+                GC.KeepAlive(bCallback);
+                GC.KeepAlive(cCallback);
+                GC.KeepAlive(dCallback);
+                GC.KeepAlive(eCallback);
+                GC.KeepAlive(nestedCallback);
+                GC.KeepAlive(transform);
+                GC.KeepAlive(notify);
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_SysVAggregatesRoundTripAfterArgumentRegisterExhaustionWithC()
+    {
+        if (!OperatingSystem.IsLinux() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+        Compilation compilation = CreateExecutableCompilation(SourceText.From("""
+            namespace SysVRegisterInterop;
+
+            struct Pair
+            {
+                public long A;
+                public long B;
+            }
+
+            extern Pair CAdjust(int a, int b, int c, int d, int e, Pair value);
+            extern int ProbeXenon();
+
+            export Pair XenonAdjust(int a, int b, int c, int d, int e, Pair value)
+            {
+                value.A += cast<long>(a + b + c + d + e);
+                value.B += cast<long>(7);
+                return value;
+            }
+
+            export Pair Invoke(
+                function Pair(int, int, int, int, int, Pair)* callback,
+                Pair value)
+            {
+                return callback(1, 2, 3, 4, 5, value);
+            }
+
+            int Main()
+            {
+                Pair fromC = CAdjust(1, 2, 3, 4, 5, Pair { 10, 20 });
+                if (fromC.A != cast<long>(25)) return 1;
+                if (fromC.B != cast<long>(31)) return 2;
+                if (ProbeXenon() != 0) return 3;
+                return 42;
+            }
+            """, "sysv-register-interop.xe"));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        string cPath = Path.Combine(directory, "sysv-register-interop.c");
+        string cObjectPath = Path.Combine(directory, "sysv-register-interop-c.o");
+        string xenonObjectPath = Path.Combine(directory, "sysv-register-interop-xenon.o");
+        string executablePath = XenonBuildPaths.GetExecutablePath(
+            directory, "sysv-register-interop", "debug", target.Triple);
+
+        try
+        {
+            File.WriteAllText(cPath, """
+                #include <stdint.h>
+
+                typedef struct Pair {
+                    int64_t a;
+                    int64_t b;
+                } Pair;
+
+                typedef Pair (*PairCallback)(
+                    int32_t, int32_t, int32_t, int32_t, int32_t, Pair);
+
+                extern Pair SysVRegisterInterop_XenonAdjust(
+                    int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, Pair value);
+                extern Pair SysVRegisterInterop_Invoke(PairCallback callback, Pair value);
+
+                Pair CAdjust(
+                    int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, Pair value)
+                {
+                    value.a += a + b + c + d + e;
+                    value.b += 11;
+                    return value;
+                }
+
+                int32_t ProbeXenon(void)
+                {
+                    Pair value = { 10, 20 };
+                    Pair result = SysVRegisterInterop_XenonAdjust(1, 2, 3, 4, 5, value);
+                    if (result.a != 25 || result.b != 27)
+                        return 1;
+                    result = SysVRegisterInterop_Invoke(CAdjust, value);
+                    return result.a == 25 && result.b == 31 ? 0 : 2;
+                }
+                """);
+
+            string cCompiler = Environment.GetEnvironmentVariable("CC") ?? "cc";
+            NativeProcessResult cCompilation = new NativeProcessRunner().RunAsync(
+                new NativeProcessRequest(
+                    cCompiler,
+                    ["-std=c11", "-c", cPath, "-o", cObjectPath],
+                    directory,
+                    TimeSpan.FromMinutes(1))).GetAwaiter().GetResult();
+            Assert.True(
+                cCompilation.StartError is null && !cCompilation.TimedOut &&
+                cCompilation.TerminationError is null && cCompilation.ExitCode == 0,
+                $"C fixture compilation failed: {cCompilation.StartError}; " +
+                $"timeout={cCompilation.TimedOut}; {cCompilation.TerminationError}\n" +
+                $"stdout: {cCompilation.Stdout}\nstderr: {cCompilation.Stderr}");
+
+            LlvmObjectFile xenonObject = new LlvmObjectEmitter().Emit(
+                compilation, xenonObjectPath, target, "sysv-register-interop");
+            LinkedExecutable executable = new NativeLinker().LinkExecutable(
+                xenonObject.Path,
+                executablePath,
+                target.Triple,
+                new NativeLinkOptions(Libraries: [cObjectPath]));
+            NativeProcessResult process = new NativeProcessRunner().RunAsync(
+                new NativeProcessRequest(
+                    executable.Path,
+                    [],
+                    directory,
+                    TimeSpan.FromMinutes(1))).GetAwaiter().GetResult();
+
+            Assert.True(
+                process.StartError is null && !process.TimedOut && process.TerminationError is null,
+                $"SysV C ABI probe failed: {process.StartError}; timeout={process.TimedOut}; " +
+                $"{process.TerminationError}\nstdout: {process.Stdout}\nstderr: {process.Stderr}");
+            Assert.Equal(42, process.ExitCode);
         }
         finally
         {
@@ -6806,6 +7672,50 @@ public sealed class NativeLinkerTests
             return left + right;
         }
         """, "math.xe"));
+
+    private static string FindHostCCompiler()
+    {
+        string? configured = Environment.GetEnvironmentVariable("CC");
+        if (!string.IsNullOrWhiteSpace(configured)) return configured;
+        if (!OperatingSystem.IsWindows()) return "cc";
+
+        return FindWindowsClang();
+    }
+
+    private static string FindWindowsClang()
+    {
+
+        var candidates = new List<string>();
+        foreach (string programFiles in new[]
+                 {
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                 }.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            candidates.Add(Path.Combine(programFiles, "LLVM", "bin", "clang.exe"));
+            string visualStudio = Path.Combine(programFiles, "Microsoft Visual Studio");
+            if (!Directory.Exists(visualStudio)) continue;
+            foreach (string version in Directory.EnumerateDirectories(visualStudio))
+                foreach (string edition in Directory.EnumerateDirectories(version))
+                {
+                    candidates.Add(Path.Combine(edition, "VC", "Tools", "Llvm", "x64", "bin", "clang.exe"));
+                    candidates.Add(Path.Combine(edition, "VC", "Tools", "Llvm", "ARM64", "bin", "clang.exe"));
+                }
+        }
+
+        return candidates.FirstOrDefault(File.Exists) ?? "clang";
+    }
+
+    private static string FindHostClang()
+    {
+        string? configured = Environment.GetEnvironmentVariable("CLANG");
+        if (!string.IsNullOrWhiteSpace(configured)) return configured;
+        string? cCompiler = Environment.GetEnvironmentVariable("CC");
+        if (!string.IsNullOrWhiteSpace(cCompiler) &&
+            Path.GetFileNameWithoutExtension(cCompiler).Contains("clang", StringComparison.OrdinalIgnoreCase))
+            return cCompiler;
+        return OperatingSystem.IsWindows() ? FindWindowsClang() : "clang";
+    }
 
     private static TDelegate LoadDelegate<TDelegate>(nint library, string export)
         where TDelegate : Delegate =>

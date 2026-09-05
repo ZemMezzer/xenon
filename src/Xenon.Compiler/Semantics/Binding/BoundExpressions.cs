@@ -395,6 +395,21 @@ public sealed record BoundCallExpression(
     public override BoundKind Kind => BoundKind.CallExpression;
 }
 
+public sealed record BoundFunctionAddressExpression(
+    FunctionSymbol Function,
+    FunctionPointerTypeSymbol FunctionPointerType) : BoundExpression(FunctionPointerType)
+{
+    public override BoundKind Kind => BoundKind.FunctionAddressExpression;
+}
+
+public sealed record BoundIndirectCallExpression(
+    BoundExpression Target,
+    FunctionPointerTypeSymbol FunctionPointerType,
+    ImmutableArray<BoundExpression> Arguments) : BoundExpression(FunctionPointerType.ReturnType)
+{
+    public override BoundKind Kind => BoundKind.IndirectCallExpression;
+}
+
 public sealed record BoundErrorExpression() : BoundExpression(BuiltinTypes.Error)
 {
     public override BoundKind Kind => BoundKind.ErrorExpression;

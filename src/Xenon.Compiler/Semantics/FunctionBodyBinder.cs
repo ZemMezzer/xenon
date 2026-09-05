@@ -2056,8 +2056,80 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindUnaryExpression(UnaryExpressionSyntax syntax)
     {
+        if (syntax.OperatorToken.Kind == SyntaxKind.AmpersandToken &&
+            TryBindFunctionAddress(syntax.Operand, out BoundExpression? functionAddress))
+            return functionAddress!;
         BoundExpression operand = BindExpression(syntax.Operand);
         return BindUnaryExpression(syntax.OperatorToken, operand, isPostfix: false);
+    }
+
+    private bool TryBindFunctionAddress(ExpressionSyntax syntax, out BoundExpression? address)
+    {
+        address = null;
+        var lookupDiagnostics = new DiagnosticBag();
+        FunctionSymbol? function;
+        SyntaxToken nameToken;
+        if (syntax is NameExpressionSyntax name)
+        {
+            if (_scope.Lookup(name.IdentifierToken.Text) is not null ||
+                _function.ContainingType?.FindInstanceField(name.IdentifierToken.Text) is not null)
+                return false;
+            nameToken = name.IdentifierToken;
+            function = _function.ContainingType?.FindMember<FunctionSymbol>(nameToken.Text) ??
+                _fileScope.ResolveFunction(nameToken.Text, nameToken.Location, lookupDiagnostics, out _);
+        }
+        else if (syntax is MemberAccessExpressionSyntax member &&
+                 TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts) && parts.Length >= 2)
+        {
+            nameToken = parts[^1];
+            string[] receiverParts = parts.Take(parts.Length - 1).Select(part => part.Text).ToArray();
+            TypeSymbol? receiverType = receiverParts.Length == 1
+                ? _fileScope.ResolveType(receiverParts[0], parts[0].Location, lookupDiagnostics)
+                : _fileScope.ResolveQualifiedType(receiverParts);
+            function = (receiverType as DeclaredTypeSymbol)?.FindMember<FunctionSymbol>(nameToken.Text);
+            if (function is null)
+                function = _fileScope.ResolveQualifiedFunction(parts.Select(part => part.Text).ToArray(),
+                    nameToken.Location, lookupDiagnostics, out _);
+        }
+        else
+        {
+            return false;
+        }
+
+        if (function is null) return false;
+        if (function.HasImplicitThis)
+        {
+            _diagnostics.Report(nameToken.Location,
+                $"cannot take the address of instance method '{function.Name}'; bound method pointers are not supported",
+                DiagnosticIds.InvalidOperatorOperands);
+            address = new BoundErrorExpression();
+            return true;
+        }
+        if (function.IsGenericDefinition)
+        {
+            _diagnostics.Report(nameToken.Location,
+                $"cannot take the address of generic function '{function.Name}' without a concrete specialization",
+                DiagnosticIds.GenericSpecializationNotImplemented);
+            address = new BoundErrorExpression();
+            return true;
+        }
+
+        if (!function.IsPublic && function.ContainingType is not null &&
+            !TypeIdentity.AreSame(_function.ContainingType, function.ContainingType))
+        {
+            _diagnostics.Report(nameToken.Location,
+                $"static method '{function.Name}' is private in struct '{function.ContainingType.Name}'",
+                DiagnosticIds.InaccessibleSymbol);
+            address = new BoundErrorExpression();
+            return true;
+        }
+
+        _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(function);
+        FunctionPointerTypeSymbol type = _fileScope.TypeFactory.FunctionPointer(
+            function.ReturnType,
+            function.Parameters.Select(parameter => parameter.Type));
+        address = new BoundFunctionAddressExpression(function, type);
+        return true;
     }
 
     private BoundExpression BindMoveExpression(MoveExpressionSyntax syntax)
@@ -3427,11 +3499,11 @@ internal sealed class FunctionBodyBinder
 
         if (syntax.OperatorToken.Kind is SyntaxKind.EqualsEqualsToken or SyntaxKind.BangEqualsToken)
         {
-            if (left.Type is PointerTypeSymbol or SharedTypeSymbol)
+            if (left.Type is PointerTypeSymbol or FunctionPointerTypeSymbol or SharedTypeSymbol)
             {
                 right = ContextualizeNull(right, left.Type);
             }
-            else if (right.Type is PointerTypeSymbol or SharedTypeSymbol)
+            else if (right.Type is PointerTypeSymbol or FunctionPointerTypeSymbol or SharedTypeSymbol)
             {
                 left = ContextualizeNull(left, right.Type);
             }
@@ -4947,7 +5019,24 @@ internal sealed class FunctionBodyBinder
                 arguments,
                 syntax.Arguments,
                 syntax);
-            return qualifiedCall ?? BindMethodCallExpression(memberTarget, arguments, syntax.Arguments, syntax);
+            if (qualifiedCall is not null) return qualifiedCall;
+            if (IsFunctionPointerMemberTarget(memberTarget))
+            {
+                BoundExpression member = BindExpression(memberTarget);
+                FunctionPointerTypeSymbol memberPointer = (FunctionPointerTypeSymbol)member.Type;
+                return BindIndirectCall(member, memberPointer, arguments, syntax.Arguments,
+                    memberTarget.MemberToken.Location, incomplete, completedArgumentCount);
+            }
+            return BindMethodCallExpression(memberTarget, arguments, syntax.Arguments, syntax);
+        }
+
+        if (syntax.Target is NameExpressionSyntax variableName &&
+            (_scope.Lookup(variableName.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol ||
+             _function.ContainingType?.FindInstanceField(variableName.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol))
+        {
+            BoundExpression target = BindNameExpression(variableName);
+            return BindIndirectCall(target, (FunctionPointerTypeSymbol)target.Type, arguments, syntax.Arguments,
+                variableName.IdentifierToken.Location, incomplete, completedArgumentCount);
         }
 
         if (syntax.Target is not NameExpressionSyntax name)
@@ -5112,6 +5201,103 @@ internal sealed class FunctionBodyBinder
         arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location,
             incomplete ? completedArgumentCount : null);
         return new BoundCallExpression(function, arguments);
+    }
+
+    private bool IsFunctionPointerMemberTarget(MemberAccessExpressionSyntax member)
+    {
+        if (member.OperatorToken.Kind == SyntaxKind.DotToken &&
+            TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts) && parts.Length >= 2)
+        {
+            string[] typeParts = parts.Take(parts.Length - 1).Select(token => token.Text).ToArray();
+            TypeSymbol? type = typeParts.Length == 1
+                ? _fileScope.ResolveType(typeParts[0], parts[0].Location, new DiagnosticBag())
+                : _fileScope.ResolveQualifiedType(typeParts);
+            if ((type as DeclaredTypeSymbol)?.FindStaticField(parts[^1].Text)?.Type is FunctionPointerTypeSymbol)
+                return true;
+        }
+
+        return TryGetExpressionType(member.Receiver, out TypeSymbol? receiverType) &&
+            GetMemberContainer(receiverType!, member.OperatorToken.Kind)?.FindInstanceField(member.MemberToken.Text)?.Type
+                is FunctionPointerTypeSymbol;
+
+        bool TryGetExpressionType(ExpressionSyntax syntax, out TypeSymbol? type)
+        {
+            type = syntax switch
+            {
+                NameExpressionSyntax name => _scope.Lookup(name.IdentifierToken.Text)?.Type ??
+                    _function.ContainingType?.FindInstanceField(name.IdentifierToken.Text)?.Type,
+                ThisExpressionSyntax => _function.ContainingType,
+                MemberAccessExpressionSyntax nested when TryGetExpressionType(nested.Receiver, out TypeSymbol? nestedReceiver) =>
+                    GetMemberContainer(nestedReceiver!, nested.OperatorToken.Kind)?.FindInstanceField(nested.MemberToken.Text)?.Type,
+                _ => null,
+            };
+            return type is not null;
+        }
+
+        static DeclaredTypeSymbol? GetMemberContainer(TypeSymbol type, SyntaxKind operatorKind) =>
+            operatorKind == SyntaxKind.ArrowToken ? type switch
+            {
+                PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
+                UniqueTypeSymbol unique => unique.ElementType as DeclaredTypeSymbol,
+                SharedTypeSymbol shared => shared.ElementType as DeclaredTypeSymbol,
+                _ => null,
+            } : type as DeclaredTypeSymbol;
+    }
+
+    private BoundExpression BindIndirectCall(
+        BoundExpression target,
+        FunctionPointerTypeSymbol functionPointer,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        TextLocation location,
+        bool incomplete,
+        int completedArgumentCount)
+    {
+        if (_function.IsReadonly)
+            _diagnostics.Report(location,
+                "readonly code cannot invoke a raw function pointer because it has no readonly effect contract",
+                DiagnosticIds.NonReadonlyCallFromReadonlyFunction);
+        int suppliedCount = incomplete ? completedArgumentCount : arguments.Length;
+        if ((!incomplete && suppliedCount != functionPointer.ParameterTypes.Length) ||
+            incomplete && suppliedCount > functionPointer.ParameterTypes.Length)
+            _diagnostics.Report(location,
+                $"function pointer expects {functionPointer.ParameterTypes.Length} argument(s), but {suppliedCount} were provided",
+                DiagnosticIds.WrongArity);
+
+        var converted = arguments.ToBuilder();
+        int count = Math.Min(suppliedCount, functionPointer.ParameterTypes.Length);
+        var callBorrows = new List<(BorrowPlace Place, bool IsReadonly)>();
+        for (int index = 0; index < count; index++)
+        {
+            TypeSymbol parameterType = functionPointer.ParameterTypes[index];
+            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType,
+                GetLocation(argumentSyntax[index]));
+            converted[index] = argument;
+            SetConvertedType(argumentSyntax[index], argument.Type);
+            if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+                _diagnostics.Report(GetLocation(argumentSyntax[index]),
+                    "stack array cannot be passed to another function",
+                    DiagnosticIds.StackArrayPassedAsArgument);
+            if (!TypeFacts.CanAssign(parameterType, argument.Type))
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
+            if (parameterType is ReferenceTypeSymbol parameterReference &&
+                TryGetBorrowPlace(argument, out BorrowPlace argumentPlace, out LocalVariableSymbol? argumentAlias))
+            {
+                TextLocation argumentLocation = GetLocation(argumentSyntax[index]);
+                ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly, argumentAlias, argumentLocation);
+                if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, argumentPlace) &&
+                    (!prior.IsReadonly || !parameterReference.IsReadonly)))
+                    ReportBorrowDiagnostic(argumentLocation,
+                        $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments",
+                        DiagnosticIds.BorrowConflict);
+                callBorrows.Add((argumentPlace, parameterReference.IsReadonly));
+                if (!parameterReference.IsReadonly &&
+                    TryGetStorageType(parameterReference.ElementType, out _) &&
+                    TryGetMovePlace(argument, out MovePlace storageArgumentPlace))
+                    _storageStates[storageArgumentPlace] = StorageState.MaybeInitialized;
+            }
+        }
+        return new BoundIndirectCallExpression(target, functionPointer, converted.ToImmutable());
     }
 
     private BoundExpression BindLifetimeInvalidationOperand(ExpressionSyntax syntax)
@@ -6395,7 +6581,7 @@ internal sealed class FunctionBodyBinder
     {
         if (expression is BoundLiteralExpression { Value: null } &&
             TypeIdentity.AreSame(expression.Type, BuiltinTypes.Null) &&
-            targetType is PointerTypeSymbol or SharedTypeSymbol)
+            targetType is PointerTypeSymbol or FunctionPointerTypeSymbol or SharedTypeSymbol)
         {
             return new BoundLiteralExpression(null, targetType);
         }
@@ -6772,6 +6958,12 @@ internal sealed class FunctionBodyBinder
             case BoundCallExpression call:
                 ConsumeAll(call.Arguments);
                 break;
+            case BoundIndirectCallExpression call:
+                Visit(call.Target);
+                ConsumeAll(call.Arguments);
+                break;
+            case BoundFunctionAddressExpression:
+                break;
             case BoundMethodCallExpression call:
                 Visit(call.Receiver);
                 ConsumeAll(call.Arguments);
@@ -6871,6 +7063,7 @@ internal sealed class FunctionBodyBinder
         BoundWeakConversionExpression or
         BoundLockExpression or
         BoundCallExpression or
+        BoundIndirectCallExpression or
         BoundMethodCallExpression or
         BoundInterfaceMethodCallExpression or
         BoundStorageMoveExpression or
@@ -7784,6 +7977,11 @@ internal sealed class FunctionBodyBinder
         {
             (PointerTypeSymbol left, PointerTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
+            (FunctionPointerTypeSymbol left, FunctionPointerTypeSymbol right)
+                when left.ParameterTypes.Length == right.ParameterTypes.Length =>
+                TryInferGenericType(left.ReturnType, right.ReturnType, inferred) &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TryInferGenericType(pair.First, pair.Second, inferred)),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
             (ReferenceTypeSymbol left, _) =>
