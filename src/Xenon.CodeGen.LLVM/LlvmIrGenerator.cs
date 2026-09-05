@@ -664,7 +664,34 @@ public sealed class LlvmIrGenerator
             return;
         }
 
+        if (IsMacOsTarget())
+        {
+            EmitMacOsThreadLocalDestructorRegistration(builder, field, destructor);
+            return;
+        }
+
         EmitUnixThreadLocalDestructorRegistration(builder, field, destructor);
+    }
+
+    private void EmitMacOsThreadLocalDestructorRegistration(
+        LLVMBuilderRef builder,
+        FieldSymbol field,
+        FunctionSymbol destructor)
+    {
+        // Darwin tears down Mach-O TLV storage before running pthread TSD destructors. Registering
+        // the address of a native TLS slot with pthread_setspecific therefore leaves the callback
+        // looking at cleared storage. _tlv_atexit is libSystem's public TLV terminator API and runs
+        // callbacks while the current thread's TLV storage is still alive.
+        LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+        LLVMTypeRef registerType = LLVMTypeRef.CreateFunction(
+            _context.VoidType, [pointer, pointer], false);
+        LLVMValueRef register = GetOrAddNativeFunction("_tlv_atexit", registerType);
+        LLVMValueRef address = _staticFields[field];
+        if (field.Type is AtomicTypeSymbol atomic)
+            address = LlvmAtomicStorage.GetValueAddress(
+                builder, MapType(atomic), address, atomic, "threadlocal.atomic.value");
+        builder.BuildCall2(registerType, register,
+            new LLVMValueRef[] { _functions[destructor].Value, address }, string.Empty);
     }
 
     private void EmitUnixThreadLocalDestructorRegistration(
