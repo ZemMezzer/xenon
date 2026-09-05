@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace Xenon.Compiler.Semantics.Symbols;
 
 public abstract class TypeSymbol : Symbol
@@ -52,6 +54,23 @@ public sealed class PointerTypeSymbol : TypeSymbol
     public TypeSymbol ElementType { get; }
 
     public bool IsReadonly { get; }
+}
+
+/// <summary>A raw native code pointer. Its complete signature is part of its type identity.</summary>
+public sealed class FunctionPointerTypeSymbol : TypeSymbol
+{
+    internal FunctionPointerTypeSymbol(TypeSymbol returnType, ImmutableArray<TypeSymbol> parameterTypes)
+        : base(string.Empty)
+    {
+        ReturnType = returnType;
+        ParameterTypes = parameterTypes;
+    }
+
+    public TypeSymbol ReturnType { get; }
+    public ImmutableArray<TypeSymbol> ParameterTypes { get; }
+    public override string Name => ToDisplayString();
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
+        $"function {ReturnType.ToDisplayString(format)}({string.Join(", ", ParameterTypes.Select(type => type.ToDisplayString(format)))})*";
 }
 
 public sealed class ReferenceTypeSymbol : TypeSymbol

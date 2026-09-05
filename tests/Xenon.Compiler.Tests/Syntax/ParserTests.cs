@@ -1152,5 +1152,30 @@ public sealed class ParserTests
             Assert.IsType<NamedTypeSyntax>(function.Parameters[7].Type).TypeArguments!.Arguments));
     }
 
+    [Fact]
+    public void Parser_ParsesFunctionPointerTypesInSignaturesAndFields()
+    {
+        SyntaxTree tree = Parse("namespace Example; struct API { public function void(readonly byte*)* Error; } extern function int(int, float)* Get(function void()* callback);");
+
+        Assert.Empty(tree.Diagnostics);
+        var structure = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        var fieldType = Assert.IsType<FunctionPointerTypeSyntax>(Assert.Single(structure.Fields).Type);
+        Assert.Equal(SyntaxKind.VoidKeyword, fieldType.ReturnType.NameToken.Kind);
+        Assert.IsType<PointerTypeSyntax>(Assert.IsType<QualifiedTypeSyntax>(
+            Assert.Single(fieldType.ParameterTypes)).ElementType);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(tree.Root.Members[1]);
+        var returnType = Assert.IsType<FunctionPointerTypeSyntax>(function.ReturnType);
+        Assert.Equal(2, returnType.ParameterTypes.Length);
+        Assert.IsType<FunctionPointerTypeSyntax>(Assert.Single(function.Parameters).Type);
+    }
+
+    [Fact]
+    public void Parser_RequiresTrailingStarOnFunctionPointerType()
+    {
+        SyntaxTree tree = Parse("namespace Example; extern void Register(function void(int) callback);");
+
+        Assert.Contains(tree.Diagnostics, diagnostic => diagnostic.Message.Contains("StarToken", StringComparison.Ordinal));
+    }
+
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));
 }

@@ -124,6 +124,7 @@ public enum SyntaxKind
     StorageKeyword,
     PinKeyword,
     AtomicKeyword,
+    FunctionKeyword,
 
     CompilationUnit,
     UsingDirective,
@@ -153,6 +154,7 @@ public enum SyntaxKind
     GenericConstraint,
     NamedType,
     PointerType,
+    FunctionPointerType,
     ReferenceType,
     ArrayType,
     QualifiedType,

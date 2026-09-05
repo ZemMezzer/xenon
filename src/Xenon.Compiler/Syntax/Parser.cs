@@ -945,6 +945,35 @@ internal sealed class Parser
     {
         SyntaxToken? readonlyKeyword = Current.Kind == SyntaxKind.ReadonlyKeyword ? NextToken() : null;
         SyntaxToken? constKeyword = Current.Kind == SyntaxKind.ConstKeyword ? NextToken() : null;
+        if (Current.Kind == SyntaxKind.FunctionKeyword)
+        {
+            SyntaxToken functionKeyword = NextToken();
+            TypeSyntax returnType = ParseType(allowArraySuffix: false);
+            SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+            var parameterTypes = ImmutableArray.CreateBuilder<TypeSyntax>();
+            var commaTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
+            while (Current.Kind is not (SyntaxKind.CloseParenthesisToken or SyntaxKind.EndOfFileToken))
+            {
+                parameterTypes.Add(ParseType());
+                if (Current.Kind != SyntaxKind.CommaToken) break;
+                commaTokens.Add(NextToken());
+            }
+            SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+            SyntaxToken star = MatchToken(SyntaxKind.StarToken);
+            TypeSyntax functionPointer = new FunctionPointerTypeSyntax(
+                functionKeyword,
+                returnType,
+                openParenthesis,
+                parameterTypes.ToImmutable(),
+                commaTokens.ToImmutable(),
+                closeParenthesis,
+                star);
+            if (allowArraySuffix)
+                functionPointer = ParseArrayTypeSuffixes(functionPointer, allocation: false);
+            if (constKeyword is not null) functionPointer = new QualifiedTypeSyntax(functionPointer, constKeyword);
+            if (readonlyKeyword is not null) functionPointer = new QualifiedTypeSyntax(functionPointer, readonlyKeyword);
+            return functionPointer;
+        }
         var nameParts = ImmutableArray.CreateBuilder<SyntaxToken>();
         var dotTokens = ImmutableArray.CreateBuilder<SyntaxToken>();
         SyntaxToken firstName = SyntaxFacts.IsTypeName(Current.Kind)
@@ -1709,6 +1738,25 @@ internal sealed class Parser
         }
 
         offset++;
+        if (firstKind == SyntaxKind.FunctionKeyword)
+        {
+            while (Peek(offset).Kind is not (SyntaxKind.OpenParenthesisToken or SyntaxKind.EndOfFileToken or
+                   SyntaxKind.SemicolonToken or SyntaxKind.OpenBraceToken or SyntaxKind.CloseBraceToken))
+                offset++;
+            if (Peek(offset).Kind != SyntaxKind.OpenParenthesisToken) return false;
+            int depth = 0;
+            do
+            {
+                SyntaxKind kind = Peek(offset++).Kind;
+                if (kind == SyntaxKind.OpenParenthesisToken) depth++;
+                else if (kind == SyntaxKind.CloseParenthesisToken) depth--;
+                else if (kind is SyntaxKind.EndOfFileToken or SyntaxKind.SemicolonToken or
+                         SyntaxKind.OpenBraceToken or SyntaxKind.CloseBraceToken) return false;
+            } while (depth > 0);
+            if (Peek(offset).Kind != SyntaxKind.StarToken) return false;
+            offset++;
+            return Peek(offset).Kind == SyntaxKind.IdentifierToken;
+        }
         if (firstKind == SyntaxKind.IdentifierToken)
         {
             while (Peek(offset).Kind == SyntaxKind.DotToken &&

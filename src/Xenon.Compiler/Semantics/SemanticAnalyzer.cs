@@ -132,6 +132,7 @@ internal sealed class SemanticAnalyzer
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
         AddGeneratedDestructorFunctions(functions);
+        ValidateRawFunctionPointerSignatures();
 
         // Lifecycle/accessor checks need all bodies, including declarations that
         // occur after the readonly caller and synthesized field initializers.
@@ -2645,11 +2646,20 @@ internal sealed class SemanticAnalyzer
                 DiagnosticIds.UnsupportedNativeAtomicType);
         }
 
-        else if (function.ReturnType is StructTypeSymbol returnStruct)
+        else if (function.ReturnType is StructTypeSymbol returnStruct &&
+                 TypeFacts.GetCAbiStructIncompatibility(returnStruct) is { } returnFailure)
         {
             _diagnostics.Report(
                 declaration.ReturnType.NameToken.Location,
-                $"external ABI does not yet support struct '{returnStruct.Name}' by value; use a pointer instead",
+                $"external ABI cannot pass struct '{returnStruct.Name}' by value because {returnFailure}",
+                DiagnosticIds.UnsupportedNativeStructByValue);
+        }
+        else if (function.ReturnType is FunctionPointerTypeSymbol &&
+                 TypeFacts.GetCAbiTypeIncompatibility(function.ReturnType) is { } callbackReturnFailure)
+        {
+            _diagnostics.Report(
+                declaration.ReturnType.NameToken.Location,
+                $"external ABI cannot use function pointer '{function.ReturnType.ToDisplayString()}' because {callbackReturnFailure}",
                 DiagnosticIds.UnsupportedNativeStructByValue);
         }
 
@@ -2678,11 +2688,20 @@ internal sealed class SemanticAnalyzer
                     $"external ABI does not define a representation for type '{parameterType.ToDisplayString()}' because it exposes atomic storage",
                     DiagnosticIds.UnsupportedNativeAtomicType);
             }
-            else if (parameterType is StructTypeSymbol parameterStruct)
+            else if (parameterType is StructTypeSymbol parameterStruct &&
+                     TypeFacts.GetCAbiStructIncompatibility(parameterStruct) is { } parameterFailure)
             {
                 _diagnostics.Report(
                     declaration.Parameters[index].Type.NameToken.Location,
-                    $"external ABI does not yet support struct '{parameterStruct.Name}' by value; use a pointer instead",
+                    $"external ABI cannot pass struct '{parameterStruct.Name}' by value because {parameterFailure}",
+                    DiagnosticIds.UnsupportedNativeStructByValue);
+            }
+            else if (parameterType is FunctionPointerTypeSymbol &&
+                     TypeFacts.GetCAbiTypeIncompatibility(parameterType) is { } callbackParameterFailure)
+            {
+                _diagnostics.Report(
+                    declaration.Parameters[index].Type.NameToken.Location,
+                    $"external ABI cannot use function pointer '{parameterType.ToDisplayString()}' because {callbackParameterFailure}",
                     DiagnosticIds.UnsupportedNativeStructByValue);
             }
             else if (parameterType is ArrayTypeSymbol)
@@ -2692,6 +2711,42 @@ internal sealed class SemanticAnalyzer
                     "external ABI does not yet support Xenon array types directly; use a pointer and explicit length",
                     DiagnosticIds.UnsupportedNativeArrayType);
             }
+        }
+    }
+
+    private void ValidateRawFunctionPointerSignatures()
+    {
+        foreach ((SyntaxNode syntax, TypeInfo typeInfo) in _semanticInfo.Types)
+        {
+            if (syntax is not FunctionPointerTypeSyntax functionSyntax ||
+                typeInfo.Type is not FunctionPointerTypeSymbol functionPointer ||
+                TypeIdentity.AreSame(functionPointer.ReturnType, BuiltinTypes.Error) ||
+                functionPointer.ParameterTypes.Any(type =>
+                    TypeIdentity.AreSame(type, BuiltinTypes.Error) ||
+                    TypeIdentity.AreSame(type, BuiltinTypes.Void)))
+                continue;
+
+            string? diagnosticId = null;
+            string? failure = null;
+            if (TypeFacts.ExposesAtomicStorageToNativeAbi(functionPointer))
+            {
+                diagnosticId = DiagnosticIds.UnsupportedNativeAtomicType;
+                failure = "it exposes atomic storage";
+            }
+            else if (TypeFacts.GetCAbiTypeIncompatibility(functionPointer) is { } incompatibility)
+            {
+                diagnosticId = DiagnosticIds.UnsupportedNativeStructByValue;
+                failure = incompatibility;
+            }
+
+            if (diagnosticId is null || _diagnostics.Any(diagnostic =>
+                    diagnostic.Id == diagnosticId && diagnostic.Location == functionSyntax.FunctionKeyword.Location))
+                continue;
+
+            _diagnostics.Report(
+                functionSyntax.FunctionKeyword.Location,
+                $"raw function pointer '{functionPointer.ToDisplayString()}' cannot use the C ABI because {failure}",
+                diagnosticId);
         }
     }
 

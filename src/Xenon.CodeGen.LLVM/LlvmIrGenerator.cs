@@ -21,6 +21,7 @@ public sealed class LlvmIrGenerator
     private int _invocationStarted;
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
+    private readonly Dictionary<FunctionSymbol, LlvmCAbiFunction> _cAbiFunctions = [];
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
     private readonly Dictionary<StorageTypeSymbol, LLVMTypeRef> _storageTypes = [];
     private readonly Dictionary<AtomicTypeSymbol, LLVMTypeRef> _atomicTypes = [];
@@ -33,6 +34,7 @@ public sealed class LlvmIrGenerator
     private LLVMContextRef _context;
     private LLVMModuleRef _module;
     private NativeTargetMachine? _targetMachine;
+    private LlvmCAbi? _cAbi;
     private LlvmMemoryRuntime? _memoryRuntime;
     private Compilation _compilation = null!;
     private LLVMTypeRef _interfaceMapEntryType;
@@ -233,6 +235,12 @@ public sealed class LlvmIrGenerator
             _interfaceMapEntryType.StructSetBody([pointer, pointer], false);
             DeclareInterfaceTypes(compilation.SemanticModel.GlobalNamespace);
             DeclareStructTypes(compilation.SemanticModel.GlobalNamespace);
+            if (targetMachine is not null)
+                _cAbi = new LlvmCAbi(
+                    _context,
+                    targetMachine,
+                    LlvmTypeLayout.Create(targetMachine),
+                    MapType);
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
             foreach (BoundFunction function in compilation.SemanticModel.Functions)
                 if (!_functions.ContainsKey(function.Symbol))
@@ -242,6 +250,7 @@ public sealed class LlvmIrGenerator
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
             DeclareThreadLocalHelpers(compilation.SemanticModel.GlobalNamespace);
             EmitFunctionBodies(compilation.SemanticModel.Functions);
+            EmitCAbiThunks();
             if (compilation.Options.OutputKind == CompilationOutputKind.Executable)
             {
                 EmitExecutableEntryPoint(compilation.SemanticModel.Functions);
@@ -270,6 +279,7 @@ public sealed class LlvmIrGenerator
                 _context.Dispose();
             _functions.Clear();
             _nativeFunctions.Clear();
+            _cAbiFunctions.Clear();
             _structTypes.Clear();
             _storageTypes.Clear();
             _interfaceTypes.Clear();
@@ -279,6 +289,7 @@ public sealed class LlvmIrGenerator
             _virtualTables.Clear();
             _interfaceMaps.Clear();
             _targetMachine = null;
+            _cAbi = null;
             _memoryRuntime = null;
             _nativeReferences = null!;
             _moduleIdentity = null!;
@@ -653,7 +664,34 @@ public sealed class LlvmIrGenerator
             return;
         }
 
+        if (IsMacOsTarget())
+        {
+            EmitMacOsThreadLocalDestructorRegistration(builder, field, destructor);
+            return;
+        }
+
         EmitUnixThreadLocalDestructorRegistration(builder, field, destructor);
+    }
+
+    private void EmitMacOsThreadLocalDestructorRegistration(
+        LLVMBuilderRef builder,
+        FieldSymbol field,
+        FunctionSymbol destructor)
+    {
+        // Darwin tears down Mach-O TLV storage before running pthread TSD destructors. Registering
+        // the address of a native TLS slot with pthread_setspecific therefore leaves the callback
+        // looking at cleared storage. _tlv_atexit is libSystem's public TLV terminator API and runs
+        // callbacks while the current thread's TLV storage is still alive.
+        LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+        LLVMTypeRef registerType = LLVMTypeRef.CreateFunction(
+            _context.VoidType, [pointer, pointer], false);
+        LLVMValueRef register = GetOrAddNativeFunction("_tlv_atexit", registerType);
+        LLVMValueRef address = _staticFields[field];
+        if (field.Type is AtomicTypeSymbol atomic)
+            address = LlvmAtomicStorage.GetValueAddress(
+                builder, MapType(atomic), address, atomic, "threadlocal.atomic.value");
+        builder.BuildCall2(registerType, register,
+            new LLVMValueRef[] { _functions[destructor].Value, address }, string.Empty);
     }
 
     private void EmitUnixThreadLocalDestructorRegistration(
@@ -1077,16 +1115,37 @@ public sealed class LlvmIrGenerator
 
     private void DeclareFunction(FunctionSymbol function)
     {
-        LLVMTypeRef returnType = MapType(function.ReturnType);
-        var parameterTypes = new List<LLVMTypeRef>();
-        if (function.HasImplicitThis)
+        LLVMTypeRef functionType = CreateDirectFunctionType(function);
+        string nativeName = GetFunctionNativeName(function);
+        bool requiresCAbi = LlvmCAbi.RequiresLowering(
+            function.ReturnType,
+            function.Parameters.Select(parameter => parameter.Type));
+        if (function.IsExtern && requiresCAbi)
         {
-            parameterTypes.Add(LLVMTypeRef.CreatePointer(MapType(function.ContainingType!), 0));
+            LlvmCAbiFunctionPlan plan = RequireCAbi().Classify(
+                function.ReturnType,
+                GetCAbiParameterTypes(function));
+            if (_nativeFunctions.TryGetValue(nativeName, out LlvmFunction existingExternal))
+            {
+                if (existingExternal.Type != plan.FunctionType)
+                    throw new LlvmCodeGenerationException($"Native symbol '{nativeName}' has incompatible declarations.");
+                _functions.Add(function, existingExternal);
+                _cAbiFunctions.Add(function, new LlvmCAbiFunction(existingExternal.Value, plan));
+                return;
+            }
+            LLVMValueRef external = _module.AddFunction(nativeName, plan.FunctionType);
+            external.Linkage = LLVMLinkage.LLVMExternalLinkage;
+            ApplyCAbiFunctionAttributes(external, plan);
+            var declaration = new LlvmFunction(external, plan.FunctionType);
+            _functions.Add(function, declaration);
+            _nativeFunctions.Add(nativeName, declaration);
+            _cAbiFunctions.Add(function, new LlvmCAbiFunction(external, plan));
+            return;
         }
 
-        parameterTypes.AddRange(function.Parameters.Select(parameter => MapType(parameter.Type)));
-        LLVMTypeRef functionType = LLVMTypeRef.CreateFunction(returnType, [.. parameterTypes], false);
-        string nativeName = GetFunctionNativeName(function);
+        string implementationName = function.IsExport && requiresCAbi
+            ? GetManagedName(function, "export_implementation", function.FullName)
+            : nativeName;
         if (_nativeFunctions.TryGetValue(nativeName, out LlvmFunction existing))
         {
             if (!function.IsExtern || existing.Type != functionType)
@@ -1094,7 +1153,7 @@ public sealed class LlvmIrGenerator
             _functions.Add(function, existing);
             return;
         }
-        LLVMValueRef value = _module.AddFunction(nativeName, functionType);
+        LLVMValueRef value = _module.AddFunction(implementationName, functionType);
         bool owned = _compilation.IsSymbolDefinedHere(function);
         if (!owned)
         {
@@ -1113,14 +1172,91 @@ public sealed class LlvmIrGenerator
         {
             value.Linkage = LLVMLinkage.LLVMInternalLinkage;
         }
-        else if (function.IsExport && IsWindowsTarget())
+        else if (function.IsExport && !requiresCAbi && IsWindowsTarget())
         {
             value.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
         }
 
         var llvmFunction = new LlvmFunction(value, functionType);
         _functions.Add(function, llvmFunction);
-        _nativeFunctions.Add(nativeName, llvmFunction);
+        if (!requiresCAbi || !function.IsExport)
+            _nativeFunctions.Add(nativeName, llvmFunction);
+
+        if (!requiresCAbi || function.IsAbstract ||
+            !function.IsExport &&
+            (_cAbi is null || !_cAbi.SupportsStructValues || !HasCAbiCompatibleSignature(function)))
+            return;
+
+        LlvmCAbiFunctionPlan abiPlan = RequireCAbi().Classify(
+            function.ReturnType,
+            GetCAbiParameterTypes(function));
+        string thunkName = function.IsExport
+            ? nativeName
+            : GetManagedName(function, "cabi_thunk", function.FullName);
+        LLVMValueRef thunk = _module.AddFunction(thunkName, abiPlan.FunctionType);
+        thunk.Linkage = function.IsExport
+            ? LLVMLinkage.LLVMExternalLinkage
+            : LLVMLinkage.LLVMInternalLinkage;
+        if (function.IsExport && IsWindowsTarget())
+            thunk.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+        ApplyCAbiFunctionAttributes(thunk, abiPlan);
+        _cAbiFunctions.Add(function, new LlvmCAbiFunction(thunk, abiPlan));
+        if (function.IsExport)
+            _nativeFunctions.Add(nativeName, new LlvmFunction(thunk, abiPlan.FunctionType));
+    }
+
+    private LLVMTypeRef CreateDirectFunctionType(FunctionSymbol function)
+    {
+        var parameterTypes = new List<LLVMTypeRef>();
+        if (function.HasImplicitThis)
+            parameterTypes.Add(LLVMTypeRef.CreatePointer(MapType(function.ContainingType!), 0));
+        parameterTypes.AddRange(function.Parameters.Select(parameter => MapType(parameter.Type)));
+        return LLVMTypeRef.CreateFunction(MapType(function.ReturnType), [.. parameterTypes], false);
+    }
+
+    private IEnumerable<TypeSymbol> GetCAbiParameterTypes(FunctionSymbol function)
+    {
+        if (function.HasImplicitThis)
+            yield return _compilation.SemanticModel.TypeFactory.PointerTo(function.ContainingType!);
+        foreach (ParameterSymbol parameter in function.Parameters)
+            yield return parameter.Type;
+    }
+
+    private static bool HasCAbiCompatibleSignature(FunctionSymbol function) =>
+        IsCAbiCompatibleType(function.ReturnType) &&
+        function.Parameters.All(parameter => IsCAbiCompatibleType(parameter.Type));
+
+    private static bool IsCAbiCompatibleType(TypeSymbol type) =>
+        type is not StructTypeSymbol structure ||
+        TypeFacts.GetCAbiStructIncompatibility(structure) is null;
+
+    private LlvmCAbi RequireCAbi() => _cAbi ?? throw new LlvmCodeGenerationException(
+        "C ABI struct lowering requires a configured LLVM target; use GenerateForTarget or object emission.");
+
+    private void ApplyCAbiFunctionAttributes(LLVMValueRef function, LlvmCAbiFunctionPlan plan)
+    {
+        using LLVMBuilderRef builder = _context.CreateBuilder();
+        new LlvmCAbiMarshaller(_context, builder).ApplyFunctionAttributes(function, plan);
+    }
+
+    private void EmitCAbiThunks()
+    {
+        foreach ((FunctionSymbol symbol, LlvmCAbiFunction abi) in _cAbiFunctions)
+        {
+            if (symbol.IsExtern) continue;
+            LlvmFunction implementation = _functions[symbol];
+            using LLVMBuilderRef builder = _context.CreateBuilder();
+            LLVMBasicBlockRef entry = abi.Value.AppendBasicBlock("entry");
+            builder.PositionAtEnd(entry);
+            var marshaller = new LlvmCAbiMarshaller(_context, builder);
+            ImmutableArray<LLVMValueRef> arguments = marshaller.UnpackParameters(abi.Value, abi.Plan);
+            LLVMValueRef result = builder.BuildCall2(
+                implementation.Type,
+                implementation.Value,
+                arguments.ToArray(),
+                TypeIdentity.AreSame(symbol.ReturnType, BuiltinTypes.Void) ? string.Empty : "result");
+            marshaller.EmitReturn(abi.Value, abi.Plan, result);
+        }
     }
 
     private void EmitFunctionBodies(ImmutableArray<BoundFunction> functions)
@@ -1138,6 +1274,8 @@ public sealed class LlvmIrGenerator
                 function.Symbol,
                 declaration.Value,
                 _functions,
+                _cAbiFunctions,
+                _cAbi,
                 _staticFields,
                 _threadLocalEnsures,
                 _virtualTables,
@@ -1299,6 +1437,15 @@ public sealed class LlvmIrGenerator
         if (type is PointerTypeSymbol pointer)
         {
             return LLVMTypeRef.CreatePointer(MapType(pointer.ElementType), 0);
+        }
+
+        if (type is FunctionPointerTypeSymbol functionPointer)
+        {
+            LLVMTypeRef signature = LLVMTypeRef.CreateFunction(
+                MapType(functionPointer.ReturnType),
+                [.. functionPointer.ParameterTypes.Select(MapType)],
+                false);
+            return LLVMTypeRef.CreatePointer(signature, 0);
         }
 
         if (type is ReferenceTypeSymbol reference)
@@ -1485,6 +1632,7 @@ public sealed class LlvmIrGenerator
         IsMacOsTarget() ? _context.Int64Type : _context.Int32Type;
 
     private readonly record struct LlvmFunction(LLVMValueRef Value, LLVMTypeRef Type);
+    private readonly record struct LlvmCAbiFunction(LLVMValueRef Value, LlvmCAbiFunctionPlan Plan);
     private readonly record struct LlvmVTable(LLVMValueRef Value, LLVMTypeRef Type);
 
     private sealed record LlvmMemoryRuntime(
@@ -1506,6 +1654,8 @@ public sealed class LlvmIrGenerator
         private readonly FunctionSymbol _function;
         private readonly LLVMValueRef _llvmFunction;
         private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions;
+        private readonly Dictionary<FunctionSymbol, LlvmCAbiFunction> _cAbiFunctions;
+        private readonly LlvmCAbi? _cAbi;
         private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields;
         private readonly Dictionary<FieldSymbol, LlvmFunction> _threadLocalEnsures;
         private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables;
@@ -1546,6 +1696,8 @@ public sealed class LlvmIrGenerator
             FunctionSymbol function,
             LLVMValueRef llvmFunction,
             Dictionary<FunctionSymbol, LlvmFunction> functions,
+            Dictionary<FunctionSymbol, LlvmCAbiFunction> cAbiFunctions,
+            LlvmCAbi? cAbi,
             Dictionary<FieldSymbol, LLVMValueRef> staticFields,
             Dictionary<FieldSymbol, LlvmFunction> threadLocalEnsures,
             Dictionary<StructTypeSymbol, LlvmVTable> virtualTables,
@@ -1568,6 +1720,8 @@ public sealed class LlvmIrGenerator
             _function = function;
             _llvmFunction = llvmFunction;
             _functions = functions;
+            _cAbiFunctions = cAbiFunctions;
+            _cAbi = cAbi;
             _staticFields = staticFields;
             _threadLocalEnsures = threadLocalEnsures;
             _virtualTables = virtualTables;
@@ -2390,6 +2544,8 @@ public sealed class LlvmIrGenerator
             BoundSwapExpression swap => EmitSwap(swap),
             BoundCompoundAccessorAssignmentExpression assignment => EmitCompoundAccessorAssignment(assignment),
             BoundCallExpression call => EmitCall(call),
+            BoundIndirectCallExpression call => EmitIndirectCall(call),
+            BoundFunctionAddressExpression address => GetFunctionAddress(address.Function),
             BoundMethodCallExpression methodCall when methodCall.Method.VTableSlot is not null => EmitVirtualMethodCall(methodCall),
             BoundMethodCallExpression methodCall => EmitMethodCall(methodCall),
             BoundPropertySetExpression propertySet => EmitPropertySet(propertySet),
@@ -2495,7 +2651,7 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitLiteral(BoundLiteralExpression expression)
         {
-            if (expression.Value is null && expression.Type is not (PointerTypeSymbol or SharedTypeSymbol))
+            if (expression.Value is null && expression.Type is not (PointerTypeSymbol or FunctionPointerTypeSymbol or SharedTypeSymbol))
             {
                 throw new LlvmCodeGenerationException(
                     "Uncontextualized null literal reached LLVM code generation; null must be bound to a concrete pointer type first.");
@@ -2536,7 +2692,7 @@ public sealed class LlvmIrGenerator
                 return _builder.BuildGlobalStringPtr(text, "str");
             }
 
-            if (expression.Type is PointerTypeSymbol or SharedTypeSymbol && expression.Value is null)
+            if (expression.Type is PointerTypeSymbol or FunctionPointerTypeSymbol or SharedTypeSymbol && expression.Value is null)
             {
                 return LLVMValueRef.CreateConstPointerNull(type);
             }
@@ -2786,7 +2942,7 @@ public sealed class LlvmIrGenerator
         {
             if (type is PrimitiveTypeSymbol { IsFloatingPoint: true })
                 return _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOEQ, left, right, "value.equal.float");
-            if (type is PrimitiveTypeSymbol or EnumTypeSymbol or PointerTypeSymbol or ArrayTypeSymbol or
+            if (type is PrimitiveTypeSymbol or EnumTypeSymbol or PointerTypeSymbol or FunctionPointerTypeSymbol or ArrayTypeSymbol or
                 SharedTypeSymbol or WeakTypeSymbol)
                 return _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, left, right, "value.equal.scalar");
             if (type is not StructTypeSymbol structure)
@@ -5016,11 +5172,58 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitCall(BoundCallExpression expression)
         {
+            if (expression.Function.IsExtern &&
+                _cAbiFunctions.TryGetValue(expression.Function, out LlvmCAbiFunction abi))
+            {
+                LLVMValueRef[] logicalArguments = expression.Arguments.Select(EmitExpression).ToArray();
+                return new LlvmCAbiMarshaller(_context, _builder).EmitCall(
+                    abi.Value,
+                    abi.Plan,
+                    logicalArguments,
+                    "call");
+            }
             LlvmFunction function = _functions[expression.Function];
             LLVMValueRef[] arguments = expression.Arguments.Select(EmitExpression).ToArray();
             string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "call";
             return _builder.BuildCall2(function.Type, function.Value, arguments, name);
         }
+
+        private LLVMValueRef EmitIndirectCall(BoundIndirectCallExpression expression)
+        {
+            LLVMValueRef target = EmitExpression(expression.Target);
+            LLVMValueRef[] arguments = expression.Arguments.Select(EmitExpression).ToArray();
+            if (LlvmCAbi.RequiresLowering(
+                    expression.FunctionPointerType.ReturnType,
+                    expression.FunctionPointerType.ParameterTypes))
+            {
+                LlvmCAbiFunctionPlan plan = (_cAbi ?? throw new LlvmCodeGenerationException(
+                    "function pointers with struct values require a configured LLVM target"))
+                    .Classify(
+                        expression.FunctionPointerType.ReturnType,
+                        expression.FunctionPointerType.ParameterTypes);
+                return new LlvmCAbiMarshaller(_context, _builder).EmitCall(
+                    target,
+                    plan,
+                    arguments,
+                    "indirect.call");
+            }
+            LLVMTypeRef signature = LLVMTypeRef.CreateFunction(
+                _mapType(expression.FunctionPointerType.ReturnType),
+                [.. expression.FunctionPointerType.ParameterTypes.Select(_mapType)],
+                false);
+            string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "indirect.call";
+            return _builder.BuildCall2(signature, target, arguments, name);
+        }
+
+        private LLVMValueRef GetFunctionAddress(FunctionSymbol function) =>
+            _cAbiFunctions.TryGetValue(function, out LlvmCAbiFunction abi)
+                ? abi.Value
+                : LlvmCAbi.RequiresLowering(
+                    function.ReturnType,
+                    function.Parameters.Select(parameter => parameter.Type))
+                    ? throw new LlvmCodeGenerationException(
+                        $"function '{function.FullName}' cannot be used as a C ABI function pointer because its struct signature is not C-compatible")
+                    : _functions[function].Value;
 
         private LLVMValueRef GetAddress(VariableSymbol variable)
         {

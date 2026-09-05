@@ -312,7 +312,7 @@ public sealed class CoreIntelligenceHardeningTests
         string[] labels = Labels(keywordCompletion);
         Assert.All(SyntaxFacts.GetEditorKeywordTexts(), keyword => Assert.Contains(keyword, labels));
         JsonElement[] keywordItems = keywordCompletion.GetProperty("items").EnumerateArray().ToArray();
-        AssertKeywordDetails(keywordItems, ["unique", "shared", "weak", "storage", "pin", "atomic"],
+        AssertKeywordDetails(keywordItems, ["unique", "shared", "weak", "storage", "pin", "atomic", "function"],
             "type-forming keyword");
         AssertKeywordDetails(keywordItems, ["new", "move", "lock"], "value-forming keyword");
         AssertKeywordDetails(keywordItems, ["free", "destruct"], "lifetime operation keyword");
