@@ -45,6 +45,21 @@ internal static class TypeResolver
             case PointerTypeSyntax pointer:
                 return scope.TypeFactory.PointerTo(ResolveCore(pointer.ElementType, scope, diagnostics, isReadonly),
                     isReadonly && !pointer.ElementType.Contains<PointerTypeSyntax>());
+            case FunctionPointerTypeSyntax function:
+            {
+                TypeSymbol returnType = ResolveCore(function.ReturnType, scope, diagnostics);
+                ImmutableArray<TypeSymbol> parameterTypes = function.ParameterTypes
+                    .Select(parameter => ResolveCore(parameter, scope, diagnostics)).ToImmutableArray();
+                foreach ((TypeSyntax parameterSyntax, TypeSymbol parameterType) in function.ParameterTypes.Zip(parameterTypes))
+                {
+                    if (TypeIdentity.AreSame(parameterType, BuiltinTypes.Void))
+                    {
+                        diagnostics.Report(parameterSyntax.NameToken.Location, "function pointer parameter type cannot be 'void'",
+                            DiagnosticIds.VoidParameterType);
+                    }
+                }
+                return scope.TypeFactory.FunctionPointer(returnType, parameterTypes);
+            }
             case ReferenceTypeSyntax reference:
             {
                 TypeSymbol element = ResolveCore(reference.ElementType, scope, diagnostics, isReadonly);

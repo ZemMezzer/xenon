@@ -27,6 +27,8 @@ public enum BoundKind
     SwapExpression,
     CompoundAccessorAssignmentExpression,
     CallExpression,
+    IndirectCallExpression,
+    FunctionAddressExpression,
     MethodCallExpression,
     PropertySetExpression,
     InterfacePropertySetExpression,

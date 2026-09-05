@@ -231,6 +231,15 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 return IsAccessor(call.Function) && !call.Function.IsReadonly
                     ? ContextualDispatch(call.Function, call.Arguments, [], call)
                     : Call(call.Function, call.Arguments, call);
+            case BoundIndirectCallExpression call:
+            {
+                HashSet<object> result = Evaluate(call.Target);
+                foreach (BoundExpression argument in call.Arguments)
+                    result.UnionWith(Evaluate(argument));
+                return ContainsAccess(call.Type) ? Uncertain(result) : [];
+            }
+            case BoundFunctionAddressExpression:
+                return [];
             case BoundMethodCallExpression call:
                 return AccessorOrMethodCall(call.Method, call.Arguments, call.Receiver, call.IsPointerAccess, call);
             case BoundInterfaceMethodCallExpression call:

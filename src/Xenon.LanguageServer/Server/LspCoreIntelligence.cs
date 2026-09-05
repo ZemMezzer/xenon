@@ -351,7 +351,8 @@ internal static class LspCoreIntelligence
             SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword or SyntaxKind.PublicKeyword or
             SyntaxKind.PrivateKeyword => 14,
         SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
-            SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword or SyntaxKind.AtomicKeyword => 16,
+            SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword or SyntaxKind.AtomicKeyword or
+            SyntaxKind.FunctionKeyword => 16,
         SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword => 17,
         SyntaxKind.FreeKeyword => 18,
         SyntaxKind.SwitchKeyword or SyntaxKind.CaseKeyword or SyntaxKind.DefaultKeyword or
@@ -378,7 +379,7 @@ internal static class LspCoreIntelligence
             return "primitive type";
         return keyword switch
         {
-            "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" =>
+            "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" or "function" =>
                 "type-forming keyword",
             "new" or "move" or "lock" => "value-forming keyword",
             "free" or "destruct" => "lifetime operation keyword",

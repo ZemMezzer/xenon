@@ -10,6 +10,7 @@ internal static class TypeSignature
     {
         DeclaredTypeSymbol declared => $"{declared.DeclarationKind}({declared.FullName})",
         PointerTypeSymbol pointer => $"ptr{(pointer.IsReadonly ? "readonly" : "")}({Get(pointer.ElementType)})",
+        FunctionPointerTypeSymbol function => $"fn({Get(function.ReturnType)};{string.Join(",", function.ParameterTypes.Select(Get))})",
         ReferenceTypeSymbol reference => $"ref{(reference.IsReadonly ? "readonly" : "")}({Get(reference.ElementType)})",
         ArrayTypeSymbol array => $"array{array.Rank}({Get(array.ElementType)})",
         AtomicTypeSymbol atomic => $"atomic({Get(atomic.ElementType)})",

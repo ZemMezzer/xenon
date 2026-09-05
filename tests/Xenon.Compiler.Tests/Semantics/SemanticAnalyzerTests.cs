@@ -659,7 +659,7 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_RequiresPointersForStructsInExternalAbi()
+    public void Analyzer_AllowsCCompatibleStructsInExternalAbi()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -676,10 +676,54 @@ public sealed class SemanticAnalyzerTests
             }
             """);
 
-        Assert.Equal(
-            2,
-            compilation.Diagnostics.Count(diagnostic => diagnostic.Message ==
-                "external ABI does not yet support struct 'Vector2' by value; use a pointer instead"));
+        Assert.DoesNotContain(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnsupportedNativeStructByValue);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsCCompatibleStructsInFunctionPointerAbi()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Vector2
+            {
+                float X;
+                float Y;
+            }
+
+            function Vector2(Vector2)* Transform;
+            function Vector2*(Vector2*)* TransformPointers;
+            """);
+
+        Assert.DoesNotContain(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnsupportedNativeStructByValue);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsNonCCompatibleStructValuesRecursively()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Resource
+            {
+                public int Value;
+                public ~Resource() {}
+            }
+
+            struct Outer { public Resource Value; }
+            struct Api { public function Outer(Outer)* Transform; }
+
+            extern Outer Read(Outer value);
+            extern void Register(Api api);
+            """);
+
+        Diagnostic[] diagnostics = compilation.Diagnostics.Where(diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnsupportedNativeStructByValue).ToArray();
+        Assert.Equal(4, diagnostics.Length);
+        Assert.All(diagnostics, diagnostic =>
+            Assert.Contains("has a Xenon destructor", diagnostic.Message, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -4893,6 +4937,124 @@ public sealed class SemanticAnalyzerTests
         Assert.Equal(Copyability.Copyable, weakBox.Copyability);
         Assert.True(TypeFacts.RequiresDestruction(sharedBox));
         Assert.True(TypeFacts.RequiresDestruction(weakBox));
+    }
+
+    [Fact]
+    public void Analyzer_AcceptsFunctionAddressesIndirectCallsAndNull()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int Add(int left, int right) { return left + right; }
+            int Run()
+            {
+                function int(int, int)* callback = &Add;
+                if (callback != null) { return callback(20, 22); }
+                return 0;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction run = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Run");
+        var declaration = Assert.IsType<BoundVariableDeclarationStatement>(run.Body.Statements[0]);
+        Assert.Equal("function int(int, int)*",
+            Assert.IsType<FunctionPointerTypeSymbol>(declaration.Variable.Type).ToDisplayString());
+    }
+
+    [Fact]
+    public void Analyzer_RequiresExactFunctionPointerSignatureAndExplicitAddressOf()
+    {
+        Compilation mismatch = CreateCompilation("namespace Example; int Foo(long value) { return 0; } void Run() { function int(int)* callback = &Foo; }");
+        Compilation decay = CreateCompilation("namespace Example; int Foo(int value) { return value; } void Run() { function int(int)* callback = Foo; }");
+
+        Assert.Contains(mismatch.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.TypeMismatch);
+        Assert.Contains(decay.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.UnknownIdentifier);
+    }
+
+    [Fact]
+    public void Analyzer_AllowsFunctionPointersAcrossTheCAbiAndInsideStructs()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct API { public function int(int)* Transform; public void* Context; }
+            extern function int(int)* GetHandler();
+            extern void Register(API* api, function void(int)* callback);
+            export function int(int)* Echo(function int(int)* callback) { return callback; }
+            int Call(API api) { return api.Transform(41); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsNonCAbiTypesInRawFunctionPointerSignaturesEverywhere()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Resource
+            {
+                public int Value;
+                public ~Resource() {}
+            }
+
+            void Run()
+            {
+                function Resource(Resource)* resources;
+                function int(int[])* arrays;
+                function int(unique<Resource>)* owners;
+            }
+            """);
+
+        Diagnostic[] diagnostics = compilation.Diagnostics.Where(diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnsupportedNativeStructByValue).ToArray();
+        Assert.Equal(3, diagnostics.Length);
+        Assert.Contains(diagnostics, diagnostic =>
+            diagnostic.Message.Contains("has a Xenon destructor", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic =>
+            diagnostic.Message.Contains("int[]", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic =>
+            diagnostic.Message.Contains("unique<", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsAtomicAndNestedAtomicFunctionPointerSignatures()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct State
+            {
+                public atomic<int> Value;
+            }
+
+            struct Nested
+            {
+                public State State;
+            }
+
+            void Run()
+            {
+                function void(State)* parameter;
+                function State()* result;
+                function void(Nested)* nested;
+            }
+            """);
+
+        Diagnostic[] diagnostics = compilation.Diagnostics.Where(diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnsupportedNativeAtomicType).ToArray();
+        Assert.Equal(3, diagnostics.Length);
+        Assert.All(diagnostics, diagnostic =>
+            Assert.Contains("atomic", diagnostic.Message, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_AllowsStaticMethodAddressesButRejectsBoundInstanceMethods()
+    {
+        Compilation valid = CreateCompilation("namespace Example; struct Math { public static int Twice(int value) { return value * 2; } } int Run() { function int(int)* callback = &Math.Twice; return callback(21); }");
+        Compilation invalid = CreateCompilation("namespace Example; struct Math { public int Twice(int value) { return value * 2; } public function int(int)* Get() { return &Twice; } }");
+
+        Assert.Empty(valid.Diagnostics);
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Message.Contains("bound method pointers", StringComparison.Ordinal));
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(

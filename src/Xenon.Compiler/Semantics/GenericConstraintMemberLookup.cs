@@ -126,6 +126,10 @@ internal static class GenericConstraintMemberLookup
             SubstituteConstructedTemplateSelf(constructed, template, parameter, types, specializer),
         PointerTypeSymbol pointer => types.PointerTo(
             SubstituteTemplateSelf(pointer.ElementType, template, parameter, types, specializer), pointer.IsReadonly),
+        FunctionPointerTypeSymbol function => types.FunctionPointer(
+            SubstituteTemplateSelf(function.ReturnType, template, parameter, types, specializer),
+            function.ParameterTypes.Select(value =>
+                SubstituteTemplateSelf(value, template, parameter, types, specializer))),
         ReferenceTypeSymbol reference => types.ReferenceTo(
             SubstituteTemplateSelf(reference.ElementType, template, parameter, types, specializer), reference.IsReadonly),
         ArrayTypeSymbol array => types.ArrayOf(
