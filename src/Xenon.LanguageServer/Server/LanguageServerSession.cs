@@ -316,9 +316,26 @@ public sealed class LanguageServerSession : IAsyncDisposable
             explicitPath = GetOptionalString(options, "workspacePath") ??
                 GetOptionalString(options, "projectPath");
 
-        WorkspaceDiscoveryResult discovery = WorkspaceDiscovery.Discover(explicitPath, rootUri,
-            rootPath, cancellationToken);
-        if (discovery.Workspace is not null)
+        WorkspaceDiscoveryResult? discovery = null;
+        try
+        {
+            discovery = WorkspaceDiscovery.Discover(explicitPath, rootUri,
+                rootPath, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            (string? configurationPath, string? discoveryRoot) =
+                GetInitializationRetryTarget(explicitPath, rootUri, rootPath);
+            lock (_publicationGate)
+            {
+                _configurationPath = configurationPath;
+                _workspaceDiscoveryRoot = discoveryRoot;
+                _pendingConfigurationReconciliation =
+                    configurationPath is not null || discoveryRoot is not null;
+            }
+            TryLogLifecycleFailure("initial workspace discovery", exception);
+        }
+        if (discovery?.Workspace is not null)
         {
             lock (_publicationGate)
             {
@@ -335,6 +352,34 @@ public sealed class LanguageServerSession : IAsyncDisposable
         State = LanguageServerLifecycleState.InitializeResponded;
         return new LspInitializeResult(ServerCapabilities.CreateTyped(),
             new LspServerInfo("Xenon Language Server", XenonBuildInfo.Version));
+    }
+
+    private static (string? ConfigurationPath, string? DiscoveryRoot) GetInitializationRetryTarget(
+        string? explicitPath, string? rootUri, string? rootPath)
+    {
+        try
+        {
+            string? supplied = !string.IsNullOrWhiteSpace(explicitPath)
+                ? explicitPath
+                : !string.IsNullOrWhiteSpace(rootUri)
+                    ? DocumentUri.ToNormalizedPath(rootUri)
+                    : rootPath;
+            if (string.IsNullOrWhiteSpace(supplied)) return (null, null);
+
+            string normalized = DocumentUri.NormalizePath(supplied);
+            if (Directory.Exists(normalized)) return (null, normalized);
+            string extension = Path.GetExtension(normalized);
+            if (extension.Equals(".xeproj", StringComparison.OrdinalIgnoreCase) ||
+                extension.Equals(".xws", StringComparison.OrdinalIgnoreCase))
+                return (normalized, null);
+            string? parent = Path.GetDirectoryName(normalized);
+            return parent is not null && Directory.Exists(parent) ? (null, parent) : (null, null);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException
+            or PathTooLongException)
+        {
+            return (null, null);
+        }
     }
 
     private static string? GetFirstWorkspaceFolderUri(JsonElement initializeParams)
@@ -576,7 +621,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
             discoveryRoot = _workspaceDiscoveryRoot;
             capturedGeneration = _workspaceSetGeneration;
         }
-        if (previous is null || configurationPath is null && discoveryRoot is null) return false;
+        if (configurationPath is null && discoveryRoot is null) return false;
 
         var unpublished = new List<Xenon.ProjectSystem.Workspace>();
         try
@@ -584,8 +629,9 @@ public sealed class LanguageServerSession : IAsyncDisposable
             Dictionary<string, OpenDocumentState> overlays = CaptureOpenDocumentStates(published);
             WorkspaceDiscoveryResult? rediscovery = discoveryRoot is null ? null :
                 WorkspaceDiscovery.Discover(null, null, discoveryRoot, cancellationToken);
-            Xenon.ProjectSystem.Workspace candidate = rediscovery?.Workspace ??
-                Xenon.ProjectSystem.Workspace.Create(configurationPath!,
+            Xenon.ProjectSystem.Workspace? candidate = rediscovery?.Workspace;
+            if (candidate is null && configurationPath is not null)
+                candidate = Xenon.ProjectSystem.Workspace.Create(configurationPath,
                     cancellationToken: cancellationToken);
             if (candidate is null)
                 throw new ProjectSystemException(
