@@ -141,8 +141,8 @@ public sealed class WorkspaceLifetimeTests
         XenonProject configuration = app.Configuration;
         var withReference = new XenonProject(configuration.Name, configuration.Type,
             configuration.Version, configuration.RootDirectory, configuration.SourceRoot,
-            configuration.ProjectFilePath, configuration.SourceFiles, configuration.NativeLibraries,
-            configuration.NativeLibraryPaths, [library.Configuration.Identity],
+            configuration.ProjectFilePath, configuration.SourceFiles, configuration.Libraries,
+            configuration.LibraryPaths, [library.Configuration.Identity],
             configuration.DebugProfile, configuration.ReleaseProfile);
         using (WorkspaceAnalysisRequest request = workspace.CreateAnalysisRequest(staleSensitive: true))
         {

@@ -108,7 +108,8 @@ internal sealed class SemanticAnalyzer
 
         var genericDefinitions = _functionBodies
             .Where(entry => entry.Symbol.FunctionKind == FunctionKind.Ordinary && !entry.Symbol.TypeParameters.IsEmpty)
-            .ToDictionary(entry => entry.Symbol, entry => (entry.Body, entry.Scope));
+            .ToDictionary(entry => entry.Symbol, entry => (IGenericFunctionImplementation)
+                new SourceGenericFunctionImplementation(entry.Body, entry.Scope));
         var genericSpecializer = new GenericFunctionSpecializer(genericDefinitions, _typeFactory,
             _diagnostics, _constants, _genericStructSpecializer!, _cancellationToken);
         BindThreadLocalFieldInitializers(genericSpecializer);
@@ -436,18 +437,22 @@ internal sealed class SemanticAnalyzer
         foreach (StructTypeSymbol type in pending)
         {
             foreach (FieldSymbol field in type.StaticFields)
-                if (field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type))
-                    _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+            {
+                FieldSymbol definitionField = field.GenericDefinition ?? field;
+                if (!field.HasInitializer && TypeFacts.ContainsReferenceStorage(field.Type))
+                    _diagnostics.Report(definitionField.Declaration.Type.NameToken.Location,
                         $"static field '{field.Name}' contains a reference and requires explicit initialization",
                         DiagnosticIds.ReferenceRequiresInitializer);
+            }
             foreach (FieldSymbol field in type.Fields)
             {
+                FieldSymbol definitionField = field.GenericDefinition ?? field;
                 if (ContainsStructByValue(field.Type, type, []))
-                    _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+                    _diagnostics.Report(definitionField.Declaration.Type.NameToken.Location,
                         $"struct '{type.Name}' has a recursive by-value field '{field.Name}'; use a pointer or array handle instead",
                         DiagnosticIds.RecursiveValueLayout);
                 if (field.Type is StructTypeSymbol { IsAbstract: true } abstractType)
-                    _diagnostics.Report(field.Declaration.Type.NameToken.Location,
+                    _diagnostics.Report(definitionField.Declaration.Type.NameToken.Location,
                         $"abstract struct '{abstractType.Name}' cannot be stored in field '{field.Name}'",
                         DiagnosticIds.AbstractValueStorage);
             }
@@ -469,31 +474,34 @@ internal sealed class SemanticAnalyzer
             FileSymbolScope scope = sourceScope.WithTypeSubstitutions(
                 _genericStructSpecializer.GetSubstitutions(type), semanticInfo);
 
-            if (type.Fields.Any(field => field.Declaration.Initializer is not null) &&
+            if (type.Fields.Any(field => field.HasInitializer) &&
                 _boundSpecializedInstanceInitializers.Add(type))
             {
                 changed = true;
                 var initializer = new FunctionSymbol(FunctionKind.InstanceInitializer, type, [],
-                    type.Declaration, Accessibility.Private);
+                    SymbolOrigin.CompilerGenerated, Accessibility.Private);
                 type.SetInstanceInitializer(initializer);
                 var binder = new FunctionBodyBinder(initializer, scope, _diagnostics, _constants,
                     semanticInfo, genericFunctionSpecializer, _cancellationToken);
                 foreach (FieldSymbol field in type.Fields)
-                    if (binder.BindFieldInitializer(field) is BoundExpression boundInitializer)
+                    if (binder.BindFieldInitializer(field,
+                            field.GenericDefinition?.Declaration.Initializer) is BoundExpression boundInitializer)
                         field.SetInitializer(boundInitializer);
                 functions.Add(new BoundFunction(initializer,
                     new BoundBlockStatement(binder.CreateInstanceFieldInitializerStatements(type))));
             }
 
             foreach (FieldSymbol field in type.StaticFields.Where(field =>
-                field.Declaration.Initializer is not null && _boundSpecializedStaticInitializers.Add(field)))
+                field.HasInitializer && _boundSpecializedStaticInitializers.Add(field)))
             {
                 changed = true;
                 if (field.IsThreadLocal)
                     BindThreadLocalFieldInitializer(field, scope, semanticInfo,
-                        genericFunctionSpecializer, functions.Add);
+                        genericFunctionSpecializer, functions.Add,
+                        field.GenericDefinition?.Declaration.Initializer);
                 else
-                    BindStaticFieldInitializer(field, type, scope);
+                    BindStaticFieldInitializer(field, type, scope,
+                        field.GenericDefinition?.Declaration);
             }
         }
         return changed;
@@ -944,12 +952,14 @@ internal sealed class SemanticAnalyzer
         FileSymbolScope scope,
         SemanticInfoStore semanticInfo,
         GenericFunctionSpecializer genericFunctionSpecializer,
-        Action<BoundFunction> addFunction)
+        Action<BoundFunction> addFunction,
+        ExpressionSyntax? sourceInitializer = null)
     {
         var initializerFunction = new FunctionSymbol(field);
         var binder = new FunctionBodyBinder(initializerFunction, scope, _diagnostics, _constants,
             semanticInfo, genericFunctionSpecializer, _cancellationToken);
-        if (binder.BindFieldInitializer(field) is not BoundExpression initializer)
+        if ((sourceInitializer is null ? binder.BindFieldInitializer(field) :
+                binder.BindFieldInitializer(field, sourceInitializer)) is not BoundExpression initializer)
             return;
         field.SetInitializer(initializer);
         addFunction(new BoundFunction(initializerFunction,
@@ -958,9 +968,10 @@ internal sealed class SemanticAnalyzer
             _expressionLocations.TryAdd(entry.Key, entry.Value);
     }
 
-    private void BindStaticFieldInitializer(FieldSymbol field, StructTypeSymbol type, FileSymbolScope scope)
+    private void BindStaticFieldInitializer(FieldSymbol field, StructTypeSymbol type, FileSymbolScope scope,
+        FieldDeclarationSyntax? sourceDeclaration = null)
     {
-        FieldDeclarationSyntax syntax = field.Declaration;
+        FieldDeclarationSyntax syntax = sourceDeclaration ?? field.Declaration;
         var context = new ConstantSymbol(field.Name, field.Type, type, syntax.Initializer!, syntax);
         _constantScopes.Add(context, scope);
         BoundExpression? initializer = BindConstantExpression(syntax.Initializer!, context);
@@ -1060,6 +1071,7 @@ internal sealed class SemanticAnalyzer
 
     private bool EvaluateConstant(ConstantSymbol constant)
     {
+        ConstantSymbol source = constant.GenericDefinition ?? constant;
         if (constant.HasValue)
             return true;
         if (_failedConstants.Contains(constant))
@@ -1067,7 +1079,7 @@ internal sealed class SemanticAnalyzer
         if (!_evaluatingConstants.Add(constant))
         {
             if (_failedConstants.Add(constant))
-                _diagnostics.Report(constant.IdentifierToken.Location,
+                _diagnostics.Report(source.IdentifierToken.Location,
                     $"circular constant dependency involving '{constant.Name}'", DiagnosticIds.ConstantCycle);
             return false;
         }
@@ -1075,11 +1087,11 @@ internal sealed class SemanticAnalyzer
         {
             if (_enumMembers.TryGetValue(constant, out var enumMember))
                 return EvaluateEnumMember(constant, enumMember.Type, enumMember.Previous, enumMember.Automatic);
-            BoundExpression? value = BindConstantExpression(constant.Initializer, constant);
+            BoundExpression? value = BindConstantExpression(source.Initializer, constant);
             if (value is null)
             {
                 if (_failedConstants.Add(constant))
-                    _diagnostics.Report(constant.IdentifierToken.Location,
+                    _diagnostics.Report(source.IdentifierToken.Location,
                         $"initializer of constant '{constant.Name}' is not a compile-time constant",
                         DiagnosticIds.ConstantValueRequired);
                 return false;
@@ -1091,14 +1103,14 @@ internal sealed class SemanticAnalyzer
                 else
                 {
                     if (_failedConstants.Add(constant))
-                        _diagnostics.Report(constant.IdentifierToken.Location,
+                        _diagnostics.Report(source.IdentifierToken.Location,
                             $"cannot implicitly convert '{value.Type.ToDisplayString()}' to '{constant.Type.ToDisplayString()}'",
                             DiagnosticIds.TypeMismatch);
                     return false;
                 }
             }
 
-            SetConvertedType(constant.Initializer, value.Type);
+            SetConvertedType(source.Initializer, value.Type);
 
             object? foldedValue;
             ConstantFoldStatus foldStatus = constant.ContainingType is StructTypeSymbol { IsGenericDefinition: true }
@@ -1108,7 +1120,7 @@ internal sealed class SemanticAnalyzer
             {
                 if (_failedConstants.Add(constant))
                     _diagnostics.Report(
-                        constant.IdentifierToken.Location,
+                        source.IdentifierToken.Location,
                         $"initializer of constant '{constant.Name}' contains an invalid compile-time operation",
                         DiagnosticIds.InvalidConstantOperation);
                 return false;
@@ -2114,7 +2126,7 @@ internal sealed class SemanticAnalyzer
     {
         MethodDeclarationSyntax => method.Locations[0],
         DestructorDeclarationSyntax syntax => (syntax.OverrideKeyword ?? syntax.IdentifierToken).Location,
-        _ => method.ContainingType!.Declaration.IdentifierToken.Location,
+        _ => method.ContainingType!.GetSourceDeclaration<TypeDeclarationSyntax>().IdentifierToken.Location,
     };
 
     private static string MemberName(FunctionSymbol method) =>
@@ -2614,7 +2626,8 @@ internal sealed class SemanticAnalyzer
                 if (signature == previousSignature) continue;
             }
             TextLocation location = function.Declaration is FunctionDeclarationSyntax declaration
-                ? declaration.IdentifierToken.Location : function.ContainingType!.Declaration.IdentifierToken.Location;
+                ? declaration.IdentifierToken.Location : function.ContainingType!
+                    .GetSourceDeclaration<TypeDeclarationSyntax>().IdentifierToken.Location;
             _diagnostics.Report(location,
                 $"native symbol '{name}' collides between '{previous.FullName}' and '{function.FullName}' with incompatible ABI or multiple definitions",
                 DiagnosticIds.NativeSymbolCollision);

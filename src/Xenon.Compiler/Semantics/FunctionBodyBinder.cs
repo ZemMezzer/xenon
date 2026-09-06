@@ -250,7 +250,7 @@ internal sealed class FunctionBodyBinder
             {
                 var state = new LocalVariableSymbol(field.Name, field.Type, _function, false);
                 _constructorFields.Add(field, state);
-                if (field.Declaration.Initializer is not null)
+                if (field.HasInitializer)
                 {
                     _definitelyAssigned.Add(state);
                     _possiblyAssignedConstructorFields.Add(state);
@@ -265,7 +265,7 @@ internal sealed class FunctionBodyBinder
         bool callsThisConstructor = false;
         ConstructorDeclarationSyntax? constructorSyntax =
             _function.FunctionKind == FunctionKind.Constructor
-                ? _function.Declaration as ConstructorDeclarationSyntax
+                ? _function.ImplementationDeclaration as ConstructorDeclarationSyntax
                 : null;
 
         if (constructorSyntax is { HasThisInitializer: true } &&
@@ -311,7 +311,8 @@ internal sealed class FunctionBodyBinder
         {
             ConstructorDeclarationSyntax? syntax = constructorSyntax;
             ImmutableArray<ExpressionSyntax> baseArguments = syntax?.BaseArguments ?? [];
-            TextLocation location = syntax?.IdentifierToken.Location ?? _function.ContainingType!.Declaration.IdentifierToken.Location;
+            TextLocation location = syntax?.IdentifierToken.Location ??
+                _function.ContainingType!.GetSourceDeclaration<TypeDeclarationSyntax>().IdentifierToken.Location;
             _bindingBaseConstructorArguments = true;
             ImmutableArray<BoundExpression> arguments;
             try
@@ -431,8 +432,10 @@ internal sealed class FunctionBodyBinder
     }
 
     internal BoundExpression? BindFieldInitializer(FieldSymbol field)
+        => BindFieldInitializer(field, field.Declaration.Initializer);
+
+    internal BoundExpression? BindFieldInitializer(FieldSymbol field, ExpressionSyntax? syntax)
     {
-        ExpressionSyntax? syntax = field.Declaration.Initializer;
         if (syntax is null)
             return null;
 
@@ -452,7 +455,7 @@ internal sealed class FunctionBodyBinder
                     field,
                     IsPointerAccess: true);
             initializer = BindDestinationConstruction(target, destinationType, initializer, syntax,
-                field.Declaration.IdentifierToken.Location);
+                (field.GenericDefinition ?? field).Declaration.IdentifierToken.Location);
         }
         else if (field.Type is AtomicTypeSymbol atomic && AtomicTypeRules.SupportsOperations(atomic.ElementType))
             initializer = ContextualizeConversion(ReadAtomicValue(initializer), atomic.ElementType, GetLocation(syntax));
@@ -3344,7 +3347,8 @@ internal sealed class FunctionBodyBinder
 
     private int FindLastValueUse(LocalVariableSymbol variable, int afterPosition)
     {
-        return SyntaxNavigator.DescendantNodesAndSelf(_function.Declaration)
+        return SyntaxNavigator.DescendantNodesAndSelf(_function.ImplementationDeclaration ??
+                throw new InvalidOperationException($"function '{_function.Name}' has no implementation metadata"))
             .OfType<NameExpressionSyntax>()
             .Where(name => name.IdentifierToken.Location.Span.Start > afterPosition &&
                 string.Equals(name.IdentifierToken.Text, variable.Name, StringComparison.Ordinal))
@@ -6788,10 +6792,10 @@ internal sealed class FunctionBodyBinder
         {
             foreach (FieldSymbol field in structure.AllInstanceFields)
             {
-                if (field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type))
+                if (!field.HasInitializer && TypeFacts.ContainsReferenceStorage(field.Type))
                     _diagnostics.Report(location, $"field '{field.Name}' contains a reference and requires explicit initialization",
                         DiagnosticIds.ReferenceFieldRequiresExplicitInitialization);
-                if (field.Declaration.Initializer is null && field.Type is PinTypeSymbol)
+                if (!field.HasInitializer && field.Type is PinTypeSymbol)
                     _diagnostics.Report(location, $"pinned field '{field.Name}' requires final-destination initialization",
                         DiagnosticIds.PinnedRelocation);
             }

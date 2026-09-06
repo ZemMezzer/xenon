@@ -156,7 +156,7 @@ internal static class GenericConstraintMemberLookup
         ImmutableArray<TypeSymbol> arguments = constructed.TypeArguments.Select(argument =>
             SubstituteTemplateSelf(argument, template, parameter, types, specializer)).ToImmutableArray();
         return (TypeSymbol?)specializer.GetOrCreate(constructed.GenericDefinition!, arguments,
-            constructed.Declaration.IdentifierToken.Location) ?? BuiltinTypes.Error;
+            constructed.Locations.FirstOrDefault()) ?? BuiltinTypes.Error;
     }
 
     private static bool IsConstraintAccessible(Symbol member) => member switch

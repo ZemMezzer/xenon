@@ -18,7 +18,7 @@ public sealed class XenonProjectLoaderTests
             [source]
             root = "code"
 
-            [native]
+            [libraries]
             libraries = ["sqlite3", "zlib"]
             library-paths = [
                 "native/lib",
@@ -50,10 +50,10 @@ public sealed class XenonProjectLoaderTests
         Assert.False(project.ReleaseProfile.EmitDebugInformation);
         Assert.False(XenonProjectCompilationFactory.Create(project, "debug").Options.EnableRuntimeChecks);
         Assert.False(XenonProjectCompilationFactory.Create(project, "release").Options.EnableRuntimeChecks);
-        Assert.Equal(["sqlite3", "zlib"], project.NativeLibraries.ToArray());
+        Assert.Equal(["sqlite3", "zlib"], project.Libraries.ToArray());
         Assert.Equal(
             [Path.GetFullPath(directory.PathOf("native/lib")), Path.GetFullPath(directory.PathOf("vendor/lib"))],
-            project.NativeLibraryPaths.ToArray());
+            project.LibraryPaths.ToArray());
     }
 
     [Fact]
@@ -125,6 +125,26 @@ public sealed class XenonProjectLoaderTests
 
         Assert.Contains("Invalid.xeproj(4)", exception.Message, StringComparison.Ordinal);
         Assert.Contains("unknown project setting 'project.unexpected'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Loader_RejectsLegacyNativeSection()
+    {
+        using var directory = new TemporaryDirectory();
+        directory.Write("Legacy.xeproj", """
+            [project]
+            name = "Legacy"
+            type = "executable"
+
+            [native]
+            libraries = ["sqlite3"]
+            """);
+        directory.Write("Main.xe", "namespace Legacy; int Main() { return 0; }");
+
+        ProjectSystemException exception = Assert.Throws<ProjectSystemException>(
+            () => XenonProjectLoader.LoadProjectFile(directory.PathOf("Legacy.xeproj")));
+        Assert.Contains("unknown project setting 'native.libraries'", exception.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]

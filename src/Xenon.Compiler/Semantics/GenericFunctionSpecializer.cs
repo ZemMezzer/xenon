@@ -2,14 +2,13 @@ using System.Collections.Immutable;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
-using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 
 namespace Xenon.Compiler.Semantics;
 
 internal sealed class GenericFunctionSpecializer
 {
-    private readonly IReadOnlyDictionary<FunctionSymbol, (BlockStatementSyntax Body, FileSymbolScope Scope)> _definitions;
+    private readonly IReadOnlyDictionary<FunctionSymbol, IGenericFunctionImplementation> _implementations;
     private readonly TypeFactory _types;
     private readonly DiagnosticBag _diagnostics;
     private readonly ConstantEvaluationContext _constants;
@@ -20,14 +19,14 @@ internal sealed class GenericFunctionSpecializer
     private readonly GenericConstraintValidator _constraintValidator = new();
 
     public GenericFunctionSpecializer(
-        IReadOnlyDictionary<FunctionSymbol, (BlockStatementSyntax Body, FileSymbolScope Scope)> definitions,
+        IReadOnlyDictionary<FunctionSymbol, IGenericFunctionImplementation> implementations,
         TypeFactory types,
         DiagnosticBag diagnostics,
         ConstantEvaluationContext constants,
         GenericStructSpecializer structSpecializer,
         CancellationToken cancellationToken)
     {
-        _definitions = definitions;
+        _implementations = implementations;
         _types = types;
         _diagnostics = diagnostics;
         _constants = constants;
@@ -43,10 +42,10 @@ internal sealed class GenericFunctionSpecializer
         _cancellationToken.ThrowIfCancellationRequested();
         if (!definition.IsGenericDefinition || definition.ContainingType is not null)
             return null;
-        if (!_definitions.ContainsKey(definition))
+        if (!_implementations.ContainsKey(definition))
         {
             _diagnostics.Report(location,
-                $"generic function '{definition.Name}' cannot be specialized without a source body in this compilation",
+                $"generic function '{definition.Name}' cannot be specialized because its implementation is unavailable",
                 DiagnosticIds.GenericSpecializationNotImplemented);
             return null;
         }
@@ -85,10 +84,14 @@ internal sealed class GenericFunctionSpecializer
         TypeSymbol returnType = Substitute(definition.ReturnType, substitutions, location);
         ImmutableArray<ParameterSymbol> parameters = definition.Parameters.Select(parameter =>
             new ParameterSymbol(parameter.Name, Substitute(parameter.Type, substitutions, location), parameter.Ordinal,
-                parameter.IsReadonly, declaration: parameter.Declaration)).ToImmutableArray();
+                parameter.IsReadonly)).ToImmutableArray();
         string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
-        var specialized = new FunctionSymbol(name, definition.ContainingNamespace, returnType, parameters,
-            (FunctionDeclarationSyntax)definition.Declaration);
+        var specialized = new FunctionSymbol(name, definition.ContainingNamespace, FunctionKind.Ordinary,
+            returnType, parameters, definition.Accessibility, isStatic: definition.IsStatic,
+            isReadonly: definition.IsReadonly, isVirtual: definition.IsVirtual,
+            isOverride: definition.IsOverride, isAbstract: definition.IsAbstract,
+            isExtern: definition.IsExtern, isExport: definition.IsExport, isDefinition: true,
+            origin: SymbolOrigin.CompilerGenerated, documentation: definition.Documentation);
         specialized.SetGenericSpecialization(definition, typeArguments);
         specialized.SetReceiverMoveEffects(definition.ReceiverMoveEffects);
         specialized.SetReferenceReturnOrigins(definition.ReferenceReturnOrigins);
@@ -96,14 +99,8 @@ internal sealed class GenericFunctionSpecializer
         specialized.SetReferenceFieldOrigins(definition.ReferenceFieldOrigins);
         _symbols.Add(key, specialized);
 
-        var source = _definitions[definition];
-        // Specializations intentionally use a private semantic store: source-level
-        // hover/definition data belongs to the generic definition, not to one use site.
-        var semanticInfo = new SemanticInfoStore();
-        FileSymbolScope scope = source.Scope.WithTypeSubstitutions(substitutions, semanticInfo);
-        var binder = new FunctionBodyBinder(specialized, scope, _diagnostics, _constants,
-            semanticInfo, this, _cancellationToken);
-        BoundBlockStatement body = binder.BindBody(source.Body);
+        BoundBlockStatement body = _implementations[definition].Bind(specialized, substitutions,
+            _diagnostics, _constants, this, _cancellationToken);
         _functions.Add(new BoundFunction(specialized, body));
         return specialized;
     }

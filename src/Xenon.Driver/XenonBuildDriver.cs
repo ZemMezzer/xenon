@@ -135,8 +135,8 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                         .Any(dependency => LlvmIrGenerator.RequiresNativeThreadingRuntime(
                             compilations[dependency.Identity]));
                 var options = new NativeLinkOptions(
-                    project.NativeLibraries.AddRange(dependencyArtifacts),
-                    project.NativeLibraryPaths,
+                    project.Libraries.AddRange(dependencyArtifacts),
+                    project.LibraryPaths,
                     exportedSymbols.Distinct(StringComparer.Ordinal).ToArray(),
                     RequiresThreadingRuntime: requiresThreadingRuntime);
                 LinkedNativeArtifact artifact;
