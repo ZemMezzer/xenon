@@ -14,6 +14,8 @@ public sealed class Compilation
 {
     private readonly ConcurrentDictionary<SyntaxTree, SemanticModel> _semanticModels =
         new(ReferenceEqualityComparer.Instance);
+    private readonly object _nativeReachabilityLock = new();
+    private NativeReachability? _nativeReachability;
 
     private Compilation(ImmutableArray<SyntaxTree> syntaxTrees, CompilationOptions options,
         ImmutableArray<CompilationReference> references, ITargetTypeLayout? targetLayout,
@@ -188,64 +190,174 @@ public sealed class Compilation
     }
 
     public ImmutableArray<BoundFunction> GetStaticImplementationFunctions()
+        => GetNativeReachability().Functions;
+
+    /// <summary>Whether an imported XELIB symbol is required by this native link unit.</summary>
+    public bool IsImportedSymbolNativeReachable(Symbol symbol)
+    {
+        ArgumentNullException.ThrowIfNull(symbol);
+        if (GetOwningLibrary(symbol) is null) return true;
+        NativeReachability reachability = GetNativeReachability();
+        return symbol switch
+        {
+            FunctionSymbol function => reachability.FunctionSymbols.Contains(function),
+            FieldSymbol field => reachability.StaticFields.Contains(field),
+            DeclaredTypeSymbol type => reachability.Types.Contains(type),
+            _ => true,
+        };
+    }
+
+    public bool IsImportedDispatchTypeNativeReachable(StructTypeSymbol type)
+    {
+        ArgumentNullException.ThrowIfNull(type);
+        return GetOwningLibrary(type) is null || GetNativeReachability().DispatchTypes.Contains(type);
+    }
+
+    private NativeReachability GetNativeReachability()
+    {
+        if (_nativeReachability is { } cached) return cached;
+        lock (_nativeReachabilityLock)
+        {
+            if (_nativeReachability is { } winner) return winner;
+            return _nativeReachability = ComputeNativeReachability();
+        }
+    }
+
+    private NativeReachability ComputeNativeReachability()
     {
         ImmutableArray<BoundFunction> source = SemanticModel.Functions;
         var available = new Dictionary<FunctionSymbol, BoundFunction>(ReferenceEqualityComparer.Instance);
         foreach (BoundFunction function in References.OfType<LibraryCompilationReference>()
                      .SelectMany(reference => reference.ImplementationFunctions))
             available.TryAdd(function.Symbol, function);
-        if (available.Count == 0) return source;
-
         var selected = new HashSet<FunctionSymbol>(ReferenceEqualityComparer.Instance);
         var pending = new Queue<FunctionSymbol>();
+        var reachableTypes = new HashSet<DeclaredTypeSymbol>(ReferenceEqualityComparer.Instance);
+        var reachableDispatchTypes = new HashSet<StructTypeSymbol>(ReferenceEqualityComparer.Instance);
+        var reachableStaticFields = new HashSet<FieldSymbol>(ReferenceEqualityComparer.Instance);
+        var inspectingTypes = new HashSet<TypeSymbol>(ReferenceEqualityComparer.Instance);
         void Select(FunctionSymbol function)
         {
             if (available.ContainsKey(function) && selected.Add(function)) pending.Enqueue(function);
         }
-        void SelectDispatchBodies(NamespaceSymbol @namespace)
+
+        void MarkType(TypeSymbol type, bool requiresDispatch = true)
         {
-            foreach (StructTypeSymbol type in @namespace.Structs)
+            bool firstVisit = inspectingTypes.Add(type);
+            switch (type)
             {
-                foreach (FunctionSymbol function in type.VirtualMethods) Select(function);
-                if (!type.Interfaces.IsEmpty)
-                    foreach (FunctionSymbol function in type.Methods) Select(function);
+                case StructTypeSymbol structure:
+                    reachableTypes.Add(structure);
+                    bool newDispatch = requiresDispatch && reachableDispatchTypes.Add(structure);
+                    if (!firstVisit && !newDispatch) return;
+                    if (structure.BaseType is { } baseType) MarkType(baseType, requiresDispatch);
+                    foreach (InterfaceTypeSymbol @interface in structure.ImplementedInterfaces)
+                        MarkType(@interface, false);
+                    foreach (FieldSymbol field in structure.AllInstanceFields) MarkType(field.Type, false);
+                    if (newDispatch && structure.IsConcreteType && structure.HasVirtualDispatch)
+                        foreach (FunctionSymbol target in structure.VirtualMethods) Select(target);
+                    if (newDispatch && structure.IsConcreteType)
+                        foreach (InterfaceTypeSymbol @interface in structure.ImplementedInterfaces)
+                        foreach (FunctionSymbol required in @interface.AllMethods)
+                            if (structure.FindInterfaceImplementation(required) is { } implementation)
+                                Select(implementation);
+                    // Default construction executes the hidden initializer; it is a type-use
+                    // dependency, not a root for every loaded library type.
+                    if (requiresDispatch && structure.InstanceInitializer is { } initializer)
+                        Select(initializer);
+                    if (requiresDispatch && TypeFacts.GetCompleteDestructor(structure) is { } destructor)
+                        Select(destructor);
+                    break;
+                case InterfaceTypeSymbol @interface:
+                    if (!firstVisit) return;
+                    reachableTypes.Add(@interface);
+                    foreach (InterfaceTypeSymbol baseInterface in @interface.BaseInterfaces) MarkType(baseInterface, false);
+                    break;
+                case PointerTypeSymbol pointer: MarkType(pointer.ElementType, requiresDispatch); break;
+                case ReferenceTypeSymbol reference: MarkType(reference.ElementType, requiresDispatch); break;
+                case ArrayTypeSymbol array: MarkType(array.ElementType, requiresDispatch); break;
+                case AtomicTypeSymbol atomic: MarkType(atomic.ElementType, requiresDispatch); break;
+                case OwnershipTypeSymbol ownership:
+                    MarkType(ownership.ElementType, requiresDispatch);
+                    if (ownership.CompleteDestructor is { } ownershipDestructor) Select(ownershipDestructor);
+                    break;
+                case LifetimeModifierTypeSymbol modifier:
+                    MarkType(modifier.ElementType, requiresDispatch);
+                    if (modifier is StorageTypeSymbol { CompleteDestructor: { } storageDestructor })
+                        Select(storageDestructor);
+                    break;
+                case FunctionPointerTypeSymbol functionPointer:
+                    MarkType(functionPointer.ReturnType, false);
+                    foreach (TypeSymbol parameter in functionPointer.ParameterTypes) MarkType(parameter, false);
+                    break;
             }
-            foreach (NamespaceSymbol child in @namespace.Namespaces) SelectDispatchBodies(child);
         }
-        foreach (LibraryCompilationReference reference in References.OfType<LibraryCompilationReference>())
-            SelectDispatchBodies(reference.GlobalNamespace);
+
+        void MarkStaticField(FieldSymbol field)
+        {
+            if (!field.IsStatic || !reachableStaticFields.Add(field)) return;
+            MarkType(field.ContainingType, false);
+            MarkType(field.Type);
+            foreach (FunctionSymbol initializer in available.Keys.Where(function =>
+                         function.FunctionKind == FunctionKind.ThreadLocalInitializer &&
+                         ReferenceEquals(function.ThreadLocalField, field)))
+                Select(initializer);
+        }
+
+        void MarkSymbol(Symbol symbol)
+        {
+            switch (symbol)
+            {
+                case FunctionSymbol function: Select(function); break;
+                case FieldSymbol field: MarkStaticField(field); break;
+                case PropertySymbol property:
+                    if (property.Getter is { } getter) Select(getter);
+                    if (property.Setter is { } setter) Select(setter);
+                    break;
+                case IndexerSymbol indexer:
+                    if (indexer.Getter is { } indexerGetter) Select(indexerGetter);
+                    if (indexer.Setter is { } indexerSetter) Select(indexerSetter);
+                    break;
+            }
+        }
+
         void Inspect(BoundFunction function)
         {
+            MarkType(function.Symbol.ReturnType, false);
             foreach (ParameterSymbol parameter in function.Symbol.Parameters)
+            {
+                MarkType(parameter.Type, false);
                 if (TypeFacts.GetCompleteDestructor(parameter.Type) is { } parameterDestructor)
                     Select(parameterDestructor);
-            XelibBodyCodec.Collect(function.Body, type =>
-            {
-                if (TypeFacts.GetCompleteDestructor(type) is { } destructor) Select(destructor);
-            }, symbol =>
-            {
-                switch (symbol)
-                {
-                    case FunctionSymbol called: Select(called); break;
-                    case PropertySymbol property:
-                        if (property.Getter is { } getter) Select(getter);
-                        if (property.Setter is { } setter) Select(setter);
-                        break;
-                    case IndexerSymbol indexer:
-                        if (indexer.Getter is { } indexerGetter) Select(indexerGetter);
-                        if (indexer.Setter is { } indexerSetter) Select(indexerSetter);
-                        break;
-                }
-            });
+            }
+            XelibBodyCodec.Collect(function.Body, type => MarkType(type), MarkSymbol);
         }
+        void MarkSourceTypes(NamespaceSymbol @namespace)
+        {
+            foreach (StructTypeSymbol type in @namespace.Structs.Where(IsSymbolDefinedHere)) MarkType(type);
+            foreach (InterfaceTypeSymbol type in @namespace.Interfaces.Where(IsSymbolDefinedHere)) MarkType(type, false);
+            foreach (NamespaceSymbol child in @namespace.Namespaces) MarkSourceTypes(child);
+        }
+        MarkSourceTypes(SemanticModel.GlobalNamespace);
         foreach (BoundFunction function in source) Inspect(function);
+        // Native exports are ABI roots even when no Xenon call site references them.
+        foreach (FunctionSymbol export in available.Keys.Where(function => function.IsExport)) Select(export);
         while (pending.TryDequeue(out FunctionSymbol? symbol)) Inspect(available[symbol]);
 
-        return source.Concat(selected.Select(symbol => available[symbol])
+        ImmutableArray<BoundFunction> functions = source.Concat(selected.Select(symbol => available[symbol])
                 .OrderBy(function => function.Symbol.QualifiedName, StringComparer.Ordinal))
             .DistinctBy(function => function.Symbol, ReferenceEqualityComparer.Instance)
             .ToImmutableArray();
+        return new NativeReachability(functions, selected, reachableTypes, reachableDispatchTypes,
+            reachableStaticFields);
     }
+
+    private sealed record NativeReachability(
+        ImmutableArray<BoundFunction> Functions,
+        HashSet<FunctionSymbol> FunctionSymbols,
+        HashSet<DeclaredTypeSymbol> Types,
+        HashSet<StructTypeSymbol> DispatchTypes,
+        HashSet<FieldSymbol> StaticFields);
 
     public LibraryCompilationReference? GetOwningLibrary(Symbol symbol)
     {

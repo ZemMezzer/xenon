@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Text.Json;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -63,14 +64,17 @@ public static class XelibReader
             var reconstruction = new XelibSemanticReconstruction(metadata.Manifest, types, symbols,
                 exports, documentation, dependencies, path);
             reconstruction.ReconstructMetadata();
-            if (!metadataOnly)
+            ImmutableArray<XelibGenericImplementation> generics =
+                ReadSection<ImmutableArray<XelibGenericImplementation>>(
+                    container, XelibSectionKind.GenericImplementations, path);
+            // Tooling discards ordinary native bodies, but retains the portable generic payloads
+            // needed to diagnose and specialize generic calls in a consumer source snapshot.
+            if (!metadataOnly || !generics.IsEmpty)
             {
-                ImmutableArray<XelibBodyRecord> bodies = ReadSection<ImmutableArray<XelibBodyRecord>>(
-                    container, XelibSectionKind.Bodies, path);
-                ImmutableArray<XelibGenericImplementation> generics =
-                    ReadSection<ImmutableArray<XelibGenericImplementation>>(
-                        container, XelibSectionKind.GenericImplementations, path);
-                reconstruction.ReconstructBodies(bodies, generics);
+                ImmutableArray<XelibBodyRecord> bodies = metadataOnly
+                    ? ReadGenericBodies(container, generics, path)
+                    : ReadSection<ImmutableArray<XelibBodyRecord>>(container, XelibSectionKind.Bodies, path);
+                reconstruction.ReconstructBodies(bodies, generics, includeOrdinaryBodies: !metadataOnly);
             }
             return reconstruction.CreateReference(path);
         }
@@ -85,6 +89,67 @@ public static class XelibReader
 
     private static T ReadSection<T>(XelibContainer container, XelibSectionKind kind, string? path) =>
         XelibJson.Deserialize<T>(container.GetRequiredSection(kind).AsSpan(), path);
+
+    private static ImmutableArray<XelibBodyRecord> ReadGenericBodies(XelibContainer container,
+        ImmutableArray<XelibGenericImplementation> generics, string? path)
+    {
+        var requiredIds = generics.SelectMany(item =>
+            (item.BodyId == 0 ? Enumerable.Empty<int>() : [item.BodyId])
+            .Concat((item.StaticFieldInitializers.IsDefault ? [] : item.StaticFieldInitializers)
+                .Select(initializer => initializer.BodyId))).ToHashSet();
+        ReadOnlySpan<byte> bytes = container.GetRequiredSection(XelibSectionKind.Bodies).AsSpan();
+        var result = ImmutableArray.CreateBuilder<XelibBodyRecord>();
+        try
+        {
+            var reader = new Utf8JsonReader(bytes);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray)
+                throw Invalid("body section is not an array", path);
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+            {
+                if (reader.TokenType != JsonTokenType.StartObject)
+                    throw Invalid("body section contains a non-object record", path);
+                int start = checked((int)reader.TokenStartIndex);
+                var header = reader;
+                int id = ReadBodyId(ref header, path);
+                reader.Skip();
+                int length = checked((int)reader.BytesConsumed) - start;
+                if (requiredIds.Contains(id))
+                    result.Add(XelibJson.Deserialize<XelibBodyRecord>(bytes.Slice(start, length), path));
+            }
+            if (reader.TokenType != JsonTokenType.EndArray)
+                throw Invalid("unterminated body section", path);
+        }
+        catch (XelibFormatException) { throw; }
+        catch (JsonException exception)
+        {
+            throw new XelibFormatException(XelibErrorCode.InvalidRecord,
+                $"invalid Library IR body section: {exception.Message}", path, exception);
+        }
+        return result.ToImmutable();
+    }
+
+    private static int ReadBodyId(ref Utf8JsonReader reader, string? path)
+    {
+        int? id = null;
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.EndObject)
+                return id ?? throw Invalid("body record does not contain an ID", path);
+            if (reader.TokenType != JsonTokenType.PropertyName)
+                throw Invalid("body record contains an invalid property", path);
+            bool isId = reader.ValueTextEquals("id"u8);
+            if (!reader.Read()) throw Invalid("body record contains an incomplete property", path);
+            if (isId)
+            {
+                if (id is not null || reader.TokenType != JsonTokenType.Number ||
+                    !reader.TryGetInt32(out int parsed) || parsed <= 0)
+                    throw Invalid("body record contains an invalid or duplicate ID", path);
+                id = parsed;
+            }
+            reader.Skip();
+        }
+        throw Invalid("unterminated body record", path);
+    }
 
     private static void ValidateIds(ImmutableArray<XelibTypeRecord> types,
         ImmutableArray<XelibSymbolRecord> symbols, ImmutableArray<XelibExport> exports,
@@ -149,10 +214,11 @@ internal sealed class XelibSemanticReconstruction
         CreateFunctions();
         CompleteRelations();
         CompleteConstraints();
+        CompleteConstantExpressions();
     }
 
     public void ReconstructBodies(ImmutableArray<XelibBodyRecord> bodies,
-        ImmutableArray<XelibGenericImplementation> generics)
+        ImmutableArray<XelibGenericImplementation> generics, bool includeOrdinaryBodies = true)
     {
         if (bodies.Any(item => item.Id <= 0) || bodies.Select(item => item.Id).Distinct().Count() != bodies.Length ||
             bodies.Select(item => item.FunctionSymbolId).Distinct().Count() != bodies.Length)
@@ -178,13 +244,15 @@ internal sealed class XelibSemanticReconstruction
         var genericBodyIds = generics.SelectMany(item =>
                 (item.BodyId == 0 ? Enumerable.Empty<int>() : [item.BodyId])
                 .Concat(StaticInitializers(item).Select(value => value.BodyId))).ToHashSet();
-        _functions = bodies.Where(item => !genericBodyIds.Contains(item.Id)).OrderBy(item => item.Id).Select(item =>
-        {
-            if (Symbol(item.FunctionSymbolId) is not FunctionSymbol function)
-                throw XelibReader.Invalid($"body {item.Id} does not reference a function", _path);
-            return new BoundFunction(function, XelibBodyCodec.Decode(item.Root, function,
-                ResolveType, Resolve));
-        }).ToImmutableArray();
+        _functions = includeOrdinaryBodies
+            ? bodies.Where(item => !genericBodyIds.Contains(item.Id)).OrderBy(item => item.Id).Select(item =>
+            {
+                if (Symbol(item.FunctionSymbolId) is not FunctionSymbol function)
+                    throw XelibReader.Invalid($"body {item.Id} does not reference a function", _path);
+                return new BoundFunction(function, XelibBodyCodec.Decode(item.Root, function,
+                    ResolveType, Resolve));
+            }).ToImmutableArray()
+            : [];
         var implementations = new GenericImplementationStoreBuilder([]);
         foreach (XelibGenericImplementation generic in generics)
         {
@@ -217,13 +285,25 @@ internal sealed class XelibSemanticReconstruction
                 }
                 var constants = ImmutableArray.CreateBuilder<(
                     ConstantSymbol Constant, XelibBodyNode Expression)>();
+                var constantExpressions = new Dictionary<int, XelibBodyNode>();
+                foreach (XelibSymbolRecord item in _symbolRecords.Where(item =>
+                             item.Kind == XelibSymbolKind.Constant &&
+                             item.ContainingSymbolId == generic.DefinitionSymbolId &&
+                             item.ConstantExpression is not null))
+                    constantExpressions.Add(item.Id, item.ConstantExpression!);
+                // Accept the legacy per-generic payload while keeping the symbol record as the
+                // canonical representation emitted by current writers.
                 foreach (XelibGenericConstantImplementation item in Constants(generic))
+                    if (!constantExpressions.TryAdd(item.ConstantSymbolId, item.Expression))
+                        throw XelibReader.Invalid(
+                            "generic constant implementation is represented more than once", _path);
+                foreach ((int constantId, XelibBodyNode expression) in constantExpressions)
                 {
-                    if (Symbol(item.ConstantSymbolId) is not ConstantSymbol constant ||
-                        !ReferenceEquals(constant.ContainingType, structure) || item.Expression is null)
+                    if (Symbol(constantId) is not ConstantSymbol constant ||
+                        !ReferenceEquals(constant.ContainingType, structure) || expression is null)
                         throw XelibReader.Invalid(
                             "generic constant implementation references an invalid constant", _path);
-                    constants.Add((constant, item.Expression));
+                    constants.Add((constant, expression));
                 }
                 implementations.AddStruct(structure, new LibraryGenericStructImplementation(
                     initializer, body?.Root, staticInitializers.ToImmutable(),
@@ -249,7 +329,8 @@ internal sealed class XelibSemanticReconstruction
             exports.Add(export.Key, Symbol(export.SymbolId));
         return new LibraryCompilationReference(
             new XelibLibraryIdentity(_manifest.Name, _manifest.Version, _manifest.ContentIdentity),
-            _globalNamespace, _genericImplementations, _functions, exports.ToImmutable(), path);
+            _globalNamespace, _genericImplementations, _functions, exports.ToImmutable(),
+            _dependencies.OrderBy(item => item.Key).Select(item => item.Value).ToImmutableArray(), path);
     }
 
     private void CreateNamespaces()
@@ -370,9 +451,28 @@ internal sealed class XelibSemanticReconstruction
                     Origin(record.Id), Documentation(record.Id)),
                 _ => throw new InvalidOperationException(),
             };
+            if (created is ConstantSymbol constant && record.ConstantValue is not null)
+                constant.SetBoundValue(new BoundLiteralExpression(constant.Value, constant.Type));
             _symbols.Add(record.Id, created);
             MapOwnedParameters(record, created);
         }
+    }
+
+    private void CompleteConstantExpressions()
+    {
+        foreach (XelibSymbolRecord record in _symbolRecords.Where(item => item.ConstantExpression is not null))
+        {
+            if (record.Kind is not (XelibSymbolKind.Constant or XelibSymbolKind.EnumMember) ||
+                Symbol(record.Id) is not ConstantSymbol constant || record.ConstantValue is not null)
+                throw XelibReader.Invalid("constant expression is attached to an invalid symbol", _path);
+            constant.SetBoundValue(XelibBodyCodec.DecodeExpression(
+                record.ConstantExpression!, ResolveType, Resolve));
+        }
+        foreach (XelibSymbolRecord record in _symbolRecords.Where(item =>
+                     item.Kind is XelibSymbolKind.Constant or XelibSymbolKind.EnumMember))
+            if ((record.ConstantValue is null) == (record.ConstantExpression is null))
+                throw XelibReader.Invalid(
+                    $"constant symbol {record.Id} must contain exactly one value representation", _path);
     }
 
     private void CreateFunctions()
@@ -411,14 +511,14 @@ internal sealed class XelibSemanticReconstruction
             created.SetReceiverMoveEffects(record.ReceiverMoveEffects.Select(item =>
                 new ReceiverMoveEffect(item)).ToImmutableArray());
             created.SetReferenceReturnOrigins(record.ReferenceReturnOrigins.Select(item =>
-                new ReferenceReturnOrigin((ReferenceReturnOriginKind)item.Kind,
+                new ReferenceReturnOrigin(XelibStableMappings.FromXelib(item.Kind),
                     item.ParameterOrdinal, item.FieldOrdinals)).ToImmutableArray());
             created.SetSharedReturnOrigins(record.SharedReturnOrigins.Select(item =>
-                new SharedReturnOrigin((SharedReturnOriginKind)item.Kind,
+                new SharedReturnOrigin(XelibStableMappings.FromXelib(item.Kind),
                     item.ParameterOrdinal)).ToImmutableArray());
             created.SetReferenceFieldOrigins(record.ReferenceFieldOrigins.Select(item =>
                 new ReferenceFieldOrigin(item.FieldOrdinals,
-                    new ReferenceReturnOrigin((ReferenceReturnOriginKind)item.Origin.Kind,
+                    new ReferenceReturnOrigin(XelibStableMappings.FromXelib(item.Origin.Kind),
                         item.Origin.ParameterOrdinal, item.Origin.FieldOrdinals),
                     item.IsReadonly)).ToImmutableArray());
             _symbols.Add(record.Id, created);
@@ -519,7 +619,7 @@ internal sealed class XelibSemanticReconstruction
         {
             var parameter = (GenericParameterSymbol)Symbol(record.Id);
             parameter.SetConstraints(record.Constraints.Select(item => new GenericConstraintSymbol(
-                (GenericConstraintKind)item.Kind, Resolve(item.Target), Origin(record.Id))).ToImmutableArray());
+                XelibStableMappings.FromXelib(item.Kind), Resolve(item.Target), Origin(record.Id))).ToImmutableArray());
         }
     }
 
@@ -658,29 +758,9 @@ internal sealed class XelibSemanticReconstruction
         Has(record, XelibSymbolFlags.Public) ? Semantics.Symbols.Accessibility.Public :
             Semantics.Symbols.Accessibility.Private;
 
-    private static FunctionKind Map(XelibFunctionKind kind) => kind switch
-    {
-        XelibFunctionKind.Ordinary => FunctionKind.Ordinary,
-        XelibFunctionKind.Method => FunctionKind.Method,
-        XelibFunctionKind.Constructor => FunctionKind.Constructor,
-        XelibFunctionKind.InstanceInitializer => FunctionKind.InstanceInitializer,
-        XelibFunctionKind.ThreadLocalInitializer => FunctionKind.ThreadLocalInitializer,
-        XelibFunctionKind.Destructor => FunctionKind.Destructor,
-        XelibFunctionKind.DestructorGlue => FunctionKind.DestructorGlue,
-        XelibFunctionKind.OwnershipDestructor => FunctionKind.OwnershipDestructor,
-        XelibFunctionKind.StorageDestructor => FunctionKind.StorageDestructor,
-        _ => throw new XelibFormatException(XelibErrorCode.InvalidRecord,
-            $"unknown function kind {(ushort)kind}"),
-    };
+    private static FunctionKind Map(XelibFunctionKind kind) => XelibStableMappings.FromXelib(kind);
 
-    private static AccessorKind Map(XelibAccessorKind kind) => kind switch
-    {
-        XelibAccessorKind.None => AccessorKind.None,
-        XelibAccessorKind.Getter => AccessorKind.Getter,
-        XelibAccessorKind.Setter => AccessorKind.Setter,
-        _ => throw new XelibFormatException(XelibErrorCode.InvalidRecord,
-            $"unknown accessor kind {(byte)kind}"),
-    };
+    private static AccessorKind Map(XelibAccessorKind kind) => XelibStableMappings.FromXelib(kind);
 
     private static PrimitiveTypeSymbol Builtin(string? name) => name switch
     {

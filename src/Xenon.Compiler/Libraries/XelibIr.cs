@@ -102,6 +102,42 @@ public enum XelibAccessorKind : byte
     Setter = 2,
 }
 
+public enum XelibGenericConstraintKind : byte
+{
+    BaseStruct = 1,
+    Interface = 2,
+    StructuralTemplate = 3,
+}
+
+public enum XelibReferenceReturnOriginKind : byte
+{
+    Parameter = 1,
+    Receiver = 2,
+    Static = 3,
+    Unknown = 4,
+}
+
+public enum XelibSharedReturnOriginKind : byte
+{
+    Fresh = 1,
+    Parameter = 2,
+    Unknown = 3,
+}
+
+public enum XelibArrayStorageKind : byte
+{
+    Unknown = 0,
+    Heap = 1,
+    Stack = 2,
+}
+
+public enum XelibMovedPlaceReinitializationKind : byte
+{
+    Live = 0,
+    DefinitelyMoved = 1,
+    MaybeMoved = 2,
+}
+
 public sealed record XelibSymbolReference(int LocalId, int DependencyId, string? ExportKey)
 {
     public static XelibSymbolReference Local(int id) => new(id, 0, null);
@@ -129,11 +165,11 @@ public sealed record XelibParameterRecord(
     bool IsReadonly);
 
 public sealed record XelibConstraintRecord(
-    ushort Kind,
+    XelibGenericConstraintKind Kind,
     XelibSymbolReference Target);
 
 public sealed record XelibReferenceReturnOriginRecord(
-    ushort Kind,
+    XelibReferenceReturnOriginKind Kind,
     int ParameterOrdinal,
     ImmutableArray<int> FieldOrdinals);
 
@@ -142,7 +178,7 @@ public sealed record XelibReferenceFieldOriginRecord(
     XelibReferenceReturnOriginRecord Origin,
     bool IsReadonly);
 
-public sealed record XelibSharedReturnOriginRecord(ushort Kind, int ParameterOrdinal);
+public sealed record XelibSharedReturnOriginRecord(XelibSharedReturnOriginKind Kind, int ParameterOrdinal);
 
 public sealed record XelibSymbolRecord
 {
@@ -171,6 +207,7 @@ public sealed record XelibSymbolRecord
     public bool HasGetter { get; init; }
     public bool HasSetter { get; init; }
     public XelibConstantValue? ConstantValue { get; init; }
+    public XelibBodyNode? ConstantExpression { get; init; }
     public ImmutableArray<ImmutableArray<int>> ReceiverMoveEffects { get; init; } = [];
     public ImmutableArray<XelibReferenceReturnOriginRecord> ReferenceReturnOrigins { get; init; } = [];
     public ImmutableArray<XelibSharedReturnOriginRecord> SharedReturnOrigins { get; init; } = [];
@@ -323,7 +360,7 @@ public sealed record XelibLocalRecord(
     string Name,
     int TypeId,
     bool IsReadonly,
-    ushort ArrayStorage,
+    XelibArrayStorageKind ArrayStorage,
     bool RequiresArrayCleanupTransfer,
     XelibSymbolReference? Destructor);
 
@@ -342,6 +379,8 @@ public sealed record XelibBodyNode
     public int LocalId { get; init; }
     public string? Text { get; init; }
     public int Integer { get; init; }
+    public XelibArrayStorageKind ArrayStorage { get; init; }
+    public XelibMovedPlaceReinitializationKind MovedPlaceReinitialization { get; init; }
     public bool Flag1 { get; init; }
     public bool Flag2 { get; init; }
     public bool Flag3 { get; init; }

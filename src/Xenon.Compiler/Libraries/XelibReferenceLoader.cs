@@ -4,11 +4,14 @@ namespace Xenon.Compiler.Libraries;
 
 public static class XelibReferenceLoader
 {
+    public static StringComparer PathComparer { get; } = OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
     public static ImmutableArray<LibraryCompilationReference> LoadFiles(IEnumerable<string> paths,
         bool metadataOnly = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        string[] orderedPaths = paths.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        string[] orderedPaths = paths.Select(Path.GetFullPath).Distinct(PathComparer).ToArray();
         if (orderedPaths.Length == 0) return [];
 
         var metadata = orderedPaths.Select(path => (Path: path, Metadata: XelibMetadataReader.ReadFile(path))).ToArray();

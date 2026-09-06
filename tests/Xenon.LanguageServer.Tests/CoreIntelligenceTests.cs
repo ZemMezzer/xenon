@@ -3,6 +3,7 @@ using System.Text.Json;
 using Xenon.Compiler.Text;
 using Xenon.Compiler;
 using Xenon.Compiler.Libraries;
+using Xenon.ProjectSystem;
 using Xenon.LanguageServer.Protocol;
 using Xenon.LanguageServer.Text;
 
@@ -10,6 +11,37 @@ namespace Xenon.LanguageServer.Tests;
 
 public sealed class CoreIntelligenceTests
 {
+    [Fact]
+    public async Task LanguageServerProjectSnapshotLoadsOnlyXelibMetadataBodies()
+    {
+        using var directory = new TestDirectory();
+        directory.Write("src/main.xe",
+            "using Library; namespace App; int Main() { return Identity<int>(42); }");
+        string projectPath = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["Library.xelib"]
+            """);
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace Library; public T Identity<T>(T value) { return move value; }", "library.xe"));
+        File.WriteAllBytes(directory.PathOf("Library.xelib"),
+            XelibWriter.Write(library, new XelibWriteOptions("Library")));
+
+        WorkspaceDiscoveryResult discovered = WorkspaceDiscovery.Discover(projectPath, null, null);
+        using Workspace workspace = discovered.Workspace!;
+        Compilation toolingCompilation = await workspace.CurrentSnapshot.RootProject.GetCompilationAsync();
+        LibraryCompilationReference reference = Assert.IsType<LibraryCompilationReference>(
+            Assert.Single(toolingCompilation.References));
+
+        Assert.Empty(reference.ImplementationFunctions);
+        Assert.False(toolingCompilation.HasErrors, string.Join(Environment.NewLine,
+            toolingCompilation.Diagnostics.Select(item => item.Message)));
+    }
+
     [Fact]
     public async Task ReferencedXelibDocumentationReloadsAfterWatchedFileChange()
     {

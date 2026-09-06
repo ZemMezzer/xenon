@@ -6,7 +6,7 @@ namespace Xenon.Compiler.Libraries;
 public static class XelibVersions
 {
     public const ushort Container = 1;
-    public const ushort LibraryIr = 1;
+    public const ushort LibraryIr = 2;
     public const ushort Language = 1;
 }
 

@@ -53,13 +53,15 @@ public sealed class LibraryCompilationReference : CompilationReference
     internal LibraryCompilationReference(XelibLibraryIdentity libraryIdentity,
         NamespaceSymbol globalNamespace, GenericImplementationStore genericImplementations,
         ImmutableArray<BoundFunction> implementationFunctions,
-        ImmutableDictionary<string, Symbol> exports, string? path)
+        ImmutableDictionary<string, Symbol> exports,
+        ImmutableArray<LibraryCompilationReference> dependencies, string? path)
         : base(CreateIdentity(libraryIdentity.ContentIdentity))
     {
         LibraryIdentity = libraryIdentity;
         GlobalNamespace = globalNamespace;
         GenericImplementations = genericImplementations;
         ImplementationFunctions = implementationFunctions;
+        Dependencies = dependencies;
         _exports = exports;
         Path = path;
     }
@@ -68,6 +70,8 @@ public sealed class LibraryCompilationReference : CompilationReference
     public override NamespaceSymbol GlobalNamespace { get; }
     public override GenericImplementationStore GenericImplementations { get; }
     public ImmutableArray<BoundFunction> ImplementationFunctions { get; }
+    /// <summary>Exact XELIB dependencies captured by this immutable library image.</summary>
+    public ImmutableArray<LibraryCompilationReference> Dependencies { get; }
     public string? Path { get; }
 
     internal bool TryResolveExport(string key, out Symbol symbol) => _exports.TryGetValue(key, out symbol!);

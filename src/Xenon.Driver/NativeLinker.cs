@@ -192,12 +192,13 @@ public sealed class NativeLinker
         {
             return new LinkerCommand(
                 toolchain.LibrarianPath,
-                ["/NOLOGO", $"/MACHINE:{machine}", $"/OUT:{outputPath}", objectPath]);
+                ["/NOLOGO", "/Brepro", $"/MACHINE:{machine}", $"/OUT:{outputPath}", objectPath]);
         }
 
         var arguments = new List<string>
         {
             "/NOLOGO",
+            "/Brepro",
             "/INCREMENTAL:NO",
             $"/MACHINE:{machine}",
             $"/OUT:{outputPath}",

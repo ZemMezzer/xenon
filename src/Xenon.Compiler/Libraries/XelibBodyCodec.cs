@@ -112,7 +112,7 @@ public static class XelibBodyCodec
         {
             Locals = locals.OrderBy(pair => pair.Value).Select(pair => new XelibLocalRecord(
                 pair.Value, pair.Key.Name, typeId(pair.Key.Type), pair.Key.IsReadonly,
-                (ushort)pair.Key.ArrayStorage, pair.Key.RequiresArrayCleanupTransfer,
+                XelibStableMappings.ToXelib(pair.Key.ArrayStorage), pair.Key.RequiresArrayCleanupTransfer,
                 pair.Key.Destructor is null ? null : symbolReference(pair.Key.Destructor))).ToImmutableArray(),
         };
     }
@@ -137,7 +137,7 @@ public static class XelibBodyCodec
             if (record.Id <= 0 || locals.ContainsKey(record.Id)) Invalid("duplicate or invalid local ID");
             var local = new LocalVariableSymbol(record.Name, type(record.TypeId), function, record.IsReadonly)
             {
-                ArrayStorage = (ArrayStorageKind)record.ArrayStorage,
+                ArrayStorage = XelibStableMappings.FromXelib(record.ArrayStorage),
                 RequiresArrayCleanupTransfer = record.RequiresArrayCleanupTransfer,
                 Destructor = record.Destructor is null ? null : (FunctionSymbol)symbol(record.Destructor),
             };
@@ -269,7 +269,7 @@ public static class XelibBodyCodec
             case BoundAssignmentExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Assignment, TypeId = typeId(value.Type),
                     Operator = Map(value.OperatorKind), Flag1 = value.IsInitialization,
-                    Integer = (int)value.MovedPlaceReinitialization,
+                    MovedPlaceReinitialization = XelibStableMappings.ToXelib(value.MovedPlaceReinitialization),
                     Symbol = value.ConstructorField is null ? null : symbol(value.ConstructorField),
                     Flag2 = value.RequiresRuntimeInitializationCheck,
                     Children = [E(value.Target), E(value.Expression)] };
@@ -391,7 +391,7 @@ public static class XelibBodyCodec
                     Symbol = symbol(value.Function), Children = value.Arguments.Select(E).ToImmutableArray() };
             case BoundArrayCreationExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.ArrayCreation, TypeId = typeId(value.ArrayType),
-                    AuxTypeId = typeId(value.ElementType), Integer = (int)value.Storage,
+                    AuxTypeId = typeId(value.ElementType), ArrayStorage = XelibStableMappings.ToXelib(value.Storage),
                     Children = value.Dimensions.Select(E).ToImmutableArray() };
             case BoundArrayMetadataExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.ArrayMetadata, TypeId = typeId(value.Type),
@@ -516,7 +516,7 @@ public static class XelibBodyCodec
             case XelibBodyOpcode.Assignment: return new BoundAssignmentExpression(E(0), Map(node.Operator), E(1))
             {
                 IsInitialization = node.Flag1,
-                MovedPlaceReinitialization = (MovedPlaceReinitializationState)node.Integer,
+                MovedPlaceReinitialization = XelibStableMappings.FromXelib(node.MovedPlaceReinitialization),
                 ConstructorField = node.Symbol is null ? null : Sym<FieldSymbol>(node.Symbol),
                 RequiresRuntimeInitializationCheck = node.Flag2,
             };
@@ -624,7 +624,7 @@ public static class XelibBodyCodec
                 ImmutableArray<BoundExpression> dimensions = node.Children.Select((_, i) => E(i)).ToImmutableArray();
                 if (dimensions.IsEmpty) throw Invalid("array creation has no dimensions");
                 return new BoundArrayCreationExpression(type(node.AuxTypeId), dimensions[0],
-                    (ArrayTypeSymbol)type(node.TypeId), (ArrayStorageKind)node.Integer) { Dimensions = dimensions };
+                    (ArrayTypeSymbol)type(node.TypeId), XelibStableMappings.FromXelib(node.ArrayStorage)) { Dimensions = dimensions };
             }
             case XelibBodyOpcode.ArrayMetadata: return new BoundArrayMetadataExpression(E(0),
                 node.Text ?? throw Invalid("array metadata member is missing"), node.Flag1 ? E(1) : null);

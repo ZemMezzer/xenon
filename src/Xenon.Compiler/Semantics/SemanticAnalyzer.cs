@@ -1168,7 +1168,7 @@ internal sealed class SemanticAnalyzer
     private bool EvaluateConstantCore(ConstantSymbol constant, ExpressionSyntax initializer,
         TextLocation location)
     {
-        if (constant.HasValue)
+        if (constant.EvaluationState != ConstantEvaluationState.Unresolved)
             return true;
         if (_failedConstants.Contains(constant))
             return false;

@@ -271,6 +271,13 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     }
 }
 
+public enum ConstantEvaluationState
+{
+    Unresolved,
+    Deferred,
+    Evaluated,
+}
+
 public sealed class ConstantSymbol : Symbol
 {
     internal ConstantSymbol(
@@ -294,7 +301,7 @@ public sealed class ConstantSymbol : Symbol
     {
         Type = type;
         Value = value;
-        HasValue = hasValue;
+        EvaluationState = hasValue ? ConstantEvaluationState.Evaluated : ConstantEvaluationState.Unresolved;
         SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
         SetImplementation(implementation);
     }
@@ -304,7 +311,8 @@ public sealed class ConstantSymbol : Symbol
     public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
     public object? Value { get; private set; }
     public BoundExpression? BoundValue { get; private set; }
-    public bool HasValue { get; private set; }
+    public bool HasValue => EvaluationState == ConstantEvaluationState.Evaluated;
+    public ConstantEvaluationState EvaluationState { get; private set; }
     public ConstantSymbol? GenericDefinition { get; private set; }
     internal ExpressionSyntax Initializer { get; } = null!;
     internal SyntaxNode Declaration { get; } = null!;
@@ -316,13 +324,14 @@ public sealed class ConstantSymbol : Symbol
     internal void SetValue(object? value)
     {
         Value = value;
-        HasValue = true;
+        EvaluationState = ConstantEvaluationState.Evaluated;
     }
 
     internal void SetBoundValue(BoundExpression value)
     {
         BoundValue = value;
-        HasValue = true;
+        if (EvaluationState != ConstantEvaluationState.Evaluated)
+            EvaluationState = ConstantEvaluationState.Deferred;
     }
 
     internal void SetGenericSpecialization(ConstantSymbol definition) => GenericDefinition = definition;
