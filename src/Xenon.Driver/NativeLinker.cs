@@ -85,9 +85,10 @@ public sealed class NativeLinker
         string? finalImportLibraryPath = importLibraryPath is null || !hasExports
             ? null
             : Path.GetFullPath(importLibraryPath);
-        // PE import tables embed the DLL basename passed to LINK. Keep the final
-        // basename while isolating the unpublished output in a temporary directory.
-        string? temporaryDirectory = OperatingSystem.IsWindows() && kind == NativeArtifactKind.SharedLibrary
+        // PE import tables and Mach-O ad-hoc signatures embed the output basename. Keep
+        // the final basename while isolating unpublished output in a temporary directory.
+        string? temporaryDirectory = OperatingSystem.IsMacOS() ||
+            (OperatingSystem.IsWindows() && kind == NativeArtifactKind.SharedLibrary)
             ? Path.Combine(Path.GetDirectoryName(artifactPath)!,
                 $".x-{Guid.NewGuid():N}"[..11])
             : null;
