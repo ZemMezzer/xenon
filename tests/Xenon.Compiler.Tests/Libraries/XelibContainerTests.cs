@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections.Immutable;
 using System.Text;
+using System.Text.Json;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Libraries;
@@ -405,10 +406,8 @@ public sealed class XelibContainerTests
             "namespace Ordered; public T Identity<T>(T value) { return move value; }", "library.xe"));
         byte[] valid = XelibWriter.Write(library, new XelibWriteOptions("Ordered"));
         XelibContainer container = XelibContainer.Read(valid);
-        ImmutableArray<XelibBodyRecord> bodies = XelibJson.Deserialize<ImmutableArray<XelibBodyRecord>>(
-            container.GetRequiredSection(XelibSectionKind.Bodies).AsSpan(), null);
-        byte[] reordered = XelibJson.Serialize(bodies.Select(body =>
-            new ReorderedBodyRecord(body.Root, body.FunctionSymbolId, body.Id)).ToImmutableArray());
+        byte[] bodies = container.GetRequiredSection(XelibSectionKind.Bodies).ToArray();
+        byte[] reordered = RewriteBodyJson(bodies, omitIds: false);
         byte[] reorderedImage = RewriteSection(valid, XelibSectionKind.Bodies, reordered);
 
         LibraryCompilationReference full = XelibReader.Read(reorderedImage);
@@ -420,11 +419,31 @@ public sealed class XelibContainerTests
             Assert.False(consumer.HasErrors, string.Join(Environment.NewLine, consumer.Diagnostics));
         }
 
-        byte[] missingIds = XelibJson.Serialize(bodies.Select(body =>
-            new BodyRecordWithoutId(body.Root, body.FunctionSymbolId)).ToImmutableArray());
+        byte[] missingIds = RewriteBodyJson(bodies, omitIds: true);
         XelibFormatException exception = Assert.Throws<XelibFormatException>(() =>
             XelibReader.Read(RewriteSection(valid, XelibSectionKind.Bodies, missingIds), metadataOnly: true));
         Assert.Equal(XelibErrorCode.InvalidReference, exception.Code);
+
+        static byte[] RewriteBodyJson(byte[] bytes, bool omitIds)
+        {
+            using JsonDocument document = JsonDocument.Parse(bytes);
+            using var output = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(output))
+            {
+                writer.WriteStartArray();
+                foreach (JsonElement body in document.RootElement.EnumerateArray())
+                {
+                    writer.WriteStartObject();
+                    writer.WritePropertyName("root");
+                    body.GetProperty("root").WriteTo(writer);
+                    writer.WriteNumber("functionSymbolId", body.GetProperty("functionSymbolId").GetInt32());
+                    if (!omitIds) writer.WriteNumber("id", body.GetProperty("id").GetInt32());
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+            }
+            return output.ToArray();
+        }
     }
 
     [Fact]
@@ -1146,9 +1165,4 @@ public sealed class XelibContainerTests
             XelibSectionFlags.Required, pair.Value)));
     }
 
-    private sealed record ReorderedBodyRecord(
-        XelibBodyNode Root, int FunctionSymbolId, int Id);
-
-    private sealed record BodyRecordWithoutId(
-        XelibBodyNode Root, int FunctionSymbolId);
 }

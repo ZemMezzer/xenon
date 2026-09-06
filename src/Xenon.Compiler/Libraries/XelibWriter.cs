@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 
@@ -184,14 +185,16 @@ internal static class XelibJson
         NumberHandling = JsonNumberHandling.Strict,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
     };
+    private static readonly XelibJsonSerializerContext Context = new(Options);
 
-    public static byte[] Serialize<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, Options);
+    public static byte[] Serialize<T>(T value) =>
+        JsonSerializer.SerializeToUtf8Bytes(value, GetTypeInfo<T>());
 
     public static T Deserialize<T>(ReadOnlySpan<byte> bytes, string? path)
     {
         try
         {
-            return JsonSerializer.Deserialize<T>(bytes, Options) ??
+            return JsonSerializer.Deserialize(bytes, GetTypeInfo<T>()) ??
                 throw new XelibFormatException(XelibErrorCode.InvalidRecord, "section contains null", path);
         }
         catch (XelibFormatException) { throw; }
@@ -201,7 +204,29 @@ internal static class XelibJson
                 $"invalid Library IR record: {exception.Message}", path, exception);
         }
     }
+
+    private static JsonTypeInfo<T> GetTypeInfo<T>()
+        => Context.GetTypeInfo(typeof(T)) as JsonTypeInfo<T> ??
+           throw new InvalidOperationException($"XELIB JSON type '{typeof(T)}' is not registered.");
 }
+
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault,
+    NumberHandling = JsonNumberHandling.Strict,
+    UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
+    GenerationMode = JsonSourceGenerationMode.Metadata)]
+[JsonSerializable(typeof(ImmutableArray<string>))]
+[JsonSerializable(typeof(ImmutableArray<XelibDependency>))]
+[JsonSerializable(typeof(ImmutableArray<XelibTypeRecord>))]
+[JsonSerializable(typeof(ImmutableArray<XelibSymbolRecord>))]
+[JsonSerializable(typeof(ImmutableArray<XelibExport>))]
+[JsonSerializable(typeof(ImmutableArray<XelibDocumentation>))]
+[JsonSerializable(typeof(ImmutableArray<XelibBodyRecord>))]
+[JsonSerializable(typeof(ImmutableArray<XelibGenericImplementation>))]
+[JsonSerializable(typeof(XelibBodyRecord))]
+[JsonSerializable(typeof(XelibManifest))]
+internal sealed partial class XelibJsonSerializerContext : JsonSerializerContext;
 
 internal sealed record XelibIrPayload(
     ImmutableArray<string> Strings,
