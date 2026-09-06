@@ -515,6 +515,7 @@ internal sealed class XelibIrBuilder
                 AddType(function.ReturnType);
                 foreach (ParameterSymbol parameter in function.Parameters) AddType(parameter.Type);
                 break;
+            case FieldSymbol field: AddType(field.Type); break;
             case VariableSymbol variable: AddType(variable.Type); break;
             case ConstantSymbol constant: AddType(constant.Type); break;
             case PropertySymbol property: AddType(property.Type); break;

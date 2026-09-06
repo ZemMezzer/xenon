@@ -7,14 +7,18 @@ namespace Xenon.Compiler.Libraries;
 
 public static class XelibBodyCodec
 {
-    public static void Collect(BoundNode node, Action<TypeSymbol> addType, Action<Symbol> addSymbol)
+    public static void Collect(BoundNode node, Action<TypeSymbol> addType, Action<Symbol> addSymbol,
+        Action<BoundNode>? visitNode = null)
     {
+        visitNode?.Invoke(node);
         if (node is BoundExpression expression) addType(expression.Type);
         switch (node)
         {
             case BoundVariableDeclarationStatement value:
                 addType(value.Variable.Type);
-                if (value.Variable.Destructor is { } localDestructor) addSymbol(localDestructor);
+                if ((value.Initializer is not null || value.Variable.Type is StorageTypeSymbol) &&
+                    value.Variable.Destructor is { } localDestructor)
+                    addSymbol(localDestructor);
                 break;
             case BoundVariableExpression value when value.Variable is not LocalVariableSymbol:
                 addSymbol(value.Variable);
@@ -99,7 +103,7 @@ public static class XelibBodyCodec
                 addSymbol(value.Function); addType(value.FunctionPointerType); break;
             case BoundIndirectCallExpression value: addType(value.FunctionPointerType); break;
         }
-        foreach (BoundNode child in Children(node)) Collect(child, addType, addSymbol);
+        foreach (BoundNode child in Children(node)) Collect(child, addType, addSymbol, visitNode);
     }
 
     public static XelibBodyNode Encode(BoundBlockStatement root, FunctionSymbol function,
