@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Xenon.Compiler;
+using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
@@ -9,6 +11,53 @@ namespace Xenon.LanguageServer.Tests;
 
 public sealed class CoreIntelligenceHardeningTests
 {
+    [Fact]
+    public async Task ImportedXelibConstructorReceivesTheTypeSemanticToken()
+    {
+        const string source = """
+            using Xenon.String;
+            namespace App;
+            int Main()
+            {
+                String value = String("Hello world!");
+                return 0;
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("src/main.xe", source);
+        string project = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["String.xelib"]
+            """);
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Xenon.String;
+            struct String
+            {
+                public String(readonly byte* value) {}
+            }
+            """, "string.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine,
+            library.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        File.WriteAllBytes(directory.PathOf("String.xelib"),
+            XelibWriter.Write(library, new XelibWriteOptions("String")));
+
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, project, source);
+        JsonElement response = Result(await session.HandleRequestAsync(
+            "textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var strings = DecodeTokens(source, response.GetProperty("data"))
+            .Where(token => token.Text == "String").ToArray();
+
+        Assert.Equal(2, strings.Length);
+        Assert.All(strings, token => Assert.Equal(1, token.Type));
+    }
+
     [Fact]
     public async Task IndexerRenameIsRejectedWhilePropertyAndMethodRemainRenameable()
     {

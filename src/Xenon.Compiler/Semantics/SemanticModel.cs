@@ -399,7 +399,7 @@ public sealed class SemanticModel
         foreach ((SyntaxNode syntax, SymbolInfo info) in _semanticInfo.Symbols)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (info.Symbol is not { } symbol || !IsReferenceableSourceSymbol(symbol) ||
+            if (info.Symbol is not { } symbol || !IsReferenceableSymbol(symbol) ||
                 !TryGetReferenceLocation(syntax, out TextLocation location) ||
                 _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source) ||
                 !seen.Add((symbol, location.Source.FileId, location.Span)))
@@ -426,9 +426,9 @@ public sealed class SemanticModel
             .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
     }
 
-    private static bool IsReferenceableSourceSymbol(Symbol symbol)
+    private static bool IsReferenceableSymbol(Symbol symbol)
     {
-        if (symbol.IsSourceDefined) return true;
+        if (symbol.IsSourceDefined || symbol.Origin.Kind == SymbolOriginKind.Library) return true;
         if (symbol is SyntheticMemberSymbol) return true;
         if (symbol is not ParameterSymbol { Name: "value", ContainingSymbol: FunctionSymbol accessor })
             return false;
