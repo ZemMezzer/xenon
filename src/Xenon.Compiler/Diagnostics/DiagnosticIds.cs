@@ -8,6 +8,10 @@ public static class DiagnosticIds
     public const string UnterminatedString = "XE0003";
     public const string UnknownEscapeSequence = "XE0004";
     public const string UnterminatedBlockComment = "XE0005";
+    public const string UnterminatedCharacter = "XE0006";
+    public const string EmptyCharacter = "XE0007";
+    public const string MultiScalarCharacter = "XE0008";
+    public const string InvalidUnicodeScalar = "XE0009";
     public const string UnexpectedToken = "XE1001";
     public const string UsingDirectiveOrder = "XE1002";
     public const string DuplicateModifier = "XE1003";
@@ -218,5 +222,6 @@ public static class DiagnosticIds
     public const string StructValueEqualityNotSupported = "XE2263";
     public const string AmbiguousConstructorFieldInitialization = "XE2264";
     public const string ConditionalMoveReinitializationNotTracked = "XE2265";
+    public const string InvalidUnicodeScalarCast = "XE2266";
     public const string RecursiveValueLayout = "XE2600";
 }

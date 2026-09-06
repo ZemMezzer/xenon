@@ -21,6 +21,45 @@ public sealed class NativeLinkerTests
     [DllImport("kernel32.dll")]
     private static extern uint SetErrorMode(uint mode);
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void UnicodeCharPrimitiveExecutesAsOneNativeI32Scalar(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Holder { public char Value; }
+            char Echo(char value) { return value; }
+            void Assign(char& target, char value) { target = value; }
+
+            int Main()
+            {
+                char emoji = '😀';
+                if (cast<uint>(emoji) != cast<uint>(0x1F600)) return 1;
+                if (sizeof(char) != cast<nuint>(4)) return 2;
+                if (!('A' < 'Ж' && 'Ж' < '😀')) return 3;
+                Holder holder = Holder { 'Ж' };
+                if (cast<uint>(holder.Value) != cast<uint>(0x416)) return 4;
+                char[] values = char[2];
+                values[0] = Echo(emoji);
+                if (cast<uint>(values[0]) != cast<uint>(0x1F600)) return 5;
+                atomic<char> current = 'A';
+                current = values[0];
+                char loaded = current;
+                if (loaded != emoji) return 6;
+                Assign(loaded, '\n');
+                if (cast<uint>(loaded) != cast<uint>(10)) return 7;
+                switch (emoji)
+                {
+                    case '😀': break;
+                    default: return 8;
+                }
+                return 42;
+            }
+            """, optimization);
+
+        Assert.Equal(42, exit);
+    }
+
     [DllImport("/usr/lib/system/libsystem_pthread.dylib", EntryPoint = "pthread_create")]
     private static extern int MacOsPthreadCreate(
         out nint thread,
@@ -80,6 +119,15 @@ public sealed class NativeLinkerTests
     private delegate int Int32IntDelegate(int value);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint CharScalarDelegate(uint value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate NativeCharData CharDataDelegate(NativeCharData value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint CharCallbackInvokeDelegate(nint callback, uint value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int AddressInt32IntDelegate(nint callback, int value);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -93,6 +141,13 @@ public sealed class NativeLinkerTests
     {
         public float X;
         public float Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeCharData
+    {
+        public byte Prefix;
+        public uint Value;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -455,6 +510,81 @@ public sealed class NativeLinkerTests
                 nint address = NativeLibrary.GetExport(handle, "Integration_Add");
                 AddDelegate add = Marshal.GetDelegateForFunctionPointer<AddDelegate>(address);
                 Assert.Equal(42, add(20, 22));
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Linker_ExportsUnicodeCharThroughScalarStructAndCallbackCAbiPositions()
+    {
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace UnicodeAbi;
+
+            struct CharData
+            {
+                public byte Prefix;
+                public char Value;
+            }
+
+            export char Echo(char value) { return value; }
+            export CharData RoundTrip(CharData value) { return value; }
+            export char Invoke(function char(char)* callback, char value)
+            {
+                return callback(value);
+            }
+            """, "unicode-abi.xe"));
+        string objectPath = Path.Combine(directory,
+            $"unicode-abi{LlvmTargetPlatform.GetObjectFileExtension(target.Triple)}");
+        string libraryPath = XenonBuildPaths.GetSharedLibraryPath(
+            directory, "unicode-abi", "debug", target.Triple);
+        string? importLibraryPath = XenonBuildPaths.GetImportLibraryPath(
+            directory, "unicode-abi", "debug", target.Triple);
+
+        try
+        {
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(
+                compilation, objectPath, target, "unicode-abi");
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path, libraryPath, target.Triple,
+                new NativeLinkOptions(ExportedSymbols:
+                    ["UnicodeAbi_Echo", "UnicodeAbi_RoundTrip", "UnicodeAbi_Invoke"]),
+                importLibraryPath);
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                CharScalarDelegate echo = LoadDelegate<CharScalarDelegate>(handle, "UnicodeAbi_Echo");
+                Assert.Equal(0x41u, echo(0x41));
+                Assert.Equal(0x416u, echo(0x416));
+                Assert.Equal(0x1F600u, echo(0x1F600));
+
+                CharDataDelegate roundTrip = LoadDelegate<CharDataDelegate>(
+                    handle, "UnicodeAbi_RoundTrip");
+                NativeCharData data = roundTrip(new NativeCharData
+                {
+                    Prefix = 7,
+                    Value = 0x1F600,
+                });
+                Assert.Equal((byte)7, data.Prefix);
+                Assert.Equal(0x1F600u, data.Value);
+                Assert.Equal(8, Marshal.SizeOf<NativeCharData>());
+                Assert.Equal(4, Marshal.OffsetOf<NativeCharData>(nameof(NativeCharData.Value)).ToInt32());
+
+                CharCallbackInvokeDelegate invoke = LoadDelegate<CharCallbackInvokeDelegate>(
+                    handle, "UnicodeAbi_Invoke");
+                CharScalarDelegate callback = value => value == 0x1F600 ? 0x416u : 0u;
+                Assert.Equal(0x416u,
+                    invoke(Marshal.GetFunctionPointerForDelegate(callback), 0x1F600));
+                GC.KeepAlive(callback);
             }
             finally
             {

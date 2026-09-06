@@ -283,6 +283,8 @@ public static class TypeFacts
 
     public static bool IsInteger(TypeSymbol type) => type is PrimitiveTypeSymbol { IsInteger: true };
 
+    public static bool IsCharacter(TypeSymbol type) => type is PrimitiveTypeSymbol { IsCharacter: true };
+
     internal static ValueEqualityFailure? GetValueEqualityFailure(TypeSymbol type) =>
         GetValueEqualityFailure(type, []);
 
@@ -333,6 +335,8 @@ public static class TypeFacts
 
     public static bool CanExplicitlyCast(TypeSymbol target, TypeSymbol source) =>
         (IsNumeric(target) && IsNumeric(source)) ||
+        (IsCharacter(target) && IsInteger(source)) ||
+        (IsCharacter(source) && IsInteger(target)) ||
         (target is EnumTypeSymbol && IsInteger(source)) ||
         (source is EnumTypeSymbol && IsInteger(target)) ||
         (target is EnumTypeSymbol && TypeIdentity.AreSame(target, source));

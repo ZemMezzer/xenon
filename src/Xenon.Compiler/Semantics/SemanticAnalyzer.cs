@@ -1579,6 +1579,12 @@ internal sealed class SemanticAnalyzer
             }
             if (targetType is not PrimitiveTypeSymbol { IsInteger: true } integerType)
             {
+                if (TypeFacts.IsCharacter(targetType))
+                {
+                    BigInteger scalar = ToInteger(value);
+                    converted = UnicodeScalarFacts.IsValid(scalar) ? (ulong)scalar : null;
+                    return converted is not null;
+                }
                 converted = null;
                 return false;
             }
@@ -1639,6 +1645,7 @@ internal sealed class SemanticAnalyzer
         value is null ||
         (TypeIdentity.AreSame(type, BuiltinTypes.Bool) && value is bool) ||
         (type is PrimitiveTypeSymbol { IsInteger: true } && value is not bool) ||
+        (type is PrimitiveTypeSymbol { IsCharacter: true } && value is ulong) ||
         type is PrimitiveTypeSymbol { IsFloatingPoint: true };
 
     private static object? GetConstantLiteralValue(LiteralExpressionSyntax literal) => literal.LiteralToken switch
@@ -1679,6 +1686,7 @@ internal sealed class SemanticAnalyzer
         LiteralExpressionSyntax { LiteralToken.Value: double } => BuiltinTypes.Double,
         LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.TrueKeyword or SyntaxKind.FalseKeyword } => BuiltinTypes.Bool,
         LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.StringLiteralToken } => _typeFactory.PointerTo(BuiltinTypes.Byte, isReadonly: true),
+        LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.CharacterLiteralToken } => BuiltinTypes.Char,
         LiteralExpressionSyntax { LiteralToken.Kind: SyntaxKind.NullKeyword } => BuiltinTypes.Null,
         ParenthesizedExpressionSyntax parenthesized => GetConstantExpressionType(parenthesized.Expression),
         UnaryExpressionSyntax { OperatorToken.Kind: SyntaxKind.BangToken } => BuiltinTypes.Bool,

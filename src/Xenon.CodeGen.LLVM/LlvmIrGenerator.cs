@@ -1044,6 +1044,8 @@ public sealed class LlvmIrGenerator
             return LLVMValueRef.CreateConstInt(llvmType, value is true ? 1UL : 0UL, false);
         if (type is PrimitiveTypeSymbol { IsInteger: true })
             return LLVMValueRef.CreateConstInt(llvmType, GetIntegerConstantBits(value), false);
+        if (type is PrimitiveTypeSymbol { IsCharacter: true })
+            return LLVMValueRef.CreateConstInt(llvmType, GetIntegerConstantBits(value), false);
         if (type is PrimitiveTypeSymbol { IsFloatingPoint: true })
             return LLVMValueRef.CreateConstReal(llvmType, Convert.ToDouble(value));
         throw new LlvmCodeGenerationException($"static field type '{type.Name}' does not support a constant initializer");
@@ -1427,7 +1429,8 @@ public sealed class LlvmIrGenerator
             return _context.Int16Type;
         }
 
-        if (TypeIdentity.AreSame(type, BuiltinTypes.Int) || TypeIdentity.AreSame(type, BuiltinTypes.UInt))
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Int) || TypeIdentity.AreSame(type, BuiltinTypes.UInt) ||
+            TypeIdentity.AreSame(type, BuiltinTypes.Char))
         {
             return _context.Int32Type;
         }
@@ -1544,6 +1547,7 @@ public sealed class LlvmIrGenerator
     private int GetIntegerBitWidth(TypeSymbol type)
     {
         if (type is EnumTypeSymbol enumeration) return GetIntegerBitWidth(enumeration.UnderlyingType);
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Char)) return 32;
         if (type is PrimitiveTypeSymbol { IsInteger: true, BitWidth: int bitWidth })
         {
             return bitWidth;
@@ -2703,7 +2707,7 @@ public sealed class LlvmIrGenerator
                 return LLVMValueRef.CreateConstInt(type, expression.Value is true ? 1UL : 0UL, false);
             }
 
-            if (expression.Type is PrimitiveTypeSymbol { IsInteger: true } or EnumTypeSymbol)
+            if (expression.Type is PrimitiveTypeSymbol { IsInteger: true } or PrimitiveTypeSymbol { IsCharacter: true } or EnumTypeSymbol)
             {
                 ulong value = expression.Value switch
                 {
@@ -4574,8 +4578,8 @@ public sealed class LlvmIrGenerator
                 return value;
 
             LLVMTypeRef target = _mapType(expression.TargetType);
-            bool sourceInteger = expression.Expression.Type is PrimitiveTypeSymbol { IsInteger: true } or EnumTypeSymbol;
-            bool targetInteger = expression.TargetType is PrimitiveTypeSymbol { IsInteger: true } or EnumTypeSymbol;
+            bool sourceInteger = expression.Expression.Type is PrimitiveTypeSymbol { IsInteger: true } or PrimitiveTypeSymbol { IsCharacter: true } or EnumTypeSymbol;
+            bool targetInteger = expression.TargetType is PrimitiveTypeSymbol { IsInteger: true } or PrimitiveTypeSymbol { IsCharacter: true } or EnumTypeSymbol;
             bool sourceFloat = expression.Expression.Type is PrimitiveTypeSymbol { IsFloatingPoint: true };
             bool targetFloat = expression.TargetType is PrimitiveTypeSymbol { IsFloatingPoint: true };
             if (sourceInteger && targetInteger)

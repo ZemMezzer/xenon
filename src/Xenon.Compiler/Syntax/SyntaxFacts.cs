@@ -12,6 +12,7 @@ public static class SyntaxFacts
             ["void"] = SyntaxKind.VoidKeyword,
             ["bool"] = SyntaxKind.BoolKeyword,
             ["byte"] = SyntaxKind.ByteKeyword,
+            ["char"] = SyntaxKind.CharKeyword,
             ["sbyte"] = SyntaxKind.SByteKeyword,
             ["short"] = SyntaxKind.ShortKeyword,
             ["ushort"] = SyntaxKind.UShortKeyword,
@@ -96,6 +97,7 @@ public static class SyntaxFacts
         SyntaxKind.VoidKeyword or
         SyntaxKind.BoolKeyword or
         SyntaxKind.ByteKeyword or
+        SyntaxKind.CharKeyword or
         SyntaxKind.SByteKeyword or
         SyntaxKind.ShortKeyword or
         SyntaxKind.UShortKeyword or
@@ -114,6 +116,7 @@ public static class SyntaxFacts
         SyntaxKind.VoidKeyword or
         SyntaxKind.BoolKeyword or
         SyntaxKind.ByteKeyword or
+        SyntaxKind.CharKeyword or
         SyntaxKind.SByteKeyword or
         SyntaxKind.ShortKeyword or
         SyntaxKind.UShortKeyword or

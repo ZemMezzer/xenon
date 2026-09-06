@@ -484,6 +484,28 @@ public sealed class CoreIntelligenceTests
         Assert.Contains("readonly byte* readonly Data", item.GetProperty("detail").GetString());
     }
 
+    [Fact]
+    public async Task CharacterLiteralHoverReportsDistinctCharType()
+    {
+        const string source = "namespace Example; char Value() { return '😀'; }";
+        using var directory = new TestDirectory();
+        string file = directory.Write("char.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source,
+            source.IndexOf("😀", StringComparison.Ordinal));
+
+        Assert.Contains("char", hover.GetProperty("contents").GetProperty("value").GetString());
+    }
+
     private static async Task<JsonElement> RequestAtAsync(LanguageServerSession session, string method,
         string uri, string source, int offset, object? context = null, string? newName = null)
     {

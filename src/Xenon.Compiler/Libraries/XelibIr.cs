@@ -38,6 +38,7 @@ public enum XelibTypeKind : ushort
     Weak = 13,
     Storage = 14,
     Pin = 15,
+    Char = 16,
 }
 
 public enum XelibSymbolKind : ushort
@@ -222,6 +223,7 @@ public enum XelibConstantKind : byte
     UnsignedInteger = 3,
     FloatingPoint = 4,
     String = 5,
+    UnicodeScalar = 6,
 }
 
 public sealed record XelibConstantValue(XelibConstantKind Kind, string? Value);
