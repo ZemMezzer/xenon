@@ -211,6 +211,34 @@ public sealed class XenonProjectLoaderTests
                 projectDirectory, project.Name, "release", "aarch64-apple-darwin"));
     }
 
+    [Fact]
+    public void LoaderRecognizesPortableXelibProjectAndResolvesOnlyXelibPaths()
+    {
+        using var directory = new TemporaryDirectory();
+        directory.Write("Library.xeproj", """
+            [project]
+            name = "libsample"
+            type = "xenon-library"
+
+            [source]
+            root = "src"
+
+            [libraries]
+            libraries = ["../artifacts/Base.xelib", "sqlite3"]
+            """);
+        directory.Write("src/main.xe", "namespace Sample; public int Value() { return 1; }");
+
+        XenonProject project = XenonProjectLoader.LoadProjectFile(directory.PathOf("Library.xeproj"));
+
+        Assert.Equal(XenonProjectType.XenonLibrary, project.Type);
+        Assert.Equal(Path.GetFullPath(directory.PathOf("../artifacts/Base.xelib")),
+            Assert.Single(project.XenonLibraries));
+        Assert.Equal("sqlite3", Assert.Single(project.NativeLibraries));
+        Assert.Equal(Path.Combine(directory.Root, "build", "release", "libsample.xelib"),
+            XenonBuildPaths.GetArtifactPath(directory.Root, project.Name, project.Type,
+                "release", "ignored-target"));
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()

@@ -6,6 +6,7 @@ namespace Xenon.Compiler.Semantics.Symbols;
 
 public sealed class FunctionSymbol : Symbol
 {
+    private ImmutableArray<GenericParameterSymbol> _typeParameters = [];
     public bool HasStackArrays { get; internal set; }
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
@@ -30,7 +31,7 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
         FunctionKind = FunctionKind.Ordinary;
         IsReadonly = declaration.IsReadonly;
-        TypeParameters = typeParameters.IsDefault ? [] : typeParameters;
+        SetTypeParameters(typeParameters.IsDefault ? [] : typeParameters);
         IsExtern = declaration.IsExtern;
         IsExport = declaration.IsExport;
         IsDefinition = declaration.Body is not null;
@@ -241,7 +242,7 @@ public sealed class FunctionSymbol : Symbol
         IsDefinition = isDefinition;
         DelegatesToThisConstructor = delegatesToThisConstructor;
         AccessorKind = accessorKind;
-        TypeParameters = typeParameters.IsDefault ? [] : typeParameters;
+        SetTypeParameters(typeParameters.IsDefault ? [] : typeParameters);
         SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
         SetImplementation(implementation);
         if (implementation is SourceSymbolImplementation source) Declaration = source.Declaration;
@@ -372,7 +373,7 @@ public sealed class FunctionSymbol : Symbol
 
     public ImmutableArray<ParameterSymbol> Parameters { get; }
 
-    public ImmutableArray<GenericParameterSymbol> TypeParameters { get; } = [];
+    public ImmutableArray<GenericParameterSymbol> TypeParameters => _typeParameters;
 
     public FunctionSymbol? GenericDefinition { get; private set; }
     public ImmutableArray<TypeSymbol> TypeArguments { get; private set; } = [];
@@ -412,6 +413,11 @@ public sealed class FunctionSymbol : Symbol
     public int ConstructorOverloadCount { get; private set; } = 1;
 
     internal void SetVTableSlot(int slot) => VTableSlot = slot;
+    internal void SetTypeParameters(ImmutableArray<GenericParameterSymbol> parameters)
+    {
+        _typeParameters = parameters;
+        foreach (GenericParameterSymbol parameter in parameters) parameter.SetDeclaringSymbol(this);
+    }
     internal void SetReceiverMoveEffects(ImmutableArray<ReceiverMoveEffect> effects) =>
         ReceiverMoveEffects = effects;
     internal void SetReferenceReturnOrigins(ImmutableArray<ReferenceReturnOrigin> origins) =>

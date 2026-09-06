@@ -421,3 +421,14 @@ public sealed record BoundDeferredConstantExpression(TypeSymbol ConstantType) : 
 {
     public override BoundKind Kind => BoundKind.DeferredConstantExpression;
 }
+
+/// <summary>A validated open-generic method operation that is resolved after type substitution.</summary>
+public sealed record BoundDeferredGenericMethodCallExpression(
+    BoundExpression Receiver,
+    Symbol Requirement,
+    ImmutableArray<BoundExpression> Arguments,
+    bool IsPointerAccess,
+    TypeSymbol ResultType) : BoundExpression(ResultType)
+{
+    public override BoundKind Kind => BoundKind.DeferredGenericMethodCallExpression;
+}

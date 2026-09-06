@@ -495,10 +495,13 @@ public sealed class LanguageServerSession : IAsyncDisposable
         bool unknownChangedSource = events.Any(item => item.Type == 2 &&
             Path.GetExtension(item.Path).Equals(".xe", StringComparison.OrdinalIgnoreCase) &&
             ResolveContexts(item.Uri).Count == 0);
+        bool referencedXelibChanged = events.Any(item =>
+            Path.GetExtension(item.Path).Equals(".xelib", StringComparison.OrdinalIgnoreCase) &&
+            IsReferencedXelibPath(item.Path));
         if (sourceSetMayHaveChanged) _pendingSourceReconciliation = true;
         if (configurationChanged && CanReloadPrimaryWorkspace())
             _pendingConfigurationReconciliation = true;
-        bool mustReconcile = configurationChanged || sourceSetMayHaveChanged ||
+        bool mustReconcile = configurationChanged || referencedXelibChanged || sourceSetMayHaveChanged ||
             unknownChangedSource || _pendingSourceReconciliation && hasSourceEvent ||
             _pendingConfigurationReconciliation && hasConfigurationEvent;
         if (mustReconcile && CanReloadPrimaryWorkspace())
@@ -528,6 +531,14 @@ public sealed class LanguageServerSession : IAsyncDisposable
         return primary is not null && primary.CurrentSnapshot.Projects.Any(project =>
             project.Configuration.ProjectFilePath is { } projectPath &&
             DocumentUri.PathComparer.Equals(DocumentUri.NormalizePath(projectPath), path));
+    }
+
+    private bool IsReferencedXelibPath(string path)
+    {
+        Xenon.ProjectSystem.Workspace? primary = _primaryWorkspace;
+        return primary is not null && primary.CurrentSnapshot.Projects.Any(project =>
+            project.Configuration.XenonLibraries.Any(library =>
+                DocumentUri.PathComparer.Equals(DocumentUri.NormalizePath(library), path)));
     }
 
     private bool IsDiscoveryConfigurationPath(string path)

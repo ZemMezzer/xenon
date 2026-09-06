@@ -1,8 +1,10 @@
+using System.Collections.Immutable;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Text;
+using Xenon.Compiler.Libraries;
 using Xenon.ProjectSystem;
 
 namespace Xenon.Driver;
@@ -55,13 +57,14 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
             result.TargetTriple = triple;
             var compilations = new Dictionary<string, Compilation>(StringComparer.OrdinalIgnoreCase);
             var artifacts = new Dictionary<string, LinkedNativeArtifact>(StringComparer.OrdinalIgnoreCase);
+            var libraryReferences = new Dictionary<string, LibraryCompilationReference>(StringComparer.OrdinalIgnoreCase);
 
             foreach (XenonProject project in graph.BuildOrder)
             {
                 XenonBuildProfile profile = project.GetProfile(request.Profile);
                 result.Stage = BuildStage.Compilation;
                 Compilation compilation = XenonProjectCompilationFactory.Create(
-                    project, request.Profile, compilations);
+                    project, request.Profile, compilations, dependencyLibraries: libraryReferences);
                 if (compilation.HasErrors)
                 {
                     result.Diagnostics = compilation.Diagnostics;
@@ -70,7 +73,8 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 }
 
                 LlvmTargetOptions? target = null;
-                if (!request.CompileOnly || compilation.RequiresTargetLayout)
+                if (project.Type != XenonProjectType.XenonLibrary &&
+                    (!request.CompileOnly || compilation.RequiresTargetLayout))
                 {
                     target = new LlvmTargetOptions(triple, profile.OptimizationLevel,
                         PositionIndependentCode: RequiresPositionIndependentCode(project.Type, triple));
@@ -87,6 +91,31 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 {
                     result.Compilation = compilation;
                     result.Diagnostics = compilation.Diagnostics;
+                }
+                if (project.Type == XenonProjectType.XenonLibrary)
+                {
+                    LibraryCompilationReference[] dependencyReferences = compilation.References
+                        .OfType<LibraryCompilationReference>().ToArray();
+                    var writerOptions = new XelibWriteOptions(project.Name, project.Version,
+                        dependencyReferences.Select(reference => new XelibDependencyInput(
+                            reference, reference.LibraryIdentity)).ToImmutableArray());
+                    byte[] image = XelibWriter.Write(compilation, writerOptions);
+                    LibraryCompilationReference libraryReference = XelibReader.Read(image,
+                        dependencyReferences);
+                    libraryReferences.Add(project.Identity, libraryReference);
+                    if (!request.CompileOnly)
+                    {
+                        string xelibArtifactPath = XenonBuildPaths.GetXenonLibraryPath(
+                            outputRoot, project.Name, request.Profile);
+                        Directory.CreateDirectory(Path.GetDirectoryName(xelibArtifactPath)!);
+                        File.WriteAllBytes(xelibArtifactPath, image);
+                        if (new FileInfo(xelibArtifactPath).Length == 0)
+                            return Fail(result, BuildFailureKind.Environment,
+                                $"Expected artifact is missing or empty: {xelibArtifactPath}");
+                        if (project.Identity == graph.Root.Identity)
+                            result.ArtifactPath = xelibArtifactPath;
+                    }
+                    continue;
                 }
                 if (request.CompileOnly) continue;
 
@@ -121,6 +150,7 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 result.Stage = BuildStage.Link;
                 var linker = new NativeLinker(processRunner, request.ToolTimeout, project.RootDirectory);
                 string[] dependencyArtifacts = graph.GetNativeLinkOrder(project)
+                    .Where(dependency => dependency.Type != XenonProjectType.XenonLibrary)
                     .Select(dependency => artifacts[dependency.Identity])
                     .Select(artifact => artifact.ImportLibraryPath ?? artifact.Path).ToArray();
                 IEnumerable<string> exportedSymbols = project.Type == XenonProjectType.SharedLibrary
@@ -135,7 +165,7 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                         .Any(dependency => LlvmIrGenerator.RequiresNativeThreadingRuntime(
                             compilations[dependency.Identity]));
                 var options = new NativeLinkOptions(
-                    project.Libraries.AddRange(dependencyArtifacts),
+                    project.NativeLibraries.AddRange(dependencyArtifacts),
                     project.LibraryPaths,
                     exportedSymbols.Distinct(StringComparer.Ordinal).ToArray(),
                     RequiresThreadingRuntime: requiresThreadingRuntime);
@@ -175,6 +205,10 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
         {
             return Fail(result, IsNativeEnvironmentFailure(exception) ? BuildFailureKind.Environment : BuildFailureKind.Compiler, exception.ToString());
         }
+        catch (XelibFormatException exception)
+        {
+            return Fail(result, BuildFailureKind.Compiler, exception.Message);
+        }
         catch (Exception exception) when (exception is ProjectSystemException or IOException or UnauthorizedAccessException
             or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
@@ -204,7 +238,9 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
         XenonProjectGraph graph,
         XenonProject project,
         IReadOnlyDictionary<string, Compilation> compilations) =>
-        new(project.Name, graph.GetTransitiveDependencies(project).Select(dependency =>
+        new(project.Name, graph.GetTransitiveDependencies(project)
+            .Where(dependency => dependency.Type != XenonProjectType.XenonLibrary)
+            .Select(dependency =>
             new LlvmNativeReference(
                 compilations[dependency.Identity],
                 dependency.Type == XenonProjectType.SharedLibrary

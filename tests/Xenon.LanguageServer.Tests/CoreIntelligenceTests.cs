@@ -1,6 +1,8 @@
 using System.Reflection;
 using System.Text.Json;
 using Xenon.Compiler.Text;
+using Xenon.Compiler;
+using Xenon.Compiler.Libraries;
 using Xenon.LanguageServer.Protocol;
 using Xenon.LanguageServer.Text;
 
@@ -8,6 +10,62 @@ namespace Xenon.LanguageServer.Tests;
 
 public sealed class CoreIntelligenceTests
 {
+    [Fact]
+    public async Task ReferencedXelibDocumentationReloadsAfterWatchedFileChange()
+    {
+        const string appSource = "using Library; namespace App; int Main() { return Value(); }";
+        using var directory = new TestDirectory();
+        string sourcePath = directory.Write("src/main.xe", appSource);
+        string projectPath = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["Library.xelib"]
+            """);
+        string libraryPath = directory.PathOf("Library.xelib");
+        WriteLibrary("First documentation.");
+
+        string uri = DocumentUri.FromPath(sourcePath).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new
+        {
+            initializationOptions = new { workspacePath = projectPath },
+        }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = appSource },
+        }), default);
+
+        int call = appSource.IndexOf("Value()", StringComparison.Ordinal);
+        JsonElement first = await RequestAtAsync(session, "textDocument/hover", uri, appSource, call);
+        Assert.Contains("First documentation.", first.GetProperty("contents").GetProperty("value").GetString());
+
+        WriteLibrary("Updated documentation.");
+        await session.HandleNotificationAsync("workspace/didChangeWatchedFiles", LspTestProtocol.Json(new
+        {
+            changes = new[] { new { uri = DocumentUri.FromPath(libraryPath).AbsoluteUri, type = 2 } },
+        }), default);
+        JsonElement updated = await RequestAtAsync(session, "textDocument/hover", uri, appSource, call);
+        Assert.Contains("Updated documentation.",
+            updated.GetProperty("contents").GetProperty("value").GetString());
+
+        void WriteLibrary(string documentation)
+        {
+            Compilation compilation = Compilation.Create(SourceText.From($$"""
+                namespace Library;
+                /// <summary>{{documentation}}</summary>
+                public int Value() { return 42; }
+                """, "library.xe"));
+            File.WriteAllBytes(libraryPath,
+                XelibWriter.Write(compilation, new XelibWriteOptions("Library")));
+        }
+    }
+
     [Fact]
     public async Task DocumentationIsSerializedInHoverCompletionAndSignatureHelp()
     {

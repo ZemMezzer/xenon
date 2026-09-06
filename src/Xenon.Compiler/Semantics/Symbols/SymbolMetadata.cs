@@ -18,12 +18,19 @@ public abstract record SymbolImplementation;
 internal sealed record SourceSymbolImplementation(SyntaxNode Declaration) : SymbolImplementation;
 
 /// <summary>Optional provenance used by tooling; it is never required to describe semantics.</summary>
-public sealed record SymbolOrigin(SymbolOriginKind Kind, ImmutableArray<SyntaxReference> SyntaxReferences)
+public sealed record SymbolOrigin(SymbolOriginKind Kind, ImmutableArray<SyntaxReference> SyntaxReferences,
+    string? LibraryContentIdentity = null, string? LibrarySymbolKey = null)
 {
     public static SymbolOrigin Source(SyntaxNode declaration) =>
         new(SymbolOriginKind.Source, [new SyntaxReference(declaration)]);
 
     public static SymbolOrigin Library { get; } = new(SymbolOriginKind.Library, []);
+    public static SymbolOrigin FromLibrary(string contentIdentity, string symbolKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentIdentity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(symbolKey);
+        return new SymbolOrigin(SymbolOriginKind.Library, [], contentIdentity, symbolKey);
+    }
     public static SymbolOrigin CompilerGenerated { get; } = new(SymbolOriginKind.CompilerGenerated, []);
 }
 
