@@ -135,14 +135,14 @@ public static class SymbolDisplay
         FunctionSymbol function => MemberModifiers(function.Accessibility, function.IsStatic, function.IsAbstract,
             function.IsVirtual, function.IsOverride) + (function.IsExtern ? "extern " : function.IsExport ? "export " : ""),
         FieldSymbol field => MemberModifiers(field.Accessibility, field.IsStatic) + (field.IsThreadLocal ? "threadlocal " : ""),
-        PropertySymbol property => MemberModifiers(property.Accessibility, property.Declaration.IsStatic,
-            property.Declaration.IsAbstract, property.Declaration.IsVirtual, property.Declaration.IsOverride)
-            + (property.Declaration.IsReadonly ? "readonly " : ""),
-        IndexerSymbol indexer => MemberModifiers(indexer.Accessibility, indexer.Declaration.IsStatic,
-            indexer.Declaration.IsAbstract, indexer.Declaration.IsVirtual, indexer.Declaration.IsOverride)
-            + (indexer.Declaration.IsReadonly ? "readonly " : ""),
-        InterfacePropertySymbol property => "public abstract " + (property.Declaration.IsReadonly ? "readonly " : ""),
-        InterfaceIndexerSymbol indexer => "public abstract " + (indexer.Declaration.IsReadonly ? "readonly " : ""),
+        PropertySymbol property => MemberModifiers(property.Accessibility, property.IsStatic,
+            property.IsAbstract, property.IsVirtual, property.IsOverride)
+            + (property.IsReadonly ? "readonly " : ""),
+        IndexerSymbol indexer => MemberModifiers(indexer.Accessibility, indexer.IsStatic,
+            indexer.IsAbstract, indexer.IsVirtual, indexer.IsOverride)
+            + (indexer.IsReadonly ? "readonly " : ""),
+        InterfacePropertySymbol property => "public abstract " + (property.IsReadonly ? "readonly " : ""),
+        InterfaceIndexerSymbol indexer => "public abstract " + (indexer.IsReadonly ? "readonly " : ""),
         TemplateMemberRequirementSymbol requirement =>
             MemberModifiers(requirement.Accessibility, requirement.IsStatic) + (requirement.IsReadonly ? "readonly " : ""),
         _ => "",

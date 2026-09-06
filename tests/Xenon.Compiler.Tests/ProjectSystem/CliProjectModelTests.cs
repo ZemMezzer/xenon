@@ -53,7 +53,7 @@ public sealed class CliProjectModelTests
             [source]
             root = "src"
 
-            [native]
+            [libraries]
             libraries = ["user32"]
             library-paths = ["native"]
 
@@ -84,8 +84,8 @@ public sealed class CliProjectModelTests
         Assert.Equal(graph.Root.SourceFiles.ToArray(), driverResult.Project!.SourceFiles.ToArray());
         Assert.Equal(graph.Root.ProjectReferences.ToArray(), driverResult.Project.ProjectReferences.ToArray());
         Assert.Equal(graph.Root.Type, driverResult.Project.Type);
-        Assert.Equal(graph.Root.NativeLibraries.ToArray(), driverResult.Project.NativeLibraries.ToArray());
-        Assert.Equal(graph.Root.NativeLibraryPaths.ToArray(), driverResult.Project.NativeLibraryPaths.ToArray());
+        Assert.Equal(graph.Root.Libraries.ToArray(), driverResult.Project.Libraries.ToArray());
+        Assert.Equal(graph.Root.LibraryPaths.ToArray(), driverResult.Project.LibraryPaths.ToArray());
         Assert.Equal(apiCompilation.Options, driverResult.Compilation!.Options);
         Assert.Equal(apiCompilation.SyntaxTrees.Select(tree => tree.Source.Path),
             driverResult.Compilation.SyntaxTrees.Select(tree => tree.Source.Path));

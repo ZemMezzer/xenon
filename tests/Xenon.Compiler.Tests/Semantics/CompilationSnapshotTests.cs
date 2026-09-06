@@ -116,6 +116,19 @@ public sealed class CompilationSnapshotTests
     }
 
     [Fact]
+    public void CompilationImportsSemanticSurfaceFromAnyReferenceImplementation()
+    {
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace Lib; public int Value() { return 1; }", "library.xe"));
+        Compilation app = Compilation.Create(new CompilationOptions(),
+            [new TestSemanticReference(library.SemanticModel.GlobalNamespace)],
+            SourceText.From("using Lib; namespace App; int Main() { return Value(); }", "app.xe"));
+
+        Assert.False(app.HasErrors);
+        Assert.IsNotType<SourceCompilationReference>(app.References.Single());
+    }
+
+    [Fact]
     public void ConflictingReferenceSymbolsAreAmbiguousRatherThanReferenceOrderDependent()
     {
         Compilation first = Compilation.Create(SourceText.From(
@@ -298,5 +311,11 @@ public sealed class CompilationSnapshotTests
         public ulong GetSize(TypeSymbol type) => 8;
         public uint GetAlignment(TypeSymbol type) => 8;
         public ulong GetFieldOffset(StructTypeSymbol type, FieldSymbol field) => 0;
+    }
+
+    private sealed class TestSemanticReference(NamespaceSymbol globalNamespace)
+        : CompilationReference(Guid.NewGuid())
+    {
+        public override NamespaceSymbol GlobalNamespace { get; } = globalNamespace;
     }
 }

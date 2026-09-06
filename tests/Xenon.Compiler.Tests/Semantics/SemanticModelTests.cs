@@ -1063,6 +1063,38 @@ public sealed class SemanticModelTests
         Assert.Equal(0, function.Body.CloseBraceToken.Location.Span.Length);
     }
 
+    [Fact]
+    public void DocumentationCommentsBecomeTolerantSourceIndependentSymbolMetadata()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            /// <summary>Adds an item.</summary>
+            /// <typeparam name="T">The item type.</typeparam>
+            /// <param name="value">The item.</param>
+            /// <returns>The resulting item.</returns>
+            /// <remarks>Kept for callers.</remarks>
+            public T Add<T>(T value) { return value; }
+            // ordinary comments are not documentation
+            public void Plain() {}
+            /// <summary>Malformed
+            public void Tolerant() {}
+            """);
+
+        FunctionSymbol add = compilation.SemanticModel.GlobalNamespace.Namespaces.Single()
+            .Functions.Single(function => function.Name == "Add");
+        Assert.Equal("Adds an item.", add.Documentation.Summary);
+        Assert.Equal("The item.", add.Documentation.Parameters["value"]);
+        Assert.Equal("The item type.", add.Documentation.TypeParameters["T"]);
+        Assert.Equal("The resulting item.", add.Documentation.Returns);
+        Assert.Equal("Kept for callers.", add.Documentation.Remarks);
+        Assert.Equal("The item.", add.Parameters.Single().Documentation.Summary);
+        Assert.Equal("The item type.", add.TypeParameters.Single().Documentation.Summary);
+        Assert.True(compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Functions
+            .Single(function => function.Name == "Plain").Documentation.IsEmpty);
+        Assert.NotNull(compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Functions
+            .Single(function => function.Name == "Tolerant").Documentation.Summary);
+    }
+
     [Theory]
     [InlineData("namespace Example; void Foo() {} void Test() { Foo(")]
     [InlineData("namespace Example; void Test() { new<")]

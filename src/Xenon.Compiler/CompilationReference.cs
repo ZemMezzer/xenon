@@ -1,3 +1,5 @@
+using Xenon.Compiler.Semantics.Symbols;
+
 namespace Xenon.Compiler;
 
 /// <summary>A stable semantic input captured by a compilation snapshot.</summary>
@@ -6,6 +8,9 @@ public abstract class CompilationReference : IEquatable<CompilationReference>
     protected CompilationReference(Guid identity) => Identity = identity;
 
     public Guid Identity { get; }
+
+    /// <summary>The immutable semantic namespace surface imported by a consuming compilation.</summary>
+    public abstract NamespaceSymbol GlobalNamespace { get; }
 
     public bool Equals(CompilationReference? other) =>
         other is not null && GetType() == other.GetType() && Identity == other.Identity;
@@ -25,4 +30,6 @@ public sealed class SourceCompilationReference : CompilationReference
     }
 
     public Compilation Compilation { get; }
+
+    public override NamespaceSymbol GlobalNamespace => Compilation.SemanticModel.GlobalNamespace;
 }

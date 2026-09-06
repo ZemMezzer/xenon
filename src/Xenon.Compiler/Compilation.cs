@@ -26,9 +26,8 @@ public sealed class Compilation
         cancellationToken.ThrowIfCancellationRequested();
         TypeFactory = new TypeFactory();
         SemanticModel = SemanticAnalyzer.Analyze(syntaxTrees, TypeFactory,
-            references.OfType<SourceCompilationReference>()
-                .Select(reference => reference.Compilation.SemanticModel.GlobalNamespace)
-                .ToImmutableArray(), targetLayout, cancellationToken);
+            references.Select(reference => reference.GlobalNamespace).ToImmutableArray(),
+            targetLayout, cancellationToken);
         Diagnostics = SemanticModel.Diagnostics;
     }
 

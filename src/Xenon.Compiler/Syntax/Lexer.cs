@@ -23,28 +23,28 @@ internal sealed class Lexer
 
     public SyntaxToken Lex()
     {
-        SkipTrivia();
+        string? leadingDocumentation = SkipTrivia();
 
         int start = _position;
 
         if (Current == '\0')
         {
-            return MakeToken(SyntaxKind.EndOfFileToken, start);
+            return MakeToken(SyntaxKind.EndOfFileToken, start, leadingDocumentation: leadingDocumentation);
         }
 
         if (char.IsLetter(Current) || Current == '_')
         {
-            return LexIdentifierOrKeyword();
+            return LexIdentifierOrKeyword(leadingDocumentation);
         }
 
         if (char.IsDigit(Current))
         {
-            return LexNumber();
+            return LexNumber(leadingDocumentation);
         }
 
         if (Current == '"')
         {
-            return LexString();
+            return LexString(leadingDocumentation);
         }
 
         SyntaxKind kind = Current switch
@@ -104,7 +104,7 @@ internal sealed class Lexer
             : IsTwoCharacterToken(kind) ? 2 : 1;
 
         _position += width;
-        SyntaxToken token = MakeToken(kind, start);
+        SyntaxToken token = MakeToken(kind, start, leadingDocumentation: leadingDocumentation);
 
         if (kind == SyntaxKind.BadToken)
         {
@@ -114,7 +114,7 @@ internal sealed class Lexer
         return token;
     }
 
-    private SyntaxToken LexIdentifierOrKeyword()
+    private SyntaxToken LexIdentifierOrKeyword(string? leadingDocumentation)
     {
         int start = _position;
 
@@ -124,10 +124,10 @@ internal sealed class Lexer
         }
 
         string text = _source.Text[start.._position];
-        return MakeToken(SyntaxFacts.GetKeywordKind(text), start);
+        return MakeToken(SyntaxFacts.GetKeywordKind(text), start, leadingDocumentation: leadingDocumentation);
     }
 
-    private SyntaxToken LexNumber()
+    private SyntaxToken LexNumber(string? leadingDocumentation)
     {
         int start = _position;
         int numberBase = 10;
@@ -205,7 +205,7 @@ internal sealed class Lexer
                     CultureInfo.InvariantCulture,
                     out float single))
             {
-                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, single);
+                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, single, leadingDocumentation);
             }
 
             if (!isSinglePrecision && double.TryParse(
@@ -214,10 +214,11 @@ internal sealed class Lexer
                     CultureInfo.InvariantCulture,
                     out double @double))
             {
-                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, @double);
+                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, @double, leadingDocumentation);
             }
 
-            SyntaxToken invalidFloat = MakeToken(SyntaxKind.FloatingPointLiteralToken, start);
+            SyntaxToken invalidFloat = MakeToken(SyntaxKind.FloatingPointLiteralToken, start,
+                leadingDocumentation: leadingDocumentation);
             Diagnostics.ReportInvalidNumber(invalidFloat.Location, text, "floating-point");
             return invalidFloat;
         }
@@ -225,15 +226,16 @@ internal sealed class Lexer
         string integerDigits = numberBase == 10 ? text : text[2..];
         if (TryParseUnsignedInteger(integerDigits, numberBase, out ulong integer))
         {
-            return MakeToken(SyntaxKind.IntegerLiteralToken, start, integer);
+            return MakeToken(SyntaxKind.IntegerLiteralToken, start, integer, leadingDocumentation);
         }
 
-        SyntaxToken invalidInteger = MakeToken(SyntaxKind.IntegerLiteralToken, start);
+        SyntaxToken invalidInteger = MakeToken(SyntaxKind.IntegerLiteralToken, start,
+            leadingDocumentation: leadingDocumentation);
         Diagnostics.ReportInvalidNumber(invalidInteger.Location, text, "integer");
         return invalidInteger;
     }
 
-    private SyntaxToken LexString()
+    private SyntaxToken LexString(string? leadingDocumentation)
     {
         int start = _position++;
         var value = new StringBuilder();
@@ -283,7 +285,7 @@ internal sealed class Lexer
             }
         }
 
-        SyntaxToken token = MakeToken(SyntaxKind.StringLiteralToken, start, value.ToString());
+        SyntaxToken token = MakeToken(SyntaxKind.StringLiteralToken, start, value.ToString(), leadingDocumentation);
         if (!terminated)
         {
             Diagnostics.ReportUnterminatedString(token.Location);
@@ -292,22 +294,40 @@ internal sealed class Lexer
         return token;
     }
 
-    private void SkipTrivia()
+    private string? SkipTrivia()
     {
+        var documentation = new List<string>();
+        int lineBreaksAfterDocumentation = 0;
         while (true)
         {
             if (char.IsWhiteSpace(Current))
             {
+                if (Current == '\n') lineBreaksAfterDocumentation++;
                 _position++;
+                if (documentation.Count > 0 && lineBreaksAfterDocumentation > 1)
+                    documentation.Clear();
                 continue;
             }
 
             if (Current == '/' && Lookahead == '/')
             {
-                _position += 2;
+                bool isDocumentation = Peek(2) == '/';
+                _position += isDocumentation ? 3 : 2;
+                int contentStart = _position;
                 while (Current is not '\0' and not '\r' and not '\n')
                 {
                     _position++;
+                }
+
+                if (isDocumentation)
+                {
+                    string line = _source.Text[contentStart.._position];
+                    documentation.Add(line.StartsWith(' ') ? line[1..] : line);
+                    lineBreaksAfterDocumentation = 0;
+                }
+                else
+                {
+                    documentation.Clear();
                 }
 
                 continue;
@@ -327,21 +347,24 @@ internal sealed class Lexer
                 {
                     Diagnostics.ReportUnterminatedBlockComment(
                         new TextLocation(_source, TextSpan.FromBounds(start, _position)));
-                    return;
+                    return null;
                 }
 
                 _position += 2;
+                documentation.Clear();
                 continue;
             }
 
-            return;
+            return documentation.Count == 0 ? null : string.Join('\n', documentation);
         }
     }
 
-    private SyntaxToken MakeToken(SyntaxKind kind, int start, object? value = null)
+    private SyntaxToken MakeToken(SyntaxKind kind, int start, object? value = null,
+        string? leadingDocumentation = null)
     {
         var span = TextSpan.FromBounds(start, _position);
-        return new SyntaxToken(kind, new TextLocation(_source, span), _source.GetText(span), value);
+        return new SyntaxToken(kind, new TextLocation(_source, span), _source.GetText(span), value,
+            LeadingDocumentation: leadingDocumentation);
     }
 
     private char Peek(int offset)

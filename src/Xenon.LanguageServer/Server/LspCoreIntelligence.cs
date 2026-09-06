@@ -104,7 +104,10 @@ internal static class LspCoreIntelligence
         }
         symbol = UnwrapAlias(symbol);
         string display = HoverDisplay(symbol);
-        return new LspHover(new LspMarkupContent("markdown", $"```xenon\n{display}\n```"),
+        string documentation = DocumentationMarkdown(symbol.Documentation);
+        string markdown = $"```xenon\n{display}\n```" +
+            (documentation.Length == 0 ? string.Empty : $"\n\n{documentation}");
+        return new LspHover(new LspMarkupContent("markdown", markdown),
             SymbolRangeAtPosition(model, context.Document.SyntaxTree, position));
     }
 
@@ -115,6 +118,7 @@ internal static class LspCoreIntelligence
         Symbol? symbol = FindSymbol(model, context.Document.SyntaxTree, position);
         if (symbol is null) return null;
         symbol = UnwrapAlias(symbol);
+        symbol = SourceNavigationTarget(symbol);
         if (typeDefinition) symbol = SemanticModel.GetAssociatedDeclaredType(symbol);
         if (symbol is null || !symbol.IsSourceDefined) return null;
         SourceReference[] workspaceDeclarations = context.Snapshot.TryGetSymbolId(symbol,
@@ -272,7 +276,9 @@ internal static class LspCoreIntelligence
         LspSignatureInformation[] signatures = candidates.Select(candidate =>
             new LspSignatureInformation(candidate.ToDisplayString(SymbolDisplayFormat.Signature),
                 Parameters(candidate).Select(parameter => new LspParameterInformation(
-                    parameter.ToDisplayString(SymbolDisplayFormat.Signature))).ToArray())).ToArray();
+                    parameter.ToDisplayString(SymbolDisplayFormat.Signature),
+                    ParameterDocumentation(candidate, parameter))).ToArray(),
+                Markup(candidate.Documentation))).ToArray();
         int maxParameter = signatures.Max(signature => signature.Parameters.Length);
         return new LspSignatureHelp(signatures, 0,
             maxParameter == 0 ? 0 : Math.Min(activeParameter, maxParameter - 1));
@@ -533,6 +539,17 @@ internal static class LspCoreIntelligence
 
     private static Symbol UnwrapAlias(Symbol symbol) => symbol is AliasSymbol alias ? alias.Target : symbol;
 
+    private static Symbol SourceNavigationTarget(Symbol symbol) => symbol switch
+    {
+        FunctionSymbol { GenericDefinition: not null } function => function.GenericDefinition,
+        StructTypeSymbol { GenericDefinition: not null } structure => structure.GenericDefinition,
+        FieldSymbol { GenericDefinition: not null } field => field.GenericDefinition,
+        PropertySymbol { GenericDefinition: not null } property => property.GenericDefinition,
+        IndexerSymbol { GenericDefinition: not null } indexer => indexer.GenericDefinition,
+        ConstantSymbol { GenericDefinition: not null } constant => constant.GenericDefinition,
+        _ => symbol,
+    };
+
     private static Symbol GetImplementationTarget(Symbol symbol) => symbol switch
     {
         FunctionSymbol { ContainingProperty: not null } function => function.ContainingProperty,
@@ -578,7 +595,30 @@ internal static class LspCoreIntelligence
                 LspCompletionItemKindAdapter.XenonKindName(kind),
             symbol.Name,
             "0_" + symbol.Name,
-            symbol.Name);
+            symbol.Name,
+            Markup(symbol.Documentation));
+    }
+
+    private static LspMarkupContent? ParameterDocumentation(Symbol owner, ParameterSymbol parameter)
+    {
+        string? text = owner.Documentation.Parameters.GetValueOrDefault(parameter.Name) ??
+            parameter.Documentation.Summary;
+        return string.IsNullOrWhiteSpace(text) ? null : new LspMarkupContent("markdown", text);
+    }
+
+    private static LspMarkupContent? Markup(SymbolDocumentation documentation)
+    {
+        string markdown = DocumentationMarkdown(documentation);
+        return markdown.Length == 0 ? null : new LspMarkupContent("markdown", markdown);
+    }
+
+    private static string DocumentationMarkdown(SymbolDocumentation documentation)
+    {
+        var sections = new List<string>();
+        if (documentation.Summary is { Length: > 0 } summary) sections.Add(summary);
+        if (documentation.Returns is { Length: > 0 } returns) sections.Add($"**Returns:** {returns}");
+        if (documentation.Remarks is { Length: > 0 } remarks) sections.Add($"**Remarks:** {remarks}");
+        return string.Join("\n\n", sections);
     }
 
     private static int SymbolKindNumber(EditorSymbolKind kind) => kind switch

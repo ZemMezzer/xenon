@@ -13,15 +13,22 @@ public enum GenericConstraintKind
 public sealed class GenericConstraintSymbol
 {
     internal GenericConstraintSymbol(GenericConstraintKind kind, Symbol target, GenericConstraintSyntax declaration)
+        : this(kind, target, new SymbolOrigin(SymbolOriginKind.Source, []))
+    {
+        Declaration = declaration!;
+    }
+
+    internal GenericConstraintSymbol(GenericConstraintKind kind, Symbol target, SymbolOrigin? origin = null)
     {
         Kind = kind;
         Target = target;
-        Declaration = declaration;
+        Origin = origin ?? SymbolOrigin.CompilerGenerated;
     }
 
     public GenericConstraintKind Kind { get; }
     public Symbol Target { get; }
-    public GenericConstraintSyntax Declaration { get; }
+    public SymbolOrigin Origin { get; }
+    internal GenericConstraintSyntax Declaration { get; } = null!;
 }
 
 public sealed class GenericParameterSymbol : TypeSymbol
@@ -29,20 +36,34 @@ public sealed class GenericParameterSymbol : TypeSymbol
     private ImmutableArray<GenericConstraintSymbol> _constraints = [];
 
     internal GenericParameterSymbol(string name, int ordinal, Symbol containingSymbol, GenericParameterSyntax declaration)
+        : this(name, ordinal, containingSymbol, SymbolOrigin.Source(declaration))
+    {
+        Declaration = declaration;
+        SetImplementation(new SourceSymbolImplementation(declaration));
+    }
+
+    internal GenericParameterSymbol(string name, int ordinal, Symbol containingSymbol,
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
         : base(name, containingSymbol)
     {
         Ordinal = ordinal;
-        Declaration = declaration;
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
     }
 
     public int Ordinal { get; }
-    public GenericParameterSyntax Declaration { get; }
+    internal GenericParameterSyntax Declaration { get; } = null!;
     public ImmutableArray<GenericConstraintSymbol> Constraints => _constraints;
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
     public override bool IsDefinition => true;
 
     internal void SetConstraints(ImmutableArray<GenericConstraintSymbol> constraints) => _constraints = constraints;
-    internal void SetDeclaringSymbol(Symbol symbol) => SetContainingSymbol(symbol);
+    internal void SetDeclaringSymbol(Symbol symbol)
+    {
+        SetContainingSymbol(symbol);
+        if (symbol.Documentation.TypeParameters.TryGetValue(Name, out string? text))
+            SetMetadata(Origin, SymbolDocumentation.Empty with { Summary = text });
+    }
 }
 
 public sealed class TemplateSymbol : Symbol
@@ -50,17 +71,27 @@ public sealed class TemplateSymbol : Symbol
     private ImmutableArray<TemplateMemberRequirementSymbol> _members = [];
 
     internal TemplateSymbol(string name, NamespaceSymbol containingNamespace, TemplateDeclarationSyntax declaration)
-        : base(name, SymbolKind.Template, containingNamespace)
+        : this(name, containingNamespace, SymbolOrigin.Source(declaration),
+            SymbolDocumentation.FromDeclaration(declaration))
     {
         Declaration = declaration;
+        SetImplementation(new SourceSymbolImplementation(declaration));
+    }
+
+    internal TemplateSymbol(string name, NamespaceSymbol containingNamespace,
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
+        : base(name, SymbolKind.Template, containingNamespace)
+    {
         SelfType = new TemplateSelfTypeSymbol(this);
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
     }
 
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
-    public TemplateDeclarationSyntax Declaration { get; }
+    internal TemplateDeclarationSyntax Declaration { get; } = null!;
     public ImmutableArray<TemplateMemberRequirementSymbol> Members => _members;
     internal TemplateSelfTypeSymbol SelfType { get; }
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
     public override bool IsDefinition => true;
 
     internal void SetMembers(ImmutableArray<TemplateMemberRequirementSymbol> members) => _members = members;
@@ -79,13 +110,16 @@ internal sealed class TemplateSelfTypeSymbol : TypeSymbol
 public abstract class TemplateMemberRequirementSymbol : Symbol
 {
     protected TemplateMemberRequirementSymbol(string name, SymbolKind kind, TemplateSymbol template,
-        Accessibility accessibility, bool isStatic, bool isReadonly, SyntaxNode declaration)
+        Accessibility accessibility, bool isStatic, bool isReadonly, SyntaxNode? declaration,
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
         : base(name, kind, template)
     {
         Accessibility = accessibility;
         IsStatic = isStatic;
         IsReadonly = isReadonly;
-        Declaration = declaration;
+        Declaration = declaration!;
+        SetMetadata(origin ?? (declaration is null ? SymbolOrigin.CompilerGenerated : SymbolOrigin.Source(declaration)),
+            documentation ?? (declaration is null ? null : SymbolDocumentation.FromDeclaration(declaration)));
     }
 
     public TemplateSymbol Template => (TemplateSymbol)ContainingSymbol!;
@@ -93,8 +127,9 @@ public abstract class TemplateMemberRequirementSymbol : Symbol
     public bool IsPublic => Accessibility == Accessibility.Public;
     public bool IsStatic { get; }
     public bool IsReadonly { get; }
-    public SyntaxNode Declaration { get; }
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    internal SyntaxNode Declaration { get; } = null!;
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
 }
 
 public sealed class TemplateMethodRequirementSymbol : TemplateMemberRequirementSymbol
@@ -103,6 +138,15 @@ public sealed class TemplateMethodRequirementSymbol : TemplateMemberRequirementS
         ImmutableArray<ParameterSymbol> parameters, Accessibility accessibility, MethodDeclarationSyntax declaration)
         : base(declaration.IdentifierToken.Text, SymbolKind.Function, template, accessibility,
             declaration.IsStatic, declaration.IsReadonly, declaration)
+    {
+        ReturnType = returnType;
+        Parameters = ParameterSymbol.Own(parameters, this);
+    }
+
+    internal TemplateMethodRequirementSymbol(string name, TemplateSymbol template, TypeSymbol returnType,
+        ImmutableArray<ParameterSymbol> parameters, Accessibility accessibility, bool isStatic, bool isReadonly,
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
+        : base(name, SymbolKind.Function, template, accessibility, isStatic, isReadonly, null, origin, documentation)
     {
         ReturnType = returnType;
         Parameters = ParameterSymbol.Own(parameters, this);
@@ -121,6 +165,11 @@ public sealed class TemplateConstructorRequirementSymbol : TemplateMemberRequire
         Parameters = ParameterSymbol.Own(parameters, this);
     }
 
+    internal TemplateConstructorRequirementSymbol(TemplateSymbol template, ImmutableArray<ParameterSymbol> parameters,
+        Accessibility accessibility, SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
+        : base(template.Name, SymbolKind.Function, template, accessibility, false, false, null, origin, documentation) =>
+        Parameters = ParameterSymbol.Own(parameters, this);
+
     public ImmutableArray<ParameterSymbol> Parameters { get; }
 }
 
@@ -134,6 +183,16 @@ public sealed class TemplatePropertyRequirementSymbol : TemplateMemberRequiremen
         Type = type;
         HasGetter = declaration.Getter is not null;
         HasSetter = declaration.Setter is not null;
+    }
+
+    internal TemplatePropertyRequirementSymbol(string name, TemplateSymbol template, TypeSymbol type,
+        Accessibility accessibility, bool isStatic, bool isReadonly, bool hasGetter, bool hasSetter,
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
+        : base(name, SymbolKind.Property, template, accessibility, isStatic, isReadonly, null, origin, documentation)
+    {
+        Type = type;
+        HasGetter = hasGetter;
+        HasSetter = hasSetter;
     }
 
     public TypeSymbol Type { get; }
@@ -152,6 +211,17 @@ public sealed class TemplateIndexerRequirementSymbol : TemplateMemberRequirement
         Parameters = ParameterSymbol.Own(parameters, this);
         HasGetter = declaration.Getter is not null;
         HasSetter = declaration.Setter is not null;
+    }
+
+    internal TemplateIndexerRequirementSymbol(TemplateSymbol template, TypeSymbol type,
+        ImmutableArray<ParameterSymbol> parameters, Accessibility accessibility, bool isStatic, bool isReadonly,
+        bool hasGetter, bool hasSetter, SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
+        : base("this", SymbolKind.Property, template, accessibility, isStatic, isReadonly, null, origin, documentation)
+    {
+        Type = type;
+        Parameters = ParameterSymbol.Own(parameters, this);
+        HasGetter = hasGetter;
+        HasSetter = hasSetter;
     }
 
     public TypeSymbol Type { get; }

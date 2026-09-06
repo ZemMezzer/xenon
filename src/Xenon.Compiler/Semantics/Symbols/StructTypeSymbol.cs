@@ -20,12 +20,19 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
         string name,
         NamespaceSymbol containingNamespace,
         StructDeclarationSyntax declaration)
-        : base(name, containingNamespace)
+        : base(name, containingNamespace, "struct", origin: SymbolOrigin.Source(declaration),
+            documentation: SymbolDocumentation.FromDeclaration(declaration))
     {
         Declaration = declaration;
+        IsAbstract = declaration.IsAbstract;
+        SetImplementation(new SourceSymbolImplementation(declaration));
     }
 
-    public override string DeclarationKind => "struct";
+    internal StructTypeSymbol(string name, NamespaceSymbol containingNamespace, bool isAbstract,
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
+        : base(name, containingNamespace, "struct", origin: origin, documentation: documentation) =>
+        IsAbstract = isAbstract;
+
     public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short)
     {
         string name = base.ToDisplayString(format);
@@ -84,7 +91,7 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
                 FunctionKind.DestructorGlue,
                 this,
                 [],
-                Declaration,
+                Origin,
                 Accessibility.Public);
         }
     }
@@ -104,9 +111,9 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     // The complete base subobject (including tail padding) occupies element zero.
     public int DeclaredFieldStart => (BaseType is null ? 0 : 1) + (IntroducesVirtualDispatch ? 1 : 0);
 
-    public bool IsAbstract => Declaration.IsAbstract;
+    public bool IsAbstract { get; }
 
-    public override StructDeclarationSyntax Declaration { get; }
+    internal StructDeclarationSyntax Declaration { get; } = null!;
 
     internal void SetFields(ImmutableArray<FieldSymbol> fields)
     {
@@ -132,7 +139,11 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     internal void SetHasVirtualDispatch() => HasVirtualDispatch = true;
 
     internal void SetVirtualMethods(ImmutableArray<FunctionSymbol> methods) => _virtualMethods = methods;
-    internal void SetTypeParameters(ImmutableArray<GenericParameterSymbol> parameters) => _typeParameters = parameters;
+    internal void SetTypeParameters(ImmutableArray<GenericParameterSymbol> parameters)
+    {
+        _typeParameters = parameters;
+        foreach (GenericParameterSymbol parameter in parameters) parameter.SetDeclaringSymbol(this);
+    }
     internal void SetGenericSpecialization(StructTypeSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
     {
         GenericDefinition = definition;
@@ -265,6 +276,19 @@ public sealed class ConstantSymbol : Symbol
         Type = type;
         Initializer = initializer;
         Declaration = declaration;
+        SetSourceOrigin(declaration);
+    }
+
+    internal ConstantSymbol(string name, TypeSymbol type, Symbol containingSymbol, object? value,
+        bool hasValue, SymbolOrigin? origin = null, SymbolDocumentation? documentation = null,
+        SymbolImplementation? implementation = null)
+        : base(name, SymbolKind.Constant, containingSymbol)
+    {
+        Type = type;
+        Value = value;
+        HasValue = hasValue;
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
+        SetImplementation(implementation);
     }
 
     public TypeSymbol Type { get; }
@@ -273,10 +297,12 @@ public sealed class ConstantSymbol : Symbol
     public object? Value { get; private set; }
     public BoundExpression? BoundValue { get; private set; }
     public bool HasValue { get; private set; }
-    internal ExpressionSyntax Initializer { get; }
-    internal SyntaxNode Declaration { get; }
+    public ConstantSymbol? GenericDefinition { get; private set; }
+    internal ExpressionSyntax Initializer { get; } = null!;
+    internal SyntaxNode Declaration { get; } = null!;
     internal SyntaxToken IdentifierToken => new SyntaxReference(Declaration).IdentifierToken;
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
     public override bool IsDefinition => true;
 
     internal void SetValue(object? value)
@@ -290,6 +316,8 @@ public sealed class ConstantSymbol : Symbol
         BoundValue = value;
         HasValue = true;
     }
+
+    internal void SetGenericSpecialization(ConstantSymbol definition) => GenericDefinition = definition;
 }
 
 public sealed class IndexerSymbol : Symbol
@@ -306,6 +334,32 @@ public sealed class IndexerSymbol : Symbol
         Parameters = ParameterSymbol.Own(parameters, this);
         Accessibility = accessibility;
         Declaration = declaration;
+        IsStatic = declaration.IsStatic;
+        IsReadonly = declaration.IsReadonly;
+        IsVirtual = declaration.IsVirtual;
+        IsOverride = declaration.IsOverride;
+        IsAbstract = declaration.IsAbstract;
+        SetSourceOrigin(declaration);
+        ApplyParameterDocumentation();
+    }
+
+    internal IndexerSymbol(DeclaredTypeSymbol containingType, TypeSymbol type,
+        ImmutableArray<ParameterSymbol> parameters, Accessibility accessibility,
+        bool isStatic, bool isReadonly, bool isVirtual, bool isOverride, bool isAbstract,
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null,
+        SymbolImplementation? implementation = null)
+        : base("this", SymbolKind.Property, containingType)
+    {
+        Type = type;
+        Parameters = ParameterSymbol.Own(parameters, this);
+        Accessibility = accessibility;
+        IsStatic = isStatic;
+        IsReadonly = isReadonly;
+        IsVirtual = isVirtual;
+        IsOverride = isOverride;
+        IsAbstract = isAbstract;
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
+        SetImplementation(implementation);
     }
 
     public DeclaredTypeSymbol ContainingType => GetContainingSymbol<DeclaredTypeSymbol>()!;
@@ -313,10 +367,17 @@ public sealed class IndexerSymbol : Symbol
     public ImmutableArray<ParameterSymbol> Parameters { get; }
     public Accessibility Accessibility { get; }
     public bool IsPublic => Accessibility == Accessibility.Public;
+    public bool IsStatic { get; }
+    public bool IsReadonly { get; }
+    public bool IsVirtual { get; }
+    public bool IsOverride { get; }
+    public bool IsAbstract { get; }
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
-    internal IndexerDeclarationSyntax Declaration { get; }
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public IndexerSymbol? GenericDefinition { get; private set; }
+    internal IndexerDeclarationSyntax Declaration { get; } = null!;
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
     public override bool IsDefinition => Getter?.IsDefinition == true || Setter?.IsDefinition == true;
     public override bool HasUserEditableIdentifier => false;
 
@@ -324,6 +385,16 @@ public sealed class IndexerSymbol : Symbol
     {
         Getter = getter;
         Setter = setter;
+    }
+
+    internal void SetGenericSpecialization(IndexerSymbol definition) => GenericDefinition = definition;
+
+    private void ApplyParameterDocumentation()
+    {
+        foreach (ParameterSymbol parameter in Parameters)
+            if (Documentation.Parameters.TryGetValue(parameter.Name, out string? text))
+                parameter.SetMetadata(parameter.Origin,
+                    SymbolDocumentation.Empty with { Summary = text });
     }
 
     internal string GetAccessorName(bool getter) =>
@@ -354,19 +425,46 @@ public sealed class PropertySymbol : Symbol
         Type = type;
         Accessibility = accessibility;
         Declaration = declaration;
+        IsStatic = declaration.IsStatic;
+        IsReadonly = declaration.IsReadonly;
+        IsVirtual = declaration.IsVirtual;
+        IsOverride = declaration.IsOverride;
+        IsAbstract = declaration.IsAbstract;
+        SetSourceOrigin(declaration);
+    }
+
+    internal PropertySymbol(string name, DeclaredTypeSymbol containingType, TypeSymbol type,
+        Accessibility accessibility, bool isStatic, bool isReadonly, bool isVirtual,
+        bool isOverride, bool isAbstract, SymbolOrigin? origin = null,
+        SymbolDocumentation? documentation = null, SymbolImplementation? implementation = null)
+        : base(name, SymbolKind.Property, containingType)
+    {
+        Type = type;
+        Accessibility = accessibility;
+        IsStatic = isStatic;
+        IsReadonly = isReadonly;
+        IsVirtual = isVirtual;
+        IsOverride = isOverride;
+        IsAbstract = isAbstract;
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
+        SetImplementation(implementation);
     }
 
     public DeclaredTypeSymbol ContainingType => GetContainingSymbol<DeclaredTypeSymbol>()!;
     public TypeSymbol Type { get; }
     public Accessibility Accessibility { get; }
     public bool IsPublic => Accessibility == Accessibility.Public;
-    public bool IsVirtual => Declaration.IsVirtual;
-    public bool IsOverride => Declaration.IsOverride;
-    public bool IsAbstract => Declaration.IsAbstract;
+    public bool IsStatic { get; }
+    public bool IsReadonly { get; }
+    public bool IsVirtual { get; }
+    public bool IsOverride { get; }
+    public bool IsAbstract { get; }
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
-    internal PropertyDeclarationSyntax Declaration { get; }
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    public PropertySymbol? GenericDefinition { get; private set; }
+    internal PropertyDeclarationSyntax Declaration { get; } = null!;
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
     public override bool IsDefinition => Getter?.IsDefinition == true || Setter?.IsDefinition == true;
 
     internal void SetAccessors(FunctionSymbol? getter, FunctionSymbol? setter)
@@ -374,6 +472,8 @@ public sealed class PropertySymbol : Symbol
         Getter = getter;
         Setter = setter;
     }
+
+    internal void SetGenericSpecialization(PropertySymbol definition) => GenericDefinition = definition;
 }
 
 public sealed class FieldSymbol : Symbol
@@ -397,6 +497,27 @@ public sealed class FieldSymbol : Symbol
         IsReadonly = isReadonly || declaration.Type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is not null;
         ConstantValue = constantValue;
         Declaration = declaration;
+        IsThreadLocal = declaration.IsThreadLocal;
+        HasInitializer = declaration.Initializer is not null;
+        SetSourceOrigin(declaration);
+    }
+
+    internal FieldSymbol(string name, DeclaredTypeSymbol containingType, TypeSymbol type, int ordinal,
+        Accessibility accessibility, bool isStatic, bool isReadonly, bool isThreadLocal,
+        bool hasInitializer, object? constantValue, SymbolOrigin? origin = null,
+        SymbolDocumentation? documentation = null, SymbolImplementation? implementation = null)
+        : base(name, SymbolKind.Field, containingType)
+    {
+        Type = type;
+        Ordinal = ordinal;
+        Accessibility = accessibility;
+        IsStatic = isStatic;
+        IsReadonly = isReadonly;
+        IsThreadLocal = isThreadLocal;
+        HasInitializer = hasInitializer;
+        ConstantValue = constantValue;
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
+        SetImplementation(implementation);
     }
 
     public DeclaredTypeSymbol ContainingType => GetContainingSymbol<DeclaredTypeSymbol>()!;
@@ -413,9 +534,9 @@ public sealed class FieldSymbol : Symbol
 
     public bool IsStatic { get; }
 
-    public bool IsThreadLocal => Declaration.IsThreadLocal;
+    public bool IsThreadLocal { get; }
 
-    public bool HasInitializer => Declaration.Initializer is not null;
+    public bool HasInitializer { get; }
 
     public bool IsReadonly { get; }
 
@@ -424,10 +545,13 @@ public sealed class FieldSymbol : Symbol
     internal void SetConstantValue(object? value) => ConstantValue = value;
 
     public BoundExpression? Initializer { get; private set; }
+    public FieldSymbol? GenericDefinition { get; private set; }
 
-    internal FieldDeclarationSyntax Declaration { get; }
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
+    internal FieldDeclarationSyntax Declaration { get; } = null!;
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
     public override bool IsDefinition => true;
 
     internal void SetInitializer(BoundExpression initializer) => Initializer = initializer;
+    internal void SetGenericSpecialization(FieldSymbol definition) => GenericDefinition = definition;
 }
