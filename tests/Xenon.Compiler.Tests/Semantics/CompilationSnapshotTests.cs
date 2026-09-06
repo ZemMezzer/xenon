@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics;
+using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
@@ -126,6 +127,226 @@ public sealed class CompilationSnapshotTests
 
         Assert.False(app.HasErrors);
         Assert.IsNotType<SourceCompilationReference>(app.References.Single());
+    }
+
+    [Fact]
+    public void AnyReferenceImplementationCanExportGenericFunctionImplementation()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Library;
+            public T Identity<T>(T value) { return move value; }
+            """, "library.xe"));
+        Compilation app = Compilation.Create(new CompilationOptions(),
+            [new TestSemanticReference(library.SemanticModel.GlobalNamespace,
+                library.GenericImplementations)], SourceText.From("""
+                using Library;
+                namespace App;
+                int Main() { return Identity<int>(42); }
+                """, "app.xe"));
+
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        Assert.False(library.GenericImplementations.IsEmpty);
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        BoundFunction specialization = Assert.Single(app.SemanticModel.Functions,
+            function => function.Symbol.IsGenericSpecialization);
+        Assert.Equal("Identity<int>", specialization.Symbol.Name);
+        Assert.Same(BuiltinTypes.Int, specialization.Symbol.ReturnType);
+        Assert.True(app.IsSymbolDefinedHere(specialization.Symbol));
+    }
+
+    [Fact]
+    public void SourceReferenceExportsGenericStructBodiesInitializersConstantsAndAccessors()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Library;
+            struct Box<T>
+            {
+                const int Offset = 2;
+                const nuint Width = sizeof(T);
+                private T _value;
+                private int _offset = Offset;
+                public static int State = 7;
+                public Box(T value) { _value = move value; }
+                public T Get() { return move _value; }
+                public int OffsetValue { get { return _offset; } }
+                public T this[int index]
+                {
+                    get { return move _value; }
+                    set { _value = move value; }
+                }
+            }
+            struct Cleanup<T> { public ~Cleanup() { } }
+            """, "library.xe"));
+        Compilation app = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(library)], SourceText.From("""
+                using Library;
+                namespace App;
+                int Main()
+                {
+                    Box<int> box = Box<int>(40);
+                    Cleanup<int> cleanup = Cleanup<int>();
+                    box[0] = 40;
+                    return box.OffsetValue + box.Get();
+                }
+                """, "app.xe"));
+
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        Assert.False(library.GenericImplementations.IsEmpty);
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        StructTypeSymbol box = app.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "Library").Structs
+            .Single(type => type.GenericDefinition?.Name == "Box");
+        Assert.True(app.IsSymbolDefinedHere(box));
+        Assert.Equal(2, box.Constants.Single(constant => constant.Name == "Offset").Value);
+        Assert.IsType<BoundTypeLayoutExpression>(
+            box.Constants.Single(constant => constant.Name == "Width").BoundValue);
+        Assert.Equal(7, box.StaticFields.Single(field => field.Name == "State").ConstantValue);
+        Assert.NotNull(box.Fields.Single(field => field.Name == "_offset").Initializer);
+        Assert.NotNull(box.InstanceInitializer);
+        Assert.Contains(app.SemanticModel.Functions,
+            function => ReferenceEquals(function.Symbol, box.FindMethod("Get")));
+        Assert.Contains(app.SemanticModel.Functions,
+            function => function.Symbol.AccessorKind == AccessorKind.Getter &&
+                ReferenceEquals(function.Symbol.ContainingType, box));
+        StructTypeSymbol cleanup = app.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "Library").Structs
+            .Single(type => type.GenericDefinition?.Name == "Cleanup");
+        Assert.NotNull(cleanup.Destructor);
+        Assert.Contains(app.SemanticModel.Functions,
+            function => ReferenceEquals(function.Symbol, cleanup.Destructor));
+    }
+
+    [Fact]
+    public void SourceReferenceVirtualLayoutRemainsOwnedByTheReferencedCompilation()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Library;
+            struct Base
+            {
+                public virtual int Read() { return 1; }
+                public virtual int Value { get { return 2; } set { } }
+                public virtual int this[int index] { get { return index; } set { } }
+                public virtual ~Base() { }
+            }
+            """, "virtual-library.xe"));
+        StructTypeSymbol baseType = library.SemanticModel.GlobalNamespace.Namespaces
+            .Single().Structs.Single();
+        var before = baseType.VirtualMethods;
+
+        Compilation app = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(library)], SourceText.From("""
+                using Library;
+                namespace App;
+                struct Derived : Base
+                {
+                    public override int Read() { return 40; }
+                    public override int Value { get { return 1; } set { } }
+                    public override int this[int index] { get { return index; } set { } }
+                    public override ~Derived() { }
+                }
+                """, "virtual-app.xe"));
+
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        Assert.True(before == baseType.VirtualMethods);
+        StructTypeSymbol derived = app.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "App").Structs.Single();
+        Assert.Equal(baseType.VirtualMethods.Length, derived.VirtualMethods.Length);
+        Assert.All(derived.VirtualMethods, member => Assert.Same(derived, member.ContainingType));
+        Assert.Equal(baseType.VirtualMethods.Select(member => member.VTableSlot),
+            derived.VirtualMethods.Select(member => member.VTableSlot));
+    }
+
+    [Fact]
+    public void ReferencedGenericSpecializationReusesBaseMethodAndDestructorSlots()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Library;
+            struct Root
+            {
+                public virtual int Read() { return 1; }
+                public virtual ~Root() { }
+            }
+            struct Box<T> : Root
+            {
+                T Item;
+                public override int Read() { return 42; }
+                public override ~Box() { }
+            }
+            """, "generic-virtual-library.xe"));
+        StructTypeSymbol root = library.SemanticModel.GlobalNamespace.Namespaces
+            .Single().Structs.Single(type => type.Name == "Root");
+        var rootVirtualMethods = root.VirtualMethods;
+
+        Compilation app = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(library)], SourceText.From("""
+                using Library;
+                namespace App;
+                void Use(Box<int>* value) { }
+                """, "generic-virtual-app.xe"));
+
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        StructTypeSymbol specialization = app.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "Library").Structs
+            .Single(type => type.GenericDefinition?.Name == "Box");
+        Assert.Equal(rootVirtualMethods.Length, specialization.VirtualMethods.Length);
+        Assert.All(specialization.VirtualMethods, member => Assert.Same(specialization, member.ContainingType));
+        Assert.Equal(rootVirtualMethods.Select(member => member.VTableSlot),
+            specialization.VirtualMethods.Select(member => member.VTableSlot));
+        Assert.Contains(specialization.VirtualMethods,
+            member => member.FunctionKind == FunctionKind.Destructor);
+        Assert.True(rootVirtualMethods == root.VirtualMethods);
+    }
+
+    [Fact]
+    public void TransitiveSourceReferencesPreserveTemplateConstraintsForGenericImplementations()
+    {
+        Compilation contracts = Compilation.Create(SourceText.From("""
+            namespace Contracts;
+            template Readable { int Read(); }
+            """, "contracts.xe"));
+        Compilation generics = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(contracts)], SourceText.From("""
+                using Contracts;
+                namespace Generics;
+                public int ReadValue<T>(T value) where T : Readable { return value.Read(); }
+                """, "generics.xe"));
+        Compilation app = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(generics)], SourceText.From("""
+                using Generics;
+                namespace App;
+                struct Value { public int Read() { return 42; } }
+                int Main() { Value value = Value(); return ReadValue<Value>(value); }
+                """, "app.xe"));
+
+        Assert.False(contracts.HasErrors, string.Join(Environment.NewLine, contracts.Diagnostics));
+        Assert.False(generics.HasErrors, string.Join(Environment.NewLine, generics.Diagnostics));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        Assert.Contains(app.SemanticModel.Functions,
+            function => function.Symbol.IsGenericSpecialization &&
+                function.Symbol.Name.StartsWith("ReadValue<", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void DiamondReferencesDeduplicateTransitiveGenericImplementationsBySymbolIdentity()
+    {
+        Compilation core = Compilation.Create(SourceText.From(
+            "namespace Core; public T Identity<T>(T value) { return move value; }", "core.xe"));
+        Compilation left = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(core)],
+            SourceText.From("namespace Left; public int Ready() { return 1; }", "left.xe"));
+        Compilation right = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(core)],
+            SourceText.From("namespace Right; public int Ready() { return 1; }", "right.xe"));
+        Compilation app = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(left), new SourceCompilationReference(right)],
+            SourceText.From("using Core; namespace App; int Main() { return Identity<int>(42); }", "app.xe"));
+
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        Assert.Equal(1, app.GenericImplementations.FunctionCount);
+        Assert.Contains(app.SemanticModel.Functions,
+            function => function.Symbol.IsGenericSpecialization);
     }
 
     [Fact]
@@ -313,9 +534,12 @@ public sealed class CompilationSnapshotTests
         public ulong GetFieldOffset(StructTypeSymbol type, FieldSymbol field) => 0;
     }
 
-    private sealed class TestSemanticReference(NamespaceSymbol globalNamespace)
+    private sealed class TestSemanticReference(NamespaceSymbol globalNamespace,
+        GenericImplementationStore? genericImplementations = null)
         : CompilationReference(Guid.NewGuid())
     {
         public override NamespaceSymbol GlobalNamespace { get; } = globalNamespace;
+        public override GenericImplementationStore GenericImplementations { get; } =
+            genericImplementations ?? GenericImplementationStore.Empty;
     }
 }

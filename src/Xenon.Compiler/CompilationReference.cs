@@ -1,4 +1,5 @@
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Semantics;
 
 namespace Xenon.Compiler;
 
@@ -11,6 +12,9 @@ public abstract class CompilationReference : IEquatable<CompilationReference>
 
     /// <summary>The immutable semantic namespace surface imported by a consuming compilation.</summary>
     public abstract NamespaceSymbol GlobalNamespace { get; }
+
+    /// <summary>Opaque compile-time implementations required to specialize exported generics.</summary>
+    public virtual GenericImplementationStore GenericImplementations => GenericImplementationStore.Empty;
 
     public bool Equals(CompilationReference? other) =>
         other is not null && GetType() == other.GetType() && Identity == other.Identity;
@@ -32,4 +36,6 @@ public sealed class SourceCompilationReference : CompilationReference
     public Compilation Compilation { get; }
 
     public override NamespaceSymbol GlobalNamespace => Compilation.SemanticModel.GlobalNamespace;
+
+    public override GenericImplementationStore GenericImplementations => Compilation.GenericImplementations;
 }

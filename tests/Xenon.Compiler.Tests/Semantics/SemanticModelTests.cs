@@ -1095,6 +1095,39 @@ public sealed class SemanticModelTests
             .Single(function => function.Name == "Tolerant").Documentation.Summary);
     }
 
+    [Fact]
+    public void DocumentationBelongsOnlyToTheDeclarationLeadingToken()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Undocumented
+            {
+                /// <summary>Field docs.</summary>
+                public int Value;
+            }
+            /// <summary>Box docs.</summary>
+            struct Documented
+            {
+                /// <summary>Other field docs.</summary>
+                public int Other;
+            }
+            void Function()
+            {
+                /// <summary>Local docs.</summary>
+                int local = 0;
+            }
+            """);
+
+        NamespaceSymbol scope = compilation.SemanticModel.GlobalNamespace.Namespaces.Single();
+        StructTypeSymbol undocumented = scope.Structs.Single(type => type.Name == "Undocumented");
+        StructTypeSymbol documented = scope.Structs.Single(type => type.Name == "Documented");
+        Assert.True(undocumented.Documentation.IsEmpty);
+        Assert.Equal("Field docs.", undocumented.Fields.Single().Documentation.Summary);
+        Assert.Equal("Box docs.", documented.Documentation.Summary);
+        Assert.Equal("Other field docs.", documented.Fields.Single().Documentation.Summary);
+        Assert.True(scope.Functions.Single(function => function.Name == "Function").Documentation.IsEmpty);
+    }
+
     [Theory]
     [InlineData("namespace Example; void Foo() {} void Test() { Foo(")]
     [InlineData("namespace Example; void Test() { new<")]

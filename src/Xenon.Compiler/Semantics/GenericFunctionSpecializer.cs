@@ -8,22 +8,24 @@ namespace Xenon.Compiler.Semantics;
 
 internal sealed class GenericFunctionSpecializer
 {
-    private readonly IReadOnlyDictionary<FunctionSymbol, IGenericFunctionImplementation> _implementations;
+    private readonly IGenericImplementationProvider _implementations;
     private readonly TypeFactory _types;
     private readonly DiagnosticBag _diagnostics;
     private readonly ConstantEvaluationContext _constants;
     private readonly CancellationToken _cancellationToken;
     private readonly GenericStructSpecializer _structSpecializer;
+    private readonly Func<NamespaceSymbol, NamespaceSymbol> _resolveNamespace;
     private readonly Dictionary<GenericInstantiationKey, FunctionSymbol> _symbols = [];
     private readonly List<BoundFunction> _functions = [];
     private readonly GenericConstraintValidator _constraintValidator = new();
 
     public GenericFunctionSpecializer(
-        IReadOnlyDictionary<FunctionSymbol, IGenericFunctionImplementation> implementations,
+        IGenericImplementationProvider implementations,
         TypeFactory types,
         DiagnosticBag diagnostics,
         ConstantEvaluationContext constants,
         GenericStructSpecializer structSpecializer,
+        Func<NamespaceSymbol, NamespaceSymbol> resolveNamespace,
         CancellationToken cancellationToken)
     {
         _implementations = implementations;
@@ -31,10 +33,13 @@ internal sealed class GenericFunctionSpecializer
         _diagnostics = diagnostics;
         _constants = constants;
         _structSpecializer = structSpecializer;
+        _resolveNamespace = resolveNamespace;
         _cancellationToken = cancellationToken;
     }
 
     public ImmutableArray<BoundFunction> Functions => [.. _functions];
+    internal GenericStructSpecializer StructSpecializer => _structSpecializer;
+    internal TypeFactory Types => _types;
 
     public FunctionSymbol? GetOrCreate(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments,
         TextLocation location)
@@ -42,7 +47,7 @@ internal sealed class GenericFunctionSpecializer
         _cancellationToken.ThrowIfCancellationRequested();
         if (!definition.IsGenericDefinition || definition.ContainingType is not null)
             return null;
-        if (!_implementations.ContainsKey(definition))
+        if (!_implementations.TryGetFunction(definition, out IGenericFunctionImplementation? implementation))
         {
             _diagnostics.Report(location,
                 $"generic function '{definition.Name}' cannot be specialized because its implementation is unavailable",
@@ -86,7 +91,7 @@ internal sealed class GenericFunctionSpecializer
             new ParameterSymbol(parameter.Name, Substitute(parameter.Type, substitutions, location), parameter.Ordinal,
                 parameter.IsReadonly)).ToImmutableArray();
         string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
-        var specialized = new FunctionSymbol(name, definition.ContainingNamespace, FunctionKind.Ordinary,
+        var specialized = new FunctionSymbol(name, _resolveNamespace(definition.ContainingNamespace), FunctionKind.Ordinary,
             returnType, parameters, definition.Accessibility, isStatic: definition.IsStatic,
             isReadonly: definition.IsReadonly, isVirtual: definition.IsVirtual,
             isOverride: definition.IsOverride, isAbstract: definition.IsAbstract,
@@ -99,7 +104,7 @@ internal sealed class GenericFunctionSpecializer
         specialized.SetReferenceFieldOrigins(definition.ReferenceFieldOrigins);
         _symbols.Add(key, specialized);
 
-        BoundBlockStatement body = _implementations[definition].Bind(specialized, substitutions,
+        BoundBlockStatement body = implementation.Bind(specialized, substitutions,
             _diagnostics, _constants, this, _cancellationToken);
         _functions.Add(new BoundFunction(specialized, body));
         return specialized;

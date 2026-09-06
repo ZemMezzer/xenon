@@ -72,6 +72,7 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = Accessibility.Public;
         IsAbstract = true;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
         IsReadonly = declaration.IsGetter && containingProperty.IsReadonly;
         IsDefinition = declaration.Body is not null;
         SetSourceOrigin(declaration, includeDocumentation: false);
@@ -91,6 +92,7 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = Accessibility.Public;
         IsAbstract = true;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
         IsReadonly = declaration.IsGetter && containingIndexer.IsReadonly;
         IsDefinition = declaration.Body is not null;
         SetSourceOrigin(declaration, includeDocumentation: false);
@@ -136,6 +138,7 @@ public sealed class FunctionSymbol : Symbol
         IsVirtual = containingProperty.IsVirtual;
         IsOverride = containingProperty.IsOverride;
         IsAbstract = containingProperty.IsAbstract;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
         IsReadonly = declaration.IsGetter && containingProperty.IsReadonly;
         IsDefinition = declaration.Body is not null;
         SetSourceOrigin(declaration, includeDocumentation: false);
@@ -158,6 +161,7 @@ public sealed class FunctionSymbol : Symbol
         IsVirtual = containingIndexer.IsVirtual;
         IsOverride = containingIndexer.IsOverride;
         IsAbstract = containingIndexer.IsAbstract;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
         IsReadonly = declaration.IsGetter && containingIndexer.IsReadonly;
         IsDefinition = declaration.Body is not null;
         SetSourceOrigin(declaration, includeDocumentation: false);
@@ -219,7 +223,8 @@ public sealed class FunctionSymbol : Symbol
         ImmutableArray<GenericParameterSymbol> typeParameters = default,
         SymbolOrigin? origin = null,
         SymbolDocumentation? documentation = null,
-        SymbolImplementation? implementation = null)
+        SymbolImplementation? implementation = null,
+        AccessorKind accessorKind = AccessorKind.None)
         : base(name, SymbolKind.Function, containingSymbol)
     {
         FunctionKind = functionKind;
@@ -235,6 +240,7 @@ public sealed class FunctionSymbol : Symbol
         IsExport = isExport;
         IsDefinition = isDefinition;
         DelegatesToThisConstructor = delegatesToThisConstructor;
+        AccessorKind = accessorKind;
         TypeParameters = typeParameters.IsDefault ? [] : typeParameters;
         SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
         SetImplementation(implementation);
@@ -260,11 +266,11 @@ public sealed class FunctionSymbol : Symbol
         FunctionKind = FunctionKind.ThreadLocalInitializer;
         ReturnType = BuiltinTypes.Void;
         Parameters = [];
-        Declaration = threadLocalField.Declaration;
         Accessibility = Accessibility.Private;
         IsStatic = true;
         ThreadLocalField = threadLocalField;
         IsDefinition = true;
+        SetMetadata(SymbolOrigin.CompilerGenerated);
     }
 
     internal FunctionSymbol(
@@ -392,8 +398,9 @@ public sealed class FunctionSymbol : Symbol
     public bool IsAbstract { get; }
     public bool IsReadonly { get; }
 
-    public bool IsAccessor => ContainingProperty is not null || ContainingInterfaceProperty is not null ||
-        ContainingIndexer is not null || ContainingInterfaceIndexer is not null;
+    public AccessorKind AccessorKind { get; }
+
+    public bool IsAccessor => AccessorKind != AccessorKind.None;
 
     public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor;
     public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) && !IsAccessor;
@@ -434,6 +441,7 @@ public sealed class FunctionSymbol : Symbol
 
     public bool HasSameSignature(FunctionSymbol candidate) =>
         FunctionKind == candidate.FunctionKind &&
+        AccessorKind == candidate.AccessorKind &&
         (ContainingProperty is not null || ContainingInterfaceProperty is not null) ==
             (candidate.ContainingProperty is not null || candidate.ContainingInterfaceProperty is not null) &&
         (ContainingIndexer is not null || ContainingInterfaceIndexer is not null) ==
