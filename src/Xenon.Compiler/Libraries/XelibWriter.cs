@@ -621,6 +621,7 @@ internal sealed class XelibIrBuilder
             DeclaredTypeSymbol value => new(id, XelibTypeKind.Declared, Symbol: Reference(value)),
             GenericParameterSymbol value => new(id, XelibTypeKind.GenericParameter, Symbol: Reference(value)),
             TemplateSelfTypeSymbol value => new(id, XelibTypeKind.TemplateSelf, Symbol: Reference(value.Template)),
+            PrimitiveTypeSymbol { IsCharacter: true } => new(id, XelibTypeKind.Char),
             PrimitiveTypeSymbol value => new(id, XelibTypeKind.Primitive, PrimitiveName: value.Name),
             PointerTypeSymbol value => new(id, XelibTypeKind.Pointer, ElementTypeId: TypeId(value.ElementType),
                 IsReadonly: value.IsReadonly),
@@ -702,7 +703,7 @@ internal sealed class XelibIrBuilder
             FieldSymbol value => record with
             {
                 TypeId = TypeId(value.Type), Ordinal = value.Ordinal,
-                ConstantValue = Constant(value.ConstantValue),
+                ConstantValue = Constant(value.ConstantValue, value.Type),
             },
             PropertySymbol value => record with
             {
@@ -725,7 +726,7 @@ internal sealed class XelibIrBuilder
             ConstantSymbol value => record with
             {
                 TypeId = TypeId(value.Type), ConstantValue =
-                    value.EvaluationState == ConstantEvaluationState.Evaluated ? Constant(value.Value) : null,
+                    value.EvaluationState == ConstantEvaluationState.Evaluated ? Constant(value.Value, value.Type) : null,
                 ConstantExpression = value.EvaluationState == ConstantEvaluationState.Deferred
                     ? XelibBodyCodec.EncodeExpression(value.BoundValue ?? throw new XelibFormatException(
                         XelibErrorCode.FeatureNotRepresentable,
@@ -936,10 +937,12 @@ internal sealed class XelibIrBuilder
 
     private static XelibAccessorKind Map(AccessorKind kind) => XelibStableMappings.ToXelib(kind);
 
-    internal static XelibConstantValue Constant(object? value) => value switch
+    internal static XelibConstantValue Constant(object? value, TypeSymbol? type = null) => value switch
     {
         null => new(XelibConstantKind.Null, null),
         bool item => new(XelibConstantKind.Boolean, item ? "true" : "false"),
+        ulong item when TypeFacts.IsCharacter(type ?? BuiltinTypes.Error) =>
+            new(XelibConstantKind.UnicodeScalar, item.ToString(CultureInfo.InvariantCulture)),
         sbyte or short or int or long => new(XelibConstantKind.SignedInteger,
             Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)),
         byte or ushort or uint or ulong => new(XelibConstantKind.UnsignedInteger,

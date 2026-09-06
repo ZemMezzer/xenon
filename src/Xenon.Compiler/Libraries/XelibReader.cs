@@ -633,6 +633,7 @@ internal sealed class XelibSemanticReconstruction
         // only needed after a complete child has been reconstructed.
         TypeSymbol created = record.Kind switch
         {
+            XelibTypeKind.Char => BuiltinTypes.Char,
             XelibTypeKind.Primitive => Builtin(record.PrimitiveName),
             XelibTypeKind.Declared => (TypeSymbol)Resolve(Required(record.Symbol)),
             XelibTypeKind.GenericParameter => (GenericParameterSymbol)Resolve(Required(record.Symbol)),
@@ -786,6 +787,7 @@ internal sealed class XelibSemanticReconstruction
             return value.Kind switch
             {
                 XelibConstantKind.Boolean => bool.Parse(text),
+                XelibConstantKind.UnicodeScalar when TypeFacts.IsCharacter(type) => ParseUnicodeScalar(text),
                 XelibConstantKind.SignedInteger => ParseSigned(text, type),
                 XelibConstantKind.UnsignedInteger => ParseUnsigned(text, type),
                 XelibConstantKind.FloatingPoint when ReferenceEquals(type, BuiltinTypes.Float) =>
@@ -817,6 +819,15 @@ internal sealed class XelibSemanticReconstruction
         if (ReferenceEquals(type, BuiltinTypes.Byte)) return checked((byte)value);
         if (ReferenceEquals(type, BuiltinTypes.UShort)) return checked((ushort)value);
         if (ReferenceEquals(type, BuiltinTypes.UInt)) return checked((uint)value);
+        return value;
+    }
+
+    private static ulong ParseUnicodeScalar(string text)
+    {
+        if (!ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out ulong value))
+            throw new FormatException();
+        if (value > uint.MaxValue || !UnicodeScalarFacts.IsValid((uint)value))
+            throw new FormatException();
         return value;
     }
 }

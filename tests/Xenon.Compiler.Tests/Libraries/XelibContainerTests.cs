@@ -152,7 +152,7 @@ public sealed class XelibContainerTests
     public void UnsupportedVersionsAreReportedSeparately()
     {
         byte[] container = ValidContainer();
-        BinaryPrimitives.WriteUInt16LittleEndian(container.AsSpan(10), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(container.AsSpan(10), checked((ushort)(XelibVersions.Container + 1)));
         Assert.Equal(XelibErrorCode.UnsupportedContainerVersion,
             Assert.Throws<XelibFormatException>(() => XelibContainer.Read(container)).Code);
 
@@ -162,7 +162,7 @@ public sealed class XelibContainerTests
             Assert.Throws<XelibFormatException>(() => XelibContainer.Read(container)).Code);
 
         container = ValidContainer();
-        BinaryPrimitives.WriteUInt16LittleEndian(container.AsSpan(14), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(container.AsSpan(14), checked((ushort)(XelibVersions.Language + 1)));
         Assert.Equal(XelibErrorCode.UnsupportedLanguageVersion,
             Assert.Throws<XelibFormatException>(() => XelibContainer.Read(container)).Code);
     }

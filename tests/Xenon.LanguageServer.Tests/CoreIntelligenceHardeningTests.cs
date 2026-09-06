@@ -318,7 +318,7 @@ public sealed class CoreIntelligenceHardeningTests
         AssertKeywordDetails(keywordItems, ["free", "destruct"], "lifetime operation keyword");
         AssertKeywordDetails(keywordItems, ["true", "false", "null"], "literal keyword");
         AssertKeywordDetails(keywordItems,
-            ["void", "bool", "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong",
+            ["void", "bool", "byte", "char", "sbyte", "short", "ushort", "int", "uint", "long", "ulong",
                 "float", "double", "nint", "nuint", "clong", "culong"],
             "primitive type", 22);
     }

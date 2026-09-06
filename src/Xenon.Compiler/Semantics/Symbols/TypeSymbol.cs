@@ -21,13 +21,15 @@ public sealed class PrimitiveTypeSymbol : TypeSymbol
         bool isInteger = false,
         bool isSigned = false,
         int? bitWidth = null,
-        bool isFloatingPoint = false)
+        bool isFloatingPoint = false,
+        bool isCharacter = false)
         : base(name)
     {
         IsInteger = isInteger;
         IsSigned = isSigned;
         BitWidth = bitWidth;
         IsFloatingPoint = isFloatingPoint;
+        IsCharacter = isCharacter;
     }
 
     public bool IsInteger { get; }
@@ -37,6 +39,9 @@ public sealed class PrimitiveTypeSymbol : TypeSymbol
     public int? BitWidth { get; }
 
     public bool IsFloatingPoint { get; }
+
+    /// <summary>True only for the Unicode-scalar <c>char</c> primitive.</summary>
+    public bool IsCharacter { get; }
 }
 
 public sealed class PointerTypeSymbol : TypeSymbol

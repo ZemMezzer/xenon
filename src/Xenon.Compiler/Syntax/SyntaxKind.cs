@@ -9,6 +9,7 @@ public enum SyntaxKind
     IntegerLiteralToken,
     FloatingPointLiteralToken,
     StringLiteralToken,
+    CharacterLiteralToken,
 
     OpenParenthesisToken,
     CloseParenthesisToken,
@@ -63,6 +64,7 @@ public enum SyntaxKind
     VoidKeyword,
     BoolKeyword,
     ByteKeyword,
+    CharKeyword,
     SByteKeyword,
     ShortKeyword,
     UShortKeyword,

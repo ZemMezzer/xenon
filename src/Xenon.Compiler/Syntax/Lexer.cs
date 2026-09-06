@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Text;
 using Xenon.Compiler.Diagnostics;
@@ -45,6 +46,11 @@ internal sealed class Lexer
         if (Current == '"')
         {
             return LexString(leadingDocumentation);
+        }
+
+        if (Current == '\'')
+        {
+            return LexCharacter(leadingDocumentation);
         }
 
         SyntaxKind kind = Current switch
@@ -291,6 +297,82 @@ internal sealed class Lexer
             Diagnostics.ReportUnterminatedString(token.Location);
         }
 
+        return token;
+    }
+
+    private SyntaxToken LexCharacter(string? leadingDocumentation)
+    {
+        int start = _position++;
+        ulong value = 0;
+        int scalarCount = 0;
+        bool terminated = false;
+
+        while (Current is not '\0' and not '\r' and not '\n')
+        {
+            if (Current == '\'')
+            {
+                _position++;
+                terminated = true;
+                break;
+            }
+
+            Rune rune;
+            if (Current == '\\')
+            {
+                int escapeStart = _position++;
+                if (Current is '\0' or '\r' or '\n') break;
+
+                char escaped = Current;
+                _position++;
+                char decoded = escaped switch
+                {
+                    '0' => '\0',
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '\'' => '\'',
+                    '"' => '"',
+                    '\\' => '\\',
+                    _ => escaped,
+                };
+                if (escaped is not ('0' or 'n' or 'r' or 't' or '\'' or '"' or '\\'))
+                {
+                    Diagnostics.ReportUnknownEscapeSequence(
+                        new TextLocation(_source, new TextSpan(escapeStart, 2)), escaped);
+                }
+                if (!Rune.TryCreate(decoded, out rune))
+                {
+                    Diagnostics.ReportInvalidUnicodeScalar(
+                        new TextLocation(_source, new TextSpan(escapeStart, 2)));
+                    scalarCount++;
+                    continue;
+                }
+            }
+            else
+            {
+                OperationStatus status = Rune.DecodeFromUtf16(
+                    _source.Text.AsSpan(_position), out rune, out int consumed);
+                if (status != OperationStatus.Done)
+                {
+                    Diagnostics.ReportInvalidUnicodeScalar(
+                        new TextLocation(_source, new TextSpan(_position, 1)));
+                    _position++;
+                    scalarCount++;
+                    continue;
+                }
+                _position += consumed;
+            }
+
+            if (scalarCount++ == 0) value = (uint)rune.Value;
+        }
+
+        SyntaxToken token = MakeToken(SyntaxKind.CharacterLiteralToken, start, value, leadingDocumentation);
+        if (!terminated)
+            Diagnostics.ReportUnterminatedCharacter(token.Location);
+        else if (scalarCount == 0)
+            Diagnostics.ReportEmptyCharacter(token.Location);
+        else if (scalarCount != 1)
+            Diagnostics.ReportMultiScalarCharacter(token.Location);
         return token;
     }
 

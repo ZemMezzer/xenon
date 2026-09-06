@@ -7,6 +7,7 @@ public static class BuiltinTypes
     public static PrimitiveTypeSymbol Void { get; } = new("void");
     public static PrimitiveTypeSymbol Bool { get; } = new("bool");
     public static PrimitiveTypeSymbol Byte { get; } = new("byte", true, false, 8);
+    public static PrimitiveTypeSymbol Char { get; } = new("char", bitWidth: 32, isCharacter: true);
     public static PrimitiveTypeSymbol SByte { get; } = new("sbyte", true, true, 8);
     public static PrimitiveTypeSymbol Short { get; } = new("short", true, true, 16);
     public static PrimitiveTypeSymbol UShort { get; } = new("ushort", true, false, 16);
@@ -30,6 +31,7 @@ public static class BuiltinTypes
         SyntaxKind.VoidKeyword => Void,
         SyntaxKind.BoolKeyword => Bool,
         SyntaxKind.ByteKeyword => Byte,
+        SyntaxKind.CharKeyword => Char,
         SyntaxKind.SByteKeyword => SByte,
         SyntaxKind.ShortKeyword => Short,
         SyntaxKind.UShortKeyword => UShort,

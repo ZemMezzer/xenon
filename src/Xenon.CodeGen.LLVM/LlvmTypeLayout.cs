@@ -101,6 +101,7 @@ internal sealed class LlvmTypeLayout : ITargetTypeLayout
         if (TypeIdentity.AreSame(type, BuiltinTypes.Bool)) return _bool;
         if (TypeIdentity.AreSame(type, BuiltinTypes.Float)) return _float;
         if (TypeIdentity.AreSame(type, BuiltinTypes.Double)) return _double;
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Char)) return _int32;
         if (type is PrimitiveTypeSymbol { IsInteger: true } integer)
             return GetIntegerBitWidth(integer) switch
             {

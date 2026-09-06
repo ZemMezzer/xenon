@@ -4819,6 +4819,7 @@ public sealed class SemanticAnalyzerTests
             {
                 unique<bool> a = new bool(true);
                 unique<byte> b = new byte();
+                unique<char> character = new char('😀');
                 unique<sbyte> c = new sbyte();
                 unique<short> d = new short();
                 unique<ushort> e = new ushort();
@@ -4845,6 +4846,7 @@ public sealed class SemanticAnalyzerTests
     [Theory]
     [InlineData("bool")]
     [InlineData("byte")]
+    [InlineData("char")]
     [InlineData("sbyte")]
     [InlineData("short")]
     [InlineData("ushort")]

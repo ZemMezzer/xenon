@@ -1752,6 +1752,7 @@ internal sealed class Parser
             SyntaxKind.IntegerLiteralToken or
             SyntaxKind.FloatingPointLiteralToken or
             SyntaxKind.StringLiteralToken or
+            SyntaxKind.CharacterLiteralToken or
             SyntaxKind.TrueKeyword or
             SyntaxKind.FalseKeyword or
             SyntaxKind.NullKeyword)
@@ -1895,6 +1896,7 @@ internal sealed class Parser
     private static bool IsBuiltinTypeKeyword(SyntaxKind kind) => kind is
         SyntaxKind.BoolKeyword or
         SyntaxKind.ByteKeyword or
+        SyntaxKind.CharKeyword or
         SyntaxKind.SByteKeyword or
         SyntaxKind.ShortKeyword or
         SyntaxKind.UShortKeyword or

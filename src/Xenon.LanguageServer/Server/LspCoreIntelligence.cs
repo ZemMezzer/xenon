@@ -90,6 +90,20 @@ internal static class LspCoreIntelligence
         Symbol? symbol = FindSymbol(model, context.Document.SyntaxTree, position);
         if (symbol is null)
         {
+            LiteralExpressionSyntax? literal = SyntaxNavigator.DescendantNodesAndSelf(context.Document.SyntaxTree.Root)
+                .OfType<LiteralExpressionSyntax>()
+                .Where(candidate => candidate.LiteralToken.Kind == SyntaxKind.CharacterLiteralToken &&
+                    position >= candidate.LiteralToken.Location.Span.Start &&
+                    position <= candidate.LiteralToken.Location.Span.End)
+                .OrderBy(candidate => candidate.LiteralToken.Location.Span.Length).FirstOrDefault();
+            if (literal is not null)
+            {
+                TypeSymbol literalType = model.GetTypeInfo(literal, context.CancellationToken).Type;
+                if (literalType is not ErrorTypeSymbol)
+                    return new LspHover(
+                        new LspMarkupContent("markdown", $"```xenon\n{literalType.ToDisplayString()}\n```"),
+                        ToRange(context.Document.EffectiveText, literal.LiteralToken.Location.Span));
+            }
             LockExpressionSyntax? @lock = SyntaxNavigator.DescendantNodesAndSelf(context.Document.SyntaxTree.Root)
                 .OfType<LockExpressionSyntax>()
                 .Where(candidate => position >= candidate.LockKeyword.Location.Span.Start &&
@@ -347,6 +361,7 @@ internal static class LspCoreIntelligence
     private static int LanguageTokenType(SyntaxKind kind) => kind switch
     {
         SyntaxKind.VoidKeyword or SyntaxKind.BoolKeyword or SyntaxKind.ByteKeyword or
+            SyntaxKind.CharKeyword or
             SyntaxKind.SByteKeyword or SyntaxKind.ShortKeyword or SyntaxKind.UShortKeyword or
             SyntaxKind.IntKeyword or SyntaxKind.UIntKeyword or SyntaxKind.LongKeyword or
             SyntaxKind.ULongKeyword or SyntaxKind.FloatKeyword or SyntaxKind.DoubleKeyword or
@@ -371,7 +386,8 @@ internal static class LspCoreIntelligence
         SyntaxKind.GetKeyword or SyntaxKind.SetKeyword or SyntaxKind.BaseKeyword or
             SyntaxKind.ThisKeyword or SyntaxKind.SizeOfKeyword or SyntaxKind.AlignOfKeyword or
             SyntaxKind.OffsetOfKeyword or SyntaxKind.CastKeyword or SyntaxKind.BitCastKeyword => 21,
-        SyntaxKind.TrueKeyword or SyntaxKind.FalseKeyword or SyntaxKind.NullKeyword => 23,
+        SyntaxKind.TrueKeyword or SyntaxKind.FalseKeyword or SyntaxKind.NullKeyword or
+            SyntaxKind.CharacterLiteralToken => 23,
         _ when SyntaxFacts.IsKeyword(kind) => 15,
         _ => -1,
     };

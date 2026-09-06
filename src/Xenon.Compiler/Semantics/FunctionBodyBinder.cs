@@ -823,8 +823,9 @@ internal sealed class FunctionBodyBinder
     private BoundSwitchStatement BindSwitchStatement(SwitchStatementSyntax syntax)
     {
         BoundExpression expression = ReadAtomicValue(BindExpression(syntax.Expression));
-        if (!TypeFacts.IsInteger(expression.Type) && expression.Type is not EnumTypeSymbol && !TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
-            _diagnostics.Report(syntax.SwitchKeyword.Location, "switch operand must be an integer or enum",
+        if (!TypeFacts.IsInteger(expression.Type) && !TypeFacts.IsCharacter(expression.Type) &&
+            expression.Type is not EnumTypeSymbol && !TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
+            _diagnostics.Report(syntax.SwitchKeyword.Location, "switch operand must be an integer, char, or enum",
                 DiagnosticIds.InvalidSwitchOperand);
         var values = new HashSet<System.Numerics.BigInteger>();
         bool hasDefault = false;
@@ -875,8 +876,8 @@ internal sealed class FunctionBodyBinder
                 BoundExpression boundValue = BindExpression(section.Value);
                 ConstantFoldStatus status = _constants.Fold(boundValue, out object? constant);
                 if (status == ConstantFoldStatus.Invalid ||
-                    !(TypeFacts.IsInteger(boundValue.Type) || boundValue.Type is EnumTypeSymbol))
-                    _diagnostics.Report(section.Label.Location, "case value must be an integer or enum compile-time constant",
+                    !(TypeFacts.IsInteger(boundValue.Type) || TypeFacts.IsCharacter(boundValue.Type) || boundValue.Type is EnumTypeSymbol))
+                    _diagnostics.Report(section.Label.Location, "case value must be an integer, char, or enum compile-time constant",
                         DiagnosticIds.SwitchCaseConstantRequired);
                 else if (!TypeIdentity.AreSame(expression.Type, boundValue.Type) &&
                          !(expression.Type is PrimitiveTypeSymbol { IsInteger: true } integer && TypeFacts.IsInteger(boundValue.Type) &&
@@ -1941,6 +1942,7 @@ internal sealed class FunctionBodyBinder
             SyntaxKind.FloatingPointLiteralToken => new BoundLiteralExpression(token.Value, BuiltinTypes.Double),
             SyntaxKind.StringLiteralToken =>
                 new BoundLiteralExpression(token.Value, _fileScope.TypeFactory.PointerTo(BuiltinTypes.Byte, isReadonly: true)),
+            SyntaxKind.CharacterLiteralToken => new BoundLiteralExpression(token.Value, BuiltinTypes.Char),
             SyntaxKind.TrueKeyword => new BoundLiteralExpression(true, BuiltinTypes.Bool),
             SyntaxKind.FalseKeyword => new BoundLiteralExpression(false, BuiltinTypes.Bool),
             SyntaxKind.NullKeyword => new BoundLiteralExpression(null, BuiltinTypes.Null),
@@ -4606,7 +4608,17 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.InvalidCast);
             return new BoundErrorExpression();
         }
-        return new BoundCastExpression(expression, targetType);
+        var result = new BoundCastExpression(expression, targetType);
+        if (TypeFacts.IsCharacter(targetType) && TypeFacts.IsInteger(expression.Type) &&
+            _constants.Fold(expression, out object? constant) == ConstantFoldStatus.Folded &&
+            !UnicodeScalarFacts.IsValid(SemanticAnalyzer.ToInteger(constant)))
+        {
+            _diagnostics.Report(syntax.CastKeyword.Location,
+                "compile-time integer-to-char cast is not a valid Unicode scalar value",
+                DiagnosticIds.InvalidUnicodeScalarCast);
+            return new BoundErrorExpression();
+        }
+        return result;
     }
 
     private BoundExpression BindIndexExpression(IndexExpressionSyntax syntax)
@@ -7422,7 +7434,8 @@ internal sealed class FunctionBodyBinder
         }
 
         if (operatorKind is SyntaxKind.LessToken or SyntaxKind.LessOrEqualsToken or
-            SyntaxKind.GreaterToken or SyntaxKind.GreaterOrEqualsToken && sameType && TypeFacts.IsNumeric(left))
+            SyntaxKind.GreaterToken or SyntaxKind.GreaterOrEqualsToken && sameType &&
+            (TypeFacts.IsNumeric(left) || TypeFacts.IsCharacter(left)))
         {
             return BuiltinTypes.Bool;
         }

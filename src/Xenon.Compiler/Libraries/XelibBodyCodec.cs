@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
@@ -221,7 +222,7 @@ public static class XelibBodyCodec
             case BoundLiteralExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Literal, TypeId = typeId(value.Type),
                     Constant = value.Value is null ? new XelibConstantValue(XelibConstantKind.Null, null) :
-                        XelibIrBuilder.Constant(value.Value) };
+                        XelibIrBuilder.Constant(value.Value, value.Type) };
             case BoundVariableExpression value:
             {
                 var reference = Variable(value.Variable);
@@ -740,6 +741,7 @@ public static class XelibBodyCodec
         return value.Kind switch
         {
             XelibConstantKind.Boolean => bool.Parse(text),
+            XelibConstantKind.UnicodeScalar when TypeFacts.IsCharacter(type) => ParseUnicodeScalar(text),
             XelibConstantKind.SignedInteger when ReferenceEquals(type, BuiltinTypes.Int) => int.Parse(text),
             XelibConstantKind.SignedInteger => long.Parse(text),
             XelibConstantKind.UnsignedInteger when ReferenceEquals(type, BuiltinTypes.UInt) => uint.Parse(text),
@@ -750,6 +752,16 @@ public static class XelibBodyCodec
             XelibConstantKind.String => text,
             _ => throw Invalid("invalid constant kind"),
         };
+    }
+
+    private static ulong ParseUnicodeScalar(string text)
+    {
+        if (!ulong.TryParse(text, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out ulong value))
+            throw Invalid("invalid Unicode scalar constant");
+        if (value > uint.MaxValue || !UnicodeScalarFacts.IsValid((uint)value))
+            throw Invalid("invalid Unicode scalar constant");
+        return value;
     }
 
     private static XelibOperator Map(SyntaxKind kind) => kind switch

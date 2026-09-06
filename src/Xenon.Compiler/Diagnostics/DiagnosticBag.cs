@@ -33,6 +33,20 @@ public sealed class DiagnosticBag : IReadOnlyCollection<Diagnostic>
     public void ReportUnterminatedString(TextLocation location) =>
         Report(location, "unterminated string literal", DiagnosticIds.UnterminatedString);
 
+    public void ReportUnterminatedCharacter(TextLocation location) =>
+        Report(location, "unterminated character literal", DiagnosticIds.UnterminatedCharacter);
+
+    public void ReportEmptyCharacter(TextLocation location) =>
+        Report(location, "empty character literal", DiagnosticIds.EmptyCharacter);
+
+    public void ReportMultiScalarCharacter(TextLocation location) =>
+        Report(location, "character literal must contain exactly one Unicode scalar value",
+            DiagnosticIds.MultiScalarCharacter);
+
+    public void ReportInvalidUnicodeScalar(TextLocation location) =>
+        Report(location, "character literal contains an invalid Unicode scalar value",
+            DiagnosticIds.InvalidUnicodeScalar);
+
     public void ReportUnknownEscapeSequence(TextLocation location, char character) =>
         Report(location, $"unknown escape sequence '\\{character}'", DiagnosticIds.UnknownEscapeSequence);
 

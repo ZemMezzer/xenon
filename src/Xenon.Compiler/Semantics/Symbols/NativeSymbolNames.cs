@@ -17,6 +17,7 @@ public static class NativeSymbolNames
         PointerTypeSymbol or FunctionPointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol => "ptr",
         OwnershipTypeSymbol => null,
         EnumTypeSymbol enumeration => AbiType(enumeration.UnderlyingType, layout),
+        PrimitiveTypeSymbol { IsCharacter: true } => "i32",
         PrimitiveTypeSymbol { IsInteger: true } integer =>
             (integer.BitWidth ?? layout?.GetIntegerBitWidth(integer)) is int width ? $"i{width}" : null,
         InterfaceTypeSymbol => "{ptr,ptr}",
