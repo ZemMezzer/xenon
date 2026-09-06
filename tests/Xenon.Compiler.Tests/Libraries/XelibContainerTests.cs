@@ -726,6 +726,115 @@ public sealed class XelibContainerTests
     }
 
     [Fact]
+    public void StackArrayReachabilitySelectsOnlyRequiredXelibElementDestructors()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace StackArrayClosure;
+            void ResourceCleanup() { }
+            void StructInitialize() { }
+            void StructCleanup() { }
+            void OtherCleanup() { }
+            int InitializeElement() { StructInitialize(); return 1; }
+            struct Resource {
+                public int Value;
+                public ~Resource() { ResourceCleanup(); }
+            }
+            struct Element {
+                public int Value = InitializeElement();
+                public ~Element() { StructCleanup(); }
+            }
+            struct Other {
+                public ~Other() { OtherCleanup(); }
+            }
+            public int StackAtomicOwned(int count) {
+                atomic<shared<Resource>>[] values = atomic<shared<Resource>>[count];
+                return count;
+            }
+            public int StackStruct(int count) {
+                Element[] values = Element[count];
+                return count;
+            }
+            public int StackTrivial(int count) {
+                int[] values = int[count];
+                return count;
+            }
+            public int HeapAtomicOwned(int count) {
+                atomic<shared<Resource>>[] values = new atomic<shared<Resource>>[count];
+                return count;
+            }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("StackArrayClosure")));
+
+        Compilation atomic = CreateApp("StackAtomicOwned");
+        BoundFunction[] atomicBodies = atomic.GetStaticImplementationFunctions().ToArray();
+        FunctionSymbol atomicElementDestructor = GetArrayElementDestructor(atomicBodies, "StackAtomicOwned");
+        Assert.Contains(atomicBodies, function => ReferenceEquals(function.Symbol, atomicElementDestructor));
+        Assert.Contains(atomicBodies, function => function.Symbol.Name == "ResourceCleanup");
+        Assert.DoesNotContain(atomicBodies, function => function.Symbol.Name is "OtherCleanup" or "StructCleanup");
+        GenerateForHost(atomic);
+
+        Compilation structure = CreateApp("StackStruct");
+        BoundFunction[] structBodies = structure.GetStaticImplementationFunctions().ToArray();
+        FunctionSymbol structElementDestructor = GetArrayElementDestructor(structBodies, "StackStruct");
+        Assert.Contains(structBodies, function => ReferenceEquals(function.Symbol, structElementDestructor));
+        Assert.Contains(structBodies, function => function.Symbol.Name == "StructInitialize");
+        Assert.Contains(structBodies, function => function.Symbol.Name == "StructCleanup");
+        Assert.DoesNotContain(structBodies, function => function.Symbol.Name == "OtherCleanup");
+        GenerateForHost(structure);
+
+        Compilation trivial = CreateApp("StackTrivial");
+        BoundFunction[] trivialBodies = trivial.GetStaticImplementationFunctions().ToArray();
+        Assert.Null(GetArrayElementDestructorOrNull(trivialBodies, "StackTrivial"));
+        Assert.DoesNotContain(trivialBodies, function =>
+            function.Symbol.FunctionKind is FunctionKind.Destructor or FunctionKind.DestructorGlue ||
+            function.Symbol.Name.EndsWith("Cleanup", StringComparison.Ordinal));
+        GenerateForHost(trivial);
+
+        Compilation heap = CreateApp("HeapAtomicOwned");
+        BoundFunction[] heapBodies = heap.GetStaticImplementationFunctions().ToArray();
+        FunctionSymbol heapElementDestructor = GetArrayElementDestructor(heapBodies, "HeapAtomicOwned");
+        Assert.DoesNotContain(heapBodies, function => ReferenceEquals(function.Symbol, heapElementDestructor));
+        Assert.DoesNotContain(heapBodies, function => function.Symbol.Name.EndsWith("Cleanup", StringComparison.Ordinal));
+        GenerateForHost(heap);
+
+        Compilation CreateApp(string entry)
+        {
+            Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From($$"""
+                using StackArrayClosure;
+                namespace App;
+                int Main() { return {{entry}}(1); }
+                """, "app.xe"));
+            Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+            return app;
+        }
+
+        static FunctionSymbol GetArrayElementDestructor(BoundFunction[] bodies, string functionName) =>
+            Assert.IsType<FunctionSymbol>(GetArrayElementDestructorOrNull(bodies, functionName));
+
+        static FunctionSymbol? GetArrayElementDestructorOrNull(BoundFunction[] bodies, string functionName)
+        {
+            BoundFunction body = Assert.Single(bodies, function => function.Symbol.Name == functionName);
+            BoundArrayCreationExpression? creation = null;
+            XelibBodyCodec.Collect(body.Body, _ => { }, _ => { }, node =>
+            {
+                if (node is BoundArrayCreationExpression array)
+                    creation = array;
+            });
+            return TypeFacts.GetCompleteDestructor(Assert.IsType<BoundArrayCreationExpression>(creation).ElementType);
+        }
+
+        static void GenerateForHost(Compilation compilation)
+        {
+            var target = LlvmTargetOptions.CreateHost();
+            Compilation targeted = LlvmIrGenerator.BindForTarget(compilation, target);
+            Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+            _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+        }
+    }
+
+    [Fact]
     public void UsedNonGenericXelibTlsSelectsItsDestructorButUnusedSiblingDoesNot()
     {
         Compilation library = Compilation.Create(SourceText.From("""

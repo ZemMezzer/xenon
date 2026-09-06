@@ -435,6 +435,42 @@ public sealed class XenonBuildDriverTests
     }
 
     [Fact]
+    public async Task XelibStackAtomicSharedArraySelectsAndRunsElementCleanup()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("StackArrayClosureXelib", "xenon-library", """
+            namespace StackArrayClosureXelib;
+            struct Counters { public static int Destroyed; }
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; }
+                public ~Resource() { Counters.Destroyed++; }
+            }
+            public int Run(int count)
+            {
+                Counters.Destroyed = 0;
+                {
+                    atomic<shared<Resource>>[] values = atomic<shared<Resource>>[count];
+                    for (int index = 0; index < count; index++)
+                        values[index] = new Resource(index);
+                }
+                return 40 + Counters.Destroyed;
+            }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "StackArrayClosureXelibApp", """
+            using StackArrayClosureXelib;
+            namespace StackArrayClosureXelibApp;
+            int Main() { return Run(2); }
+            """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+    }
+
+    [Fact]
     public async Task XelibDependenciesResolveByContentIdentityWithoutSources()
     {
         using var directory = new TemporaryProject();
