@@ -522,7 +522,7 @@ public sealed class LlvmIrGenerator
     private void DeclareInterfaceTables(NamespaceSymbol @namespace)
     {
         foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType)
-                     .Where(_compilation.IsImportedDispatchTypeNativeReachable))
+                     .Where(_compilation.IsImportedInterfaceDispatchTypeNativeReachable))
         {
             var tables = new Dictionary<InterfaceTypeSymbol, (LlvmVTable Table, FunctionSymbol[] Implementations)>();
             bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(type);

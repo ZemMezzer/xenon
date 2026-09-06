@@ -1720,6 +1720,51 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
+    public void Analyzer_RejectsPrivateStaticMemberAccessThroughConstructedGenericType()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct Secret<T>
+            {
+                private static int Value = 42;
+                private static int Get() { return 42; }
+            }
+
+            int Main() { return Secret<int>.Value + Secret<int>.Get(); }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.InaccessibleSymbol &&
+            diagnostic.Message.StartsWith("static field 'Value' is private in struct 'Secret", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.InaccessibleSymbol &&
+            diagnostic.Message.StartsWith("static method 'Get' is private in struct 'Secret", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_BindsPublicStaticMembersOnQualifiedConstructedGenericType()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+
+            struct State<T>
+            {
+                const int Width = sizeof(T);
+                public static int Value = 37;
+                public static int Get() { return 1; }
+            }
+
+            int Main() {
+                return Example.State<int>.Value + Example.State<int>.Get() +
+                    Example.State<int>.Width;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
     public void Analyzer_RejectsStaticInitializerTypeMismatch()
     {
         Compilation compilation = CreateCompilation("""

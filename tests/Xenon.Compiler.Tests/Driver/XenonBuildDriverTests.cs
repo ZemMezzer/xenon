@@ -306,6 +306,7 @@ public sealed class XenonBuildDriverTests
                 T value;
                 int offset = ConstantOffset;
                 public static int State = 7;
+                public static int Adjustment() { return 0; }
                 public Box(T item) { value = move item; }
                 public T Get() { return move value; }
                 public int Offset { get { return offset; } }
@@ -323,7 +324,8 @@ public sealed class XenonBuildDriverTests
             int Main()
             {
                 Box<int> box = Box<int>(40);
-                return box.Offset + box.Get();
+                return box.Offset + box.Get() + GenericStructXelib.Box<int>.State - 7 +
+                    GenericStructXelib.Box<int>.Adjustment();
             }
             """);
         string relativeLibrary = Path.GetRelativePath(directory.Root, library.ArtifactPath!).Replace('\\', '/');
@@ -371,10 +373,58 @@ public sealed class XenonBuildDriverTests
             namespace GenericPortableStateApp;
             int Main()
             {
-                State<int> value = State<int>();
-                return cast<int>(State<int>.Width) + cast<int>(State<int>.Alignment) + value.Read();
+                GenericPortableState.State<int> value = State<int>();
+                return cast<int>(GenericPortableState.State<int>.Width) +
+                    cast<int>(GenericPortableState.State<int>.Alignment) + value.Read();
             }
             """);
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task XelibDestructorReachabilityCoversAssignmentAndNonGenericTls()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("DestructorClosureXelib", "xenon-library", """
+            namespace DestructorClosureXelib;
+            struct Counters { public static int Assignment; public static int Tls; }
+            void NoteTlsCleanup() { Counters.Tls += 1; }
+            struct AssignmentResource
+            {
+                public int Value = 1;
+                public ~AssignmentResource() { Counters.Assignment += Value; }
+            }
+            struct TlsResource
+            {
+                public int Value = 41;
+                public ~TlsResource() { NoteTlsCleanup(); }
+            }
+            struct State
+            {
+                public static threadlocal TlsResource Current = TlsResource();
+            }
+            public int RunAssignment()
+            {
+                Counters.Assignment = 0;
+                { AssignmentResource value; value = AssignmentResource(); }
+                return Counters.Assignment;
+            }
+            public int ReadTls() { return State.Current.Value; }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "DestructorClosureXelibApp", """
+            using DestructorClosureXelib;
+            namespace DestructorClosureXelibApp;
+            int Main() { return RunAssignment() + ReadTls(); }
+            """);
+
         Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
             Environment.NewLine + app.Failure);
         NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(

@@ -304,10 +304,10 @@ public sealed class XelibContainerTests
 
         LibraryCompilationReference reference = XelibReader.Read(bytes);
         Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
-            using GenericLayout;
             namespace App;
             int Main() {
-                return cast<int>(State<int*>.Width + State<int*>.Alignment);
+                return cast<int>(GenericLayout.State<int*>.Width +
+                    GenericLayout.State<int*>.Alignment);
             }
             """, "app.xe"));
         var narrowTarget = new LlvmTargetOptions("i686-pc-windows-msvc");
@@ -323,6 +323,41 @@ public sealed class XelibContainerTests
 
         static bool ContainsOpcode(XelibBodyNode node, XelibBodyOpcode opcode) =>
             node.Opcode == opcode || node.Children.Any(child => ContainsOpcode(child, opcode));
+    }
+
+    [Fact]
+    public void QualifiedGenericStaticAccessAcrossXelibPreservesAccessibility()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace GenericAccess;
+            struct State<T> {
+                private static int Hidden = 100;
+                public static int Value = 40;
+                private static int Secret() { return 100; }
+                public static int Read() { return 2; }
+            }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("GenericAccess")));
+
+        Compilation valid = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            namespace App;
+            int Main() {
+                return GenericAccess.State<int>.Value + GenericAccess.State<int>.Read();
+            }
+            """, "valid.xe"));
+        Assert.False(valid.HasErrors, string.Join(Environment.NewLine, valid.Diagnostics));
+        _ = new LlvmIrGenerator().Generate(valid);
+
+        Compilation invalid = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            namespace App;
+            int Main() {
+                return GenericAccess.State<int>.Hidden + GenericAccess.State<int>.Secret();
+            }
+            """, "invalid.xe"));
+        Assert.Equal(2, invalid.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.InaccessibleSymbol));
     }
 
     [Fact]
@@ -471,6 +506,270 @@ public sealed class XelibContainerTests
             Assert.Contains($"_{Convert.ToHexString(Encoding.UTF8.GetBytes(initializer.Symbol.QualifiedName))}",
                 ir, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void ImportedReachabilitySeparatesTypeReferencesLifecycleAndDispatch()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Precision;
+            interface IExtra { int Extra(); }
+            int Seed() { return 42; }
+            void Cleanup() { }
+            struct Heavy : IExtra {
+                public int Value = Seed();
+                public int Extra() { return 99; }
+                public virtual int Read() { return Value; }
+                public ~Heavy() { Cleanup(); }
+            }
+            public Heavy* Echo(Heavy* value) { return value; }
+            public int Invoke(Heavy* value) { return value->Read(); }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Precision")));
+        StructTypeSymbol heavy = Assert.Single(reference.GlobalNamespace.Namespaces).Structs.Single();
+
+        Compilation referenceOnly = CreateApp("""
+            using Precision;
+            namespace ReferenceApp;
+            Heavy* Relay(Heavy* value) { return Echo(value); }
+            int Main() { Heavy untouched; return cast<int>(sizeof(Heavy)); }
+            """);
+        BoundFunction[] referenced = referenceOnly.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(referenced, function => function.Symbol.Name == "Echo");
+        Assert.DoesNotContain(referenced, IsHeavyRuntimeBody);
+        Assert.True(referenceOnly.IsImportedSymbolNativeReachable(heavy));
+        Assert.False(referenceOnly.IsImportedDispatchTypeNativeReachable(heavy));
+        Assert.False(referenceOnly.IsImportedInterfaceDispatchTypeNativeReachable(heavy));
+
+        Compilation virtualCall = CreateApp("""
+            using Precision;
+            namespace VirtualApp;
+            int Call(Heavy* value) { return Invoke(value); }
+            int Main() { return 0; }
+            """);
+        BoundFunction[] virtualBodies = virtualCall.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(virtualBodies, function => function.Symbol.Name == "Invoke");
+        Assert.Contains(virtualBodies, function => function.Symbol.Name == "Read");
+        Assert.DoesNotContain(virtualBodies, function => function.Symbol.Name == "Extra");
+        Assert.True(virtualCall.IsImportedDispatchTypeNativeReachable(heavy));
+        Assert.False(virtualCall.IsImportedInterfaceDispatchTypeNativeReachable(heavy));
+
+        Compilation construction = CreateApp("""
+            using Precision;
+            namespace ConstructionApp;
+            int Main() { Heavy value = Heavy(); return value.Value; }
+            """);
+        BoundFunction[] constructed = construction.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(constructed, function => function.Symbol.Name == "Seed");
+        Assert.Contains(constructed, function => function.Symbol.Name == "Cleanup");
+        Assert.Contains(constructed, function => function.Symbol.FunctionKind == FunctionKind.InstanceInitializer &&
+            function.Symbol.ContainingStruct?.Name == "Heavy");
+        Assert.Contains(constructed, function => function.Symbol.FunctionKind == FunctionKind.Destructor &&
+            function.Symbol.ContainingStruct?.Name == "Heavy");
+        Assert.True(construction.IsImportedDispatchTypeNativeReachable(heavy));
+        Assert.False(construction.IsImportedInterfaceDispatchTypeNativeReachable(heavy));
+
+        Compilation CreateApp(string source)
+        {
+            Compilation app = Compilation.Create(new CompilationOptions(), [reference],
+                SourceText.From(source, "app.xe"));
+            Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+            return app;
+        }
+
+        static bool IsHeavyRuntimeBody(BoundFunction function) =>
+            function.Symbol.ContainingStruct?.Name == "Heavy" ||
+            function.Symbol.Name is "Seed" or "Cleanup";
+    }
+
+    [Fact]
+    public void AssignmentAndAtomicReplacementSelectOnlyRequiredXelibDestructors()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace DestructorClosure;
+            void ResourceCleanup() { }
+            void OtherCleanup() { }
+            void GenericCleanup() { }
+            struct Resource {
+                public int Value;
+                public ~Resource() { ResourceCleanup(); }
+            }
+            struct Other {
+                public ~Other() { OtherCleanup(); }
+            }
+            struct Holder {
+                public Resource A;
+                public Resource B;
+                public void Replace() { A = move B; B = Resource(); }
+            }
+            struct FirstInitializationOnly {
+                public Resource Value;
+                public FirstInitializationOnly() { Value = Resource(); }
+            }
+            struct Payload { public int Value; }
+            struct OwnershipHolder { public shared<Payload> Owner; }
+            struct Box<T> {
+                public T Value;
+                public ~Box() { GenericCleanup(); }
+            }
+            public void AssignAfterDeclaration() {
+                Resource value;
+                value = Resource();
+            }
+            public void Replace(storage<Holder>& holder) { holder.Replace(); }
+            public FirstInitializationOnly* AllocateWithoutDestruction() {
+                return new FirstInitializationOnly();
+            }
+            public void AssignOwnershipHolder() {
+                OwnershipHolder value;
+                value = OwnershipHolder();
+            }
+            public void AssignAtomic(atomic<Resource>& target, Resource& replacement) {
+                target = replacement;
+            }
+            public bool CompareAtomic(
+                atomic<Resource>& target,
+                Resource& expected,
+                Resource& desired) {
+                return target : expected --> desired;
+            }
+            public void SwapAtomic(atomic<Resource>& target, Resource& replacement) {
+                target <-> replacement;
+            }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("DestructorClosure")));
+
+        AssertClosure("int Main() { AssignAfterDeclaration(); return 0; }", "Resource", "ResourceCleanup");
+        AssertClosure("void Run(storage<Holder>& value) { Replace(value); }", "Resource", "ResourceCleanup");
+        Compilation firstInitialization = CreateApp(
+            "FirstInitializationOnly* Run() { return AllocateWithoutDestruction(); }");
+        BoundFunction[] firstInitializationBodies = firstInitialization.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(firstInitializationBodies, function => function.Symbol.Name == "AllocateWithoutDestruction");
+        Assert.DoesNotContain(firstInitializationBodies, function =>
+            function.Symbol.FunctionKind is FunctionKind.Destructor or FunctionKind.DestructorGlue ||
+            function.Symbol.Name == "ResourceCleanup");
+        GenerateForHost(firstInitialization);
+        Compilation ownership = CreateApp("int Main() { AssignOwnershipHolder(); return 0; }");
+        BoundFunction[] ownershipBodies = ownership.GetStaticImplementationFunctions().ToArray();
+        StructTypeSymbol ownershipHolder = Assert.Single(reference.GlobalNamespace.Namespaces).Structs
+            .Single(type => type.Name == "OwnershipHolder");
+        Assert.Contains(ownershipBodies, function =>
+            ReferenceEquals(function.Symbol, ownershipHolder.CompleteDestructor));
+        Assert.DoesNotContain(ownershipBodies, function => function.Symbol.Name == "OtherCleanup");
+        GenerateForHost(ownership);
+        AssertClosure("""
+            void Run(atomic<Resource>& target, Resource& value) {
+                AssignAtomic(target, value);
+            }
+            """, "Resource", "ResourceCleanup");
+        AssertClosure("""
+            bool Run(atomic<Resource>& target, Resource& expected, Resource& desired) {
+                return CompareAtomic(target, expected, desired);
+            }
+            """, "Resource", "ResourceCleanup");
+        Compilation atomicSwap = CreateApp("""
+            void Run(atomic<Resource>& target, Resource& replacement) {
+                SwapAtomic(target, replacement);
+            }
+            """);
+        BoundFunction[] atomicSwapBodies = atomicSwap.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(atomicSwapBodies, function => function.Symbol.Name == "SwapAtomic");
+        Assert.DoesNotContain(atomicSwapBodies, function =>
+            function.Symbol.ContainingStruct?.Name == "Resource" ||
+            function.Symbol.Name == "ResourceCleanup");
+        GenerateForHost(atomicSwap);
+
+        Compilation generic = CreateApp("int Main() { Box<int> value; value = Box<int>(); return 0; }");
+        BoundFunction[] genericBodies = generic.GetStaticImplementationFunctions().ToArray();
+        BoundFunction genericDestructor = Assert.Single(genericBodies, function =>
+            function.Symbol.ContainingStruct is { } owner &&
+            owner.Name.StartsWith("Box", StringComparison.Ordinal) &&
+            ReferenceEquals(function.Symbol, owner.CompleteDestructor));
+        Assert.Contains(genericBodies, function => function.Symbol.Name == "GenericCleanup");
+        Assert.DoesNotContain(genericBodies, function => function.Symbol.Name is "OtherCleanup");
+        GenerateForHost(generic);
+        Assert.NotNull(genericDestructor.Symbol.ContainingStruct);
+
+        void AssertClosure(string body, string destructorOwner, string dependency)
+        {
+            Compilation app = CreateApp(body);
+            BoundFunction[] selected = app.GetStaticImplementationFunctions().ToArray();
+            Assert.Contains(selected, function => function.Symbol.FunctionKind == FunctionKind.Destructor &&
+                function.Symbol.ContainingStruct?.Name == destructorOwner);
+            Assert.Contains(selected, function => function.Symbol.Name == dependency);
+            Assert.DoesNotContain(selected, function => function.Symbol.Name is "OtherCleanup");
+            GenerateForHost(app);
+        }
+
+        static void GenerateForHost(Compilation compilation)
+        {
+            var target = LlvmTargetOptions.CreateHost();
+            Compilation targeted = LlvmIrGenerator.BindForTarget(compilation, target);
+            Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+            _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+        }
+
+        Compilation CreateApp(string body)
+        {
+            Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From($$"""
+                using DestructorClosure;
+                namespace App;
+                {{body}}
+                """, "app.xe"));
+            Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+            return app;
+        }
+    }
+
+    [Fact]
+    public void UsedNonGenericXelibTlsSelectsItsDestructorButUnusedSiblingDoesNot()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace TlsDestructorClosure;
+            void UsedCleanup() { }
+            void UnusedCleanup() { }
+            struct Resource {
+                public int Value = 42;
+                public ~Resource() { UsedCleanup(); }
+            }
+            struct UnusedResource {
+                public int Value = 99;
+                public ~UnusedResource() { UnusedCleanup(); }
+            }
+            struct State {
+                public static threadlocal Resource Current = Resource();
+                public static threadlocal UnusedResource Unused = UnusedResource();
+            }
+            public int Read() { return State.Current.Value; }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("TlsDestructorClosure")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using TlsDestructorClosure;
+            namespace App;
+            int Main() { return Read(); }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction[] selected = app.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(selected, function => function.Symbol.FunctionKind == FunctionKind.ThreadLocalInitializer &&
+            function.Symbol.ThreadLocalField?.Name == "Current");
+        Assert.Contains(selected, function => function.Symbol.FunctionKind == FunctionKind.Destructor &&
+            function.Symbol.ContainingStruct?.Name == "Resource");
+        Assert.Contains(selected, function => function.Symbol.Name == "UsedCleanup");
+        Assert.DoesNotContain(selected, function => function.Symbol.FunctionKind == FunctionKind.ThreadLocalInitializer &&
+            function.Symbol.ThreadLocalField?.Name == "Unused");
+        Assert.DoesNotContain(selected, function => function.Symbol.ContainingStruct?.Name == "UnusedResource" ||
+            function.Symbol.Name == "UnusedCleanup");
+        var target = LlvmTargetOptions.CreateHost();
+        app = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(app, target);
     }
 
     [Fact]
