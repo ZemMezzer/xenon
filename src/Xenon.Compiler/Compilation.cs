@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using Xenon.Compiler.Diagnostics;
+using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics;
+using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
@@ -172,6 +174,80 @@ public sealed class Compilation
         Symbol root = symbol;
         while (root.ContainingSymbol is Symbol containing) root = containing;
         return ReferenceEquals(root, SemanticModel.GlobalNamespace);
+    }
+
+    /// <summary>True when this build emits the symbol either from source or a statically consumed XELIB.</summary>
+    public bool IsSymbolDefinedInCurrentArtifact(Symbol symbol)
+    {
+        ArgumentNullException.ThrowIfNull(symbol);
+        Symbol root = symbol;
+        while (root.ContainingSymbol is Symbol containing) root = containing;
+        return ReferenceEquals(root, SemanticModel.GlobalNamespace) || References
+            .OfType<LibraryCompilationReference>()
+            .Any(reference => ReferenceEquals(root, reference.GlobalNamespace));
+    }
+
+    public ImmutableArray<BoundFunction> GetStaticImplementationFunctions()
+    {
+        ImmutableArray<BoundFunction> source = SemanticModel.Functions;
+        var available = new Dictionary<FunctionSymbol, BoundFunction>(ReferenceEqualityComparer.Instance);
+        foreach (BoundFunction function in References.OfType<LibraryCompilationReference>()
+                     .SelectMany(reference => reference.ImplementationFunctions))
+            available.TryAdd(function.Symbol, function);
+        if (available.Count == 0) return source;
+
+        var selected = new HashSet<FunctionSymbol>(ReferenceEqualityComparer.Instance);
+        var pending = new Queue<FunctionSymbol>();
+        void Select(FunctionSymbol function)
+        {
+            if (available.ContainsKey(function) && selected.Add(function)) pending.Enqueue(function);
+        }
+        void SelectDispatchBodies(NamespaceSymbol @namespace)
+        {
+            foreach (StructTypeSymbol type in @namespace.Structs)
+            {
+                foreach (FunctionSymbol function in type.VirtualMethods) Select(function);
+                if (!type.Interfaces.IsEmpty)
+                    foreach (FunctionSymbol function in type.Methods) Select(function);
+            }
+            foreach (NamespaceSymbol child in @namespace.Namespaces) SelectDispatchBodies(child);
+        }
+        foreach (LibraryCompilationReference reference in References.OfType<LibraryCompilationReference>())
+            SelectDispatchBodies(reference.GlobalNamespace);
+        void Inspect(BoundFunction function)
+        {
+            XelibBodyCodec.Collect(function.Body, _ => { }, symbol =>
+            {
+                switch (symbol)
+                {
+                    case FunctionSymbol called: Select(called); break;
+                    case PropertySymbol property:
+                        if (property.Getter is { } getter) Select(getter);
+                        if (property.Setter is { } setter) Select(setter);
+                        break;
+                    case IndexerSymbol indexer:
+                        if (indexer.Getter is { } indexerGetter) Select(indexerGetter);
+                        if (indexer.Setter is { } indexerSetter) Select(indexerSetter);
+                        break;
+                }
+            });
+        }
+        foreach (BoundFunction function in source) Inspect(function);
+        while (pending.TryDequeue(out FunctionSymbol? symbol)) Inspect(available[symbol]);
+
+        return source.Concat(selected.Select(symbol => available[symbol])
+                .OrderBy(function => function.Symbol.QualifiedName, StringComparer.Ordinal))
+            .DistinctBy(function => function.Symbol, ReferenceEqualityComparer.Instance)
+            .ToImmutableArray();
+    }
+
+    public LibraryCompilationReference? GetOwningLibrary(Symbol symbol)
+    {
+        ArgumentNullException.ThrowIfNull(symbol);
+        Symbol root = symbol;
+        while (root.ContainingSymbol is Symbol containing) root = containing;
+        return References.OfType<LibraryCompilationReference>()
+            .FirstOrDefault(reference => ReferenceEquals(root, reference.GlobalNamespace));
     }
 
     private Compilation Derive(ImmutableArray<SyntaxTree> syntaxTrees, CompilationOptions options,

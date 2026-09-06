@@ -117,6 +117,7 @@ public static class XenonProjectLoader
             "executable" => XenonProjectType.Executable,
             "static-library" => XenonProjectType.StaticLibrary,
             "shared-library" => XenonProjectType.SharedLibrary,
+            "xenon-library" => XenonProjectType.XenonLibrary,
             _ => throw Error(
                 fullPath,
                 settings["project.type"].Line,
@@ -149,7 +150,12 @@ public static class XenonProjectLoader
         ImmutableArray<string> libraries = GetOptionalStringArray(
             settings,
             "libraries.libraries",
-            fullPath);
+            fullPath)
+            .Select(library => string.Equals(Path.GetExtension(library), ".xelib",
+                StringComparison.OrdinalIgnoreCase)
+                ? ProjectPath.Normalize(library, rootDirectory)
+                : library)
+            .ToImmutableArray();
         ImmutableArray<string> libraryPaths = GetOptionalStringArray(
                 settings,
                 "libraries.library-paths",

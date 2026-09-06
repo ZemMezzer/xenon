@@ -7,6 +7,7 @@ public enum XenonProjectType
     Executable,
     StaticLibrary,
     SharedLibrary,
+    XenonLibrary,
 }
 
 public sealed record XenonBuildProfile(
@@ -65,6 +66,14 @@ public class ProjectConfiguration
     public ImmutableArray<string> SourceFiles { get; }
 
     public ImmutableArray<string> Libraries { get; }
+
+    public ImmutableArray<string> XenonLibraries => Libraries
+        .Where(path => string.Equals(Path.GetExtension(path), ".xelib", StringComparison.OrdinalIgnoreCase))
+        .ToImmutableArray();
+
+    public ImmutableArray<string> NativeLibraries => Libraries
+        .Where(path => !string.Equals(Path.GetExtension(path), ".xelib", StringComparison.OrdinalIgnoreCase))
+        .ToImmutableArray();
 
     public ImmutableArray<string> LibraryPaths { get; }
 

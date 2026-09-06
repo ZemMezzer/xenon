@@ -7773,7 +7773,8 @@ internal sealed class FunctionBodyBinder
         _ = ValidateGenericArguments(method.Symbol.Name, method.ParameterTypes, arguments, argumentSyntax,
             target.MemberToken.Location, incomplete ? completedArgumentCount : null);
         RecordSymbolAndType(target, method.Symbol, method.ReturnType);
-        return new BoundDeferredConstantExpression(method.ReturnType);
+        return new BoundDeferredGenericMethodCallExpression(receiver, method.Symbol, arguments,
+            pointerAccess, method.ReturnType);
     }
 
     private BoundExpression BindGenericIndexerGet(IndexExpressionSyntax syntax, BoundExpression receiver,

@@ -120,6 +120,15 @@ internal sealed class SemanticAnalyzer
         var genericSpecializer = new GenericFunctionSpecializer(_genericImplementations, _typeFactory,
             _diagnostics, _constants, _genericStructSpecializer!, ResolveCompilationNamespace,
             _cancellationToken);
+        foreach ((StructTypeSymbol definition, IGenericStructImplementation implementation) in
+                 _genericImplementations.ToImmutable().Structs)
+            if (implementation is SourceGenericStructImplementation sourceImplementation)
+            {
+                sourceImplementation.CapturePortableInstanceInitializer(definition, _diagnostics,
+                    _constants, genericSpecializer, _cancellationToken);
+                sourceImplementation.CapturePortableStaticInitializers(definition,
+                    _genericImplementationServices);
+            }
         BindThreadLocalFieldInitializers(genericSpecializer);
         StabilizeConstructorReferenceSummaries();
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
@@ -131,7 +140,14 @@ internal sealed class SemanticAnalyzer
             BoundBlockStatement boundBody = binder.BindBody(body);
             // Generic definitions are checked now, but only concrete specializations may
             // enter the emitted function set.
-            if (!symbol.IsGenericDefinition)
+            if (symbol.IsGenericDefinition)
+            {
+                if (_genericImplementations.TryGetFunction(symbol,
+                        out IGenericFunctionImplementation? implementation) &&
+                    implementation is SourceGenericFunctionImplementation sourceImplementation)
+                    sourceImplementation.SetPortableBody(boundBody);
+            }
+            else
                 functions.Add(new BoundFunction(symbol, boundBody));
             foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
         }

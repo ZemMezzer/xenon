@@ -523,6 +523,7 @@ public sealed class Workspace : IDisposable
             ImmutableArray<DocumentSnapshot> projectDocuments = documents[id];
             DocumentChangeKind kind = mutation?.Kind ?? DocumentChangeKind.None;
             bool sameCompilationInputs = !dependencyChanged && mutation is not { ConfigurationChanged: true } &&
+                old.LibraryFingerprint == ProjectSnapshot.CreateLibraryFingerprint(configuration) &&
                 old.Documents.Length == projectDocuments.Length && old.Documents.Zip(projectDocuments)
                     .All(pair => ReferenceEquals(pair.First.SyntaxTree, pair.Second.SyntaxTree));
             Compilation? reusableCompilation = sameCompilationInputs ? old.TryGetCachedCompilation() : null;

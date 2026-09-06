@@ -1,6 +1,7 @@
 using Xenon.Compiler;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
+using Xenon.Compiler.Libraries;
 
 namespace Xenon.ProjectSystem;
 
@@ -11,7 +12,8 @@ public static class XenonProjectCompilationFactory
         XenonProject project,
         string profileName,
         IReadOnlyDictionary<string, Compilation>? dependencyCompilations = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, LibraryCompilationReference>? dependencyLibraries = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         SourceText[] sources = project.SourceFiles.Select(path =>
@@ -19,7 +21,8 @@ public static class XenonProjectCompilationFactory
             cancellationToken.ThrowIfCancellationRequested();
             return SourceText.From(File.ReadAllText(path), path);
         }).ToArray();
-        return Create(project, profileName, sources, dependencyCompilations, cancellationToken);
+        return Create(project, profileName, sources, dependencyCompilations, cancellationToken,
+            dependencyLibraries);
     }
 
     public static Compilation Create(
@@ -27,19 +30,27 @@ public static class XenonProjectCompilationFactory
         string profileName,
         IEnumerable<SourceText> sources,
         IReadOnlyDictionary<string, Compilation>? dependencyCompilations = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, LibraryCompilationReference>? dependencyLibraries = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(sources);
         dependencyCompilations ??= new Dictionary<string, Compilation>(ProjectPath.Comparer);
-        var references = new List<CompilationReference>(project.ProjectReferences.Length);
+        dependencyLibraries ??= new Dictionary<string, LibraryCompilationReference>(ProjectPath.Comparer);
+        var references = new List<CompilationReference>(project.ProjectReferences.Length + project.XenonLibraries.Length);
         foreach (string identity in project.ProjectReferences)
         {
+            if (dependencyLibraries.TryGetValue(identity, out LibraryCompilationReference? library))
+            {
+                references.Add(library);
+                continue;
+            }
             if (!dependencyCompilations.TryGetValue(identity, out Compilation? dependency))
                 throw new ProjectSystemException(
                     $"compilation for project reference '{identity}' is unavailable while compiling '{project.Name}'");
             references.Add(new SourceCompilationReference(dependency));
         }
+        references.AddRange(XelibReferenceLoader.LoadFiles(project.XenonLibraries));
         XenonBuildProfile profile = project.GetProfile(profileName);
         var options = new CompilationOptions(
             project.Type == XenonProjectType.Executable
@@ -54,20 +65,28 @@ public static class XenonProjectCompilationFactory
         string profileName,
         IEnumerable<SyntaxTree> syntaxTrees,
         IReadOnlyDictionary<string, Compilation>? dependencyCompilations = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, LibraryCompilationReference>? dependencyLibraries = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(syntaxTrees);
         dependencyCompilations ??= new Dictionary<string, Compilation>(ProjectPath.Comparer);
-        var references = new List<CompilationReference>(project.ProjectReferences.Length);
+        dependencyLibraries ??= new Dictionary<string, LibraryCompilationReference>(ProjectPath.Comparer);
+        var references = new List<CompilationReference>(project.ProjectReferences.Length + project.XenonLibraries.Length);
         foreach (string identity in project.ProjectReferences)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (dependencyLibraries.TryGetValue(identity, out LibraryCompilationReference? library))
+            {
+                references.Add(library);
+                continue;
+            }
             if (!dependencyCompilations.TryGetValue(identity, out Compilation? dependency))
                 throw new ProjectSystemException(
                     $"compilation for project reference '{identity}' is unavailable while compiling '{project.Name}'");
             references.Add(new SourceCompilationReference(dependency));
         }
+        references.AddRange(XelibReferenceLoader.LoadFiles(project.XenonLibraries));
         XenonBuildProfile profile = project.GetProfile(profileName);
         var options = new CompilationOptions(project.Type == XenonProjectType.Executable
             ? CompilationOutputKind.Executable : CompilationOutputKind.Library,
