@@ -424,11 +424,9 @@ public sealed class Compilation
                     TypeSymbol element = array.ElementType is AtomicTypeSymbol atomic
                         ? atomic.ElementType : array.ElementType;
                     if (element is StructTypeSymbol arrayElement)
-                        MarkType(arrayElement, TypeReachabilityReason.Construct |
-                            (array.Storage == ArrayStorageKind.Stack &&
-                             TypeFacts.GetCompleteDestructor(array.ElementType) is not null
-                                ? TypeReachabilityReason.Destruct
-                                : TypeReachabilityReason.None));
+                        MarkType(arrayElement, TypeReachabilityReason.Construct);
+                    if (array.Storage == ArrayStorageKind.Stack)
+                        MarkDestructionRequirement(array.ElementType);
                     break;
                 case BoundDefaultValueExpression { ValueType: StructTypeSymbol defaulted }
                     when defaulted.HasVirtualDispatch:
