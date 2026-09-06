@@ -1974,10 +1974,10 @@ internal sealed class FunctionBodyBinder
         if (_function.ContainingType is { } containingType)
         {
             ConstantSymbol? associatedConstant = containingType.FindMember<ConstantSymbol>(syntax.IdentifierToken.Text);
-            if (associatedConstant?.HasValue == true)
+            if (associatedConstant?.BoundValue is { } associatedValue)
             {
                 _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(associatedConstant);
-                return associatedConstant.BoundValue!;
+                return associatedValue;
             }
             if (associatedConstant is not null)
                 return new BoundErrorExpression();
@@ -2043,10 +2043,10 @@ internal sealed class FunctionBodyBinder
             syntax.IdentifierToken.Text,
             syntax.IdentifierToken.Location,
             _diagnostics);
-        if (constant?.HasValue == true)
+        if (constant?.BoundValue is { } constantValue)
         {
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(constant);
-            return constant.BoundValue!;
+            return constantValue;
         }
         if (constant is not null)
             return new BoundErrorExpression();
@@ -4177,6 +4177,28 @@ internal sealed class FunctionBodyBinder
             _semanticInfo.Symbols[syntax] = new SymbolInfo(null, [], CandidateReason.Incomplete);
             return new BoundErrorExpression();
         }
+        if (syntax.OperatorToken.Kind == SyntaxKind.DotToken &&
+            syntax.ReceiverTypeArguments is { } receiverTypeArguments &&
+            syntax.Receiver is NameExpressionSyntax genericTypeName)
+        {
+            var typeSyntax = new NamedTypeSyntax([genericTypeName.IdentifierToken], [], receiverTypeArguments);
+            if (TypeResolver.Resolve(typeSyntax, _fileScope, _diagnostics) is DeclaredTypeSymbol staticType)
+            {
+                ConstantSymbol? constant = staticType.FindMember<ConstantSymbol>(syntax.MemberToken.Text);
+                if (constant?.BoundValue is { } constantValue)
+                {
+                    RecordStaticReceiver(syntax.Receiver, staticType);
+                    RecordSymbolAndType(syntax, constant, constant.Type);
+                    return constantValue;
+                }
+                FieldSymbol? staticField = staticType.FindStaticField(syntax.MemberToken.Text);
+                if (staticField is not null)
+                {
+                    RecordStaticReceiver(syntax.Receiver, staticType);
+                    return new BoundStaticFieldExpression(staticField);
+                }
+            }
+        }
         if (syntax.OperatorToken.Kind == SyntaxKind.DotToken && TryGetDottedName(syntax, out ImmutableArray<SyntaxToken> qualifiedName) && qualifiedName.Length >= 2)
         {
             string[] typeParts = qualifiedName.Take(qualifiedName.Length - 1).Select(token => token.Text).ToArray();
@@ -4203,11 +4225,11 @@ internal sealed class FunctionBodyBinder
                     ReferenceEquals(specialization.GenericDefinition, definition))
                     staticType = specialization;
                 ConstantSymbol? constant = staticType.FindMember<ConstantSymbol>(qualifiedName[^1].Text);
-                if (constant?.HasValue == true)
+                if (constant?.BoundValue is { } constantValue)
                 {
                     RecordStaticReceiver(syntax.Receiver, staticType);
                     RecordSymbolAndType(syntax, constant, constant.Type);
-                    return constant.BoundValue!;
+                    return constantValue;
                 }
                 if (constant is not null)
                     return new BoundErrorExpression();

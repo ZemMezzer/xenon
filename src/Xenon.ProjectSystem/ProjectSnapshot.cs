@@ -96,7 +96,8 @@ public sealed class ProjectSnapshot
         await Task.Yield();
         cancellationToken.ThrowIfCancellationRequested();
         Compilation created = XenonProjectCompilationFactory.Create(Configuration, _profileName,
-            Documents.Select(document => document.SyntaxTree), dependencies, cancellationToken);
+            Documents.Select(document => document.SyntaxTree), dependencies, cancellationToken,
+            metadataOnlyXelib: true);
         cancellationToken.ThrowIfCancellationRequested();
         Compilation? winner = Interlocked.CompareExchange(ref _compilation, created, null);
         return winner ?? created;

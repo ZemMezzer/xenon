@@ -50,7 +50,8 @@ public static class XelibWriter
             [XelibSectionKind.GenericImplementations] = XelibJson.Serialize(payload.GenericImplementations),
         };
         string contentIdentity = ComputeContentIdentity(options.Name, options.Version,
-            sections.Select(pair => (pair.Key, (ReadOnlyMemory<byte>)pair.Value)));
+            sections.Select(pair => (pair.Key, (ReadOnlyMemory<byte>)pair.Value)),
+            XelibVersions.LibraryIr, XelibVersions.Language);
         var manifest = new XelibManifest(options.Name, options.Version, contentIdentity,
             XelibVersions.Language, XelibVersions.LibraryIr);
         sections.Add(XelibSectionKind.Manifest, XelibJson.Serialize(manifest));
@@ -81,9 +82,16 @@ public static class XelibWriter
     }
 
     internal static string ComputeContentIdentity(string name, string? version,
-        IEnumerable<(XelibSectionKind Kind, ReadOnlyMemory<byte> Data)> sections)
+        IEnumerable<(XelibSectionKind Kind, ReadOnlyMemory<byte> Data)> sections,
+        ushort libraryIrVersion = XelibVersions.LibraryIr,
+        ushort languageVersion = XelibVersions.Language)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Append("XELIB-CONTENT-IDENTITY-V2"u8);
+        Span<byte> encodedVersions = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(encodedVersions, libraryIrVersion);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(encodedVersions[2..], languageVersion);
+        Append(encodedVersions);
         Append(Encoding.UTF8.GetBytes(name));
         Append(Encoding.UTF8.GetBytes(version ?? string.Empty));
         Span<byte> encodedKind = stackalloc byte[4];
@@ -157,7 +165,8 @@ public static class XelibMetadataReader
         string actualIdentity = XelibWriter.ComputeContentIdentity(manifest.Name, manifest.Version,
             container.Sections.Where(pair => pair.Key != (uint)XelibSectionKind.Manifest)
                 .Select(pair => ((XelibSectionKind)pair.Key,
-                    (ReadOnlyMemory<byte>)pair.Value.ToArray())));
+                    (ReadOnlyMemory<byte>)pair.Value.ToArray())),
+            manifest.LibraryIrVersion, manifest.LanguageVersion);
         if (!string.Equals(actualIdentity, manifest.ContentIdentity, StringComparison.Ordinal))
             throw new XelibFormatException(XelibErrorCode.ContentIdentityMismatch,
                 "content digest does not match the manifest identity", path);
@@ -208,12 +217,15 @@ internal static class XelibExportKey
 {
     public static string Create(Symbol symbol) => symbol switch
     {
-        NamespaceSymbol value => $"N:{value.FullName}",
-        DeclaredTypeSymbol value => $"T:{value.DeclarationKind}:{value.FullName}",
-        TemplateSymbol value => $"T:template:{value.QualifiedName}",
+        NamespaceSymbol value => $"N:{Tag(XelibSymbolKind.Namespace)}:{value.FullName}",
+        StructTypeSymbol value => $"T:{Tag(XelibSymbolKind.Struct)}:{value.FullName}",
+        InterfaceTypeSymbol value => $"T:{Tag(XelibSymbolKind.Interface)}:{value.FullName}",
+        EnumTypeSymbol value => $"T:{Tag(XelibSymbolKind.Enum)}:{value.FullName}",
+        TemplateSymbol value => $"T:{Tag(XelibSymbolKind.Template)}:{value.QualifiedName}",
         FunctionSymbol value => $"F:{Owner(value)}:{value.Name}:{value.TypeParameters.Length}:" +
             $"({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})" +
-            $"->{TypeKey(value.ReturnType)}:{(int)value.FunctionKind}:{(int)value.AccessorKind}",
+            $"->{TypeKey(value.ReturnType)}:{(ushort)XelibStableMappings.ToXelib(value.FunctionKind)}:" +
+            $"{(byte)XelibStableMappings.ToXelib(value.AccessorKind)}",
         FieldSymbol value => $"D:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         PropertySymbol value => $"P:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         InterfacePropertySymbol value => $"P:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
@@ -224,9 +236,21 @@ internal static class XelibExportKey
         ConstantSymbol value => $"C:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         GenericParameterSymbol value => $"G:{Owner(value)}:{value.Ordinal}:{value.Name}",
         ParameterSymbol value => $"A:{Owner(value)}:{value.Ordinal}:{value.Name}:{TypeKey(value.Type)}",
-        TemplateMemberRequirementSymbol value => $"R:{Owner(value)}:{value.Kind}:{value.Name}",
-        _ => $"S:{symbol.Kind}:{symbol.QualifiedName}",
+        TemplateMethodRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateMethod)}:{Owner(value)}:" +
+            $"{value.Name}:({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})" +
+            $"->{TypeKey(value.ReturnType)}",
+        TemplateConstructorRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateConstructor)}:{Owner(value)}:" +
+            $"({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})",
+        TemplatePropertyRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateProperty)}:{Owner(value)}:" +
+            $"{value.Name}:{TypeKey(value.Type)}:{value.HasGetter}:{value.HasSetter}",
+        TemplateIndexerRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateIndexer)}:{Owner(value)}:" +
+            $"({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})" +
+            $"->{TypeKey(value.Type)}:{value.HasGetter}:{value.HasSetter}",
+        _ => throw new XelibFormatException(XelibErrorCode.FeatureNotRepresentable,
+            $"symbol '{symbol.QualifiedName}' has no stable XELIB export key"),
     };
+
+    private static string Tag(XelibSymbolKind kind) => ((ushort)kind).ToString(CultureInfo.InvariantCulture);
 
     public static string TypeKey(TypeSymbol type) => type switch
     {
@@ -310,11 +334,20 @@ internal sealed class XelibIrBuilder
                 XelibBodyCodec.Collect(staticInitializer.Body, AddType, VisitExternalOrLocal);
             }
             foreach (ConstantSymbol constant in entry.Key.Constants.Where(constant =>
-                         !constant.HasValue && constant.BoundValue is not null))
+                         constant.EvaluationState == ConstantEvaluationState.Deferred && constant.BoundValue is not null))
             {
                 VisitSymbol(constant);
                 XelibBodyCodec.Collect(constant.BoundValue!, AddType, VisitExternalOrLocal);
             }
+        }
+        foreach (ConstantSymbol constant in _symbols.OfType<ConstantSymbol>()
+                     .Where(constant => constant.EvaluationState == ConstantEvaluationState.Deferred)
+                     .ToArray())
+        {
+            if (constant.BoundValue is null)
+                throw new XelibFormatException(XelibErrorCode.FeatureNotRepresentable,
+                    $"deferred constant '{constant.QualifiedName}' has no semantic expression");
+            XelibBodyCodec.Collect(constant.BoundValue, AddType, VisitExternalOrLocal);
         }
 
         Symbol[] orderedSymbols = _symbols.OrderBy(XelibExportKey.Create, StringComparer.Ordinal).ToArray();
@@ -372,11 +405,9 @@ internal sealed class XelibIrBuilder
                         "portable generic static initializer is not associated with a field");
                 staticInitializers.Add(new XelibGenericFieldInitializer(Id(field), initializerBodyId));
             }
-            ImmutableArray<XelibGenericConstantImplementation> constants = entry.Key.Constants
-                .Where(constant => !constant.HasValue && constant.BoundValue is not null)
-                .Select(constant => new XelibGenericConstantImplementation(Id(constant),
-                    XelibBodyCodec.EncodeExpression(constant.BoundValue!, TypeId, Reference)))
-                .ToImmutableArray();
+            // Deferred constants use the same symbol-level representation for generic and
+            // ordinary owners. The per-generic list remains reader-compatible only.
+            ImmutableArray<XelibGenericConstantImplementation> constants = [];
             genericBuilder.Add(new XelibGenericImplementation(Id(entry.Key), bodyId, IsStruct: true,
                 staticInitializers.ToImmutable(), constants));
         }
@@ -631,14 +662,14 @@ internal sealed class XelibIrBuilder
                 ReceiverMoveEffects = value.ReceiverMoveEffects.Select(effect => effect.FieldOrdinals)
                     .ToImmutableArray(),
                 ReferenceReturnOrigins = value.ReferenceReturnOrigins.Select(origin =>
-                    new XelibReferenceReturnOriginRecord((ushort)origin.Kind, origin.ParameterOrdinal,
+                    new XelibReferenceReturnOriginRecord(XelibStableMappings.ToXelib(origin.Kind), origin.ParameterOrdinal,
                         origin.FieldOrdinals)).ToImmutableArray(),
                 SharedReturnOrigins = value.SharedReturnOrigins.Select(origin =>
-                    new XelibSharedReturnOriginRecord((ushort)origin.Kind,
+                    new XelibSharedReturnOriginRecord(XelibStableMappings.ToXelib(origin.Kind),
                         origin.ParameterOrdinal)).ToImmutableArray(),
                 ReferenceFieldOrigins = value.ReferenceFieldOrigins.Select(origin =>
                     new XelibReferenceFieldOriginRecord(origin.FieldOrdinals,
-                        new XelibReferenceReturnOriginRecord((ushort)origin.Origin.Kind,
+                        new XelibReferenceReturnOriginRecord(XelibStableMappings.ToXelib(origin.Origin.Kind),
                             origin.Origin.ParameterOrdinal, origin.Origin.FieldOrdinals),
                         origin.IsReadonly)).ToImmutableArray(),
             },
@@ -667,14 +698,23 @@ internal sealed class XelibIrBuilder
             },
             ConstantSymbol value => record with
             {
-                TypeId = TypeId(value.Type), ConstantValue = value.HasValue ? Constant(value.Value) : null,
+                TypeId = TypeId(value.Type), ConstantValue =
+                    value.EvaluationState == ConstantEvaluationState.Evaluated ? Constant(value.Value) : null,
+                ConstantExpression = value.EvaluationState == ConstantEvaluationState.Deferred
+                    ? XelibBodyCodec.EncodeExpression(value.BoundValue ?? throw new XelibFormatException(
+                        XelibErrorCode.FeatureNotRepresentable,
+                        $"deferred constant '{value.QualifiedName}' has no semantic expression"), TypeId, Reference)
+                    : value.EvaluationState == ConstantEvaluationState.Unresolved
+                        ? throw new XelibFormatException(XelibErrorCode.FeatureNotRepresentable,
+                            $"unresolved constant '{value.QualifiedName}' cannot be emitted")
+                        : null,
             },
             ParameterSymbol value => record with { TypeId = TypeId(value.Type), Ordinal = value.Ordinal },
             GenericParameterSymbol value => record with
             {
                 Ordinal = value.Ordinal,
                 Constraints = value.Constraints.Select(constraint => new XelibConstraintRecord(
-                    (ushort)constraint.Kind, Reference(constraint.Target))).ToImmutableArray(),
+                    XelibStableMappings.ToXelib(constraint.Kind), Reference(constraint.Target))).ToImmutableArray(),
             },
             TemplateMethodRequirementSymbol value => record with
             {
@@ -866,31 +906,13 @@ internal sealed class XelibIrBuilder
         return result;
     }
 
-    private static XelibFunctionKind Map(FunctionKind kind) => kind switch
-    {
-        FunctionKind.Ordinary => XelibFunctionKind.Ordinary,
-        FunctionKind.Method => XelibFunctionKind.Method,
-        FunctionKind.Constructor => XelibFunctionKind.Constructor,
-        FunctionKind.InstanceInitializer => XelibFunctionKind.InstanceInitializer,
-        FunctionKind.ThreadLocalInitializer => XelibFunctionKind.ThreadLocalInitializer,
-        FunctionKind.Destructor => XelibFunctionKind.Destructor,
-        FunctionKind.DestructorGlue => XelibFunctionKind.DestructorGlue,
-        FunctionKind.OwnershipDestructor => XelibFunctionKind.OwnershipDestructor,
-        FunctionKind.StorageDestructor => XelibFunctionKind.StorageDestructor,
-        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
-    };
+    private static XelibFunctionKind Map(FunctionKind kind) => XelibStableMappings.ToXelib(kind);
 
-    private static XelibAccessorKind Map(AccessorKind kind) => kind switch
-    {
-        AccessorKind.None => XelibAccessorKind.None,
-        AccessorKind.Getter => XelibAccessorKind.Getter,
-        AccessorKind.Setter => XelibAccessorKind.Setter,
-        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
-    };
+    private static XelibAccessorKind Map(AccessorKind kind) => XelibStableMappings.ToXelib(kind);
 
-    internal static XelibConstantValue? Constant(object? value) => value switch
+    internal static XelibConstantValue Constant(object? value) => value switch
     {
-        null => null,
+        null => new(XelibConstantKind.Null, null),
         bool item => new(XelibConstantKind.Boolean, item ? "true" : "false"),
         sbyte or short or int or long => new(XelibConstantKind.SignedInteger,
             Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)),

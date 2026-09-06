@@ -197,6 +197,29 @@ public sealed class XenonBuildDriverTests
     }
 
     [Fact]
+    public void UnreferencedEnvironmentXelibDoesNotChangeNativeBuildOutput()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("EnvironmentIsolation", "executable",
+            "namespace EnvironmentIsolation; int Main() { return 42; }");
+        var driver = new XenonBuildDriver();
+        XenonBuildResult first = driver.Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(first.Success, first.Failure ?? string.Join(Environment.NewLine, first.Diagnostics));
+        byte[] firstHash = System.Security.Cryptography.SHA256.HashData(
+            File.ReadAllBytes(first.ArtifactPath!));
+
+        File.WriteAllBytes(Path.Combine(directory.Root, "Unrelated.xelib"), "not a xelib"u8.ToArray());
+        XenonBuildResult second = driver.Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(second.Success, second.Failure ?? string.Join(Environment.NewLine, second.Diagnostics));
+        byte[] secondHash = System.Security.Cryptography.SHA256.HashData(
+            File.ReadAllBytes(second.ArtifactPath!));
+
+        Assert.Equal(firstHash, secondHash);
+    }
+
+    [Fact]
     public async Task ExplicitXelibBuildsAndRunsWithoutLibrarySources()
     {
         using var directory = new TemporaryProject();
@@ -207,7 +230,8 @@ public sealed class XenonBuildDriverTests
         string libraryProjectPath = Path.GetFullPath(Path.Combine(directory.Root, libraryProject));
         XenonBuildResult library = new XenonBuildDriver().Build(new XenonBuildRequest(
             libraryProjectPath, OutputRoot: directory.OutputRoot));
-        Assert.True(library.Success, library.Failure ?? string.Join(Environment.NewLine, library.Diagnostics));
+        Assert.True(library.Success, string.Join(Environment.NewLine, library.Diagnostics) +
+            Environment.NewLine + library.Failure);
 
         Directory.Delete(Path.Combine(Path.GetDirectoryName(libraryProjectPath)!, "src"), recursive: true);
         directory.WriteProject("PortableApp", "executable", """
@@ -335,8 +359,10 @@ public sealed class XenonBuildDriverTests
             struct State<T>
             {
                 const nuint Width = sizeof(T);
-                public static threadlocal int Offset = 38;
-                public int Read() { return cast<int>(Width) + State.Offset; }
+                const nuint Alignment = alignof(T);
+                public static threadlocal int Offset = 30;
+                public int GetWidth() { return cast<int>(Width); }
+                public int Read() { return GetWidth() + State.Offset; }
             }
             """);
         XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
@@ -346,11 +372,16 @@ public sealed class XenonBuildDriverTests
             int Main()
             {
                 State<int> value = State<int>();
-                return value.Read();
+                return cast<int>(State<int>.Width) + cast<int>(State<int>.Alignment) + value.Read();
             }
             """);
         Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
             Environment.NewLine + app.Failure);
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
     }
 
     [Fact]
@@ -894,6 +925,130 @@ public sealed class XenonBuildDriverTests
         Assert.False(process.TimedOut);
         Assert.Equal(42, process.ExitCode);
         Assert.True(File.Exists(app.ArtifactPath));
+    }
+
+    [Fact]
+    public async Task XenonLibraryProjectReferencesBringTransitiveDiamondClosureExactlyOnce()
+    {
+        using var directory = new TemporaryProject();
+        string contractProject = directory.WriteDependencyProject("GraphContract", "xenon-library", """
+            namespace GraphContract;
+            public int BaseValue() { return 20; }
+            """);
+        string leftProject = directory.WriteDependencyProject("GraphLeft", "xenon-library", """
+            using GraphContract;
+            namespace GraphLeft;
+            public int LeftValue() { return BaseValue(); }
+            """);
+        string rightProject = directory.WriteDependencyProject("GraphRight", "xenon-library", """
+            using GraphContract;
+            namespace GraphRight;
+            public int RightValue() { return BaseValue() + 2; }
+            """);
+        AddProjectReference(leftProject, contractProject);
+        AddProjectReference(rightProject, contractProject);
+        directory.WriteProject("GraphApp", "executable", """
+            using GraphLeft;
+            using GraphRight;
+            namespace GraphApp;
+            int Main() { return LeftValue() + RightValue(); }
+            """, leftProject, rightProject);
+
+        XenonBuildResult app = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+        LibraryCompilationReference[] references = app.Compilation!.References
+            .OfType<LibraryCompilationReference>().ToArray();
+        Assert.Equal(3, references.Length);
+        Assert.Single(references, reference => reference.LibraryIdentity.Name == "GraphContract");
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+
+        void AddProjectReference(string ownerProject, string dependencyProject)
+        {
+            string ownerPath = Path.GetFullPath(Path.Combine(directory.Root, ownerProject));
+            string dependencyPath = Path.GetFullPath(Path.Combine(directory.Root, dependencyProject));
+            string relative = Path.GetRelativePath(Path.GetDirectoryName(ownerPath)!, dependencyPath)
+                .Replace('\\', '/');
+            File.AppendAllText(ownerPath, $"""
+
+                [references]
+                projects = ["{relative}"]
+                """);
+        }
+    }
+
+    [Fact]
+    public async Task AppProjectReferenceReceivesTransitiveXenonLibraryDependency()
+    {
+        using var directory = new TemporaryProject();
+        string contractProject = directory.WriteDependencyProject("ChainContract", "xenon-library", """
+            namespace ChainContract;
+            public int BaseValue() { return 40; }
+            """);
+        string engineProject = directory.WriteDependencyProject("ChainEngine", "xenon-library", """
+            using ChainContract;
+            namespace ChainEngine;
+            public int Value() { return BaseValue() + 2; }
+            """);
+        string enginePath = Path.GetFullPath(Path.Combine(directory.Root, engineProject));
+        string contractPath = Path.GetFullPath(Path.Combine(directory.Root, contractProject));
+        string relativeContract = Path.GetRelativePath(Path.GetDirectoryName(enginePath)!, contractPath)
+            .Replace('\\', '/');
+        File.AppendAllText(enginePath, $"""
+
+            [references]
+            projects = ["{relativeContract}"]
+            """);
+        directory.WriteProject("ChainApp", "executable", """
+            using ChainEngine;
+            namespace ChainApp;
+            int Main() { return Value(); }
+            """, engineProject);
+
+        XenonBuildResult app = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+        Assert.Equal(["ChainEngine", "ChainContract"], app.Compilation!.References
+            .OfType<LibraryCompilationReference>().Select(reference => reference.LibraryIdentity.Name).ToArray());
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task OrdinaryXelibFieldInitializersRunForDirectHeapAndStorageConstruction()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("InitializerXelib", "xenon-library", """
+            namespace InitializerXelib;
+            int Seed() { return 42; }
+            struct Value { public int Number = Seed(); }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "InitializerApp", """
+                using InitializerXelib;
+                namespace InitializerApp;
+                int Main()
+                {
+                    Value direct = Value();
+                    Value* heap = new Value();
+                    storage<Value> stored = Value();
+                    int result = direct.Number + heap->Number + stored.Number - 84;
+                    free(heap);
+                    return result;
+                }
+                """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
     }
 
     [Theory]

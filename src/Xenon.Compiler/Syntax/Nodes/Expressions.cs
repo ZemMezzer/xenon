@@ -87,6 +87,7 @@ public sealed record MemberAccessExpressionSyntax(
     SyntaxToken MemberToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.MemberAccessExpression;
+    public TypeArgumentListSyntax? ReceiverTypeArguments { get; init; }
 }
 
 public sealed record IndexExpressionSyntax(

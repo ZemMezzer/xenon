@@ -4,6 +4,7 @@ using System.Text;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Libraries;
+using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Text;
 using Xunit;
@@ -12,6 +13,88 @@ namespace Xenon.Compiler.Tests.Libraries;
 
 public sealed class XelibContainerTests
 {
+    [Fact]
+    public void PersistedSemanticKindsRoundTripThroughExplicitXelibMappings()
+    {
+        foreach (FunctionKind value in Enum.GetValues<FunctionKind>())
+            Assert.Equal(value, XelibStableMappings.FromXelib(XelibStableMappings.ToXelib(value)));
+        foreach (AccessorKind value in Enum.GetValues<AccessorKind>())
+            Assert.Equal(value, XelibStableMappings.FromXelib(XelibStableMappings.ToXelib(value)));
+        foreach (GenericConstraintKind value in Enum.GetValues<GenericConstraintKind>())
+            Assert.Equal(value, XelibStableMappings.FromXelib(XelibStableMappings.ToXelib(value)));
+        foreach (ReferenceReturnOriginKind value in Enum.GetValues<ReferenceReturnOriginKind>())
+            Assert.Equal(value, XelibStableMappings.FromXelib(XelibStableMappings.ToXelib(value)));
+        foreach (SharedReturnOriginKind value in Enum.GetValues<SharedReturnOriginKind>())
+            Assert.Equal(value, XelibStableMappings.FromXelib(XelibStableMappings.ToXelib(value)));
+        foreach (ArrayStorageKind value in Enum.GetValues<ArrayStorageKind>())
+            Assert.Equal(value, XelibStableMappings.FromXelib(XelibStableMappings.ToXelib(value)));
+        foreach (MovedPlaceReinitializationState value in Enum.GetValues<MovedPlaceReinitializationState>())
+            Assert.Equal(value, XelibStableMappings.FromXelib(XelibStableMappings.ToXelib(value)));
+    }
+
+    [Fact]
+    public void ExportKeysUseStableXelibKindTags()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Keys;
+            template Shape {
+                int Run();
+                Shape(int value);
+                int Value { get; set; }
+                int this[int index] { get; set; }
+            }
+            struct Access {
+                public int Method() { return 1; }
+                public int Value { get { return 1; } set { } }
+                public int this[int index] { get { return index; } set { } }
+            }
+            public int Value() { return 1; }
+            """, "keys.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        XelibContainer container = XelibContainer.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Keys")));
+        ImmutableArray<XelibExport> exports = XelibJson.Deserialize<ImmutableArray<XelibExport>>(
+            container.GetRequiredSection(XelibSectionKind.Exports).AsSpan(), null);
+        XelibExport export = Assert.Single(exports,
+            item => item.Key.StartsWith("F:", StringComparison.Ordinal) &&
+                item.Key.Contains(":Value:0:", StringComparison.Ordinal));
+
+        Assert.EndsWith(":1:0", export.Key, StringComparison.Ordinal);
+        Assert.Contains(exports, item => item.Key.StartsWith(
+            $"R:{(ushort)XelibSymbolKind.TemplateMethod}:", StringComparison.Ordinal));
+        Assert.Contains(exports, item => item.Key.StartsWith(
+            $"R:{(ushort)XelibSymbolKind.TemplateConstructor}:", StringComparison.Ordinal));
+        Assert.Contains(exports, item => item.Key.StartsWith(
+            $"R:{(ushort)XelibSymbolKind.TemplateProperty}:", StringComparison.Ordinal));
+        Assert.Contains(exports, item => item.Key.StartsWith(
+            $"R:{(ushort)XelibSymbolKind.TemplateIndexer}:", StringComparison.Ordinal));
+        Assert.Contains(exports, item => item.Key.StartsWith("P:", StringComparison.Ordinal));
+        Assert.Contains(exports, item => item.Key.StartsWith("I:", StringComparison.Ordinal));
+        Assert.Contains(exports, item => item.Key.StartsWith("F:", StringComparison.Ordinal) &&
+            item.Key.Contains($":{(ushort)XelibFunctionKind.Method}:", StringComparison.Ordinal));
+        Assert.DoesNotContain(exports, item => item.Key.Contains("Template", StringComparison.Ordinal));
+        Assert.NotEqual((int)FunctionKind.Ordinary, (int)XelibFunctionKind.Ordinary);
+    }
+
+    [Fact]
+    public void ContentIdentityIncludesSemanticVersionsButNotPhysicalMetadata()
+    {
+        (XelibSectionKind, ReadOnlyMemory<byte>)[] sections =
+            [(XelibSectionKind.Symbols, new byte[] { 1, 2, 3 })];
+        string baseline = XelibWriter.ComputeContentIdentity("Library", "1.0", sections, 1, 1);
+
+        Assert.NotEqual(baseline, XelibWriter.ComputeContentIdentity("Library", "1.0", sections, 2, 1));
+        Assert.NotEqual(baseline, XelibWriter.ComputeContentIdentity("Library", "1.0", sections, 1, 2));
+        Assert.Equal(baseline, XelibWriter.ComputeContentIdentity("Library", "1.0", sections, 1, 1));
+    }
+
+    [Fact]
+    public void XelibPathComparisonMatchesPlatformFilesystemPolicy()
+    {
+        Assert.Equal(OperatingSystem.IsWindows(),
+            XelibReferenceLoader.PathComparer.Equals("C:/lib/Foo.xelib", "C:/lib/foo.xelib"));
+    }
+
     [Fact]
     public void HeaderAndSectionsRoundTrip()
     {
@@ -73,7 +156,7 @@ public sealed class XelibContainerTests
             Assert.Throws<XelibFormatException>(() => XelibContainer.Read(container)).Code);
 
         container = ValidContainer();
-        BinaryPrimitives.WriteUInt16LittleEndian(container.AsSpan(12), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(container.AsSpan(12), checked((ushort)(XelibVersions.LibraryIr + 1)));
         Assert.Equal(XelibErrorCode.UnsupportedLibraryIrVersion,
             Assert.Throws<XelibFormatException>(() => XelibContainer.Read(container)).Code);
 
@@ -200,6 +283,116 @@ public sealed class XelibContainerTests
     }
 
     [Fact]
+    public void GenericLayoutConstantsRemainDeferredAndBindForEachConsumerTarget()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace GenericLayout;
+            struct State<T> {
+                const nuint Width = sizeof(T);
+                const nuint Alignment = alignof(T);
+            }
+            """, "library.xe"));
+        byte[] bytes = XelibWriter.Write(library, new XelibWriteOptions("GenericLayout"));
+        XelibContainer container = XelibContainer.Read(bytes);
+        ImmutableArray<XelibSymbolRecord> symbols = XelibJson.Deserialize<ImmutableArray<XelibSymbolRecord>>(
+            container.GetRequiredSection(XelibSectionKind.Symbols).AsSpan(), null);
+        XelibSymbolRecord[] constants = symbols.Where(symbol =>
+            symbol.Kind == XelibSymbolKind.Constant && symbol.ConstantExpression is not null).ToArray();
+        Assert.Equal(2, constants.Length);
+        Assert.All(constants, constant =>
+            Assert.True(ContainsOpcode(constant.ConstantExpression!, XelibBodyOpcode.TypeLayout)));
+
+        LibraryCompilationReference reference = XelibReader.Read(bytes);
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using GenericLayout;
+            namespace App;
+            int Main() {
+                return cast<int>(State<int*>.Width + State<int*>.Alignment);
+            }
+            """, "app.xe"));
+        var narrowTarget = new LlvmTargetOptions("i686-pc-windows-msvc");
+        var wideTarget = new LlvmTargetOptions("x86_64-pc-windows-msvc");
+
+        string narrowIr = new LlvmIrGenerator().GenerateForTarget(
+            LlvmIrGenerator.BindForTarget(app, narrowTarget), narrowTarget);
+        string wideIr = new LlvmIrGenerator().GenerateForTarget(
+            LlvmIrGenerator.BindForTarget(app, wideTarget), wideTarget);
+
+        Assert.Contains("ret i32 8", narrowIr, StringComparison.Ordinal);
+        Assert.Contains("ret i32 16", wideIr, StringComparison.Ordinal);
+
+        static bool ContainsOpcode(XelibBodyNode node, XelibBodyOpcode opcode) =>
+            node.Opcode == opcode || node.Children.Any(child => ContainsOpcode(child, opcode));
+    }
+
+    [Fact]
+    public void OrdinaryLayoutConstantsAndLibraryFunctionsBindForEachConsumerTarget()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace OrdinaryLayout;
+            const nuint Width = sizeof(int*);
+            const nuint Alignment = alignof(int*);
+            public int LibraryMetric() { return cast<int>(Width + Alignment); }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        byte[] bytes = XelibWriter.Write(library, new XelibWriteOptions("OrdinaryLayout"));
+        XelibContainer container = XelibContainer.Read(bytes);
+        ImmutableArray<XelibSymbolRecord> symbols = XelibJson.Deserialize<ImmutableArray<XelibSymbolRecord>>(
+            container.GetRequiredSection(XelibSectionKind.Symbols).AsSpan(), null);
+        Assert.Equal(2, symbols.Count(symbol => symbol.Kind == XelibSymbolKind.Constant &&
+            symbol.ConstantExpression is { Opcode: XelibBodyOpcode.TypeLayout }));
+
+        LibraryCompilationReference reference = XelibReader.Read(bytes);
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using OrdinaryLayout;
+            namespace App;
+            int Main() { return cast<int>(Width + Alignment) + LibraryMetric(); }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        var narrowTarget = new LlvmTargetOptions("i686-pc-windows-msvc");
+        var wideTarget = new LlvmTargetOptions("x86_64-pc-windows-msvc");
+
+        string narrowIr = new LlvmIrGenerator().GenerateForTarget(
+            LlvmIrGenerator.BindForTarget(app, narrowTarget), narrowTarget);
+        string wideIr = new LlvmIrGenerator().GenerateForTarget(
+            LlvmIrGenerator.BindForTarget(app, wideTarget), wideTarget);
+
+        Assert.Contains("ret i32 8", narrowIr, StringComparison.Ordinal);
+        Assert.Contains("add i32 8", narrowIr, StringComparison.Ordinal);
+        Assert.Contains("ret i32 16", wideIr, StringComparison.Ordinal);
+        Assert.Contains("add i32 16", wideIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MetadataOnlyGenericBodyScanAcceptsAnyJsonPropertyOrderAndRejectsMissingIds()
+    {
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace Ordered; public T Identity<T>(T value) { return move value; }", "library.xe"));
+        byte[] valid = XelibWriter.Write(library, new XelibWriteOptions("Ordered"));
+        XelibContainer container = XelibContainer.Read(valid);
+        ImmutableArray<XelibBodyRecord> bodies = XelibJson.Deserialize<ImmutableArray<XelibBodyRecord>>(
+            container.GetRequiredSection(XelibSectionKind.Bodies).AsSpan(), null);
+        byte[] reordered = XelibJson.Serialize(bodies.Select(body =>
+            new ReorderedBodyRecord(body.Root, body.FunctionSymbolId, body.Id)).ToImmutableArray());
+        byte[] reorderedImage = RewriteSection(valid, XelibSectionKind.Bodies, reordered);
+
+        LibraryCompilationReference full = XelibReader.Read(reorderedImage);
+        LibraryCompilationReference metadataOnly = XelibReader.Read(reorderedImage, metadataOnly: true);
+        foreach (LibraryCompilationReference reference in new[] { full, metadataOnly })
+        {
+            Compilation consumer = Compilation.Create(new CompilationOptions(), [reference], SourceText.From(
+                "using Ordered; namespace App; int Main() { return Identity<int>(42); }", "app.xe"));
+            Assert.False(consumer.HasErrors, string.Join(Environment.NewLine, consumer.Diagnostics));
+        }
+
+        byte[] missingIds = XelibJson.Serialize(bodies.Select(body =>
+            new BodyRecordWithoutId(body.Root, body.FunctionSymbolId)).ToImmutableArray());
+        XelibFormatException exception = Assert.Throws<XelibFormatException>(() =>
+            XelibReader.Read(RewriteSection(valid, XelibSectionKind.Bodies, missingIds), metadataOnly: true));
+        Assert.Equal(XelibErrorCode.InvalidReference, exception.Code);
+    }
+
+    [Fact]
     public void StaticConsumptionSelectsOnlyReachableLibraryBodies()
     {
         Compilation library = Compilation.Create(SourceText.From("""
@@ -218,6 +411,167 @@ public sealed class XelibContainerTests
         Assert.Contains("Used", selected);
         Assert.Contains("Helper", selected);
         Assert.DoesNotContain("Unused", selected);
+    }
+
+    [Fact]
+    public void ConstructingOrdinaryImportedStructSelectsItsHiddenInstanceInitializer()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Initializers;
+            int Seed() { return 42; }
+            struct Value { public int Number = Seed(); }
+            struct Unused { public int Number = 99; }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Initializers")));
+
+        AssertInitializerSelected("""
+            using Initializers;
+            namespace DirectApp;
+            int Main() { Value value = Value(); return value.Number; }
+            """);
+        AssertInitializerSelected("""
+            using Initializers;
+            namespace HeapApp;
+            int Main() {
+                Value* value = new Value();
+                int result = value->Number;
+                free(value);
+                return result;
+            }
+            """);
+        AssertInitializerSelected("""
+            using Initializers;
+            namespace StorageApp;
+            int Main() {
+                storage<Value> value = Value();
+                return value.Number;
+            }
+            """);
+
+        void AssertInitializerSelected(string source)
+        {
+            Compilation app = Compilation.Create(new CompilationOptions(), [reference],
+                SourceText.From(source, "app.xe"));
+            Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+            var target = new LlvmTargetOptions(LlvmTargetPlatform.HostTriple);
+            app = LlvmIrGenerator.BindForTarget(app, target);
+            Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+            BoundFunction initializer = Assert.Single(app.GetStaticImplementationFunctions(), function =>
+                function.Symbol.FunctionKind == FunctionKind.InstanceInitializer &&
+                function.Symbol.ContainingStruct?.Name == "Value");
+            Assert.DoesNotContain(app.GetStaticImplementationFunctions(), function =>
+                function.Symbol.FunctionKind == FunctionKind.InstanceInitializer &&
+                function.Symbol.ContainingStruct?.Name == "Unused");
+            Assert.Contains(app.GetStaticImplementationFunctions(), function =>
+                function.Symbol.Name == "Seed");
+            string ir = new LlvmIrGenerator().GenerateForTarget(app, target);
+            Assert.Contains("call void @__xenon_function_", ir, StringComparison.Ordinal);
+            Assert.Contains($"_{Convert.ToHexString(Encoding.UTF8.GetBytes(initializer.Symbol.QualifiedName))}",
+                ir, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void StaticConsumptionRootsOnlyUsedDispatchStaticTlsAndPrivateDependenciesPlusExports()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Reachability;
+            interface IFoo { int Read(); }
+            interface IBar { int Read(); }
+            struct Used : IFoo { public int Read() { return PrivateHelper(); } }
+            struct Unused : IBar { public int Read() { return 99; } }
+            struct UnusedBase { public virtual int Value() { return 10; } }
+            struct UnusedDerived : UnusedBase { public override int Value() { return 11; } }
+            struct State {
+                public static threadlocal int UsedTls = 40;
+                public static threadlocal int UnusedTls = 100;
+            }
+            int PrivateHelper() { return 2; }
+            public int Entry() { Used value = Used(); return value.Read() + State.UsedTls; }
+            export int NativeExport() { return 7; }
+            public int NeverCalled() { return 8; }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Reachability")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From(
+            "using Reachability; namespace App; int Main() { return Entry(); }", "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction[] selected = app.GetStaticImplementationFunctions().ToArray();
+        string[] names = selected.Select(item => item.Symbol.Name).ToArray();
+        Assert.Contains("Entry", names);
+        Assert.Contains("PrivateHelper", names);
+        Assert.Contains(selected, item => item.Symbol.FunctionKind == FunctionKind.ThreadLocalInitializer &&
+            item.Symbol.ThreadLocalField?.Name == "UsedTls");
+        Assert.Contains("NativeExport", names);
+        Assert.DoesNotContain("NeverCalled", names);
+        Assert.DoesNotContain(selected, item => item.Symbol.ContainingStruct?.Name is "Unused" or "UnusedBase" or "UnusedDerived");
+
+        NamespaceSymbol scope = Assert.Single(reference.GlobalNamespace.Namespaces);
+        StructTypeSymbol state = scope.Structs.Single(type => type.Name == "State");
+        Assert.True(app.IsImportedSymbolNativeReachable(state.StaticFields.Single(field => field.Name == "UsedTls")));
+        Assert.False(app.IsImportedSymbolNativeReachable(state.StaticFields.Single(field => field.Name == "UnusedTls")));
+        Assert.False(app.IsImportedDispatchTypeNativeReachable(
+            scope.Structs.Single(type => type.Name == "UnusedDerived")));
+    }
+
+    [Fact]
+    public void ExplicitlyReferencedButUnusedXelibContributesNoImplementationBodies()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace BigLibrary;
+            public int First() { return 1; }
+            public int Second() { return 2; }
+            struct VirtualType { public virtual int Read() { return 3; } }
+            """, "library.xe"));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("BigLibrary")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference],
+            SourceText.From("namespace App; int Main() { return 0; }", "app.xe"));
+
+        Assert.DoesNotContain(app.GetStaticImplementationFunctions(),
+            function => app.GetOwningLibrary(function.Symbol) is not null);
+        Assert.False(app.IsImportedDispatchTypeNativeReachable(
+            Assert.Single(Assert.Single(reference.GlobalNamespace.Namespaces).Structs)));
+    }
+
+    [Fact]
+    public void UncalledXelibNativeExportRemainsInFinalLlvmModule()
+    {
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace Exported; export int RequiredNativeSymbol() { return 42; }", "library.xe"));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Exported")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference],
+            SourceText.From("namespace App; int Main() { return 0; }", "app.xe"));
+
+        string ir = new LlvmIrGenerator().Generate(app);
+
+        Assert.Contains("@Exported_RequiredNativeSymbol", ir, StringComparison.Ordinal);
+        Assert.Contains(app.GetStaticImplementationFunctions(),
+            function => function.Symbol.Name == "RequiredNativeSymbol");
+    }
+
+    [Fact]
+    public void RepeatedXelibGenericCallsShareOneConsumerSpecialization()
+    {
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace GenericDedup; public T Identity<T>(T value) { return move value; }", "library.xe"));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("GenericDedup")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using GenericDedup;
+            namespace App;
+            int Main() { return Identity<int>(20) + Identity<int>(22); }
+            """, "app.xe"));
+
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        Assert.Single(app.SemanticModel.Functions, function =>
+            function.Symbol.GenericDefinition?.Name == "Identity" &&
+            function.Symbol.TypeArguments is [PrimitiveTypeSymbol { Name: "int" }]);
     }
 
     [Fact]
@@ -383,4 +737,10 @@ public sealed class XelibContainerTests
         return XelibContainer.Write(sections.Select(pair => new XelibSection(pair.Key,
             XelibSectionFlags.Required, pair.Value)));
     }
+
+    private sealed record ReorderedBodyRecord(
+        XelibBodyNode Root, int FunctionSymbolId, int Id);
+
+    private sealed record BodyRecordWithoutId(
+        XelibBodyNode Root, int FunctionSymbolId);
 }
