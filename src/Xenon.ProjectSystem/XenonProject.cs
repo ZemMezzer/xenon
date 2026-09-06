@@ -7,6 +7,7 @@ public enum XenonProjectType
     Executable,
     StaticLibrary,
     SharedLibrary,
+    XenonLibrary,
 }
 
 public sealed record XenonBuildProfile(
@@ -30,8 +31,8 @@ public class ProjectConfiguration
         string sourceRoot,
         string? projectFilePath,
         ImmutableArray<string> sourceFiles,
-        ImmutableArray<string> nativeLibraries,
-        ImmutableArray<string> nativeLibraryPaths,
+        ImmutableArray<string> libraries,
+        ImmutableArray<string> libraryPaths,
         ImmutableArray<string> projectReferences,
         XenonBuildProfile debugProfile,
         XenonBuildProfile releaseProfile)
@@ -43,8 +44,8 @@ public class ProjectConfiguration
         SourceRoot = sourceRoot;
         ProjectFilePath = projectFilePath;
         SourceFiles = sourceFiles;
-        NativeLibraries = nativeLibraries;
-        NativeLibraryPaths = nativeLibraryPaths;
+        Libraries = libraries;
+        LibraryPaths = libraryPaths;
         ProjectReferences = projectReferences;
         DebugProfile = debugProfile;
         ReleaseProfile = releaseProfile;
@@ -64,9 +65,17 @@ public class ProjectConfiguration
 
     public ImmutableArray<string> SourceFiles { get; }
 
-    public ImmutableArray<string> NativeLibraries { get; }
+    public ImmutableArray<string> Libraries { get; }
 
-    public ImmutableArray<string> NativeLibraryPaths { get; }
+    public ImmutableArray<string> XenonLibraries => Libraries
+        .Where(path => string.Equals(Path.GetExtension(path), ".xelib", StringComparison.OrdinalIgnoreCase))
+        .ToImmutableArray();
+
+    public ImmutableArray<string> NativeLibraries => Libraries
+        .Where(path => !string.Equals(Path.GetExtension(path), ".xelib", StringComparison.OrdinalIgnoreCase))
+        .ToImmutableArray();
+
+    public ImmutableArray<string> LibraryPaths { get; }
 
     public ImmutableArray<string> ProjectReferences { get; }
 
@@ -91,11 +100,11 @@ public sealed class XenonProject : ProjectConfiguration
 {
     public XenonProject(string name, XenonProjectType type, string? version, string rootDirectory,
         string sourceRoot, string? projectFilePath, ImmutableArray<string> sourceFiles,
-        ImmutableArray<string> nativeLibraries, ImmutableArray<string> nativeLibraryPaths,
+        ImmutableArray<string> libraries, ImmutableArray<string> libraryPaths,
         ImmutableArray<string> projectReferences, XenonBuildProfile debugProfile,
         XenonBuildProfile releaseProfile)
         : base(name, type, version, rootDirectory, sourceRoot, projectFilePath, sourceFiles,
-            nativeLibraries, nativeLibraryPaths, projectReferences, debugProfile, releaseProfile)
+            libraries, libraryPaths, projectReferences, debugProfile, releaseProfile)
     {
     }
 }

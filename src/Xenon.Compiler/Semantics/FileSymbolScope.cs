@@ -286,9 +286,10 @@ internal sealed class FileSymbolScope
 
     public FileSymbolScope WithTypeSubstitutions(
         IEnumerable<KeyValuePair<GenericParameterSymbol, TypeSymbol>> substitutions,
-        SemanticInfoStore? semanticInfo = null)
+        SemanticInfoStore? semanticInfo = null,
+        TypeFactory? typeFactory = null)
     {
-        var scope = new FileSymbolScope(GlobalNamespace, ContainingNamespace, TypeFactory,
+        var scope = new FileSymbolScope(GlobalNamespace, ContainingNamespace, typeFactory ?? TypeFactory,
             semanticInfo ?? SemanticInfo);
         scope.GenericStructSpecializer = GenericStructSpecializer;
         scope._importedNamespaces.AddRange(_importedNamespaces);
@@ -297,7 +298,7 @@ internal sealed class FileSymbolScope
         foreach ((string name, TypeSymbol localType) in _localTypes)
             scope._localTypes.Add(name, localType);
         foreach ((GenericParameterSymbol parameter, TypeSymbol type) in substitutions)
-            scope._localTypes[parameter.Name] = TypeFactory.Intern(type);
+            scope._localTypes[parameter.Name] = scope.TypeFactory.Intern(type);
         return scope;
     }
 

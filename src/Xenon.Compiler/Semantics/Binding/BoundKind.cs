@@ -62,4 +62,6 @@ public enum BoundKind
     FreeExpression,
     ErrorExpression,
     DeferredConstantExpression,
+    DeferredGenericMethodCallExpression,
+    DeferredGenericOperationExpression,
 }

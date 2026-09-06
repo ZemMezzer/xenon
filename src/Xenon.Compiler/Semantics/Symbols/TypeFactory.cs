@@ -100,8 +100,21 @@ public sealed class TypeFactory
         }
     }
 
+    internal void EnsureOwnershipDestructor(OwnershipTypeSymbol type,
+        NamespaceSymbol globalNamespace, SymbolOrigin origin)
+    {
+        if (type.CompleteDestructor is not null) return;
+        lock (type)
+        {
+            type.CompleteDestructor ??= new FunctionSymbol(type, globalNamespace, PointerTo(type), origin);
+        }
+    }
+
     internal void EnsureUniqueDestructor(UniqueTypeSymbol type, NamespaceSymbol globalNamespace, SyntaxNode declaration) =>
         EnsureOwnershipDestructor(type, globalNamespace, declaration);
+
+    internal void EnsureUniqueDestructor(UniqueTypeSymbol type, NamespaceSymbol globalNamespace, SymbolOrigin origin) =>
+        EnsureOwnershipDestructor(type, globalNamespace, origin);
 
     internal void EnsureStorageDestructor(
         StorageTypeSymbol type,
@@ -116,6 +129,16 @@ public sealed class TypeFactory
                 globalNamespace,
                 PointerTo(type),
                 declaration);
+        }
+    }
+
+    internal void EnsureStorageDestructor(StorageTypeSymbol type,
+        NamespaceSymbol globalNamespace, SymbolOrigin origin)
+    {
+        if (type.CompleteDestructor is not null) return;
+        lock (type)
+        {
+            type.CompleteDestructor ??= new FunctionSymbol(type, globalNamespace, PointerTo(type), origin);
         }
     }
 

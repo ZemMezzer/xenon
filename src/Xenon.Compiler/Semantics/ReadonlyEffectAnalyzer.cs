@@ -457,9 +457,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         return Call(callee, arguments, site);
     }
 
-    private static bool IsAccessor(FunctionSymbol callee) =>
-        callee.ContainingProperty is not null || callee.ContainingIndexer is not null ||
-        callee.ContainingInterfaceProperty is not null || callee.ContainingInterfaceIndexer is not null;
+    private static bool IsAccessor(FunctionSymbol callee) => callee.IsAccessor;
 
     private HashSet<object> ContextualDispatch(FunctionSymbol callee,
         ImmutableArray<BoundExpression> arguments, HashSet<object> receiver, BoundExpression site)

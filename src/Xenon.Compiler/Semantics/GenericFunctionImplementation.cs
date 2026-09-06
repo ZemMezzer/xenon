@@ -1,0 +1,644 @@
+using System.Collections.Immutable;
+using Xenon.Compiler.Diagnostics;
+using Xenon.Compiler.Semantics.Binding;
+using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Syntax;
+using Xenon.Compiler.Text;
+using Xenon.Compiler.Libraries;
+
+namespace Xenon.Compiler.Semantics;
+
+/// <summary>An implementation provider for an open generic function, independent of its storage format.</summary>
+internal interface IGenericFunctionImplementation
+{
+    BoundBlockStatement? PortableBody { get; }
+
+    BoundBlockStatement Bind(
+        FunctionSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants,
+        GenericFunctionSpecializer specializer,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Provider-owned implementation data for an open generic struct.</summary>
+internal interface IGenericStructImplementation
+{
+    BoundFunction? PortableInstanceInitializer { get; }
+
+    ImmutableArray<BoundFunction> PortableStaticFieldInitializers { get; }
+
+    BoundFunction? BindInstanceFieldInitializers(
+        StructTypeSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo,
+        GenericFunctionSpecializer functionSpecializer,
+        CancellationToken cancellationToken);
+
+    ImmutableArray<BoundFunction> BindStaticFieldInitializers(
+        StructTypeSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo,
+        GenericFunctionSpecializer functionSpecializer,
+        GenericStructImplementationServices services,
+        CancellationToken cancellationToken);
+
+    bool EvaluateConstant(
+        ConstantSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        GenericStructSpecializer structSpecializer,
+        ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo,
+        GenericStructImplementationServices services);
+}
+
+internal sealed class GenericStructImplementationServices(SemanticAnalyzer analyzer)
+{
+    public void BindSourceStaticFieldInitializer(FieldSymbol field, StructTypeSymbol type,
+        FileSymbolScope scope, FieldDeclarationSyntax declaration) =>
+        analyzer.BindSourceGenericStaticFieldInitializer(field, type, scope, declaration);
+
+    public bool EvaluateSourceConstant(ConstantSymbol constant, FileSymbolScope scope,
+        ExpressionSyntax initializer, TextLocation location) =>
+        analyzer.EvaluateSourceGenericConstant(constant, scope, initializer, location);
+}
+
+/// <summary>The current source-backed implementation. A future Library IR provider implements the same contract.</summary>
+internal sealed class SourceGenericFunctionImplementation(
+    BlockStatementSyntax body,
+    FileSymbolScope scope) : IGenericFunctionImplementation
+{
+    public BoundBlockStatement? PortableBody { get; private set; }
+
+    internal void SetPortableBody(BoundBlockStatement body) => PortableBody = body;
+
+    public BoundBlockStatement Bind(FunctionSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics, ConstantEvaluationContext constants,
+        GenericFunctionSpecializer specializer, CancellationToken cancellationToken)
+    {
+        var semanticInfo = new SemanticInfoStore();
+        FileSymbolScope specializedScope = scope.WithTypeSubstitutions(substitutions, semanticInfo,
+            specializer.Types);
+        specializedScope.SetGenericStructSpecializer(specializer.StructSpecializer);
+        var binder = new FunctionBodyBinder(specialization, specializedScope, diagnostics, constants,
+            semanticInfo, specializer, cancellationToken);
+        return binder.BindBody(body);
+    }
+}
+
+/// <summary>
+/// Source-backed generic struct payload. All syntax and source-scope access is
+/// deliberately contained here rather than in the specialization pipeline.
+/// </summary>
+internal sealed class SourceGenericStructImplementation(FileSymbolScope sourceScope)
+    : IGenericStructImplementation
+{
+    public BoundFunction? PortableInstanceInitializer { get; private set; }
+    public ImmutableArray<BoundFunction> PortableStaticFieldInitializers { get; private set; } = [];
+
+    internal void CapturePortableInstanceInitializer(StructTypeSymbol definition,
+        DiagnosticBag diagnostics, ConstantEvaluationContext constants,
+        GenericFunctionSpecializer functionSpecializer, CancellationToken cancellationToken)
+    {
+        if (!definition.Fields.Any(field => field.HasInitializer)) return;
+        var initializer = new FunctionSymbol(FunctionKind.InstanceInitializer, definition, [],
+            SymbolOrigin.CompilerGenerated, Accessibility.Private);
+        definition.SetInstanceInitializer(initializer);
+        var semanticInfo = new SemanticInfoStore();
+        var substitutions = new Dictionary<GenericParameterSymbol, TypeSymbol>(
+            ReferenceEqualityComparer.Instance);
+        foreach (GenericParameterSymbol parameter in definition.TypeParameters)
+            substitutions.Add(parameter, parameter);
+        FileSymbolScope scope = CreateScope(substitutions, semanticInfo, functionSpecializer);
+        var binder = new FunctionBodyBinder(initializer, scope, diagnostics, constants,
+            semanticInfo, functionSpecializer, cancellationToken);
+        foreach (FieldSymbol field in definition.Fields)
+        {
+            if (!field.HasInitializer ||
+                field.Implementation is not SourceSymbolImplementation
+                {
+                    Declaration: FieldDeclarationSyntax declaration,
+                })
+                continue;
+            if (binder.BindFieldInitializer(field, declaration.Initializer) is BoundExpression bound)
+                field.SetInitializer(bound);
+        }
+        PortableInstanceInitializer = new BoundFunction(initializer,
+            new BoundBlockStatement(binder.CreateInstanceFieldInitializerStatements(definition)));
+    }
+
+    internal void CapturePortableStaticInitializers(StructTypeSymbol definition,
+        GenericStructImplementationServices services, DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants, GenericFunctionSpecializer functionSpecializer,
+        CancellationToken cancellationToken)
+    {
+        var functions = ImmutableArray.CreateBuilder<BoundFunction>();
+        var semanticInfo = new SemanticInfoStore();
+        var substitutions = new Dictionary<GenericParameterSymbol, TypeSymbol>(
+            ReferenceEqualityComparer.Instance);
+        foreach (GenericParameterSymbol parameter in definition.TypeParameters)
+            substitutions.Add(parameter, parameter);
+        FileSymbolScope scope = CreateScope(substitutions, semanticInfo, functionSpecializer);
+        foreach (FieldSymbol field in definition.StaticFields.Where(field => field.HasInitializer))
+            if (field.Implementation is SourceSymbolImplementation
+                {
+                    Declaration: FieldDeclarationSyntax declaration,
+                })
+            {
+                if (!field.IsThreadLocal)
+                {
+                    services.BindSourceStaticFieldInitializer(field, definition, sourceScope, declaration);
+                    continue;
+                }
+
+                var initializer = new FunctionSymbol(field);
+                var binder = new FunctionBodyBinder(initializer, scope, diagnostics, constants,
+                    semanticInfo, functionSpecializer, cancellationToken);
+                if (binder.BindFieldInitializer(field, declaration.Initializer) is not BoundExpression bound)
+                    continue;
+                field.SetInitializer(bound);
+                functions.Add(new BoundFunction(initializer,
+                    new BoundBlockStatement([binder.CreateThreadLocalFieldInitializerStatement(field)])));
+            }
+        PortableStaticFieldInitializers = functions.ToImmutable();
+    }
+
+    public BoundFunction? BindInstanceFieldInitializers(
+        StructTypeSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo,
+        GenericFunctionSpecializer functionSpecializer,
+        CancellationToken cancellationToken)
+    {
+        if (!specialization.Fields.Any(field => field.HasInitializer)) return null;
+        FileSymbolScope scope = CreateScope(substitutions, semanticInfo, functionSpecializer);
+        var initializer = new FunctionSymbol(FunctionKind.InstanceInitializer, specialization, [],
+            SymbolOrigin.CompilerGenerated, Accessibility.Private);
+        specialization.SetInstanceInitializer(initializer);
+        var binder = new FunctionBodyBinder(initializer, scope, diagnostics, constants,
+            semanticInfo, functionSpecializer, cancellationToken);
+        foreach (FieldSymbol field in specialization.Fields)
+        {
+            if (!field.HasInitializer ||
+                field.GenericDefinition?.Implementation is not SourceSymbolImplementation
+                {
+                    Declaration: FieldDeclarationSyntax declaration,
+                })
+                continue;
+            if (binder.BindFieldInitializer(field, declaration.Initializer) is BoundExpression bound)
+                field.SetInitializer(bound);
+        }
+        return new BoundFunction(initializer,
+            new BoundBlockStatement(binder.CreateInstanceFieldInitializerStatements(specialization)));
+    }
+
+    public ImmutableArray<BoundFunction> BindStaticFieldInitializers(
+        StructTypeSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics,
+        ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo,
+        GenericFunctionSpecializer functionSpecializer,
+        GenericStructImplementationServices services,
+        CancellationToken cancellationToken)
+    {
+        FileSymbolScope scope = CreateScope(substitutions, semanticInfo, functionSpecializer);
+        var functions = ImmutableArray.CreateBuilder<BoundFunction>();
+        foreach (FieldSymbol field in specialization.StaticFields.Where(field => field.HasInitializer))
+        {
+            if (field.GenericDefinition?.Implementation is not SourceSymbolImplementation
+                {
+                    Declaration: FieldDeclarationSyntax declaration,
+                })
+                continue;
+            if (!field.IsThreadLocal)
+            {
+                services.BindSourceStaticFieldInitializer(field, specialization, scope, declaration);
+                continue;
+            }
+
+            var initializer = new FunctionSymbol(field);
+            var binder = new FunctionBodyBinder(initializer, scope, diagnostics, constants,
+                semanticInfo, functionSpecializer, cancellationToken);
+            if (binder.BindFieldInitializer(field, declaration.Initializer) is not BoundExpression bound)
+                continue;
+            field.SetInitializer(bound);
+            functions.Add(new BoundFunction(initializer,
+                new BoundBlockStatement([binder.CreateThreadLocalFieldInitializerStatement(field)])));
+        }
+        return functions.ToImmutable();
+    }
+
+    public bool EvaluateConstant(ConstantSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        GenericStructSpecializer structSpecializer,
+        ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo,
+        GenericStructImplementationServices services)
+    {
+        if (specialization.GenericDefinition is not { } definition ||
+            definition.Implementation is not SourceSymbolImplementation)
+            return false;
+        FileSymbolScope scope = sourceScope.WithTypeSubstitutions(substitutions, semanticInfo,
+            structSpecializer.Types);
+        scope.SetGenericStructSpecializer(structSpecializer);
+        return services.EvaluateSourceConstant(specialization, scope,
+            definition.Initializer, definition.IdentifierToken.Location);
+    }
+
+    private FileSymbolScope CreateScope(
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        SemanticInfoStore semanticInfo,
+        GenericFunctionSpecializer functionSpecializer)
+    {
+        FileSymbolScope scope = sourceScope.WithTypeSubstitutions(substitutions, semanticInfo,
+            functionSpecializer.Types);
+        scope.SetGenericStructSpecializer(functionSpecializer.StructSpecializer);
+        return scope;
+    }
+}
+
+/// <summary>Source-free implementation of a generic function stored as stable Library IR.</summary>
+internal sealed class LibraryGenericFunctionImplementation(
+    FunctionSymbol definition,
+    XelibBodyNode body,
+    Func<int, TypeSymbol> resolveType,
+    Func<XelibSymbolReference, Symbol> resolveSymbol) : IGenericFunctionImplementation
+{
+    public BoundBlockStatement? PortableBody => null;
+
+    public BoundBlockStatement Bind(FunctionSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics, ConstantEvaluationContext constants,
+        GenericFunctionSpecializer specializer, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        TypeSymbol Type(int id) => specializer.StructSpecializer.Substitute(
+            resolveType(id), substitutions);
+        Symbol Symbol(XelibSymbolReference reference) => MapSymbol(resolveSymbol(reference), specialization);
+        return XelibBodyCodec.Decode(body, specialization, Type, Symbol, ResolveGenericMethod,
+            (operation, receiver, requirement, arguments, value, operatorKind, isPointerAccess,
+                resultType, typeArguments) => ResolveGenericOperation(operation, receiver,
+                requirement, arguments, value, operatorKind, isPointerAccess, resultType,
+                typeArguments, specializer));
+    }
+
+    private BoundExpression ResolveGenericOperation(BoundDeferredGenericOperationKind operation,
+        BoundExpression? receiver, Symbol requirement, ImmutableArray<BoundExpression> arguments,
+        BoundExpression? value, SyntaxKind operatorKind, bool isPointerAccess, TypeSymbol resultType,
+        ImmutableArray<TypeSymbol> typeArguments, GenericFunctionSpecializer specializer)
+    {
+        if (operation == BoundDeferredGenericOperationKind.FunctionCall)
+        {
+            if (requirement is not FunctionSymbol definition)
+                throw InvalidGenericOperation(operation, requirement, resultType);
+            FunctionSymbol function = specializer.GetOrCreate(definition, typeArguments, TextLocation.None) ??
+                throw InvalidGenericOperation(operation, requirement, resultType);
+            return new BoundCallExpression(function, arguments);
+        }
+
+        if (operation is BoundDeferredGenericOperationKind.Construction or
+            BoundDeferredGenericOperationKind.Allocation)
+        {
+            StructTypeSymbol? structure = resultType switch
+            {
+                StructTypeSymbol item => item,
+                PointerTypeSymbol { ElementType: StructTypeSymbol item } => item,
+                _ => null,
+            };
+            if (structure is null) throw InvalidGenericOperation(operation, requirement, resultType);
+            FunctionSymbol? constructor = FindConstructor(structure, arguments);
+            if (constructor is null && !arguments.IsEmpty)
+                throw InvalidGenericOperation(operation, requirement, resultType);
+            if (operation == BoundDeferredGenericOperationKind.Construction)
+                return constructor is null
+                    ? new BoundStructConstructionExpression(structure, []) { IsDefaultInitialization = true }
+                    : new BoundConstructorCallExpression(structure, constructor, arguments);
+            var pointer = resultType as PointerTypeSymbol ??
+                throw InvalidGenericOperation(operation, requirement, resultType);
+            return new BoundNewExpression(structure, constructor, arguments,
+                IsPositionalInitialization: false, pointer)
+            {
+                IsDefaultInitialization = constructor is null,
+            };
+        }
+
+        if (receiver is null) throw InvalidGenericOperation(operation, requirement, resultType);
+        TypeSymbol receiverType = receiver.Type switch
+        {
+            PointerTypeSymbol pointer => pointer.ElementType,
+            ReferenceTypeSymbol reference => reference.ElementType,
+            UniqueTypeSymbol unique when isPointerAccess => unique.ElementType,
+            SharedTypeSymbol shared when isPointerAccess => shared.ElementType,
+            _ => receiver.Type,
+        };
+        if (operation is BoundDeferredGenericOperationKind.FieldGet or
+            BoundDeferredGenericOperationKind.FieldSet)
+        {
+            if (receiverType is not StructTypeSymbol structure ||
+                structure.FindField(requirement.Name) is not { } field)
+                throw InvalidGenericOperation(operation, requirement, receiverType);
+            var target = new BoundMemberAccessExpression(receiver, field, isPointerAccess);
+            return operation == BoundDeferredGenericOperationKind.FieldGet
+                ? target
+                : new BoundAssignmentExpression(target, operatorKind,
+                    value ?? throw InvalidGenericOperation(operation, requirement, receiverType));
+        }
+
+        if (operation is BoundDeferredGenericOperationKind.PropertyGet or
+            BoundDeferredGenericOperationKind.PropertySet)
+        {
+            if (receiverType is StructTypeSymbol structure &&
+                structure.FindProperty(requirement.Name) is { } property)
+            {
+                if (operation == BoundDeferredGenericOperationKind.PropertyGet)
+                    return new BoundMethodCallExpression(receiver,
+                        property.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                        [], isPointerAccess);
+                BoundExpression assigned = value ??
+                    throw InvalidGenericOperation(operation, requirement, receiverType);
+                if (operatorKind == SyntaxKind.EqualsToken)
+                    return new BoundPropertySetExpression(receiver, property, assigned, isPointerAccess);
+                return new BoundCompoundAccessorAssignmentExpression(receiver,
+                    property.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    property.Setter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    [], CompoundOperator(operatorKind), assigned, isPointerAccess, null);
+            }
+            if (receiverType is InterfaceTypeSymbol @interface &&
+                @interface.FindProperty(requirement.Name) is { } interfaceProperty)
+            {
+                if (operation == BoundDeferredGenericOperationKind.PropertyGet)
+                    return new BoundInterfaceMethodCallExpression(receiver, @interface,
+                        interfaceProperty.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                        [], isPointerAccess);
+                BoundExpression assigned = value ??
+                    throw InvalidGenericOperation(operation, requirement, receiverType);
+                if (operatorKind == SyntaxKind.EqualsToken)
+                    return new BoundInterfacePropertySetExpression(receiver, @interface,
+                        interfaceProperty, assigned, isPointerAccess);
+                return new BoundCompoundAccessorAssignmentExpression(receiver,
+                    interfaceProperty.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    interfaceProperty.Setter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    [], CompoundOperator(operatorKind), assigned, isPointerAccess, @interface);
+            }
+            throw InvalidGenericOperation(operation, requirement, receiverType);
+        }
+
+        if (operation is BoundDeferredGenericOperationKind.IndexerGet or
+            BoundDeferredGenericOperationKind.IndexerSet)
+        {
+            if (receiverType is StructTypeSymbol structure &&
+                FindIndexer(structure.AllIndexers, arguments) is { } indexer)
+            {
+                if (operation == BoundDeferredGenericOperationKind.IndexerGet)
+                    return new BoundMethodCallExpression(receiver,
+                        indexer.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                        arguments, isPointerAccess);
+                BoundExpression assigned = value ??
+                    throw InvalidGenericOperation(operation, requirement, receiverType);
+                if (operatorKind == SyntaxKind.EqualsToken)
+                    return new BoundIndexerSetExpression(receiver, indexer, arguments, assigned);
+                return new BoundCompoundAccessorAssignmentExpression(receiver,
+                    indexer.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    indexer.Setter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    arguments, CompoundOperator(operatorKind), assigned, isPointerAccess, null);
+            }
+            if (receiverType is InterfaceTypeSymbol @interface &&
+                FindInterfaceIndexer(@interface.AllIndexers, arguments) is { } interfaceIndexer)
+            {
+                if (operation == BoundDeferredGenericOperationKind.IndexerGet)
+                    return new BoundInterfaceMethodCallExpression(receiver, @interface,
+                        interfaceIndexer.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                        arguments, isPointerAccess);
+                BoundExpression assigned = value ??
+                    throw InvalidGenericOperation(operation, requirement, receiverType);
+                if (operatorKind == SyntaxKind.EqualsToken)
+                    return new BoundInterfaceIndexerSetExpression(receiver, @interface,
+                        interfaceIndexer, arguments, assigned);
+                return new BoundCompoundAccessorAssignmentExpression(receiver,
+                    interfaceIndexer.Getter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    interfaceIndexer.Setter ?? throw InvalidGenericOperation(operation, requirement, receiverType),
+                    arguments, CompoundOperator(operatorKind), assigned, isPointerAccess, @interface);
+            }
+        }
+        throw InvalidGenericOperation(operation, requirement, receiverType);
+    }
+
+    private static SyntaxKind CompoundOperator(SyntaxKind kind) => kind switch
+    {
+        SyntaxKind.PlusEqualsToken => SyntaxKind.PlusToken,
+        SyntaxKind.MinusEqualsToken => SyntaxKind.MinusToken,
+        SyntaxKind.StarEqualsToken => SyntaxKind.StarToken,
+        SyntaxKind.SlashEqualsToken => SyntaxKind.SlashToken,
+        SyntaxKind.PercentEqualsToken => SyntaxKind.PercentToken,
+        SyntaxKind.AmpersandEqualsToken => SyntaxKind.AmpersandToken,
+        SyntaxKind.PipeEqualsToken => SyntaxKind.PipeToken,
+        SyntaxKind.CaretEqualsToken => SyntaxKind.CaretToken,
+        SyntaxKind.LessLessEqualsToken => SyntaxKind.LessLessToken,
+        SyntaxKind.GreaterGreaterEqualsToken => SyntaxKind.GreaterGreaterToken,
+        _ => kind,
+    };
+
+    private static FunctionSymbol? FindConstructor(StructTypeSymbol structure,
+        ImmutableArray<BoundExpression> arguments) => structure.Constructors.FirstOrDefault(candidate =>
+        ParametersMatch(candidate.Parameters, arguments));
+
+    private static IndexerSymbol? FindIndexer(IEnumerable<IndexerSymbol> candidates,
+        ImmutableArray<BoundExpression> arguments) => candidates.FirstOrDefault(candidate =>
+        ParametersMatch(candidate.Parameters, arguments));
+
+    private static InterfaceIndexerSymbol? FindInterfaceIndexer(
+        IEnumerable<InterfaceIndexerSymbol> candidates, ImmutableArray<BoundExpression> arguments) =>
+        candidates.FirstOrDefault(candidate => ParametersMatch(candidate.Parameters, arguments));
+
+    private static bool ParametersMatch(ImmutableArray<ParameterSymbol> parameters,
+        ImmutableArray<BoundExpression> arguments) => parameters.Length == arguments.Length &&
+        parameters.Zip(arguments).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second.Type));
+
+    private static XelibFormatException InvalidGenericOperation(
+        BoundDeferredGenericOperationKind operation, Symbol requirement, TypeSymbol type) =>
+        new(XelibErrorCode.InvalidReference,
+            $"generic operation '{operation}' for requirement '{requirement.Name}' cannot be resolved on '{type}'");
+
+    private static BoundExpression ResolveGenericMethod(BoundExpression receiver, Symbol requirement,
+        ImmutableArray<BoundExpression> arguments, bool isPointerAccess)
+    {
+        TypeSymbol receiverType = receiver.Type switch
+        {
+            PointerTypeSymbol pointer => pointer.ElementType,
+            ReferenceTypeSymbol reference => reference.ElementType,
+            UniqueTypeSymbol unique when isPointerAccess => unique.ElementType,
+            SharedTypeSymbol shared when isPointerAccess => shared.ElementType,
+            _ => receiver.Type,
+        };
+        if (receiverType is StructTypeSymbol structure)
+        {
+            FunctionSymbol? method = structure.Methods.FirstOrDefault(candidate =>
+                candidate.Name == requirement.Name && candidate.Parameters.Length == arguments.Length &&
+                candidate.Parameters.Zip(arguments).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second.Type)));
+            if (method is not null)
+                return new BoundMethodCallExpression(receiver, method, arguments, isPointerAccess);
+        }
+        if (receiverType is InterfaceTypeSymbol @interface)
+        {
+            FunctionSymbol? method = @interface.AllMethods.FirstOrDefault(candidate =>
+                candidate.Name == requirement.Name && candidate.Parameters.Length == arguments.Length &&
+                candidate.Parameters.Zip(arguments).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second.Type)));
+            if (method is not null)
+                return new BoundInterfaceMethodCallExpression(receiver, @interface, method, arguments,
+                    isPointerAccess);
+        }
+        throw new XelibFormatException(XelibErrorCode.InvalidReference,
+            $"generic method requirement '{requirement.Name}' cannot be resolved on '{receiverType}'");
+    }
+
+    private Symbol MapSymbol(Symbol source, FunctionSymbol specialization)
+    {
+        if (ReferenceEquals(source, definition)) return specialization;
+        if (source is ParameterSymbol parameter && parameter.ContainingSymbol is FunctionSymbol owner)
+        {
+            if (MapFunction(owner, specialization) is { } mapped &&
+                parameter.Ordinal >= 0 && parameter.Ordinal < mapped.Parameters.Length)
+                return mapped.Parameters[parameter.Ordinal];
+        }
+
+        StructTypeSymbol? definitionOwner = definition.ContainingStruct;
+        StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
+        if (definitionOwner is null || specializedOwner is null ||
+            ContainingStruct(source) is not { } sourceOwner ||
+            !ReferenceEquals(sourceOwner, definitionOwner))
+            return source;
+
+        return source switch
+        {
+            FieldSymbol field => MapByIndex(definitionOwner.Fields, specializedOwner.Fields, field) ??
+                MapByIndex(definitionOwner.StaticFields, specializedOwner.StaticFields, field) ?? source,
+            ConstantSymbol constant => MapByIndex(definitionOwner.Constants, specializedOwner.Constants, constant) ?? source,
+            PropertySymbol property => MapByIndex(definitionOwner.Properties, specializedOwner.Properties, property) ?? source,
+            IndexerSymbol indexer => MapByIndex(definitionOwner.Indexers, specializedOwner.Indexers, indexer) ?? source,
+            FunctionSymbol function => MapFunction(function, specialization) ?? source,
+            _ => source,
+        };
+    }
+
+    private FunctionSymbol? MapFunction(FunctionSymbol source, FunctionSymbol specialization)
+    {
+        if (ReferenceEquals(source, definition)) return specialization;
+        StructTypeSymbol? definitionOwner = definition.ContainingStruct;
+        StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
+        if (definitionOwner is null || specializedOwner is null ||
+            !ReferenceEquals(source.ContainingStruct, definitionOwner))
+            return null;
+        return MapByIndex(definitionOwner.Methods, specializedOwner.Methods, source) ??
+            MapByIndex(definitionOwner.Constructors, specializedOwner.Constructors, source) ??
+            (ReferenceEquals(definitionOwner.Destructor, source) ? specializedOwner.Destructor : null) ??
+            (ReferenceEquals(definitionOwner.InstanceInitializer, source) ? specializedOwner.InstanceInitializer : null);
+    }
+
+    private static T? MapByIndex<T>(ImmutableArray<T> definitions,
+        ImmutableArray<T> specializations, T source) where T : class
+    {
+        int index = definitions.IndexOf(source);
+        return index >= 0 && index < specializations.Length ? specializations[index] : null;
+    }
+
+    private static StructTypeSymbol? ContainingStruct(Symbol symbol)
+    {
+        for (Symbol? current = symbol; current is not null; current = current.ContainingSymbol)
+            if (current is StructTypeSymbol structure) return structure;
+        return null;
+    }
+}
+
+internal sealed class LibraryGenericStructImplementation(
+    FunctionSymbol? initializerDefinition,
+    XelibBodyNode? initializerBody,
+    ImmutableArray<(FieldSymbol Field, FunctionSymbol Definition, XelibBodyNode Body)> staticInitializers,
+    ImmutableArray<(ConstantSymbol Constant, XelibBodyNode Expression)> constantExpressions,
+    Func<int, TypeSymbol> resolveType,
+    Func<XelibSymbolReference, Symbol> resolveSymbol) : IGenericStructImplementation
+{
+    public BoundFunction? PortableInstanceInitializer => null;
+    public ImmutableArray<BoundFunction> PortableStaticFieldInitializers => [];
+
+    public BoundFunction? BindInstanceFieldInitializers(StructTypeSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics, ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo, GenericFunctionSpecializer functionSpecializer,
+        CancellationToken cancellationToken)
+    {
+        if (initializerDefinition is null || initializerBody is null) return null;
+        var initializer = new FunctionSymbol(FunctionKind.InstanceInitializer, specialization, [],
+            SymbolOrigin.CompilerGenerated, Accessibility.Private);
+        specialization.SetInstanceInitializer(initializer);
+        var implementation = new LibraryGenericFunctionImplementation(initializerDefinition,
+            initializerBody, resolveType, resolveSymbol);
+        return new BoundFunction(initializer, implementation.Bind(initializer, substitutions,
+            diagnostics, constants, functionSpecializer, cancellationToken));
+    }
+
+    public ImmutableArray<BoundFunction> BindStaticFieldInitializers(StructTypeSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        DiagnosticBag diagnostics, ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo, GenericFunctionSpecializer functionSpecializer,
+        GenericStructImplementationServices services, CancellationToken cancellationToken)
+    {
+        var functions = ImmutableArray.CreateBuilder<BoundFunction>();
+        foreach (var entry in staticInitializers)
+        {
+            int ordinal = entry.Field.Ordinal;
+            FieldSymbol? field = specialization.StaticFields.FirstOrDefault(candidate =>
+                candidate.Ordinal == ordinal && candidate.Name == entry.Field.Name);
+            if (field is null) continue;
+            var initializer = new FunctionSymbol(field);
+            var implementation = new LibraryGenericFunctionImplementation(entry.Definition,
+                entry.Body, resolveType, resolveSymbol);
+            functions.Add(new BoundFunction(initializer, implementation.Bind(initializer,
+                substitutions, diagnostics, constants, functionSpecializer, cancellationToken)));
+        }
+        return functions.ToImmutable();
+    }
+
+    public bool EvaluateConstant(ConstantSymbol specialization,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        GenericStructSpecializer structSpecializer, ConstantEvaluationContext constants,
+        SemanticInfoStore semanticInfo,
+        GenericStructImplementationServices services)
+    {
+        if (specialization.GenericDefinition is not { } definition)
+            return false;
+        if (definition.HasValue)
+        {
+            specialization.SetValue(definition.Value);
+            return true;
+        }
+        XelibBodyNode? payload = constantExpressions.FirstOrDefault(entry =>
+            ReferenceEquals(entry.Constant, definition)).Expression;
+        if (payload is null) return false;
+        TypeSymbol Type(int id) => structSpecializer.Substitute(resolveType(id), substitutions);
+        Symbol Symbol(XelibSymbolReference reference)
+        {
+            Symbol resolved = resolveSymbol(reference);
+            if (resolved is FieldSymbol field && ReferenceEquals(field.ContainingType, definition.ContainingType) &&
+                specialization.ContainingType is StructTypeSymbol specializedType)
+                return specializedType.Fields.Concat(specializedType.StaticFields)
+                    .First(candidate => candidate.Ordinal == field.Ordinal && candidate.Name == field.Name);
+            return resolved;
+        }
+        BoundExpression expression = XelibBodyCodec.DecodeExpression(payload, Type, Symbol);
+        ConstantFoldStatus status = SemanticAnalyzer.FoldConstantExpression(expression,
+            out object? value, constants.TargetLayout);
+        if (status == ConstantFoldStatus.Invalid) return false;
+        specialization.SetBoundValue(expression);
+        if (status == ConstantFoldStatus.Folded) specialization.SetValue(value);
+        return true;
+    }
+}

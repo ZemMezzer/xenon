@@ -421,3 +421,45 @@ public sealed record BoundDeferredConstantExpression(TypeSymbol ConstantType) : 
 {
     public override BoundKind Kind => BoundKind.DeferredConstantExpression;
 }
+
+/// <summary>A validated open-generic method operation that is resolved after type substitution.</summary>
+public sealed record BoundDeferredGenericMethodCallExpression(
+    BoundExpression Receiver,
+    Symbol Requirement,
+    ImmutableArray<BoundExpression> Arguments,
+    bool IsPointerAccess,
+    TypeSymbol ResultType) : BoundExpression(ResultType)
+{
+    public override BoundKind Kind => BoundKind.DeferredGenericMethodCallExpression;
+}
+
+public enum BoundDeferredGenericOperationKind : ushort
+{
+    FunctionCall = 1,
+    FieldGet = 2,
+    FieldSet = 3,
+    PropertyGet = 4,
+    PropertySet = 5,
+    IndexerGet = 6,
+    IndexerSet = 7,
+    Construction = 8,
+    Allocation = 9,
+}
+
+/// <summary>
+/// A source-independent structural operation whose concrete member can only be
+/// selected after an open generic definition is specialized by its consumer.
+/// </summary>
+public sealed record BoundDeferredGenericOperationExpression(
+    BoundDeferredGenericOperationKind Operation,
+    BoundExpression? Receiver,
+    Symbol Requirement,
+    ImmutableArray<BoundExpression> Arguments,
+    BoundExpression? Value,
+    SyntaxKind OperatorKind,
+    bool IsPointerAccess,
+    TypeSymbol ResultType,
+    ImmutableArray<TypeSymbol> TypeArguments = default) : BoundExpression(ResultType)
+{
+    public override BoundKind Kind => BoundKind.DeferredGenericOperationExpression;
+}

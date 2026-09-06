@@ -219,8 +219,8 @@ public sealed class WorkspaceSnapshotTests
         Assert.True((await app.GetCompilationAsync()).HasErrors);
         XenonProject old = app.Configuration;
         var updated = new XenonProject(old.Name, old.Type, old.Version, old.RootDirectory,
-            old.SourceRoot, old.ProjectFilePath, old.SourceFiles, old.NativeLibraries,
-            old.NativeLibraryPaths, [library.Configuration.Identity], old.DebugProfile, old.ReleaseProfile);
+            old.SourceRoot, old.ProjectFilePath, old.SourceFiles, old.Libraries,
+            old.LibraryPaths, [library.Configuration.Identity], old.DebugProfile, old.ReleaseProfile);
 
         WorkspaceSnapshot next = workspace.UpdateProject(app.Id, updated);
         ProjectSnapshot nextApp = next.GetProject(app.Id);
@@ -290,8 +290,8 @@ public sealed class WorkspaceSnapshotTests
         string main = Assert.Single(old.SourceFiles);
         string equivalent = directory.PathOf("App/src/../src/main.xe");
         var duplicate = new XenonProject(old.Name, old.Type, old.Version, old.RootDirectory,
-            old.SourceRoot, old.ProjectFilePath, [main, equivalent], old.NativeLibraries,
-            old.NativeLibraryPaths, old.ProjectReferences, old.DebugProfile, old.ReleaseProfile);
+            old.SourceRoot, old.ProjectFilePath, [main, equivalent], old.Libraries,
+            old.LibraryPaths, old.ProjectReferences, old.DebugProfile, old.ReleaseProfile);
 
         Assert.Throws<ProjectSystemException>(() => workspace.UpdateProject(project.Id, duplicate));
         Assert.Same(before, workspace.CurrentSnapshot);

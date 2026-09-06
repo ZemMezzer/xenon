@@ -26,7 +26,7 @@ public sealed class TypeArchitectureTests
             Assert.Same(scope, type.ContainingSymbol);
             Assert.Same(scope, type.ContainingNamespace);
             Assert.Equal($"Example.{type.Name}", type.QualifiedName);
-            Assert.Equal(type.Name, type.Declaration.IdentifierToken.Text);
+            Assert.Equal(type.Name, type.DeclaringSyntaxReferences.Single().IdentifierToken.Text);
             Assert.All(type.GetMembers(), member => Assert.Same(type, member.ContainingSymbol));
         }
         var structure = Assert.Single(scope.Structs);
@@ -341,7 +341,7 @@ public sealed class TypeArchitectureTests
             Assert.Equal(reference.Path, reference.Location.Path);
         }
         var structure = symbols.OfType<StructTypeSymbol>().Single();
-        Assert.Same(structure.Declaration, structure.DeclaringSyntaxReferences[0].Declaration);
+        Assert.IsType<StructDeclarationSyntax>(structure.DeclaringSyntaxReferences[0].Declaration);
         var accessor = structure.Indexers[0].Getter!;
         Assert.Equal("get", source.GetText(accessor.Locations[0].Span));
         Assert.IsType<PropertyAccessorDeclarationSyntax>(accessor.DeclaringSyntaxReferences[0].Declaration);

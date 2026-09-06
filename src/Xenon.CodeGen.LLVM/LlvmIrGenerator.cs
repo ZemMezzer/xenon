@@ -4,6 +4,7 @@ using System.Text;
 using LLVMSharp.Interop;
 using LLVMApi = LLVMSharp.Interop.LLVM;
 using Xenon.Compiler;
+using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
@@ -96,12 +97,14 @@ public sealed class LlvmIrGenerator
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentException.ThrowIfNullOrWhiteSpace(abiIdentity);
         var exports = ImmutableArray.CreateBuilder<LlvmNativeExport>();
-        foreach (BoundFunction bound in compilation.SemanticModel.Functions)
+        foreach (BoundFunction bound in compilation.GetStaticImplementationFunctions())
         {
             FunctionSymbol function = bound.Symbol;
-            if (compilation.IsSymbolDefinedHere(function) &&
+            bool sourceExport = compilation.IsSymbolDefinedHere(function) &&
                 (function.IsPublic || function.IsExport ||
-                 function.FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue))
+                 function.FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue);
+            bool xelibExport = compilation.GetOwningLibrary(function) is not null && function.IsExport;
+            if (sourceExport || xelibExport)
                 exports.Add(new LlvmNativeExport(GetFunctionNativeName(function, abiIdentity)));
         }
         void AddTypeExports(NamespaceSymbol @namespace)
@@ -142,8 +145,9 @@ public sealed class LlvmIrGenerator
         ArgumentNullException.ThrowIfNull(compilation);
         bool Visit(NamespaceSymbol @namespace) =>
             @namespace.Structs
-                .Where(compilation.IsSymbolDefinedHere)
-                .SelectMany(type => type.StaticFields)
+                .Where(compilation.IsSymbolDefinedInCurrentArtifact)
+                .Where(compilation.IsImportedSymbolNativeReachable)
+                .SelectMany(type => type.StaticFields.Where(compilation.IsImportedSymbolNativeReachable))
                 .Any(field => field.IsThreadLocal &&
                     TypeFacts.GetCompleteDestructor(field.Type) is not null) ||
             @namespace.Namespaces.Any(Visit);
@@ -241,15 +245,18 @@ public sealed class LlvmIrGenerator
                     targetMachine,
                     LlvmTypeLayout.Create(targetMachine),
                     MapType);
+            ImmutableArray<BoundFunction> implementationFunctions = compilation.GetStaticImplementationFunctions();
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
-            foreach (BoundFunction function in compilation.SemanticModel.Functions)
+            foreach (BoundFunction function in implementationFunctions)
                 if (!_functions.ContainsKey(function.Symbol))
                     DeclareFunction(function.Symbol);
+            foreach (BoundFunction implementation in implementationFunctions)
+                XelibBodyCodec.Collect(implementation.Body, _ => { }, DeclareReferencedSymbol);
             DeclareInterfaceTables(compilation.SemanticModel.GlobalNamespace);
             DeclareVirtualTables(compilation.SemanticModel.GlobalNamespace);
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
             DeclareThreadLocalHelpers(compilation.SemanticModel.GlobalNamespace);
-            EmitFunctionBodies(compilation.SemanticModel.Functions);
+            EmitFunctionBodies(implementationFunctions);
             EmitCAbiThunks();
             if (compilation.Options.OutputKind == CompilationOutputKind.Executable)
             {
@@ -293,6 +300,26 @@ public sealed class LlvmIrGenerator
             _memoryRuntime = null;
             _nativeReferences = null!;
             _moduleIdentity = null!;
+        }
+    }
+
+    private void DeclareReferencedSymbol(Symbol symbol)
+    {
+        switch (symbol)
+        {
+            case FunctionSymbol function when !_functions.ContainsKey(function):
+                DeclareFunction(function);
+                break;
+            case PropertySymbol property:
+                if (property.Getter is { } getter && !_functions.ContainsKey(getter)) DeclareFunction(getter);
+                if (property.Setter is { } setter && !_functions.ContainsKey(setter)) DeclareFunction(setter);
+                break;
+            case IndexerSymbol indexer:
+                if (indexer.Getter is { } indexerGetter && !_functions.ContainsKey(indexerGetter))
+                    DeclareFunction(indexerGetter);
+                if (indexer.Setter is { } indexerSetter && !_functions.ContainsKey(indexerSetter))
+                    DeclareFunction(indexerSetter);
+                break;
         }
     }
 
@@ -399,6 +426,8 @@ public sealed class LlvmIrGenerator
         Symbol root = symbol;
         while (root.ContainingSymbol is not null) root = root.ContainingSymbol;
         if (ReferenceEquals(root, _compilation.SemanticModel.GlobalNamespace)) return _moduleIdentity;
+        if (_compilation.GetOwningLibrary(symbol) is { } library)
+            return $"xelib:{library.LibraryIdentity.ContentIdentity}";
         if (root is NamespaceSymbol @namespace &&
             _nativeReferences.TryGetValue(@namespace, out LlvmNativeReference? reference))
             return reference.AbiIdentity;
@@ -419,7 +448,7 @@ public sealed class LlvmIrGenerator
         CollectStructTypes(globalNamespace, types);
         foreach (StructTypeSymbol type in types)
         {
-            string typeName = _compilation.IsSymbolDefinedHere(type)
+            string typeName = _compilation.IsSymbolDefinedInCurrentArtifact(type)
                 ? type.FullName
                 : GetManagedName(type, "ir_type", type.FullName);
             _structTypes.Add(type, _context.CreateNamedStruct(typeName));
@@ -434,9 +463,10 @@ public sealed class LlvmIrGenerator
 
     private void DeclareInterfaceTypes(NamespaceSymbol @namespace)
     {
-        foreach (InterfaceTypeSymbol type in @namespace.Interfaces)
+        foreach (InterfaceTypeSymbol type in @namespace.Interfaces
+                     .Where(_compilation.IsImportedSymbolNativeReachable))
         {
-            string typeName = _compilation.IsSymbolDefinedHere(type)
+            string typeName = _compilation.IsSymbolDefinedInCurrentArtifact(type)
                 ? type.FullName
                 : GetManagedName(type, "ir_type", type.FullName);
             LLVMTypeRef llvmType = _context.CreateNamedStruct(typeName);
@@ -460,13 +490,14 @@ public sealed class LlvmIrGenerator
 
     private void DeclareVirtualTables(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType && type.HasVirtualDispatch))
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType && type.HasVirtualDispatch)
+                     .Where(_compilation.IsImportedDispatchTypeNativeReachable))
         {
             LLVMTypeRef elementType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)type.VirtualMethods.Length + 1);
             LLVMValueRef table = _module.AddGlobal(tableType, GetManagedName(
                 type, "vtable", GetVirtualTableSourceName(type)));
-            bool owned = _compilation.IsSymbolDefinedHere(type);
+            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(type);
             table.Linkage = LLVMLinkage.LLVMExternalLinkage;
             if (owned)
             {
@@ -490,10 +521,11 @@ public sealed class LlvmIrGenerator
 
     private void DeclareInterfaceTables(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType)
+                     .Where(_compilation.IsImportedInterfaceDispatchTypeNativeReachable))
         {
             var tables = new Dictionary<InterfaceTypeSymbol, (LlvmVTable Table, FunctionSymbol[] Implementations)>();
-            bool owned = _compilation.IsSymbolDefinedHere(type);
+            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(type);
             foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces
                 .OrderBy(item => item.FullName, StringComparer.Ordinal))
             {
@@ -554,14 +586,15 @@ public sealed class LlvmIrGenerator
 
     private void DeclareStaticFields(NamespaceSymbol @namespace)
     {
-        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType)
+                     .Where(_compilation.IsImportedSymbolNativeReachable))
         {
-            foreach (FieldSymbol field in type.StaticFields)
+            foreach (FieldSymbol field in type.StaticFields.Where(_compilation.IsImportedSymbolNativeReachable))
             {
                 LLVMTypeRef fieldType = MapType(field.Type);
                 LLVMValueRef global = _module.AddGlobal(fieldType, GetManagedName(
                     field, "static_field", GetStaticFieldSourceName(field)));
-                bool owned = _compilation.IsSymbolDefinedHere(field);
+                bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(field);
                 global.Linkage = !owned || field.IsPublic
                     ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
                 if (owned) global.Initializer = CreateStaticInitializer(field.Type, field.ConstantValue);
@@ -582,12 +615,14 @@ public sealed class LlvmIrGenerator
     private void DeclareThreadLocalHelpers(NamespaceSymbol @namespace)
     {
         LLVMTypeRef helperType = LLVMTypeRef.CreateFunction(_context.VoidType, [], false);
-        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
-        foreach (FieldSymbol field in type.StaticFields.Where(RequiresThreadLocalEnsure))
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType)
+                     .Where(_compilation.IsImportedSymbolNativeReachable))
+        foreach (FieldSymbol field in type.StaticFields.Where(RequiresThreadLocalEnsure)
+                     .Where(_compilation.IsImportedSymbolNativeReachable))
         {
             string helperName = GetManagedName(field, "threadlocal_ensure", GetStaticFieldSourceName(field));
             LLVMValueRef helper = _module.AddFunction(helperName, helperType);
-            bool owned = _compilation.IsSymbolDefinedHere(field);
+            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(field);
             helper.Linkage = !owned || field.IsPublic
                 ? LLVMLinkage.LLVMExternalLinkage
                 : LLVMLinkage.LLVMInternalLinkage;
@@ -1080,30 +1115,34 @@ public sealed class LlvmIrGenerator
     {
         foreach (FunctionSymbol function in @namespace.Functions)
         {
-            if (!function.IsGenericDefinition)
+            if (!function.IsGenericDefinition && _compilation.IsImportedSymbolNativeReachable(function))
                 DeclareFunction(function);
         }
 
-        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType))
+        foreach (StructTypeSymbol type in @namespace.Structs.Where(type => type.IsConcreteType)
+                     .Where(_compilation.IsImportedSymbolNativeReachable))
         {
             foreach (FunctionSymbol method in type.Methods)
             {
-                if (!method.IsGenericDefinition)
+                if (!method.IsGenericDefinition && _compilation.IsImportedSymbolNativeReachable(method))
                     DeclareFunction(method);
             }
 
-            foreach (FunctionSymbol constructor in type.Constructors)
+            foreach (FunctionSymbol constructor in type.Constructors
+                         .Where(_compilation.IsImportedSymbolNativeReachable))
                 DeclareFunction(constructor);
 
-            if (type.InstanceInitializer is not null)
+            if (type.InstanceInitializer is not null &&
+                _compilation.IsImportedSymbolNativeReachable(type.InstanceInitializer))
                 DeclareFunction(type.InstanceInitializer);
 
-            if (type.Destructor is not null)
+            if (type.Destructor is not null && _compilation.IsImportedSymbolNativeReachable(type.Destructor))
             {
                 DeclareFunction(type.Destructor);
             }
 
-            if (type.CompleteDestructor is { FunctionKind: FunctionKind.DestructorGlue } destructor)
+            if (type.CompleteDestructor is { FunctionKind: FunctionKind.DestructorGlue } destructor &&
+                _compilation.IsImportedSymbolNativeReachable(destructor))
                 DeclareFunction(destructor);
         }
 
@@ -1154,7 +1193,7 @@ public sealed class LlvmIrGenerator
             return;
         }
         LLVMValueRef value = _module.AddFunction(implementationName, functionType);
-        bool owned = _compilation.IsSymbolDefinedHere(function);
+        bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(function);
         if (!owned)
         {
             value.Linkage = LLVMLinkage.LLVMExternalLinkage;
@@ -3889,7 +3928,10 @@ public sealed class LlvmIrGenerator
             ImmutableArray<BoundExpression> arguments,
             bool defaultInitialize = false)
         {
-            if (structType.AllInstanceFields.Any(field => field.Initializer is not null))
+            // Imported XELIB fields intentionally have no source initializer syntax. Their
+            // serialized hidden initializer is the authoritative signal that construction
+            // needs addressable storage and a lifecycle call.
+            if (HasDefaultInstanceInitializer(structType))
             {
                 LLVMValueRef address = _builder.BuildAlloca(_mapType(structType), $"{structType.Name}.init.tmp");
                 if (defaultInitialize)

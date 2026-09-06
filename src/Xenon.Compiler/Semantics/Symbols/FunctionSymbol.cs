@@ -6,11 +6,11 @@ namespace Xenon.Compiler.Semantics.Symbols;
 
 public sealed class FunctionSymbol : Symbol
 {
+    private ImmutableArray<GenericParameterSymbol> _typeParameters = [];
     public bool HasStackArrays { get; internal set; }
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
-    public bool DelegatesToThisConstructor =>
-        Declaration is ConstructorDeclarationSyntax { HasThisInitializer: true };
+    public bool DelegatesToThisConstructor { get; }
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
     public ImmutableArray<ReferenceReturnOrigin> ReferenceReturnOrigins { get; private set; } = [];
     public ImmutableArray<SharedReturnOrigin> SharedReturnOrigins { get; private set; } = [];
@@ -31,7 +31,12 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
         FunctionKind = FunctionKind.Ordinary;
         IsReadonly = declaration.IsReadonly;
-        TypeParameters = typeParameters.IsDefault ? [] : typeParameters;
+        SetTypeParameters(typeParameters.IsDefault ? [] : typeParameters);
+        IsExtern = declaration.IsExtern;
+        IsExport = declaration.IsExport;
+        IsDefinition = declaration.Body is not null;
+        SetSourceOrigin(declaration);
+        ApplyParameterDocumentation();
     }
 
     internal FunctionSymbol(
@@ -49,6 +54,9 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = Accessibility.Public;
         IsAbstract = true;
         IsReadonly = declaration.IsReadonly;
+        IsDefinition = false;
+        SetSourceOrigin(declaration);
+        ApplyParameterDocumentation();
     }
 
     internal FunctionSymbol(
@@ -65,7 +73,10 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = Accessibility.Public;
         IsAbstract = true;
-        IsReadonly = declaration.IsGetter && containingProperty.Declaration.IsReadonly;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
+        IsReadonly = declaration.IsGetter && containingProperty.IsReadonly;
+        IsDefinition = declaration.Body is not null;
+        SetSourceOrigin(declaration, includeDocumentation: false);
     }
 
     internal FunctionSymbol(
@@ -82,7 +93,10 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = Accessibility.Public;
         IsAbstract = true;
-        IsReadonly = declaration.IsGetter && containingIndexer.Declaration.IsReadonly;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
+        IsReadonly = declaration.IsGetter && containingIndexer.IsReadonly;
+        IsDefinition = declaration.Body is not null;
+        SetSourceOrigin(declaration, includeDocumentation: false);
     }
 
     internal FunctionSymbol(
@@ -103,6 +117,9 @@ public sealed class FunctionSymbol : Symbol
         IsOverride = declaration.IsOverride;
         IsAbstract = declaration.IsAbstract;
         IsReadonly = declaration.IsReadonly;
+        IsDefinition = declaration.Body is not null;
+        SetSourceOrigin(declaration);
+        ApplyParameterDocumentation();
     }
 
     internal FunctionSymbol(
@@ -113,17 +130,19 @@ public sealed class FunctionSymbol : Symbol
         PropertyAccessorDeclarationSyntax declaration)
         : base(name, SymbolKind.Function, containingProperty)
     {
-        PropertyDeclarationSyntax property = containingProperty.Declaration;
         FunctionKind = FunctionKind.Method;
         ReturnType = returnType;
         Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
-        Accessibility = property.IsPublic ? Accessibility.Public : Accessibility.Private;
-        IsStatic = property.IsStatic;
-        IsVirtual = property.IsVirtual;
-        IsOverride = property.IsOverride;
-        IsAbstract = property.IsAbstract;
-        IsReadonly = declaration.IsGetter && property.IsReadonly;
+        Accessibility = containingProperty.Accessibility;
+        IsStatic = containingProperty.IsStatic;
+        IsVirtual = containingProperty.IsVirtual;
+        IsOverride = containingProperty.IsOverride;
+        IsAbstract = containingProperty.IsAbstract;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
+        IsReadonly = declaration.IsGetter && containingProperty.IsReadonly;
+        IsDefinition = declaration.Body is not null;
+        SetSourceOrigin(declaration, includeDocumentation: false);
     }
 
     internal FunctionSymbol(
@@ -134,17 +153,19 @@ public sealed class FunctionSymbol : Symbol
         PropertyAccessorDeclarationSyntax declaration)
         : base(name, SymbolKind.Function, containingIndexer)
     {
-        IndexerDeclarationSyntax indexer = containingIndexer.Declaration;
         FunctionKind = FunctionKind.Method;
         ReturnType = returnType;
         Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
-        Accessibility = indexer.IsPublic ? Accessibility.Public : Accessibility.Private;
-        IsStatic = indexer.IsStatic;
-        IsVirtual = indexer.IsVirtual;
-        IsOverride = indexer.IsOverride;
-        IsAbstract = indexer.IsAbstract;
-        IsReadonly = declaration.IsGetter && indexer.IsReadonly;
+        Accessibility = containingIndexer.Accessibility;
+        IsStatic = containingIndexer.IsStatic;
+        IsVirtual = containingIndexer.IsVirtual;
+        IsOverride = containingIndexer.IsOverride;
+        IsAbstract = containingIndexer.IsAbstract;
+        AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
+        IsReadonly = declaration.IsGetter && containingIndexer.IsReadonly;
+        IsDefinition = declaration.Body is not null;
+        SetSourceOrigin(declaration, includeDocumentation: false);
     }
 
     internal FunctionSymbol(
@@ -174,7 +195,70 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = accessibility;
         IsVirtual = declaration is DestructorDeclarationSyntax { IsVirtual: true };
         IsOverride = declaration is DestructorDeclarationSyntax { IsOverride: true };
+        DelegatesToThisConstructor = declaration is ConstructorDeclarationSyntax { HasThisInitializer: true };
+        IsDefinition = functionKind is FunctionKind.Constructor or FunctionKind.Destructor or
+            FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue;
+        if (declaration is not TypeDeclarationSyntax && functionKind is FunctionKind.Constructor or FunctionKind.Destructor)
+        {
+            SetSourceOrigin(declaration);
+            ApplyParameterDocumentation();
+        }
     }
+
+    internal FunctionSymbol(
+        string name,
+        Symbol containingSymbol,
+        FunctionKind functionKind,
+        TypeSymbol returnType,
+        ImmutableArray<ParameterSymbol> parameters,
+        Accessibility accessibility,
+        bool isStatic = false,
+        bool isReadonly = false,
+        bool isVirtual = false,
+        bool isOverride = false,
+        bool isAbstract = false,
+        bool isExtern = false,
+        bool isExport = false,
+        bool isDefinition = false,
+        bool delegatesToThisConstructor = false,
+        ImmutableArray<GenericParameterSymbol> typeParameters = default,
+        SymbolOrigin? origin = null,
+        SymbolDocumentation? documentation = null,
+        SymbolImplementation? implementation = null,
+        AccessorKind accessorKind = AccessorKind.None)
+        : base(name, SymbolKind.Function, containingSymbol)
+    {
+        FunctionKind = functionKind;
+        ReturnType = returnType;
+        Parameters = ParameterSymbol.Own(parameters, this);
+        Accessibility = accessibility;
+        IsStatic = isStatic;
+        IsReadonly = isReadonly;
+        IsVirtual = isVirtual;
+        IsOverride = isOverride;
+        IsAbstract = isAbstract;
+        IsExtern = isExtern;
+        IsExport = isExport;
+        IsDefinition = isDefinition;
+        DelegatesToThisConstructor = delegatesToThisConstructor;
+        AccessorKind = accessorKind;
+        SetTypeParameters(typeParameters.IsDefault ? [] : typeParameters);
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
+        SetImplementation(implementation);
+        if (implementation is SourceSymbolImplementation source) Declaration = source.Declaration;
+    }
+
+    internal FunctionSymbol(FunctionKind functionKind, DeclaredTypeSymbol containingType,
+        ImmutableArray<ParameterSymbol> parameters, SymbolOrigin origin, Accessibility accessibility)
+        : this(functionKind switch
+            {
+                FunctionKind.Constructor => containingType.Name,
+                FunctionKind.InstanceInitializer => "__init_fields",
+                FunctionKind.Destructor => $"~{containingType.Name}",
+                FunctionKind.DestructorGlue => "__destructor",
+                _ => throw new ArgumentOutOfRangeException(nameof(functionKind)),
+            }, containingType, functionKind, BuiltinTypes.Void, parameters, accessibility,
+            isDefinition: true, origin: origin) { }
 
     internal FunctionSymbol(FieldSymbol threadLocalField)
         : base($"__init_threadlocal_{threadLocalField.Name}", SymbolKind.Function,
@@ -183,10 +267,11 @@ public sealed class FunctionSymbol : Symbol
         FunctionKind = FunctionKind.ThreadLocalInitializer;
         ReturnType = BuiltinTypes.Void;
         Parameters = [];
-        Declaration = threadLocalField.Declaration;
         Accessibility = Accessibility.Private;
         IsStatic = true;
         ThreadLocalField = threadLocalField;
+        IsDefinition = true;
+        SetMetadata(SymbolOrigin.CompilerGenerated);
     }
 
     internal FunctionSymbol(
@@ -205,6 +290,21 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = Accessibility.Private;
         OwnershipType = ownershipType;
+        IsDefinition = true;
+    }
+
+    internal FunctionSymbol(OwnershipTypeSymbol ownershipType, NamespaceSymbol containingNamespace,
+        PointerTypeSymbol addressType, SymbolOrigin origin)
+        : base($"__ownership_destructor_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(ownershipType)))}",
+            SymbolKind.Function, containingNamespace)
+    {
+        FunctionKind = FunctionKind.OwnershipDestructor;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = ParameterSymbol.Own([new ParameterSymbol("value", addressType, 0)], this);
+        Accessibility = Accessibility.Private;
+        OwnershipType = ownershipType;
+        IsDefinition = true;
+        SetMetadata(origin);
     }
 
     internal FunctionSymbol(
@@ -223,6 +323,21 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = Accessibility.Private;
         StorageType = storageType;
+        IsDefinition = true;
+    }
+
+    internal FunctionSymbol(StorageTypeSymbol storageType, NamespaceSymbol containingNamespace,
+        PointerTypeSymbol addressType, SymbolOrigin origin)
+        : base($"__storage_destructor_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(storageType)))}",
+            SymbolKind.Function, containingNamespace)
+    {
+        FunctionKind = FunctionKind.StorageDestructor;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = ParameterSymbol.Own([new ParameterSymbol("value", addressType, 0)], this);
+        Accessibility = Accessibility.Private;
+        StorageType = storageType;
+        IsDefinition = true;
+        SetMetadata(origin);
     }
 
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
@@ -258,7 +373,7 @@ public sealed class FunctionSymbol : Symbol
 
     public ImmutableArray<ParameterSymbol> Parameters { get; }
 
-    public ImmutableArray<GenericParameterSymbol> TypeParameters { get; } = [];
+    public ImmutableArray<GenericParameterSymbol> TypeParameters => _typeParameters;
 
     public FunctionSymbol? GenericDefinition { get; private set; }
     public ImmutableArray<TypeSymbol> TypeArguments { get; private set; } = [];
@@ -270,9 +385,9 @@ public sealed class FunctionSymbol : Symbol
 
     public Accessibility Accessibility { get; }
 
-    public bool IsExtern => Declaration is FunctionDeclarationSyntax { IsExtern: true };
+    public bool IsExtern { get; }
 
-    public bool IsExport => Declaration is FunctionDeclarationSyntax { IsExport: true };
+    public bool IsExport { get; }
 
     public bool IsPublic => Accessibility == Accessibility.Public;
 
@@ -284,31 +399,25 @@ public sealed class FunctionSymbol : Symbol
     public bool IsAbstract { get; }
     public bool IsReadonly { get; }
 
-    public bool IsAccessor => ContainingProperty is not null || ContainingInterfaceProperty is not null ||
-        ContainingIndexer is not null || ContainingInterfaceIndexer is not null;
+    public AccessorKind AccessorKind { get; }
+
+    public bool IsAccessor => AccessorKind != AccessorKind.None;
 
     public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor;
     public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) && !IsAccessor;
     public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor;
-    public override bool IsDefinition => Declaration switch
-    {
-        FunctionDeclarationSyntax syntax => syntax.Body is not null,
-        MethodDeclarationSyntax syntax => syntax.Body is not null,
-        ConstructorDeclarationSyntax => true,
-        DestructorDeclarationSyntax => true,
-        _ when FunctionKind == FunctionKind.DestructorGlue => true,
-        _ when FunctionKind == FunctionKind.ThreadLocalInitializer => true,
-        _ when FunctionKind == FunctionKind.OwnershipDestructor => true,
-        _ when FunctionKind == FunctionKind.StorageDestructor => true,
-        PropertyAccessorDeclarationSyntax syntax => syntax.Body is not null,
-        _ => false,
-    };
+    public override bool IsDefinition { get; }
 
     public int? VTableSlot { get; private set; }
     public int ConstructorOverload { get; private set; }
     public int ConstructorOverloadCount { get; private set; } = 1;
 
     internal void SetVTableSlot(int slot) => VTableSlot = slot;
+    internal void SetTypeParameters(ImmutableArray<GenericParameterSymbol> parameters)
+    {
+        _typeParameters = parameters;
+        foreach (GenericParameterSymbol parameter in parameters) parameter.SetDeclaringSymbol(this);
+    }
     internal void SetReceiverMoveEffects(ImmutableArray<ReceiverMoveEffect> effects) =>
         ReceiverMoveEffects = effects;
     internal void SetReferenceReturnOrigins(ImmutableArray<ReferenceReturnOrigin> origins) =>
@@ -328,8 +437,17 @@ public sealed class FunctionSymbol : Symbol
         ConstructorOverloadCount = count;
     }
 
+    private void ApplyParameterDocumentation()
+    {
+        foreach (ParameterSymbol parameter in Parameters)
+            if (Documentation.Parameters.TryGetValue(parameter.Name, out string? text))
+                parameter.SetMetadata(parameter.Origin,
+                    SymbolDocumentation.Empty with { Summary = text });
+    }
+
     public bool HasSameSignature(FunctionSymbol candidate) =>
         FunctionKind == candidate.FunctionKind &&
+        AccessorKind == candidate.AccessorKind &&
         (ContainingProperty is not null || ContainingInterfaceProperty is not null) ==
             (candidate.ContainingProperty is not null || candidate.ContainingInterfaceProperty is not null) &&
         (ContainingIndexer is not null || ContainingInterfaceIndexer is not null) ==
@@ -343,9 +461,13 @@ public sealed class FunctionSymbol : Symbol
     public bool Overrides(FunctionSymbol candidate) =>
         HasSameSignature(candidate) && TypeIdentity.AreSame(ReturnType, candidate.ReturnType);
 
-    internal SyntaxNode Declaration { get; }
+    internal SyntaxNode Declaration { get; } = null!;
+    internal SyntaxNode? ImplementationDeclaration => Implementation is SourceSymbolImplementation source
+        ? source.Declaration : GenericDefinition?.ImplementationDeclaration;
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
-        Declaration is TypeDeclarationSyntax || FunctionKind is FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor ? [] : [new(Declaration)];
+        Origin.Kind != SymbolOriginKind.Source || Declaration is TypeDeclarationSyntax ||
+            FunctionKind is FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor
+            ? base.DeclaringSyntaxReferences : [new(Declaration)];
 }
 
 public readonly record struct ReceiverMoveEffect(ImmutableArray<int> FieldOrdinals);
@@ -399,6 +521,7 @@ public sealed class ParameterSymbol : VariableSymbol
     {
         Ordinal = ordinal;
         Declaration = declaration;
+        if (declaration is not null) SetSourceOrigin(declaration, includeDocumentation: false);
     }
 
     public int Ordinal { get; }
@@ -408,7 +531,14 @@ public sealed class ParameterSymbol : VariableSymbol
 
     // Each declaration owns its own parameters, including indexers and their accessors.
     internal static ImmutableArray<ParameterSymbol> Own(ImmutableArray<ParameterSymbol> parameters, Symbol owner) =>
-        parameters.Select(parameter => new ParameterSymbol(parameter.Name, parameter.Type, parameter.Ordinal, parameter.IsReadonly, owner, parameter.Declaration)).ToImmutableArray();
+        parameters.Select(parameter =>
+        {
+            var owned = new ParameterSymbol(parameter.Name, parameter.Type, parameter.Ordinal,
+                parameter.IsReadonly, owner, parameter.Declaration);
+            if (owner.Documentation.Parameters.TryGetValue(parameter.Name, out string? text))
+                owned.SetMetadata(owned.Origin, SymbolDocumentation.Empty with { Summary = text });
+            return owned;
+        }).ToImmutableArray();
 }
 
 public sealed class LocalVariableSymbol : VariableSymbol
