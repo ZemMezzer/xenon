@@ -127,7 +127,8 @@ internal sealed class SemanticAnalyzer
                 sourceImplementation.CapturePortableInstanceInitializer(definition, _diagnostics,
                     _constants, genericSpecializer, _cancellationToken);
                 sourceImplementation.CapturePortableStaticInitializers(definition,
-                    _genericImplementationServices);
+                    _genericImplementationServices, _diagnostics, _constants, genericSpecializer,
+                    _cancellationToken);
             }
         BindThreadLocalFieldInitializers(genericSpecializer);
         StabilizeConstructorReferenceSummaries();
@@ -1145,7 +1146,7 @@ internal sealed class SemanticAnalyzer
                     out IGenericStructImplementation? implementation))
                 return implementation.EvaluateConstant(constant,
                     _genericStructSpecializer.GetSubstitutions(specialization),
-                    _genericStructSpecializer, _semanticInfo,
+                    _genericStructSpecializer, _constants, _semanticInfo,
                     _genericImplementationServices);
             if (_failedConstants.Add(constant))
                 _diagnostics.Report(_genericStructSpecializer?.GetOriginLocation(specialization) ?? TextLocation.None,

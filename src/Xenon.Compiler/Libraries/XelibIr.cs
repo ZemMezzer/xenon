@@ -264,6 +264,15 @@ public enum XelibBodyOpcode : ushort
     Free = 67,
     DeferredConstant = 68,
     DeferredGenericMethodCall = 69,
+    DeferredGenericFunctionCall = 70,
+    DeferredGenericFieldGet = 71,
+    DeferredGenericFieldSet = 72,
+    DeferredGenericPropertyGet = 73,
+    DeferredGenericPropertySet = 74,
+    DeferredGenericIndexerGet = 75,
+    DeferredGenericIndexerSet = 76,
+    DeferredGenericConstruction = 77,
+    DeferredGenericAllocation = 78,
 }
 
 public enum XelibOperator : ushort
@@ -346,4 +355,10 @@ public sealed record XelibBodyNode
 public sealed record XelibGenericImplementation(
     int DefinitionSymbolId,
     int BodyId,
-    bool IsStruct);
+    bool IsStruct,
+    ImmutableArray<XelibGenericFieldInitializer> StaticFieldInitializers = default,
+    ImmutableArray<XelibGenericConstantImplementation> Constants = default);
+
+public sealed record XelibGenericFieldInitializer(int FieldSymbolId, int BodyId);
+
+public sealed record XelibGenericConstantImplementation(int ConstantSymbolId, XelibBodyNode Expression);

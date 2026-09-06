@@ -97,6 +97,8 @@ internal sealed class GenericFunctionSpecializer
             isOverride: definition.IsOverride, isAbstract: definition.IsAbstract,
             isExtern: definition.IsExtern, isExport: definition.IsExport, isDefinition: true,
             origin: SymbolOrigin.CompilerGenerated, documentation: definition.Documentation);
+        specialized.HasStackArrays = definition.HasStackArrays;
+        specialized.HasScalarCleanup = definition.HasScalarCleanup;
         specialized.SetGenericSpecialization(definition, typeArguments);
         specialized.SetReceiverMoveEffects(definition.ReceiverMoveEffects);
         specialized.SetReferenceReturnOrigins(definition.ReferenceReturnOrigins);

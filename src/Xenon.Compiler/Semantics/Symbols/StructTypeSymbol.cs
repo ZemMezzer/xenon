@@ -190,6 +190,14 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
         Destructor = destructor;
     }
 
+    internal void SetDestructorGlue(FunctionSymbol destructor)
+    {
+        if (destructor.FunctionKind != FunctionKind.DestructorGlue ||
+            !ReferenceEquals(destructor.ContainingStruct, this))
+            throw new ArgumentException("The function is not destructor glue for this struct.", nameof(destructor));
+        _destructorGlue = destructor;
+    }
+
     public FieldSymbol? FindField(string name) =>
         _fields.FirstOrDefault(field => string.Equals(field.Name, name, StringComparison.Ordinal)) ??
         BaseType?.FindField(name);

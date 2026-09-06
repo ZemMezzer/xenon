@@ -5431,7 +5431,10 @@ internal sealed class FunctionBodyBinder
         _ = ValidateGenericArguments(definition.Name, parameterTypes, arguments, syntax.Arguments, location,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordCandidates(syntax.Target, definition, [definition], CandidateReason.None);
-        return new BoundDeferredConstantExpression(SubstituteGenericType(definition.ReturnType, substitutions));
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.FunctionCall, null, definition, arguments, null,
+            SyntaxKind.EqualsToken, false,
+            SubstituteGenericType(definition.ReturnType, substitutions), typeArguments);
     }
 
     private BoundExpression? TryBindStaticMethodCall(MemberAccessExpressionSyntax target, ImmutableArray<BoundExpression> arguments,
@@ -7598,7 +7601,9 @@ internal sealed class FunctionBodyBinder
             }
             RecordSymbolAndType(target, field.Symbol, field.Type);
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(field.Symbol);
-            return new BoundDeferredConstantExpression(field.Type);
+            return new BoundDeferredGenericOperationExpression(
+                BoundDeferredGenericOperationKind.FieldSet, receiver, field.Symbol, [], fieldValue,
+                syntax.OperatorToken.Kind, pointerAccess, field.Type);
         }
 
         GenericPropertyMember[] candidates = GenericConstraintMemberLookup
@@ -7644,7 +7649,9 @@ internal sealed class FunctionBodyBinder
         }
         RecordSymbolAndType(target, property.Symbol, property.Type);
         _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(property.Symbol);
-        return new BoundDeferredConstantExpression(property.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.PropertySet, receiver, property.Symbol, [], value,
+            syntax.OperatorToken.Kind, pointerAccess, property.Type);
     }
 
     private BoundExpression BindGenericIndexerAssignment(AssignmentExpressionSyntax syntax,
@@ -7692,7 +7699,9 @@ internal sealed class FunctionBodyBinder
         }
         RecordSymbolAndType(target, indexer.Symbol, indexer.Type);
         _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(indexer.Symbol);
-        return new BoundDeferredConstantExpression(indexer.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.IndexerSet, receiver, indexer.Symbol, indices, value,
+            syntax.OperatorToken.Kind, false, indexer.Type);
     }
 
     private BoundExpression BindGenericMemberGet(MemberAccessExpressionSyntax syntax, BoundExpression receiver,
@@ -7703,7 +7712,9 @@ internal sealed class FunctionBodyBinder
         if (field is not null)
         {
             RecordSymbolAndType(syntax, field.Symbol, field.Type);
-            return new BoundDeferredConstantExpression(field.Type);
+            return new BoundDeferredGenericOperationExpression(
+                BoundDeferredGenericOperationKind.FieldGet, receiver, field.Symbol, [], null,
+                SyntaxKind.EqualsToken, pointerAccess, field.Type);
         }
         return BindGenericPropertyGet(syntax, receiver, parameter, pointerAccess);
     }
@@ -7736,7 +7747,9 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         RecordSymbolAndType(syntax, property.Symbol, property.Type);
-        return new BoundDeferredConstantExpression(property.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.PropertyGet, receiver, property.Symbol, [], null,
+            SyntaxKind.EqualsToken, pointerAccess, property.Type);
     }
 
     private BoundExpression BindGenericMethodCall(MemberAccessExpressionSyntax target, BoundExpression receiver,
@@ -7800,7 +7813,9 @@ internal sealed class FunctionBodyBinder
         _ = ValidateGenericArguments("this", indexer.ParameterTypes, arguments, syntax.Arguments,
             syntax.OpenBracketToken.Location);
         RecordSymbolAndType(syntax, indexer.Symbol, indexer.Type);
-        return new BoundDeferredConstantExpression(indexer.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.IndexerGet, receiver, indexer.Symbol, arguments, null,
+            SyntaxKind.EqualsToken, false, indexer.Type);
     }
 
     private BoundExpression BindGenericNewExpression(NewExpressionSyntax syntax, GenericParameterSymbol parameter)
@@ -7826,7 +7841,9 @@ internal sealed class FunctionBodyBinder
             syntax.NewKeyword.Location,
             syntax.CloseDelimiterToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordSymbolAndType(syntax, constructor.Symbol, _fileScope.TypeFactory.PointerTo(parameter));
-        return new BoundDeferredConstantExpression(_fileScope.TypeFactory.PointerTo(parameter));
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.Allocation, null, constructor.Symbol, arguments, null,
+            SyntaxKind.EqualsToken, false, _fileScope.TypeFactory.PointerTo(parameter));
     }
 
     private BoundExpression BindGenericConstructionExpression(CallExpressionSyntax syntax,
@@ -7854,7 +7871,9 @@ internal sealed class FunctionBodyBinder
             GetLocation(syntax.Target),
             incomplete ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordSymbolAndType(syntax.Target, constructor.Symbol, parameter);
-        return new BoundDeferredConstantExpression(parameter);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.Construction, null, constructor.Symbol, arguments, null,
+            SyntaxKind.EqualsToken, false, parameter);
     }
 
     private T? ResolveGenericCandidate<T>(IEnumerable<T> source, Func<T, Symbol> getSymbol,

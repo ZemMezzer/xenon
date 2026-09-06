@@ -58,19 +58,29 @@ public static class XelibReader
             container, XelibSectionKind.Documentation, path);
         ValidateIds(types, symbols, exports, documentation, path);
 
-        var reconstruction = new XelibSemanticReconstruction(metadata.Manifest, types, symbols,
-            exports, documentation, dependencies, path);
-        reconstruction.ReconstructMetadata();
-        if (!metadataOnly)
+        try
         {
-            ImmutableArray<XelibBodyRecord> bodies = ReadSection<ImmutableArray<XelibBodyRecord>>(
-                container, XelibSectionKind.Bodies, path);
-            ImmutableArray<XelibGenericImplementation> generics =
-                ReadSection<ImmutableArray<XelibGenericImplementation>>(
-                    container, XelibSectionKind.GenericImplementations, path);
-            reconstruction.ReconstructBodies(bodies, generics);
+            var reconstruction = new XelibSemanticReconstruction(metadata.Manifest, types, symbols,
+                exports, documentation, dependencies, path);
+            reconstruction.ReconstructMetadata();
+            if (!metadataOnly)
+            {
+                ImmutableArray<XelibBodyRecord> bodies = ReadSection<ImmutableArray<XelibBodyRecord>>(
+                    container, XelibSectionKind.Bodies, path);
+                ImmutableArray<XelibGenericImplementation> generics =
+                    ReadSection<ImmutableArray<XelibGenericImplementation>>(
+                        container, XelibSectionKind.GenericImplementations, path);
+                reconstruction.ReconstructBodies(bodies, generics);
+            }
+            return reconstruction.CreateReference(path);
         }
-        return reconstruction.CreateReference(path);
+        catch (XelibFormatException) { throw; }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or
+            InvalidCastException or IndexOutOfRangeException or KeyNotFoundException or OverflowException)
+        {
+            throw new XelibFormatException(XelibErrorCode.InvalidReference,
+                $"invalid semantic graph: {exception.Message}", path, exception);
+        }
     }
 
     private static T ReadSection<T>(XelibContainer container, XelibSectionKind kind, string? path) =>
@@ -147,14 +157,27 @@ internal sealed class XelibSemanticReconstruction
         if (bodies.Any(item => item.Id <= 0) || bodies.Select(item => item.Id).Distinct().Count() != bodies.Length ||
             bodies.Select(item => item.FunctionSymbolId).Distinct().Count() != bodies.Length)
             throw XelibReader.Invalid("body IDs and function associations must be unique", _path);
+        static ImmutableArray<XelibGenericFieldInitializer> StaticInitializers(
+            XelibGenericImplementation item) => item.StaticFieldInitializers.IsDefault
+                ? [] : item.StaticFieldInitializers;
+        static ImmutableArray<XelibGenericConstantImplementation> Constants(
+            XelibGenericImplementation item) => item.Constants.IsDefault ? [] : item.Constants;
         if (generics.Any(item => item.DefinitionSymbolId <= 0 || item.BodyId < 0 ||
-                !item.IsStruct && item.BodyId == 0) ||
+                !item.IsStruct && (item.BodyId == 0 || !StaticInitializers(item).IsEmpty ||
+                    !Constants(item).IsEmpty) ||
+                StaticInitializers(item).Select(value => value.FieldSymbolId).Distinct().Count() !=
+                    StaticInitializers(item).Length ||
+                Constants(item).Select(value => value.ConstantSymbolId).Distinct().Count() !=
+                    Constants(item).Length) ||
             generics.Select(item => item.DefinitionSymbolId).Distinct().Count() != generics.Length ||
-            generics.Where(item => item.BodyId != 0).Select(item => item.BodyId).Distinct().Count() !=
-                generics.Count(item => item.BodyId != 0))
+            generics.SelectMany(item => (item.BodyId == 0 ? Enumerable.Empty<int>() : [item.BodyId])
+                    .Concat(StaticInitializers(item).Select(value => value.BodyId)))
+                .GroupBy(id => id).Any(group => group.Key <= 0 || group.Count() != 1))
             throw XelibReader.Invalid("generic implementation records are invalid or unsupported", _path);
         var bodiesById = bodies.ToDictionary(item => item.Id);
-        var genericBodyIds = generics.Where(item => item.BodyId != 0).Select(item => item.BodyId).ToHashSet();
+        var genericBodyIds = generics.SelectMany(item =>
+                (item.BodyId == 0 ? Enumerable.Empty<int>() : [item.BodyId])
+                .Concat(StaticInitializers(item).Select(value => value.BodyId))).ToHashSet();
         _functions = bodies.Where(item => !genericBodyIds.Contains(item.Id)).OrderBy(item => item.Id).Select(item =>
         {
             if (Symbol(item.FunctionSymbolId) is not FunctionSymbol function)
@@ -175,8 +198,36 @@ internal sealed class XelibSemanticReconstruction
                     initializer is not null && (initializer.FunctionKind != FunctionKind.InstanceInitializer ||
                         !ReferenceEquals(initializer.ContainingStruct, structure)))
                     throw XelibReader.Invalid("generic struct implementation references an invalid definition", _path);
+                var staticInitializers = ImmutableArray.CreateBuilder<(
+                    FieldSymbol Field, FunctionSymbol Definition, XelibBodyNode Body)>();
+                foreach (XelibGenericFieldInitializer item in StaticInitializers(generic))
+                {
+                    if (!bodiesById.TryGetValue(item.BodyId, out XelibBodyRecord? staticBody) ||
+                        Symbol(item.FieldSymbolId) is not FieldSymbol
+                        {
+                            IsStatic: true, IsThreadLocal: true,
+                        } field || !ReferenceEquals(field.ContainingType, structure) ||
+                        Symbol(staticBody.FunctionSymbolId) is not FunctionSymbol
+                        {
+                            FunctionKind: FunctionKind.ThreadLocalInitializer,
+                        } function || !ReferenceEquals(function.ThreadLocalField, field))
+                        throw XelibReader.Invalid(
+                            "generic static initializer references an invalid field or body", _path);
+                    staticInitializers.Add((field, function, staticBody.Root));
+                }
+                var constants = ImmutableArray.CreateBuilder<(
+                    ConstantSymbol Constant, XelibBodyNode Expression)>();
+                foreach (XelibGenericConstantImplementation item in Constants(generic))
+                {
+                    if (Symbol(item.ConstantSymbolId) is not ConstantSymbol constant ||
+                        !ReferenceEquals(constant.ContainingType, structure) || item.Expression is null)
+                        throw XelibReader.Invalid(
+                            "generic constant implementation references an invalid constant", _path);
+                    constants.Add((constant, item.Expression));
+                }
                 implementations.AddStruct(structure, new LibraryGenericStructImplementation(
-                    initializer, body?.Root, ResolveType, Resolve));
+                    initializer, body?.Root, staticInitializers.ToImmutable(),
+                    constants.ToImmutable(), ResolveType, Resolve));
             }
             else
             {
@@ -331,14 +382,28 @@ internal sealed class XelibSemanticReconstruction
             Symbol owner = record.ContainingSymbolId == 0 ? _globalNamespace : Symbol(record.ContainingSymbolId);
             ImmutableArray<GenericParameterSymbol> typeParameters = record.TypeParameterIds
                 .Select(id => (GenericParameterSymbol)Symbol(id)).ToImmutableArray();
-            var created = new FunctionSymbol(record.Name, owner, Map(record.FunctionKind),
-                ResolveType(record.ReturnTypeId), Parameters(record), Accessibility(record),
-                Has(record, XelibSymbolFlags.Static), Has(record, XelibSymbolFlags.Readonly),
-                Has(record, XelibSymbolFlags.Virtual), Has(record, XelibSymbolFlags.Override),
-                Has(record, XelibSymbolFlags.Abstract), Has(record, XelibSymbolFlags.Extern),
-                Has(record, XelibSymbolFlags.Export), Has(record, XelibSymbolFlags.Definition),
-                Has(record, XelibSymbolFlags.DelegatesToThisConstructor), typeParameters,
-                Origin(record.Id), Documentation(record.Id), accessorKind: Map(record.AccessorKind));
+            FunctionSymbol created;
+            if (Map(record.FunctionKind) == FunctionKind.ThreadLocalInitializer)
+            {
+                if (record.RelatedSymbolIds is not [int fieldId] ||
+                    Symbol(fieldId) is not FieldSymbol { IsStatic: true, IsThreadLocal: true } field ||
+                    !ReferenceEquals(field.ContainingSymbol, owner))
+                    throw XelibReader.Invalid(
+                        "thread-local initializer does not reference its owning field", _path);
+                created = new FunctionSymbol(field);
+                created.SetMetadata(Origin(record.Id), Documentation(record.Id));
+            }
+            else
+            {
+                created = new FunctionSymbol(record.Name, owner, Map(record.FunctionKind),
+                    ResolveType(record.ReturnTypeId), Parameters(record), Accessibility(record),
+                    Has(record, XelibSymbolFlags.Static), Has(record, XelibSymbolFlags.Readonly),
+                    Has(record, XelibSymbolFlags.Virtual), Has(record, XelibSymbolFlags.Override),
+                    Has(record, XelibSymbolFlags.Abstract), Has(record, XelibSymbolFlags.Extern),
+                    Has(record, XelibSymbolFlags.Export), Has(record, XelibSymbolFlags.Definition),
+                    Has(record, XelibSymbolFlags.DelegatesToThisConstructor), typeParameters,
+                    Origin(record.Id), Documentation(record.Id), accessorKind: Map(record.AccessorKind));
+            }
             created.HasStackArrays = Has(record, XelibSymbolFlags.HasStackArrays);
             created.HasScalarCleanup = Has(record, XelibSymbolFlags.HasScalarCleanup);
             if (record.VTableSlot is { } slot) created.SetVTableSlot(slot);
@@ -383,6 +448,9 @@ internal sealed class XelibSemanticReconstruction
                     if (Children<FunctionSymbol>(record.Id,
                         static item => item.FunctionKind == FunctionKind.Destructor).FirstOrDefault()
                         is { } destructor) type.SetDestructor(destructor);
+                    if (Children<FunctionSymbol>(record.Id,
+                        static item => item.FunctionKind == FunctionKind.DestructorGlue).FirstOrDefault()
+                        is { } destructorGlue) type.SetDestructorGlue(destructorGlue);
                     if (record.BaseTypeId != 0) type.SetBaseType((StructTypeSymbol)ResolveType(record.BaseTypeId));
                     type.SetInterfaces(record.InterfaceTypeIds.Select(id =>
                         (InterfaceTypeSymbol)ResolveType(id)).ToImmutableArray());
@@ -430,6 +498,17 @@ internal sealed class XelibSemanticReconstruction
                         throw XelibReader.Invalid($"duplicate constant '{constant.QualifiedName}'", _path);
                     break;
             }
+        }
+
+        foreach (FunctionSymbol function in _symbols.Values.OfType<FunctionSymbol>())
+        {
+            if (function.Parameters.FirstOrDefault()?.Type is not PointerTypeSymbol pointer) continue;
+            if (function.FunctionKind == FunctionKind.OwnershipDestructor &&
+                pointer.ElementType is OwnershipTypeSymbol ownership)
+                ownership.CompleteDestructor = function;
+            else if (function.FunctionKind == FunctionKind.StorageDestructor &&
+                     pointer.ElementType is StorageTypeSymbol storage)
+                storage.CompleteDestructor = function;
         }
     }
 

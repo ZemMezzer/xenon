@@ -4,6 +4,7 @@ using System.Text;
 using LLVMSharp.Interop;
 using LLVMApi = LLVMSharp.Interop.LLVM;
 using Xenon.Compiler;
+using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
@@ -246,6 +247,8 @@ public sealed class LlvmIrGenerator
             foreach (BoundFunction function in implementationFunctions)
                 if (!_functions.ContainsKey(function.Symbol))
                     DeclareFunction(function.Symbol);
+            foreach (BoundFunction implementation in implementationFunctions)
+                XelibBodyCodec.Collect(implementation.Body, _ => { }, DeclareReferencedSymbol);
             DeclareInterfaceTables(compilation.SemanticModel.GlobalNamespace);
             DeclareVirtualTables(compilation.SemanticModel.GlobalNamespace);
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
@@ -294,6 +297,26 @@ public sealed class LlvmIrGenerator
             _memoryRuntime = null;
             _nativeReferences = null!;
             _moduleIdentity = null!;
+        }
+    }
+
+    private void DeclareReferencedSymbol(Symbol symbol)
+    {
+        switch (symbol)
+        {
+            case FunctionSymbol function when !_functions.ContainsKey(function):
+                DeclareFunction(function);
+                break;
+            case PropertySymbol property:
+                if (property.Getter is { } getter && !_functions.ContainsKey(getter)) DeclareFunction(getter);
+                if (property.Setter is { } setter && !_functions.ContainsKey(setter)) DeclareFunction(setter);
+                break;
+            case IndexerSymbol indexer:
+                if (indexer.Getter is { } indexerGetter && !_functions.ContainsKey(indexerGetter))
+                    DeclareFunction(indexerGetter);
+                if (indexer.Setter is { } indexerSetter && !_functions.ContainsKey(indexerSetter))
+                    DeclareFunction(indexerSetter);
+                break;
         }
     }
 
