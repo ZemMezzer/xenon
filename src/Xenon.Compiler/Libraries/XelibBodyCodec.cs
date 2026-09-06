@@ -5,7 +5,7 @@ using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Libraries;
 
-internal static class XelibBodyCodec
+public static class XelibBodyCodec
 {
     public static void Collect(BoundNode node, Action<TypeSymbol> addType, Action<Symbol> addSymbol)
     {
@@ -50,6 +50,11 @@ internal static class XelibBodyCodec
                 break;
             case BoundMethodCallExpression value: addSymbol(value.Method); break;
             case BoundDeferredGenericMethodCallExpression value: addSymbol(value.Requirement); break;
+            case BoundDeferredGenericOperationExpression value:
+                addSymbol(value.Requirement);
+                if (!value.TypeArguments.IsDefault)
+                    foreach (TypeSymbol argument in value.TypeArguments) addType(argument);
+                break;
             case BoundPropertySetExpression value: addSymbol(value.Property); break;
             case BoundInterfacePropertySetExpression value:
                 addType(value.InterfaceType); addSymbol(value.Property); break;
@@ -112,10 +117,19 @@ internal static class XelibBodyCodec
         };
     }
 
+    public static XelibBodyNode EncodeExpression(BoundExpression expression,
+        Func<TypeSymbol, int> typeId, Func<Symbol, XelibSymbolReference> symbolReference) =>
+        EncodeNode(expression,
+            new Dictionary<LocalVariableSymbol, int>(ReferenceEqualityComparer.Instance),
+            typeId, symbolReference);
+
     public static BoundBlockStatement Decode(XelibBodyNode root, FunctionSymbol function,
         Func<int, TypeSymbol> type, Func<XelibSymbolReference, Symbol> symbol,
         Func<BoundExpression, Symbol, ImmutableArray<BoundExpression>, bool, BoundExpression>?
-            deferredGenericMethod = null)
+            deferredGenericMethod = null,
+        Func<BoundDeferredGenericOperationKind, BoundExpression?, Symbol,
+            ImmutableArray<BoundExpression>, BoundExpression?, SyntaxKind, bool, TypeSymbol,
+            ImmutableArray<TypeSymbol>, BoundExpression>? deferredGenericOperation = null)
     {
         var locals = new Dictionary<int, LocalVariableSymbol>();
         foreach (XelibLocalRecord record in root.Locals)
@@ -129,9 +143,15 @@ internal static class XelibBodyCodec
             };
             locals.Add(record.Id, local);
         }
-        return DecodeNode(root, locals, type, symbol, deferredGenericMethod) as BoundBlockStatement ??
+        return DecodeNode(root, locals, type, symbol, deferredGenericMethod,
+            deferredGenericOperation) as BoundBlockStatement ??
             throw Invalid("function root is not a block");
     }
+
+    public static BoundExpression DecodeExpression(XelibBodyNode root,
+        Func<int, TypeSymbol> type, Func<XelibSymbolReference, Symbol> symbol) =>
+        DecodeNode(root, new Dictionary<int, LocalVariableSymbol>(), type, symbol, null, null)
+            as BoundExpression ?? throw Invalid("generic constant payload is not an expression");
 
     private static void CollectLocals(BoundNode node, Dictionary<LocalVariableSymbol, int> locals)
     {
@@ -275,6 +295,22 @@ internal static class XelibBodyCodec
                     TypeId = typeId(value.Type), Symbol = symbol(value.Requirement),
                     Flag1 = value.IsPointerAccess,
                     Children = [E(value.Receiver), .. value.Arguments.Select(E)] };
+            case BoundDeferredGenericOperationExpression value:
+                return new XelibBodyNode
+                {
+                    Opcode = Map(value.Operation),
+                    TypeId = typeId(value.Type),
+                    Symbol = symbol(value.Requirement),
+                    Operator = Map(value.OperatorKind),
+                    Flag1 = value.IsPointerAccess,
+                    Flag2 = value.Receiver is not null,
+                    Flag3 = value.Value is not null,
+                    Integer = value.Arguments.Length,
+                    Integers = value.TypeArguments.IsDefault
+                        ? [] : value.TypeArguments.Select(typeId).ToImmutableArray(),
+                    Children = EAll(Optional(value.Receiver).Concat(value.Arguments)
+                        .Concat(Optional(value.Value))),
+                };
             case BoundPropertySetExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.PropertySet, TypeId = typeId(value.Type),
                     Symbol = symbol(value.Property), Flag1 = value.IsPointerAccess,
@@ -392,10 +428,13 @@ internal static class XelibBodyCodec
         IReadOnlyDictionary<int, LocalVariableSymbol> locals, Func<int, TypeSymbol> type,
         Func<XelibSymbolReference, Symbol> symbol,
         Func<BoundExpression, Symbol, ImmutableArray<BoundExpression>, bool, BoundExpression>?
-            deferredGenericMethod = null)
+            deferredGenericMethod,
+        Func<BoundDeferredGenericOperationKind, BoundExpression?, Symbol,
+            ImmutableArray<BoundExpression>, BoundExpression?, SyntaxKind, bool, TypeSymbol,
+            ImmutableArray<TypeSymbol>, BoundExpression>? deferredGenericOperation)
     {
         BoundNode D(int index) => DecodeNode(node.Children[index], locals, type, symbol,
-            deferredGenericMethod);
+            deferredGenericMethod, deferredGenericOperation);
         BoundExpression E(int index) => D(index) as BoundExpression ?? throw Invalid("expected expression child");
         BoundStatement S(int index) => D(index) as BoundStatement ?? throw Invalid("expected statement child");
         FunctionSymbol F(XelibSymbolReference? reference) => (FunctionSymbol)symbol(Required(reference));
@@ -438,11 +477,11 @@ internal static class XelibBodyCodec
                     if (section.Opcode != XelibBodyOpcode.SwitchSection) throw Invalid("expected switch section");
                     BoundExpression? value = section.Flag1
                         ? DecodeNode(section.Children[0], locals, type, symbol,
-                            deferredGenericMethod) as BoundExpression
+                            deferredGenericMethod, deferredGenericOperation) as BoundExpression
                         : null;
                     int bodyIndex = section.Flag1 ? 1 : 0;
                     BoundBlockStatement body = DecodeNode(section.Children[bodyIndex], locals, type, symbol,
-                        deferredGenericMethod)
+                        deferredGenericMethod, deferredGenericOperation)
                         as BoundBlockStatement ?? throw Invalid("switch section body is not a block");
                     return new BoundSwitchSection(value, body);
                 }).ToImmutableArray());
@@ -471,7 +510,7 @@ internal static class XelibBodyCodec
             case XelibBodyOpcode.Lock: return new BoundLockExpression(E(0), (SharedTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.FullExpression: return new BoundFullExpression(E(0), node.Temporaries.Select(item =>
                 new BoundFullExpressionTemporary((BoundExpression)DecodeNode(item.Value, locals, type, symbol,
-                        deferredGenericMethod),
+                        deferredGenericMethod, deferredGenericOperation),
                     (FunctionSymbol)symbol(item.Destructor))).ToImmutableArray());
             case XelibBodyOpcode.Binary: return new BoundBinaryExpression(E(0), Map(node.Operator), E(1), type(node.TypeId));
             case XelibBodyOpcode.Assignment: return new BoundAssignmentExpression(E(0), Map(node.Operator), E(1))
@@ -496,6 +535,30 @@ internal static class XelibBodyCodec
                     throw Invalid("deferred generic method call appears outside a generic implementation");
                 return deferredGenericMethod(E(0), symbol(Required(node.Symbol)),
                     node.Children.Skip(1).Select((_, i) => E(i + 1)).ToImmutableArray(), node.Flag1);
+            }
+            case XelibBodyOpcode.DeferredGenericFunctionCall or
+                 XelibBodyOpcode.DeferredGenericFieldGet or
+                 XelibBodyOpcode.DeferredGenericFieldSet or
+                 XelibBodyOpcode.DeferredGenericPropertyGet or
+                 XelibBodyOpcode.DeferredGenericPropertySet or
+                 XelibBodyOpcode.DeferredGenericIndexerGet or
+                 XelibBodyOpcode.DeferredGenericIndexerSet or
+                 XelibBodyOpcode.DeferredGenericConstruction or
+                 XelibBodyOpcode.DeferredGenericAllocation:
+            {
+                if (deferredGenericOperation is null)
+                    throw Invalid("deferred generic operation appears outside a generic implementation");
+                int index = 0;
+                BoundExpression? receiver = node.Flag2 ? E(index++) : null;
+                if (node.Integer < 0 || index + node.Integer + (node.Flag3 ? 1 : 0) != node.Children.Length)
+                    throw Invalid("deferred generic operation has an invalid child count");
+                ImmutableArray<BoundExpression> arguments = Enumerable.Range(index, node.Integer)
+                    .Select(E).ToImmutableArray();
+                index += node.Integer;
+                BoundExpression? value = node.Flag3 ? E(index) : null;
+                return deferredGenericOperation(MapDeferred(node.Opcode), receiver,
+                    symbol(Required(node.Symbol)), arguments, value, Map(node.Operator), node.Flag1,
+                    type(node.TypeId), node.Integers.Select(type).ToImmutableArray());
             }
             case XelibBodyOpcode.PropertySet: return new BoundPropertySetExpression(E(0),
                 Sym<PropertySymbol>(node.Symbol), E(1), node.Flag1);
@@ -608,6 +671,8 @@ internal static class XelibBodyCodec
         BoundCompoundAccessorAssignmentExpression value => new[] { value.Receiver }.Concat(value.Arguments).Append(value.Value),
         BoundMethodCallExpression value => new[] { value.Receiver }.Concat(value.Arguments),
         BoundDeferredGenericMethodCallExpression value => new[] { value.Receiver }.Concat(value.Arguments),
+        BoundDeferredGenericOperationExpression value => Optional(value.Receiver)
+            .Concat(value.Arguments).Concat(Optional(value.Value)),
         BoundPropertySetExpression value => [value.Receiver, value.Value],
         BoundInterfacePropertySetExpression value => [value.Receiver, value.Value],
         BoundIndexerSetExpression value => new[] { value.Receiver }.Concat(value.Arguments).Append(value.Value),
@@ -735,5 +800,33 @@ internal static class XelibBodyCodec
         XelibOperator.OffsetOf => SyntaxKind.OffsetOfKeyword, XelibOperator.Cast => SyntaxKind.CastKeyword,
         XelibOperator.BitCast => SyntaxKind.BitCastKeyword,
         _ => throw Invalid($"unknown operator {(ushort)value}"),
+    };
+
+    private static XelibBodyOpcode Map(BoundDeferredGenericOperationKind value) => value switch
+    {
+        BoundDeferredGenericOperationKind.FunctionCall => XelibBodyOpcode.DeferredGenericFunctionCall,
+        BoundDeferredGenericOperationKind.FieldGet => XelibBodyOpcode.DeferredGenericFieldGet,
+        BoundDeferredGenericOperationKind.FieldSet => XelibBodyOpcode.DeferredGenericFieldSet,
+        BoundDeferredGenericOperationKind.PropertyGet => XelibBodyOpcode.DeferredGenericPropertyGet,
+        BoundDeferredGenericOperationKind.PropertySet => XelibBodyOpcode.DeferredGenericPropertySet,
+        BoundDeferredGenericOperationKind.IndexerGet => XelibBodyOpcode.DeferredGenericIndexerGet,
+        BoundDeferredGenericOperationKind.IndexerSet => XelibBodyOpcode.DeferredGenericIndexerSet,
+        BoundDeferredGenericOperationKind.Construction => XelibBodyOpcode.DeferredGenericConstruction,
+        BoundDeferredGenericOperationKind.Allocation => XelibBodyOpcode.DeferredGenericAllocation,
+        _ => throw Invalid($"deferred generic operation '{value}' cannot be represented"),
+    };
+
+    private static BoundDeferredGenericOperationKind MapDeferred(XelibBodyOpcode value) => value switch
+    {
+        XelibBodyOpcode.DeferredGenericFunctionCall => BoundDeferredGenericOperationKind.FunctionCall,
+        XelibBodyOpcode.DeferredGenericFieldGet => BoundDeferredGenericOperationKind.FieldGet,
+        XelibBodyOpcode.DeferredGenericFieldSet => BoundDeferredGenericOperationKind.FieldSet,
+        XelibBodyOpcode.DeferredGenericPropertyGet => BoundDeferredGenericOperationKind.PropertyGet,
+        XelibBodyOpcode.DeferredGenericPropertySet => BoundDeferredGenericOperationKind.PropertySet,
+        XelibBodyOpcode.DeferredGenericIndexerGet => BoundDeferredGenericOperationKind.IndexerGet,
+        XelibBodyOpcode.DeferredGenericIndexerSet => BoundDeferredGenericOperationKind.IndexerSet,
+        XelibBodyOpcode.DeferredGenericConstruction => BoundDeferredGenericOperationKind.Construction,
+        XelibBodyOpcode.DeferredGenericAllocation => BoundDeferredGenericOperationKind.Allocation,
+        _ => throw Invalid($"opcode '{value}' is not a deferred generic operation"),
     };
 }

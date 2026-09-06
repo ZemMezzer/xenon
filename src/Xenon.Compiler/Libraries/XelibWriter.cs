@@ -140,14 +140,17 @@ public static class XelibMetadataReader
         ImmutableArray<XelibDependency> dependencies = XelibJson.Deserialize<ImmutableArray<XelibDependency>>(
             container.GetRequiredSection(XelibSectionKind.Dependencies).AsSpan(), path);
         if (string.IsNullOrWhiteSpace(manifest.Name) ||
-            manifest.ContentIdentity.Length != 64 ||
+            manifest.ContentIdentity is not { Length: 64 } ||
             !manifest.ContentIdentity.All(Uri.IsHexDigit))
             throw new XelibFormatException(XelibErrorCode.InvalidRecord, "invalid manifest identity", path);
         if (manifest.LanguageVersion != container.Header.LanguageVersion ||
             manifest.LibraryIrVersion != container.Header.LibraryIrVersion)
             throw new XelibFormatException(XelibErrorCode.InvalidRecord,
                 "manifest versions do not match the XELIB header", path);
-        if (dependencies.Select(item => item.Id).Distinct().Count() != dependencies.Length ||
+        if (dependencies.Any(item => item.Id <= 0 || string.IsNullOrWhiteSpace(item.Name) ||
+                item.ContentIdentity is not { Length: 64 } ||
+                !item.ContentIdentity.All(Uri.IsHexDigit)) ||
+            dependencies.Select(item => item.Id).Distinct().Count() != dependencies.Length ||
             dependencies.Select(item => item.ContentIdentity).Distinct(StringComparer.Ordinal).Count() != dependencies.Length)
             throw new XelibFormatException(XelibErrorCode.InvalidRecord,
                 "dependency IDs and content identities must be unique", path);
@@ -296,9 +299,22 @@ internal sealed class XelibIrBuilder
         }
         foreach (var entry in genericStructs)
         {
-            if (entry.Value.PortableInstanceInitializer is not { } initializer) continue;
-            VisitFunction(initializer.Symbol);
-            XelibBodyCodec.Collect(initializer.Body, AddType, VisitExternalOrLocal);
+            if (entry.Value.PortableInstanceInitializer is { } initializer)
+            {
+                VisitFunction(initializer.Symbol);
+                XelibBodyCodec.Collect(initializer.Body, AddType, VisitExternalOrLocal);
+            }
+            foreach (BoundFunction staticInitializer in entry.Value.PortableStaticFieldInitializers)
+            {
+                VisitFunction(staticInitializer.Symbol);
+                XelibBodyCodec.Collect(staticInitializer.Body, AddType, VisitExternalOrLocal);
+            }
+            foreach (ConstantSymbol constant in entry.Key.Constants.Where(constant =>
+                         !constant.HasValue && constant.BoundValue is not null))
+            {
+                VisitSymbol(constant);
+                XelibBodyCodec.Collect(constant.BoundValue!, AddType, VisitExternalOrLocal);
+            }
         }
 
         Symbol[] orderedSymbols = _symbols.OrderBy(XelibExportKey.Create, StringComparer.Ordinal).ToArray();
@@ -345,7 +361,24 @@ internal sealed class XelibIrBuilder
                 bodyBuilder.Add(new XelibBodyRecord(bodyId, Id(initializer.Symbol), XelibBodyCodec.Encode(
                     initializer.Body, initializer.Symbol, TypeId, Reference)));
             }
-            genericBuilder.Add(new XelibGenericImplementation(Id(entry.Key), bodyId, IsStruct: true));
+            var staticInitializers = ImmutableArray.CreateBuilder<XelibGenericFieldInitializer>();
+            foreach (BoundFunction staticInitializer in entry.Value.PortableStaticFieldInitializers)
+            {
+                int initializerBodyId = bodyBuilder.Count + 1;
+                bodyBuilder.Add(new XelibBodyRecord(initializerBodyId, Id(staticInitializer.Symbol),
+                    XelibBodyCodec.Encode(staticInitializer.Body, staticInitializer.Symbol, TypeId, Reference)));
+                FieldSymbol field = staticInitializer.Symbol.ThreadLocalField ??
+                    throw new XelibFormatException(XelibErrorCode.FeatureNotRepresentable,
+                        "portable generic static initializer is not associated with a field");
+                staticInitializers.Add(new XelibGenericFieldInitializer(Id(field), initializerBodyId));
+            }
+            ImmutableArray<XelibGenericConstantImplementation> constants = entry.Key.Constants
+                .Where(constant => !constant.HasValue && constant.BoundValue is not null)
+                .Select(constant => new XelibGenericConstantImplementation(Id(constant),
+                    XelibBodyCodec.EncodeExpression(constant.BoundValue!, TypeId, Reference)))
+                .ToImmutableArray();
+            genericBuilder.Add(new XelibGenericImplementation(Id(entry.Key), bodyId, IsStruct: true,
+                staticInitializers.ToImmutable(), constants));
         }
         ImmutableArray<XelibBodyRecord> bodies = bodyBuilder.ToImmutable();
         return new XelibIrPayload(strings, dependencies, types, symbols, exports, documentation,
@@ -591,6 +624,7 @@ internal sealed class XelibIrBuilder
                 TypeParameterIds = value.TypeParameters.Select(Id).ToImmutableArray(),
                 FunctionKind = Map(value.FunctionKind),
                 AccessorKind = Map(value.AccessorKind),
+                RelatedSymbolIds = value.ThreadLocalField is null ? [] : [Id(value.ThreadLocalField)],
                 VTableSlot = value.VTableSlot,
                 ConstructorOverload = value.ConstructorOverload,
                 ConstructorOverloadCount = value.ConstructorOverloadCount,

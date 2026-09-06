@@ -13,7 +13,7 @@ public sealed class CoreIntelligenceTests
     [Fact]
     public async Task ReferencedXelibDocumentationReloadsAfterWatchedFileChange()
     {
-        const string appSource = "using Library; namespace App; int Main() { return Value(); }";
+        const string appSource = "using Library; namespace App; int Main() { Value(); Val }";
         using var directory = new TestDirectory();
         string sourcePath = directory.Write("src/main.xe", appSource);
         string projectPath = directory.Write("App.xeproj", """
@@ -44,6 +44,17 @@ public sealed class CoreIntelligenceTests
         int call = appSource.IndexOf("Value()", StringComparison.Ordinal);
         JsonElement first = await RequestAtAsync(session, "textDocument/hover", uri, appSource, call);
         Assert.Contains("First documentation.", first.GetProperty("contents").GetProperty("value").GetString());
+        int completionOffset = appSource.LastIndexOf("Val ", StringComparison.Ordinal) + 3;
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri,
+            appSource, completionOffset);
+        JsonElement completionItem = completion.GetProperty("items").EnumerateArray()
+            .Single(candidate => candidate.GetProperty("label").GetString() == "Value");
+        Assert.Contains("First documentation.", completionItem.GetProperty("documentation")
+            .GetProperty("value").GetString());
+        JsonElement signature = await RequestAtAsync(session, "textDocument/signatureHelp", uri,
+            appSource, call + "Value(".Length);
+        Assert.Contains("First documentation.", signature.GetProperty("signatures")[0]
+            .GetProperty("documentation").GetProperty("value").GetString());
 
         WriteLibrary("Updated documentation.");
         await session.HandleNotificationAsync("workspace/didChangeWatchedFiles", LspTestProtocol.Json(new

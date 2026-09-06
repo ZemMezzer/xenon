@@ -216,7 +216,13 @@ public sealed class Compilation
             SelectDispatchBodies(reference.GlobalNamespace);
         void Inspect(BoundFunction function)
         {
-            XelibBodyCodec.Collect(function.Body, _ => { }, symbol =>
+            foreach (ParameterSymbol parameter in function.Symbol.Parameters)
+                if (TypeFacts.GetCompleteDestructor(parameter.Type) is { } parameterDestructor)
+                    Select(parameterDestructor);
+            XelibBodyCodec.Collect(function.Body, type =>
+            {
+                if (TypeFacts.GetCompleteDestructor(type) is { } destructor) Select(destructor);
+            }, symbol =>
             {
                 switch (symbol)
                 {

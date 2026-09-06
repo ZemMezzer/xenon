@@ -63,4 +63,5 @@ public enum BoundKind
     ErrorExpression,
     DeferredConstantExpression,
     DeferredGenericMethodCallExpression,
+    DeferredGenericOperationExpression,
 }
