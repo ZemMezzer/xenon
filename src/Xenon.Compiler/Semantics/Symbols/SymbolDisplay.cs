@@ -44,16 +44,16 @@ public static class SymbolDisplay
         string displayText = symbol switch
         {
             FunctionSymbol function => Function(function, name, typeFormat, diagnostic),
-            IndexerSymbol indexer => Indexer(indexer.Type, indexer.Parameters, name, typeFormat, diagnostic),
-            InterfaceIndexerSymbol indexer => Indexer(indexer.Type, indexer.Parameters, name, typeFormat, diagnostic),
+            IndexerSymbol indexer => Indexer(indexer.Type, indexer.Parameters, indexer.IsReadonly, name, typeFormat, diagnostic),
+            InterfaceIndexerSymbol indexer => Indexer(indexer.Type, indexer.Parameters, indexer.IsReadonly, name, typeFormat, diagnostic),
             FieldSymbol field => diagnostic ? name : $"{VariableType(field.Type, field.IsReadonly, typeFormat)} {name}",
-            PropertySymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
-            InterfacePropertySymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
+            PropertySymbol property => diagnostic ? name : Accessor(property.Type, property.IsReadonly, name, typeFormat),
+            InterfacePropertySymbol property => diagnostic ? name : Accessor(property.Type, property.IsReadonly, name, typeFormat),
             TemplateMethodRequirementSymbol method => TemplateMethod(method, name, typeFormat, diagnostic),
             TemplateConstructorRequirementSymbol constructor =>
                 $"{name}({Parameters(constructor.Parameters, typeFormat, !diagnostic)})",
-            TemplatePropertyRequirementSymbol property => diagnostic ? name : $"{property.Type.ToDisplayString(typeFormat)} {name}",
-            TemplateIndexerRequirementSymbol indexer => Indexer(indexer.Type, indexer.Parameters, name, typeFormat, diagnostic),
+            TemplatePropertyRequirementSymbol property => diagnostic ? name : Accessor(property.Type, property.IsReadonly, name, typeFormat),
+            TemplateIndexerRequirementSymbol indexer => Indexer(indexer.Type, indexer.Parameters, indexer.IsReadonly, name, typeFormat, diagnostic),
             SyntheticMemberSymbol { MemberKind: SyntheticMemberKind.Method } member =>
                 SyntheticMethod(member, name, typeFormat, diagnostic),
             SyntheticMemberSymbol member => diagnostic ? name : $"{member.Type.ToDisplayString(typeFormat)} {name}",
@@ -90,17 +90,20 @@ public static class SymbolDisplay
             name += $"<{string.Join(", ", function.TypeParameters.Select(parameter => parameter.Name))}>";
         string signature = $"{name}({Parameters(function.Parameters, format, !diagnostic)})";
         if (diagnostic) return signature;
-        if (function.FunctionKind is not (FunctionKind.Constructor or FunctionKind.Destructor))
-            signature = $"{function.ReturnType.ToDisplayString(format)} {signature}";
-        // A suffix distinguishes receiver readonly from a readonly pointer/reference return type.
-        return function.IsReadonly ? signature + " readonly" : signature;
+        if (function.FunctionKind is FunctionKind.Constructor or FunctionKind.Destructor)
+            return signature;
+        return $"{function.ReturnType.ToDisplayString(format)} " +
+               (function.IsReadonly ? "readonly " : "") + signature;
     }
 
-    private static string Indexer(TypeSymbol type, ImmutableArray<ParameterSymbol> parameters, string name,
-        TypeDisplayFormat format, bool diagnostic)
+    private static string Accessor(TypeSymbol type, bool isReadonly, string name, TypeDisplayFormat format) =>
+        $"{type.ToDisplayString(format)} {(isReadonly ? "readonly " : "")}{name}";
+
+    private static string Indexer(TypeSymbol type, ImmutableArray<ParameterSymbol> parameters, bool isReadonly,
+        string name, TypeDisplayFormat format, bool diagnostic)
     {
         string signature = $"{name}[{Parameters(parameters, format, !diagnostic)}]";
-        return diagnostic ? signature : $"{type.ToDisplayString(format)} {signature}";
+        return diagnostic ? signature : Accessor(type, isReadonly, signature, format);
     }
 
     private static string SyntheticMethod(SyntheticMemberSymbol member, string name,
@@ -114,7 +117,8 @@ public static class SymbolDisplay
         TypeDisplayFormat format, bool diagnostic)
     {
         string signature = $"{name}({Parameters(method.Parameters, format, !diagnostic)})";
-        return diagnostic ? signature : $"{method.ReturnType.ToDisplayString(format)} {signature}";
+        return diagnostic ? signature : $"{method.ReturnType.ToDisplayString(format)} " +
+            (method.IsReadonly ? "readonly " : "") + signature;
     }
 
     private static string Parameters(ImmutableArray<ParameterSymbol> parameters, TypeDisplayFormat format, bool includeNames) =>
@@ -140,15 +144,13 @@ public static class SymbolDisplay
             function.IsVirtual, function.IsOverride) + (function.IsExtern ? "extern " : function.IsExport ? "export " : ""),
         FieldSymbol field => MemberModifiers(field.Accessibility, field.IsStatic) + (field.IsThreadLocal ? "threadlocal " : ""),
         PropertySymbol property => MemberModifiers(property.Accessibility, property.IsStatic,
-            property.IsAbstract, property.IsVirtual, property.IsOverride)
-            + (property.IsReadonly ? "readonly " : ""),
+            property.IsAbstract, property.IsVirtual, property.IsOverride),
         IndexerSymbol indexer => MemberModifiers(indexer.Accessibility, indexer.IsStatic,
-            indexer.IsAbstract, indexer.IsVirtual, indexer.IsOverride)
-            + (indexer.IsReadonly ? "readonly " : ""),
-        InterfacePropertySymbol property => "public abstract " + (property.IsReadonly ? "readonly " : ""),
-        InterfaceIndexerSymbol indexer => "public abstract " + (indexer.IsReadonly ? "readonly " : ""),
+            indexer.IsAbstract, indexer.IsVirtual, indexer.IsOverride),
+        InterfacePropertySymbol => "public abstract ",
+        InterfaceIndexerSymbol => "public abstract ",
         TemplateMemberRequirementSymbol requirement =>
-            MemberModifiers(requirement.Accessibility, requirement.IsStatic) + (requirement.IsReadonly ? "readonly " : ""),
+            MemberModifiers(requirement.Accessibility, requirement.IsStatic),
         _ => "",
     };
 

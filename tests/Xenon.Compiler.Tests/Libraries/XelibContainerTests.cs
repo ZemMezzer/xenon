@@ -246,6 +246,105 @@ public sealed class XelibContainerTests
     }
 
     [Fact]
+    public void ReadonlyPropertyAndIndexerDimensionsRoundTripWithoutChangingTheFormat()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Library;
+            struct Buffer
+            {
+                private byte value;
+                public readonly byte* View { get { return &value; } }
+                public byte* readonly Pointer { get { return null; } }
+                public readonly byte* readonly Data { get { return &value; } }
+                public readonly byte* readonly this[int index] { get { return &value; } }
+            }
+            interface IBuffer
+            {
+                readonly byte* readonly Data { get; }
+                readonly byte* readonly this[int index] { get; }
+            }
+            template BufferShape
+            {
+                readonly byte* readonly Data { get; }
+                readonly byte* readonly this[int index] { get; }
+            }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("ReadonlyAccessors")));
+        NamespaceSymbol scope = Assert.Single(reference.GlobalNamespace.Namespaces);
+        StructTypeSymbol buffer = Assert.Single(scope.Structs);
+        PropertySymbol view = buffer.Properties.Single(property => property.Name == "View");
+        PropertySymbol pointer = buffer.Properties.Single(property => property.Name == "Pointer");
+        PropertySymbol property = buffer.Properties.Single(property => property.Name == "Data");
+        IndexerSymbol indexer = Assert.Single(buffer.Indexers);
+        InterfacePropertySymbol interfaceProperty = Assert.Single(Assert.Single(scope.Interfaces).Properties);
+        InterfaceIndexerSymbol interfaceIndexer = Assert.Single(Assert.Single(scope.Interfaces).Indexers);
+        TemplateSymbol template = Assert.Single(scope.Templates);
+        TemplatePropertyRequirementSymbol templateProperty =
+            Assert.Single(template.Members.OfType<TemplatePropertyRequirementSymbol>());
+        TemplateIndexerRequirementSymbol templateIndexer =
+            Assert.Single(template.Members.OfType<TemplateIndexerRequirementSymbol>());
+
+        Assert.True(Assert.IsType<PointerTypeSymbol>(view.Type).IsReadonly);
+        Assert.False(view.IsReadonly);
+        Assert.False(Assert.IsType<PointerTypeSymbol>(pointer.Type).IsReadonly);
+        Assert.True(pointer.IsReadonly);
+
+        foreach ((TypeSymbol Type, bool IsReadonly) member in new[]
+        {
+            (property.Type, property.IsReadonly),
+            (indexer.Type, indexer.IsReadonly),
+            (interfaceProperty.Type, interfaceProperty.IsReadonly),
+            (interfaceIndexer.Type, interfaceIndexer.IsReadonly),
+            (templateProperty.Type, templateProperty.IsReadonly),
+            (templateIndexer.Type, templateIndexer.IsReadonly),
+        })
+        {
+            Assert.True(Assert.IsType<PointerTypeSymbol>(member.Type).IsReadonly);
+            Assert.True(member.IsReadonly);
+        }
+        Assert.True(property.Getter!.IsReadonly);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(property.Getter.ReturnType).IsReadonly);
+        Assert.True(indexer.Getter!.IsReadonly);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(indexer.Getter.ReturnType).IsReadonly);
+    }
+
+    [Fact]
+    public void ReadonlyPropertyTemplateMatchingWorksAcrossXelib()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Contracts;
+            template BufferShape { readonly byte* readonly Data { get; } }
+            public void Inspect<T>(readonly T& value) where T : BufferShape
+            {
+                readonly byte* pointer = value.Data;
+            }
+            """, "contracts.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("ReadonlyContracts")));
+
+        Compilation consumer = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Contracts;
+            namespace App;
+            struct Buffer
+            {
+                private byte value;
+                public readonly byte* readonly Data { get { return &value; } }
+            }
+            void Run()
+            {
+                Buffer buffer = Buffer();
+                Inspect<Buffer>(buffer);
+            }
+            """, "consumer.xe"));
+
+        Assert.False(consumer.HasErrors, string.Join(Environment.NewLine, consumer.Diagnostics));
+    }
+
+    [Fact]
     public void SemanticBytesIgnoreAbsoluteSourcePathAndTargetChoice()
     {
         const string text = "namespace Stable; public int Value() { return 42; }";
