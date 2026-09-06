@@ -311,8 +311,7 @@ internal sealed class FunctionBodyBinder
         {
             ConstructorDeclarationSyntax? syntax = constructorSyntax;
             ImmutableArray<ExpressionSyntax> baseArguments = syntax?.BaseArguments ?? [];
-            TextLocation location = syntax?.IdentifierToken.Location ??
-                _function.ContainingType!.GetSourceDeclaration<TypeDeclarationSyntax>().IdentifierToken.Location;
+            TextLocation location = syntax?.IdentifierToken.Location ?? body.OpenBraceToken.Location;
             _bindingBaseConstructorArguments = true;
             ImmutableArray<BoundExpression> arguments;
             try
@@ -455,7 +454,7 @@ internal sealed class FunctionBodyBinder
                     field,
                     IsPointerAccess: true);
             initializer = BindDestinationConstruction(target, destinationType, initializer, syntax,
-                (field.GenericDefinition ?? field).Declaration.IdentifierToken.Location);
+                GetLocation(syntax));
         }
         else if (field.Type is AtomicTypeSymbol atomic && AtomicTypeRules.SupportsOperations(atomic.ElementType))
             initializer = ContextualizeConversion(ReadAtomicValue(initializer), atomic.ElementType, GetLocation(syntax));

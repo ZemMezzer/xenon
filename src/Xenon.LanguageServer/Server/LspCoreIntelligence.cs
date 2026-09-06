@@ -681,8 +681,7 @@ internal static class LspCoreIntelligence
                 ContainingSymbol: FunctionSymbol accessor,
             })
             return false;
-        return ReferenceEquals(accessor.ContainingProperty?.Setter, accessor) ||
-               ReferenceEquals(accessor.ContainingIndexer?.Setter, accessor);
+        return accessor.AccessorKind == AccessorKind.Setter;
     }
 
     private static int SemanticModifiers(Symbol symbol, bool declaration)

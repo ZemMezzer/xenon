@@ -27,6 +27,7 @@ public sealed class Compilation
         TypeFactory = new TypeFactory();
         SemanticModel = SemanticAnalyzer.Analyze(syntaxTrees, TypeFactory,
             references.Select(reference => reference.GlobalNamespace).ToImmutableArray(),
+            references.Select(reference => reference.GenericImplementations).ToImmutableArray(),
             targetLayout, cancellationToken);
         Diagnostics = SemanticModel.Diagnostics;
     }
@@ -38,6 +39,7 @@ public sealed class Compilation
     public ImmutableArray<Diagnostic> Diagnostics { get; }
     public SemanticModel SemanticModel { get; }
     public TypeFactory TypeFactory { get; }
+    public GenericImplementationStore GenericImplementations => SemanticModel.GenericImplementations;
     public bool HasErrors => Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
     public bool RequiresTargetLayout => SemanticModel.RequiresTargetLayout;
 

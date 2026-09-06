@@ -46,8 +46,8 @@ public sealed record SymbolDocumentation(
         string? text = SyntaxNavigator.GetTokens(declaration)
             .Where(token => !token.IsMissing)
             .OrderBy(token => token.Location.Span.Start)
-            .Select(token => token.LeadingDocumentation)
-            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+            .FirstOrDefault()
+            ?.LeadingDocumentation;
         return Parse(text);
     }
 

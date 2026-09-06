@@ -37,25 +37,34 @@ internal sealed class SemanticAnalyzer
     private readonly SemanticInfoStore _semanticInfo = new();
     private readonly CancellationToken _cancellationToken;
     private readonly ImmutableArray<NamespaceSymbol> _referencedNamespaces;
+    private readonly GenericImplementationStoreBuilder _genericImplementations;
+    private readonly GenericStructImplementationServices _genericImplementationServices;
     private GenericStructSpecializer? _genericStructSpecializer;
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
-        ImmutableArray<NamespaceSymbol> referencedNamespaces, ITargetTypeLayout? targetLayout,
+        ImmutableArray<NamespaceSymbol> referencedNamespaces,
+        ImmutableArray<GenericImplementationStore> referencedGenericImplementations,
+        ITargetTypeLayout? targetLayout,
         CancellationToken cancellationToken)
     {
         _syntaxTrees = syntaxTrees;
         _typeFactory = typeFactory;
         _referencedNamespaces = referencedNamespaces;
+        _genericImplementations = new GenericImplementationStoreBuilder(referencedGenericImplementations);
+        _genericImplementationServices = new GenericStructImplementationServices(this);
         _constants = new ConstantEvaluationContext(targetLayout);
         _cancellationToken = cancellationToken;
     }
 
     public static SemanticModel Analyze(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
         ImmutableArray<NamespaceSymbol> referencedNamespaces = default,
+        ImmutableArray<GenericImplementationStore> referencedGenericImplementations = default,
         ITargetTypeLayout? targetLayout = null, CancellationToken cancellationToken = default)
     {
         var analyzer = new SemanticAnalyzer(syntaxTrees, typeFactory,
-            referencedNamespaces.IsDefault ? [] : referencedNamespaces, targetLayout, cancellationToken);
+            referencedNamespaces.IsDefault ? [] : referencedNamespaces,
+            referencedGenericImplementations.IsDefault ? [] : referencedGenericImplementations,
+            targetLayout, cancellationToken);
         return analyzer.Analyze();
     }
 
@@ -87,12 +96,13 @@ internal sealed class SemanticAnalyzer
         // Invalid by-value layouts must not be queried through a native ABI provider.
         if (_diagnostics.Count != 0) _constants.TargetLayout = null;
         EvaluateConstants();
-        _genericStructSpecializer!.CompleteConstants();
         BindStaticFieldInitializers();
         DeclareStructProperties();
         DeclareStructIndexers();
         DeclareStructMethods();
         DeclareStructLifecycleFunctions();
+        RegisterSourceGenericStructImplementations();
+        _genericStructSpecializer!.CompleteConstants();
         foreach (StructTypeSymbol type in _structSymbols.Values)
             if (type.Destructor is null && type.BaseType?.FindDestructor() is { IsPublic: false } inheritedDestructor)
                 _diagnostics.Report(type.Declaration.IdentifierToken.Location,
@@ -106,12 +116,10 @@ internal sealed class SemanticAnalyzer
         BindInstanceFieldInitializers();
         ValidateNativeSymbols();
 
-        var genericDefinitions = _functionBodies
-            .Where(entry => entry.Symbol.FunctionKind == FunctionKind.Ordinary && !entry.Symbol.TypeParameters.IsEmpty)
-            .ToDictionary(entry => entry.Symbol, entry => (IGenericFunctionImplementation)
-                new SourceGenericFunctionImplementation(entry.Body, entry.Scope));
-        var genericSpecializer = new GenericFunctionSpecializer(genericDefinitions, _typeFactory,
-            _diagnostics, _constants, _genericStructSpecializer!, _cancellationToken);
+        RegisterSourceGenericFunctionImplementations();
+        var genericSpecializer = new GenericFunctionSpecializer(_genericImplementations, _typeFactory,
+            _diagnostics, _constants, _genericStructSpecializer!, ResolveCompilationNamespace,
+            _cancellationToken);
         BindThreadLocalFieldInitializers(genericSpecializer);
         StabilizeConstructorReferenceSummaries();
         var functions = ImmutableArray.CreateBuilder<BoundFunction>();
@@ -150,7 +158,7 @@ internal sealed class SemanticAnalyzer
 
         RecordDeclarations(_globalNamespace);
         return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), _diagnostics.ToImmutableArray(),
-            _syntaxTrees, _semanticInfo, _constants.RequiresTargetLayout);
+            _syntaxTrees, _semanticInfo, _genericImplementations.ToImmutable(), _constants.RequiresTargetLayout);
     }
 
     private void StabilizeCallableSummaries()
@@ -379,18 +387,43 @@ internal sealed class SemanticAnalyzer
     private void InitializeGenericStructSpecializer()
     {
         _genericStructSpecializer = new GenericStructSpecializer(
-            _typeFactory, _diagnostics, EvaluateSpecializedConstants);
+            _typeFactory, _diagnostics, EvaluateSpecializedConstants, ResolveCompilationNamespace);
         foreach (FileSymbolScope scope in _treeScopes.Values.Concat(_structScopes.Values)
             .Concat(_templateScopes.Values).Distinct())
             scope.SetGenericStructSpecializer(_genericStructSpecializer);
+    }
+
+    private NamespaceSymbol ResolveCompilationNamespace(NamespaceSymbol source)
+    {
+        if (source.Parent is null) return _globalNamespace;
+        var parts = new Stack<string>();
+        for (NamespaceSymbol? current = source; current?.Parent is not null; current = current.Parent)
+            parts.Push(current.Name);
+        NamespaceSymbol result = _globalNamespace;
+        while (parts.TryPop(out string? part)) result = result.GetOrAddNamespace(part);
+        return result;
+    }
+
+    private void RegisterSourceGenericStructImplementations()
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+            if (type.IsGenericDefinition)
+                _genericImplementations.AddStruct(type,
+                    new SourceGenericStructImplementation(_structScopes[declaration]));
+    }
+
+    private void RegisterSourceGenericFunctionImplementations()
+    {
+        foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
+            if (symbol.IsGenericDefinition)
+                _genericImplementations.AddFunction(symbol,
+                    new SourceGenericFunctionImplementation(body, scope));
     }
 
     private void BindSpecializedStructFunctions(ImmutableArray<BoundFunction>.Builder functions,
         GenericFunctionSpecializer genericFunctionSpecializer)
     {
         if (_genericStructSpecializer is null) return;
-        Dictionary<FunctionSymbol, (BlockStatementSyntax Body, FileSymbolScope Scope)> sources =
-            _functionBodies.ToDictionary(entry => entry.Symbol, entry => (entry.Body, entry.Scope));
         var bound = new HashSet<FunctionSymbol>(ReferenceEqualityComparer.Instance);
         while (true)
         {
@@ -413,14 +446,20 @@ internal sealed class SemanticAnalyzer
                 FunctionSymbol definition = entry.Definition;
                 FunctionSymbol specialized = entry.Specialized;
                 bound.Add(specialized);
-                if (!sources.TryGetValue(definition, out var source)) continue;
                 StructTypeSymbol owner = specialized.ContainingStruct!;
-                var semanticInfo = new SemanticInfoStore();
-                FileSymbolScope scope = source.Scope.WithTypeSubstitutions(
-                    _genericStructSpecializer.GetSubstitutions(owner), semanticInfo);
-                var binder = new FunctionBodyBinder(specialized, scope, _diagnostics, _constants,
-                    semanticInfo, genericFunctionSpecializer, _cancellationToken);
-                functions.Add(new BoundFunction(specialized, binder.BindBody(source.Body)));
+                if (!_genericImplementations.TryGetFunction(definition,
+                        out IGenericFunctionImplementation? implementation))
+                {
+                    if (specialized.IsDefinition && !specialized.IsAbstract)
+                        _diagnostics.Report(_genericStructSpecializer.GetOriginLocation(owner),
+                            $"generic member '{definition.Name}' cannot be specialized because its implementation is unavailable",
+                            DiagnosticIds.GenericSpecializationNotImplemented);
+                    continue;
+                }
+                BoundBlockStatement body = implementation.Bind(specialized,
+                    _genericStructSpecializer.GetSubstitutions(owner), _diagnostics, _constants,
+                    genericFunctionSpecializer, _cancellationToken);
+                functions.Add(new BoundFunction(specialized, body));
             }
             if (_genericStructSpecializer.SpecializationCount != specializationCountBefore)
                 changed = true;
@@ -439,26 +478,33 @@ internal sealed class SemanticAnalyzer
             foreach (FieldSymbol field in type.StaticFields)
             {
                 FieldSymbol definitionField = field.GenericDefinition ?? field;
+                TextLocation location = GetSymbolLocationOrFallback(definitionField,
+                    _genericStructSpecializer.GetOriginLocation(type));
                 if (!field.HasInitializer && TypeFacts.ContainsReferenceStorage(field.Type))
-                    _diagnostics.Report(definitionField.Declaration.Type.NameToken.Location,
+                    _diagnostics.Report(location,
                         $"static field '{field.Name}' contains a reference and requires explicit initialization",
                         DiagnosticIds.ReferenceRequiresInitializer);
             }
             foreach (FieldSymbol field in type.Fields)
             {
                 FieldSymbol definitionField = field.GenericDefinition ?? field;
+                TextLocation location = GetSymbolLocationOrFallback(definitionField,
+                    _genericStructSpecializer.GetOriginLocation(type));
                 if (ContainsStructByValue(field.Type, type, []))
-                    _diagnostics.Report(definitionField.Declaration.Type.NameToken.Location,
+                    _diagnostics.Report(location,
                         $"struct '{type.Name}' has a recursive by-value field '{field.Name}'; use a pointer or array handle instead",
                         DiagnosticIds.RecursiveValueLayout);
                 if (field.Type is StructTypeSymbol { IsAbstract: true } abstractType)
-                    _diagnostics.Report(definitionField.Declaration.Type.NameToken.Location,
+                    _diagnostics.Report(location,
                         $"abstract struct '{abstractType.Name}' cannot be stored in field '{field.Name}'",
                         DiagnosticIds.AbstractValueStorage);
             }
         }
         return pending.Length > 0;
     }
+
+    private static TextLocation GetSymbolLocationOrFallback(Symbol symbol, TextLocation fallback) =>
+        symbol.Locations is { IsEmpty: false } locations ? locations[0] : fallback;
 
     private bool BindPendingSpecializedInitializers(ImmutableArray<BoundFunction>.Builder functions,
         GenericFunctionSpecializer genericFunctionSpecializer)
@@ -469,39 +515,44 @@ internal sealed class SemanticAnalyzer
             .Where(type => type.IsConcreteType).ToArray())
         {
             StructTypeSymbol definition = type.GenericDefinition!;
-            FileSymbolScope sourceScope = _structScopes[definition.Declaration];
-            var semanticInfo = new SemanticInfoStore();
-            FileSymbolScope scope = sourceScope.WithTypeSubstitutions(
-                _genericStructSpecializer.GetSubstitutions(type), semanticInfo);
+            bool needsInstanceInitializers = type.Fields.Any(field => field.HasInitializer);
+            bool needsStaticInitializers = type.StaticFields.Any(field => field.HasInitializer);
+            if (!_genericImplementations.TryGetStruct(definition,
+                    out IGenericStructImplementation? implementation))
+            {
+                if ((needsInstanceInitializers && _boundSpecializedInstanceInitializers.Add(type)) ||
+                    needsStaticInitializers && type.StaticFields.Where(field => field.HasInitializer)
+                        .Any(field => _boundSpecializedStaticInitializers.Add(field)))
+                {
+                    changed = true;
+                    _diagnostics.Report(_genericStructSpecializer.GetOriginLocation(type),
+                        $"generic struct '{definition.Name}' cannot initialize its fields because its implementation is unavailable",
+                        DiagnosticIds.GenericSpecializationNotImplemented);
+                }
+                continue;
+            }
 
-            if (type.Fields.Any(field => field.HasInitializer) &&
+            IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions =
+                _genericStructSpecializer.GetSubstitutions(type);
+
+            if (needsInstanceInitializers &&
                 _boundSpecializedInstanceInitializers.Add(type))
             {
                 changed = true;
-                var initializer = new FunctionSymbol(FunctionKind.InstanceInitializer, type, [],
-                    SymbolOrigin.CompilerGenerated, Accessibility.Private);
-                type.SetInstanceInitializer(initializer);
-                var binder = new FunctionBodyBinder(initializer, scope, _diagnostics, _constants,
-                    semanticInfo, genericFunctionSpecializer, _cancellationToken);
-                foreach (FieldSymbol field in type.Fields)
-                    if (binder.BindFieldInitializer(field,
-                            field.GenericDefinition?.Declaration.Initializer) is BoundExpression boundInitializer)
-                        field.SetInitializer(boundInitializer);
-                functions.Add(new BoundFunction(initializer,
-                    new BoundBlockStatement(binder.CreateInstanceFieldInitializerStatements(type))));
+                BoundFunction? initializer = implementation.BindInstanceFieldInitializers(type,
+                    substitutions, _diagnostics, _constants, _semanticInfo,
+                    genericFunctionSpecializer, _cancellationToken);
+                if (initializer is not null) functions.Add(initializer);
             }
 
-            foreach (FieldSymbol field in type.StaticFields.Where(field =>
-                field.HasInitializer && _boundSpecializedStaticInitializers.Add(field)))
+            FieldSymbol[] pendingStatic = type.StaticFields.Where(field =>
+                field.HasInitializer && _boundSpecializedStaticInitializers.Add(field)).ToArray();
+            if (pendingStatic.Length > 0)
             {
                 changed = true;
-                if (field.IsThreadLocal)
-                    BindThreadLocalFieldInitializer(field, scope, semanticInfo,
-                        genericFunctionSpecializer, functions.Add,
-                        field.GenericDefinition?.Declaration.Initializer);
-                else
-                    BindStaticFieldInitializer(field, type, scope,
-                        field.GenericDefinition?.Declaration);
+                functions.AddRange(implementation.BindStaticFieldInitializers(type, substitutions,
+                    _diagnostics, _constants, _semanticInfo, genericFunctionSpecializer,
+                    _genericImplementationServices, _cancellationToken));
             }
         }
         return changed;
@@ -998,6 +1049,10 @@ internal sealed class SemanticAnalyzer
         }
     }
 
+    internal void BindSourceGenericStaticFieldInitializer(FieldSymbol field, StructTypeSymbol type,
+        FileSymbolScope scope, FieldDeclarationSyntax declaration) =>
+        BindStaticFieldInitializer(field, type, scope, declaration);
+
     private void DeclareConstants()
     {
         foreach (SyntaxTree tree in _syntaxTrees)
@@ -1058,20 +1113,44 @@ internal sealed class SemanticAnalyzer
                 _failedConstants.Add(constant);
             return;
         }
-        FileSymbolScope scope = _structScopes[definition.Declaration].WithTypeSubstitutions(
-            _genericStructSpecializer.GetSubstitutions(specialization), _semanticInfo);
-        foreach (ConstantSymbol constant in specialization.Constants)
-            _constantScopes.TryAdd(constant, scope);
 
         foreach (ConstantSymbol constant in specialization.Constants)
-        {
             EvaluateConstant(constant);
-        }
     }
 
     private bool EvaluateConstant(ConstantSymbol constant)
     {
-        ConstantSymbol source = constant.GenericDefinition ?? constant;
+        if (constant.GenericDefinition is { } genericDefinition &&
+            constant.ContainingType is StructTypeSymbol specialization &&
+            specialization.GenericDefinition is { } structDefinition)
+        {
+            if (_genericStructSpecializer is not null &&
+                _genericImplementations.TryGetStruct(structDefinition,
+                    out IGenericStructImplementation? implementation))
+                return implementation.EvaluateConstant(constant,
+                    _genericStructSpecializer.GetSubstitutions(specialization),
+                    _genericStructSpecializer, _semanticInfo,
+                    _genericImplementationServices);
+            if (_failedConstants.Add(constant))
+                _diagnostics.Report(_genericStructSpecializer?.GetOriginLocation(specialization) ?? TextLocation.None,
+                    $"generic constant '{genericDefinition.Name}' cannot be evaluated because its implementation is unavailable",
+                    DiagnosticIds.GenericSpecializationNotImplemented);
+            return false;
+        }
+
+        return EvaluateConstantCore(constant, constant.Initializer, constant.IdentifierToken.Location);
+    }
+
+    internal bool EvaluateSourceGenericConstant(ConstantSymbol constant, FileSymbolScope scope,
+        ExpressionSyntax initializer, TextLocation location)
+    {
+        _constantScopes.TryAdd(constant, scope);
+        return EvaluateConstantCore(constant, initializer, location);
+    }
+
+    private bool EvaluateConstantCore(ConstantSymbol constant, ExpressionSyntax initializer,
+        TextLocation location)
+    {
         if (constant.HasValue)
             return true;
         if (_failedConstants.Contains(constant))
@@ -1079,7 +1158,7 @@ internal sealed class SemanticAnalyzer
         if (!_evaluatingConstants.Add(constant))
         {
             if (_failedConstants.Add(constant))
-                _diagnostics.Report(source.IdentifierToken.Location,
+                _diagnostics.Report(location,
                     $"circular constant dependency involving '{constant.Name}'", DiagnosticIds.ConstantCycle);
             return false;
         }
@@ -1087,11 +1166,11 @@ internal sealed class SemanticAnalyzer
         {
             if (_enumMembers.TryGetValue(constant, out var enumMember))
                 return EvaluateEnumMember(constant, enumMember.Type, enumMember.Previous, enumMember.Automatic);
-            BoundExpression? value = BindConstantExpression(source.Initializer, constant);
+            BoundExpression? value = BindConstantExpression(initializer, constant);
             if (value is null)
             {
                 if (_failedConstants.Add(constant))
-                    _diagnostics.Report(source.IdentifierToken.Location,
+                    _diagnostics.Report(location,
                         $"initializer of constant '{constant.Name}' is not a compile-time constant",
                         DiagnosticIds.ConstantValueRequired);
                 return false;
@@ -1103,14 +1182,14 @@ internal sealed class SemanticAnalyzer
                 else
                 {
                     if (_failedConstants.Add(constant))
-                        _diagnostics.Report(source.IdentifierToken.Location,
+                        _diagnostics.Report(location,
                             $"cannot implicitly convert '{value.Type.ToDisplayString()}' to '{constant.Type.ToDisplayString()}'",
                             DiagnosticIds.TypeMismatch);
                     return false;
                 }
             }
 
-            SetConvertedType(source.Initializer, value.Type);
+            SetConvertedType(initializer, value.Type);
 
             object? foldedValue;
             ConstantFoldStatus foldStatus = constant.ContainingType is StructTypeSymbol { IsGenericDefinition: true }
@@ -1120,7 +1199,7 @@ internal sealed class SemanticAnalyzer
             {
                 if (_failedConstants.Add(constant))
                     _diagnostics.Report(
-                        source.IdentifierToken.Location,
+                        location,
                         $"initializer of constant '{constant.Name}' contains an invalid compile-time operation",
                         DiagnosticIds.InvalidConstantOperation);
                 return false;
@@ -1987,31 +2066,39 @@ internal sealed class SemanticAnalyzer
 
     private void BuildVirtualMethodTables()
     {
+        var localTypes = new HashSet<StructTypeSymbol>(_structSymbols.Values,
+            ReferenceEqualityComparer.Instance);
         var built = new HashSet<StructTypeSymbol>();
-        foreach (StructTypeSymbol type in _structSymbols.Values)
-            BuildVirtualMethodTable(type, built);
+        foreach (StructTypeSymbol type in localTypes)
+            BuildVirtualMethodTable(type, localTypes, built);
     }
 
-    private void BuildVirtualMethodTable(StructTypeSymbol type, HashSet<StructTypeSymbol> built)
+    private void BuildVirtualMethodTable(StructTypeSymbol type,
+        HashSet<StructTypeSymbol> localTypes,
+        HashSet<StructTypeSymbol> built)
     {
         if (!built.Add(type))
             return;
-        if (type.BaseType is not null)
-            BuildVirtualMethodTable(type.BaseType, built);
+        // A referenced compilation owns and finalizes its virtual layout.  Its
+        // metadata is immutable input here; only source types owned by this
+        // analyzer may be completed or mutated.
+        if (type.BaseType is { } localBase && localTypes.Contains(localBase))
+            BuildVirtualMethodTable(localBase, localTypes, built);
 
         var slots = type.BaseType?.VirtualMethods.ToBuilder() ?? ImmutableArray.CreateBuilder<FunctionSymbol>();
         var invalidAccessors = new HashSet<FunctionSymbol>();
         foreach (PropertySymbol property in type.Properties)
         {
             PropertySymbol? inherited = type.BaseType?.FindProperty(property.Name);
-            ValidateAccessorOverride($"property '{property.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'", property.Locations[0],
-                property.Declaration.IsOverride, property.Getter, property.Setter, inherited?.Getter, inherited?.Setter, invalidAccessors);
+            ValidateAccessorOverride($"property '{property.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'",
+                SymbolLocation(property), property.IsOverride, property.Getter, property.Setter,
+                inherited?.Getter, inherited?.Setter, invalidAccessors);
         }
         foreach (IndexerSymbol indexer in type.Indexers)
         {
             IndexerSymbol? inherited = type.BaseType?.AllIndexers.FirstOrDefault(candidate => HaveSameParameterTypes(indexer.Parameters, candidate.Parameters));
             ValidateAccessorOverride($"indexer '{indexer.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'",
-                indexer.Locations[0], indexer.Declaration.IsOverride,
+                SymbolLocation(indexer), indexer.IsOverride,
                 indexer.Getter, indexer.Setter, inherited?.Getter, inherited?.Setter, invalidAccessors);
         }
         foreach (FunctionSymbol method in type.Methods)
@@ -2063,7 +2150,7 @@ internal sealed class SemanticAnalyzer
         {
             foreach (FunctionSymbol member in type.VirtualMethods.Where(method => method.IsAbstract)
                 .DistinctBy(method => (object?)method.ContainingProperty ?? method.ContainingIndexer ?? (object)method))
-                _diagnostics.Report(type.Declaration.IdentifierToken.Location,
+                _diagnostics.Report(SymbolLocation(type),
                     $"concrete struct '{type.FullName}' does not implement abstract member '{MemberName(member)}'; implement it or declare the struct 'abstract'",
                     DiagnosticIds.UnimplementedInterfaceMember);
         }
@@ -2122,12 +2209,27 @@ internal sealed class SemanticAnalyzer
     private static bool HasCompatibleOverrideAccessibility(FunctionSymbol member, FunctionSymbol inherited) =>
         !inherited.IsPublic || member.IsPublic;
 
-    private static TextLocation MemberLocation(FunctionSymbol method) => method.Declaration switch
+    private TextLocation MemberLocation(FunctionSymbol method)
     {
-        MethodDeclarationSyntax => method.Locations[0],
-        DestructorDeclarationSyntax syntax => (syntax.OverrideKeyword ?? syntax.IdentifierToken).Location,
-        _ => method.ContainingType!.GetSourceDeclaration<TypeDeclarationSyntax>().IdentifierToken.Location,
-    };
+        if (method.ContainingStruct is { IsGenericSpecialization: true } specialization &&
+            _genericStructSpecializer is not null)
+            return SymbolLocation(method, _genericStructSpecializer.GetOriginLocation(specialization));
+        TextLocation? preferred = method.Origin.Kind == SymbolOriginKind.Source &&
+            method.ImplementationDeclaration is DestructorDeclarationSyntax syntax
+            ? (syntax.OverrideKeyword ?? syntax.IdentifierToken).Location
+            : null;
+        return SymbolLocation(method, preferred);
+    }
+
+    private static TextLocation SymbolLocation(Symbol member, TextLocation? preferred = null)
+    {
+        if (preferred is { } location)
+            return location;
+        for (Symbol? current = member; current is not null; current = current.ContainingSymbol)
+            foreach (TextLocation candidate in current.Locations)
+                return candidate;
+        return TextLocation.None;
+    }
 
     private static string MemberName(FunctionSymbol method) =>
         (method.ContainingProperty as Symbol ?? method.ContainingIndexer as Symbol ?? method)
@@ -2489,7 +2591,8 @@ internal sealed class SemanticAnalyzer
                     constructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
                 if (!signatures.Add(signature))
                 {
-                    _diagnostics.Report(constructor.Locations[0], $"constructor '{constructor.ToDisplayString(SymbolDisplayFormat.Diagnostic)}' is already declared",
+                    _diagnostics.Report(constructorSyntax.IdentifierToken.Location,
+                        $"constructor '{constructor.ToDisplayString(SymbolDisplayFormat.Diagnostic)}' is already declared",
                         DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
@@ -2625,10 +2728,7 @@ internal sealed class SemanticAnalyzer
                 }
                 if (signature == previousSignature) continue;
             }
-            TextLocation location = function.Declaration is FunctionDeclarationSyntax declaration
-                ? declaration.IdentifierToken.Location : function.ContainingType!
-                    .GetSourceDeclaration<TypeDeclarationSyntax>().IdentifierToken.Location;
-            _diagnostics.Report(location,
+            _diagnostics.Report(SymbolLocation(function),
                 $"native symbol '{name}' collides between '{previous.FullName}' and '{function.FullName}' with incompatible ABI or multiple definitions",
                 DiagnosticIds.NativeSymbolCollision);
         }

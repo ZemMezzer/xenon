@@ -1,6 +1,4 @@
 using System.Collections.Immutable;
-using Xenon.Compiler.Syntax;
-
 namespace Xenon.Compiler.Semantics.Symbols;
 
 /// <summary>Presentation only: these formats must not be used for type identity or native names.</summary>
@@ -68,8 +66,14 @@ public static class SymbolDisplay
 
     private static string GetName(Symbol symbol, bool qualified)
     {
-        static string Part(Symbol part) => part is FunctionSymbol { Declaration: PropertyAccessorDeclarationSyntax accessor }
-            ? accessor.KeywordToken.Text : part.Name;
+        static string Part(Symbol part) => part is FunctionSymbol function
+            ? function.AccessorKind switch
+            {
+                AccessorKind.Getter => "get",
+                AccessorKind.Setter => "set",
+                _ => part.Name,
+            }
+            : part.Name;
         if (!qualified) return Part(symbol);
         var parts = new Stack<string>();
         for (Symbol? current = symbol; current is not null; current = current.ContainingSymbol)

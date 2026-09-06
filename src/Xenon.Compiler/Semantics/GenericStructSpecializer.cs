@@ -27,6 +27,7 @@ internal sealed class GenericStructSpecializer
     private readonly TypeFactory _types;
     private readonly DiagnosticBag _diagnostics;
     private readonly Action<StructTypeSymbol>? _constantsCompletedCallback;
+    private readonly Func<NamespaceSymbol, NamespaceSymbol> _resolveNamespace;
     private readonly GenericConstraintValidator _constraintValidator = new();
     private readonly Dictionary<GenericInstantiationKey, StructTypeSymbol> _cache = [];
     private readonly Dictionary<StructTypeSymbol, ImmutableDictionary<GenericParameterSymbol, TypeSymbol>> _substitutions = [];
@@ -39,14 +40,17 @@ internal sealed class GenericStructSpecializer
     private bool _constantsReady;
 
     public GenericStructSpecializer(TypeFactory types, DiagnosticBag diagnostics,
-        Action<StructTypeSymbol>? constantsCompletedCallback = null)
+        Action<StructTypeSymbol>? constantsCompletedCallback = null,
+        Func<NamespaceSymbol, NamespaceSymbol>? resolveNamespace = null)
     {
         _types = types;
         _diagnostics = diagnostics;
         _constantsCompletedCallback = constantsCompletedCallback;
+        _resolveNamespace = resolveNamespace ?? (value => value);
     }
 
     public IEnumerable<StructTypeSymbol> Specializations => _cache.Values;
+    internal TypeFactory Types => _types;
     public int SpecializationCount => _cache.Count;
     public IEnumerable<SpecializedStructFunction> SpecializedFunctions => _specializedFunctions.Select(entry =>
         new SpecializedStructFunction(entry.Key.Definition, entry.Key.Owner, entry.Value));
@@ -98,7 +102,7 @@ internal sealed class GenericStructSpecializer
         }
 
         string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
-        var specialized = new StructTypeSymbol(name, definition.ContainingNamespace, definition.IsAbstract,
+        var specialized = new StructTypeSymbol(name, _resolveNamespace(definition.ContainingNamespace), definition.IsAbstract,
             SymbolOrigin.CompilerGenerated, definition.Documentation);
         specialized.SetGenericSpecialization(definition, typeArguments);
         // Publish the skeleton before resolving fields so recursive constructed
@@ -117,6 +121,9 @@ internal sealed class GenericStructSpecializer
         _substitutions[specialization];
 
     public GenericStructSpecializationState GetState(StructTypeSymbol specialization) => _states[specialization];
+
+    public TextLocation GetOriginLocation(StructTypeSymbol specialization) =>
+        _originLocations.GetValueOrDefault(specialization, TextLocation.None);
 
     public bool CompletePendingConstraints()
     {
@@ -277,14 +284,6 @@ internal sealed class GenericStructSpecializer
             AddFunction(source, method, specialized, methods);
         }
         specialized.SetMethods(methods.ToImmutable());
-        ImmutableArray<FunctionSymbol> virtualMethods = definition.VirtualMethods
-            .Select(source => _specializedFunctions.GetValueOrDefault((source, specialized)))
-            .OfType<FunctionSymbol>().ToImmutableArray();
-        foreach (FunctionSymbol source in definition.VirtualMethods)
-            if (source.VTableSlot is int slot &&
-                _specializedFunctions.TryGetValue((source, specialized), out FunctionSymbol? target))
-                target.SetVTableSlot(slot);
-        specialized.SetVirtualMethods(virtualMethods);
 
         ImmutableArray<FunctionSymbol> constructors = definition.Constructors.Select(source =>
         {
@@ -303,6 +302,24 @@ internal sealed class GenericStructSpecializer
             specialized.SetDestructor(destructor);
             _specializedFunctions.Add((sourceDestructor, specialized), destructor);
         }
+
+        // The specialized base already owns its finalized virtual metadata.
+        // Preserve those inherited slot identities and replace only slots whose
+        // implementation is declared by this generic definition.
+        var virtualMethods = specialized.BaseType?.VirtualMethods.ToBuilder() ??
+            ImmutableArray.CreateBuilder<FunctionSymbol>();
+        foreach (FunctionSymbol source in definition.VirtualMethods)
+        {
+            if (source.VTableSlot is not int slot ||
+                !_specializedFunctions.TryGetValue((source, specialized), out FunctionSymbol? target))
+                continue;
+            target.SetVTableSlot(slot);
+            if (slot < virtualMethods.Count)
+                virtualMethods[slot] = target;
+            else if (slot == virtualMethods.Count)
+                virtualMethods.Add(target);
+        }
+        specialized.SetVirtualMethods(virtualMethods.ToImmutable());
         _states[specialized] = GenericStructSpecializationState.MembersResolved;
     }
 
@@ -335,7 +352,8 @@ internal sealed class GenericStructSpecializer
             source.Accessibility, source.IsStatic, source.IsReadonly, source.IsVirtual,
             source.IsOverride, source.IsAbstract, source.IsExtern, source.IsExport,
             source.IsDefinition, source.DelegatesToThisConstructor, origin: SymbolOrigin.CompilerGenerated,
-            documentation: source.Documentation, implementation: source.Implementation);
+            documentation: source.Documentation, implementation: source.Implementation,
+            accessorKind: source.AccessorKind);
         return function;
     }
 
@@ -378,7 +396,7 @@ internal sealed class GenericStructSpecializer
                 DiagnosticIds.GenericConstraintNotSatisfied);
         }
         if (isValid && specialized.IsConcreteType)
-            definition.ContainingNamespace.TryDeclareType(specialized);
+            specialized.ContainingNamespace.TryDeclareType(specialized);
         _states[specialized] = GenericStructSpecializationState.ConstraintsValidated;
     }
 
@@ -473,7 +491,9 @@ internal sealed class GenericStructSpecializer
             .Select(argument => Substitute(argument, substitutions, origin)).ToImmutableArray();
         if (arguments.Zip(constructed.TypeArguments).All(pair => TypeIdentity.AreSame(pair.First, pair.Second)))
             return constructed;
-        return (TypeSymbol?)GetOrCreate(constructed.GenericDefinition!, arguments,
-            origin ?? constructed.Locations.FirstOrDefault()) ?? BuiltinTypes.Error;
+        TextLocation location = origin ?? (constructed.Locations is { IsEmpty: false } locations
+            ? locations[0]
+            : TextLocation.None);
+        return (TypeSymbol?)GetOrCreate(constructed.GenericDefinition!, arguments, location) ?? BuiltinTypes.Error;
     }
 }
