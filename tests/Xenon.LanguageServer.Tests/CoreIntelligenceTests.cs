@@ -448,6 +448,42 @@ public sealed class CoreIntelligenceTests
         }
     }
 
+    [Fact]
+    public async Task PropertyHoverUsesCanonicalReadonlyTypeAndMemberSyntax()
+    {
+        const string source = """
+            namespace Example;
+            struct Buffer
+            {
+                private byte value;
+                public readonly byte* readonly Data { get { return &value; } }
+            }
+            void Use(Buffer buffer) { readonly byte* pointer = buffer.Data; buffer.Da }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("readonly-property.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        int position = source.LastIndexOf("Data", StringComparison.Ordinal);
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, position);
+        Assert.Contains("public readonly byte* readonly Data",
+            hover.GetProperty("contents").GetProperty("value").GetString());
+        int completionPosition = source.LastIndexOf("Da", StringComparison.Ordinal) + "Da".Length;
+        JsonElement completion = await RequestAtAsync(
+            session, "textDocument/completion", uri, source, completionPosition);
+        JsonElement item = completion.GetProperty("items").EnumerateArray()
+            .Single(candidate => candidate.GetProperty("label").GetString() == "Data");
+        Assert.Contains("readonly byte* readonly Data", item.GetProperty("detail").GetString());
+    }
+
     private static async Task<JsonElement> RequestAtAsync(LanguageServerSession session, string method,
         string uri, string source, int offset, object? context = null, string? newName = null)
     {

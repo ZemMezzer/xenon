@@ -190,6 +190,88 @@ public sealed class ParserTests
         Assert.NotNull(property.Setter?.Body);
     }
 
+    [Theory]
+    [InlineData("readonly byte*", true, false)]
+    [InlineData("byte* readonly", false, true)]
+    [InlineData("readonly byte* readonly", true, true)]
+    [InlineData("readonly byte& readonly", true, true)]
+    [InlineData("readonly int", false, true)]
+    [InlineData("int readonly", false, true)]
+    public void Parser_SeparatesPropertyAndIndexerTypeReadonlyAcrossDeclarationKinds(
+        string signature, bool typeReadonly, bool memberReadonly)
+    {
+        SyntaxTree tree = Parse($$"""
+            namespace Example;
+            struct Buffer
+            {
+                public {{signature}} Data { get { } }
+                public {{signature}} this[int index] { get { } }
+            }
+            interface IBuffer
+            {
+                {{signature}} Data { get; }
+                {{signature}} this[int index] { get; }
+            }
+            template BufferShape
+            {
+                {{signature}} Data { get; }
+                {{signature}} this[int index] { get; }
+            }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var structure = Assert.IsType<StructDeclarationSyntax>(tree.Root.Members[0]);
+        var contract = Assert.IsType<InterfaceDeclarationSyntax>(tree.Root.Members[1]);
+        var template = Assert.IsType<TemplateDeclarationSyntax>(tree.Root.Members[2]);
+        foreach ((TypeSyntax Type, bool IsReadonly) member in new[]
+        {
+            (Assert.Single(structure.Properties).Type, Assert.Single(structure.Properties).IsReadonly),
+            (Assert.Single(structure.Indexers).Type, Assert.Single(structure.Indexers).IsReadonly),
+            (Assert.Single(contract.Properties).Type, Assert.Single(contract.Properties).IsReadonly),
+            (Assert.Single(contract.Indexers).Type, Assert.Single(contract.Indexers).IsReadonly),
+            (Assert.Single(template.Properties).Type, Assert.Single(template.Properties).IsReadonly),
+            (Assert.Single(template.Indexers).Type, Assert.Single(template.Indexers).IsReadonly),
+        })
+        {
+            Assert.Equal(typeReadonly,
+                member.Type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Prefix) is not null);
+            Assert.Null(member.Type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix));
+            Assert.Equal(memberReadonly, member.IsReadonly);
+        }
+    }
+
+    [Fact]
+    public void Parser_RejectsDuplicateLegacyReadonlyAccessorsAcrossDeclarationKinds()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+            struct Buffer
+            {
+                readonly readonly int Data { get { return 0; } }
+                readonly readonly int this[int index] { get { return 0; } }
+            }
+            interface IBuffer
+            {
+                readonly readonly int Data { get; }
+                readonly readonly int this[int index] { get; }
+            }
+            template BufferShape
+            {
+                readonly readonly int Data { get; }
+                readonly readonly int this[int index] { get; }
+            }
+            """);
+
+        Assert.Equal(6, tree.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.DuplicateModifier &&
+            diagnostic.Message is "duplicate readonly property modifier" or
+                "duplicate readonly indexer modifier"));
+        foreach (TypeSyntax type in tree.Root.Members
+                     .SelectMany(SyntaxNavigator.DescendantNodesAndSelf)
+                     .OfType<TypeSyntax>())
+            Assert.Null(type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Prefix));
+    }
+
     [Fact]
     public void Parser_ParsesInterfaceProperty()
     {
@@ -854,9 +936,12 @@ public sealed class ParserTests
     [InlineData("static virtual int Value { get { return 0; } }")]
     [InlineData("static override void M() {}")]
     [InlineData("virtual override int this[int i] { get { return i; } }")]
-    [InlineData("int* readonly Value { get { return null; } }")]
     [InlineData("readonly int Value { set {} }")]
     [InlineData("readonly int this[int i] { set {} }")]
+    [InlineData("int readonly Value { set {} }")]
+    [InlineData("int* readonly Value { set {} }")]
+    [InlineData("int readonly this[int i] { set {} }")]
+    [InlineData("readonly int readonly Value { get { return 0; } }")]
     [InlineData("int this[int i] { public get { return i; } }")]
     public void Parser_RejectsDiscardedDuplicateAndConflictingMemberModifiers(string member)
     {
@@ -881,6 +966,8 @@ public sealed class ParserTests
     [Theory]
     [InlineData("readonly int Value { set; }")]
     [InlineData("readonly int this[int i] { set; }")]
+    [InlineData("int readonly Value { set; }")]
+    [InlineData("int readonly this[int i] { set; }")]
     [InlineData("int Value { public get; }")]
     [InlineData("int this[int i] { virtual get; }")]
     public void Parser_RejectsIgnoredInterfaceAccessorModifiers(string member)

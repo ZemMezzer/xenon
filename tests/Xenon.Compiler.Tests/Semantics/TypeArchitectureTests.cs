@@ -479,10 +479,59 @@ public sealed class TypeArchitectureTests
         Assert.Equal("int Example.Nested.S.Value", type.Properties[0].ToDisplayString(SymbolDisplayFormat.QualifiedSignature));
         Assert.Equal("int Example.Nested.S.this[int index]", type.Indexers[0].ToDisplayString(SymbolDisplayFormat.QualifiedSignature));
         Assert.Equal("Example.Nested.S.this[int]", type.Indexers[0].ToDisplayString(SymbolDisplayFormat.Diagnostic));
-        Assert.Equal("int Read(int x) readonly", type.Methods.Single(method => method.Name == "Read")
+        Assert.Equal("int readonly Read(int x)", type.Methods.Single(method => method.Name == "Read")
             .ToDisplayString(SymbolDisplayFormat.Signature));
         Assert.Equal("S(int seed)", type.Constructors[0].ToDisplayString(SymbolDisplayFormat.Signature));
         Assert.Equal("~S()", type.Destructor!.ToDisplayString(SymbolDisplayFormat.Signature));
+    }
+
+    [Fact]
+    public void ReadonlyAccessorSyntaxPreservesTypeMemberAndGeneratedGetterDimensions()
+    {
+        var compilation = Create("""
+            namespace Example;
+            struct Buffer
+            {
+                private byte value;
+                public readonly byte* View { get { return &value; } }
+                public byte* readonly Pointer { get { return null; } }
+                public readonly byte* readonly Data
+                {
+                    get
+                    {
+                        readonly byte* pointer = &value;
+                        return pointer;
+                    }
+                }
+                public readonly byte* readonly this[int index] { get { return &value; } }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol buffer = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Structs.Single();
+        PropertySymbol view = buffer.Properties.Single(property => property.Name == "View");
+        PropertySymbol pointer = buffer.Properties.Single(property => property.Name == "Pointer");
+        PropertySymbol data = buffer.Properties.Single(property => property.Name == "Data");
+        IndexerSymbol indexer = Assert.Single(buffer.Indexers);
+
+        Assert.True(Assert.IsType<PointerTypeSymbol>(view.Type).IsReadonly);
+        Assert.False(view.IsReadonly);
+        Assert.False(Assert.IsType<PointerTypeSymbol>(pointer.Type).IsReadonly);
+        Assert.True(pointer.IsReadonly);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(data.Type).IsReadonly);
+        Assert.True(data.IsReadonly);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(data.Getter!.ReturnType).IsReadonly);
+        Assert.True(data.Getter.IsReadonly);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(indexer.Type).IsReadonly);
+        Assert.True(indexer.IsReadonly);
+        Assert.True(Assert.IsType<PointerTypeSymbol>(indexer.Getter!.ReturnType).IsReadonly);
+        Assert.True(indexer.Getter.IsReadonly);
+
+        Assert.Equal("readonly byte* View", view.ToDisplayString(SymbolDisplayFormat.Signature));
+        Assert.Equal("byte* readonly Pointer", pointer.ToDisplayString(SymbolDisplayFormat.Signature));
+        Assert.Equal("public readonly byte* readonly Data", data.ToDisplayString(SymbolDisplayFormat.Declaration));
+        Assert.Equal("public readonly byte* readonly this[int index]",
+            indexer.ToDisplayString(SymbolDisplayFormat.Declaration));
     }
 
     [Fact]

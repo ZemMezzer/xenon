@@ -168,14 +168,15 @@ internal sealed class Parser
             else
             {
                 TypeSyntax type = ParseType();
-                SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
+                SyntaxToken? trailingReadonly = ParseCallableOrAccessorReadonlyKeyword();
                 if (Current.Kind == SyntaxKind.ThisKeyword)
                 {
                     ValidateMemberModifiers("indexer", modifiers, SyntaxKind.PublicKeyword,
                         SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.VirtualKeyword,
                         SyntaxKind.OverrideKeyword, SyntaxKind.AbstractKeyword, SyntaxKind.ReadonlyKeyword);
-                    ValidateAccessorReturnBinding(type);
-                    members.Add(ParseIndexerDeclaration(accessModifier, @static, @virtual, @override, @abstract, @readonly, type));
+                    (type, SyntaxToken? indexerReadonly) = FinishAccessorType(
+                        type, @readonly, trailingReadonly, "indexer");
+                    members.Add(ParseIndexerDeclaration(accessModifier, @static, @virtual, @override, @abstract, indexerReadonly, type));
                     continue;
                 }
                 SyntaxToken memberIdentifier = MatchToken(SyntaxKind.IdentifierToken);
@@ -184,16 +185,17 @@ internal sealed class Parser
                     ValidateMemberModifiers("method", modifiers, SyntaxKind.PublicKeyword,
                         SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.VirtualKeyword,
                         SyntaxKind.OverrideKeyword, SyntaxKind.AbstractKeyword, SyntaxKind.ReadonlyKeyword);
-                    (type, methodReadonly) = FinishMethodReturnType(type, @readonly, methodReadonly);
-                    members.Add(ParseMethodDeclaration(accessModifier, @static, @virtual, @override, @abstract, methodReadonly, type, memberIdentifier));
+                    (type, trailingReadonly) = FinishMethodReturnType(type, @readonly, trailingReadonly);
+                    members.Add(ParseMethodDeclaration(accessModifier, @static, @virtual, @override, @abstract, trailingReadonly, type, memberIdentifier));
                 }
                 else if (Current.Kind == SyntaxKind.OpenBraceToken)
                 {
                     ValidateMemberModifiers("property", modifiers, SyntaxKind.PublicKeyword,
                         SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.VirtualKeyword,
                         SyntaxKind.OverrideKeyword, SyntaxKind.AbstractKeyword, SyntaxKind.ReadonlyKeyword);
-                    ValidateAccessorReturnBinding(type);
-                    members.Add(ParsePropertyDeclaration(accessModifier, @static, @virtual, @override, @abstract, @readonly, type, memberIdentifier));
+                    (type, SyntaxToken? propertyReadonly) = FinishAccessorType(
+                        type, @readonly, trailingReadonly, "property");
+                    members.Add(ParsePropertyDeclaration(accessModifier, @static, @virtual, @override, @abstract, propertyReadonly, type, memberIdentifier));
                 }
                 else
                 {
@@ -262,12 +264,13 @@ internal sealed class Parser
                     SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword,
                     SyntaxKind.ReadonlyKeyword);
                 TypeSyntax type = ParseType();
-                SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
+                SyntaxToken? trailingReadonly = ParseCallableOrAccessorReadonlyKeyword();
                 if (Current.Kind == SyntaxKind.ThisKeyword)
                 {
-                    ValidateAccessorReturnBinding(type);
+                    (type, SyntaxToken? indexerReadonly) = FinishAccessorType(
+                        type, @readonly, trailingReadonly, "indexer");
                     IndexerDeclarationSyntax indexer = ParseIndexerDeclaration(
-                        access, @static, null, null, null, @readonly, type);
+                        access, @static, null, null, null, indexerReadonly, type);
                     ReportTemplateAccessorBodies(indexer.Accessors);
                     members.Add(indexer);
                     continue;
@@ -276,14 +279,15 @@ internal sealed class Parser
                 SyntaxToken memberIdentifier = MatchToken(SyntaxKind.IdentifierToken);
                 if (Current.Kind == SyntaxKind.OpenParenthesisToken)
                 {
-                    (type, methodReadonly) = FinishMethodReturnType(type, @readonly, methodReadonly);
-                    members.Add(ParseTemplateMethodDeclaration(access, @static, methodReadonly, type, memberIdentifier));
+                    (type, trailingReadonly) = FinishMethodReturnType(type, @readonly, trailingReadonly);
+                    members.Add(ParseTemplateMethodDeclaration(access, @static, trailingReadonly, type, memberIdentifier));
                 }
                 else if (Current.Kind == SyntaxKind.OpenBraceToken)
                 {
-                    ValidateAccessorReturnBinding(type);
+                    (type, SyntaxToken? propertyReadonly) = FinishAccessorType(
+                        type, @readonly, trailingReadonly, "property");
                     PropertyDeclarationSyntax property = ParsePropertyDeclaration(
-                        access, @static, null, null, null, @readonly, type, memberIdentifier);
+                        access, @static, null, null, null, propertyReadonly, type, memberIdentifier);
                     ReportTemplateAccessorBodies(property.Accessors);
                     members.Add(property);
                 }
@@ -642,10 +646,11 @@ internal sealed class Parser
             var (access, @static, threadlocal, @virtual, @override, @abstract, readonlyKeyword) = ParseStructMemberModifiers();
             ValidateMemberModifiers("interface member", [access, @static, threadlocal, @virtual, @override, @abstract, readonlyKeyword], SyntaxKind.ReadonlyKeyword);
             TypeSyntax returnType = ParseType();
-            SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
+            SyntaxToken? trailingReadonly = ParseCallableOrAccessorReadonlyKeyword();
             if (Current.Kind == SyntaxKind.ThisKeyword)
             {
-                ValidateAccessorReturnBinding(returnType);
+                (returnType, SyntaxToken? indexerReadonly) = FinishAccessorType(
+                    returnType, readonlyKeyword, trailingReadonly, "indexer");
                 SyntaxToken thisKeyword = NextToken();
                 SyntaxToken indexOpen = MatchToken(SyntaxKind.OpenBracketToken);
                 (ImmutableArray<ParameterSyntax> indexParameters, ImmutableArray<SyntaxToken> indexCommas) =
@@ -664,9 +669,9 @@ internal sealed class Parser
                         null,
                         MatchToken(SyntaxKind.SemicolonToken)));
                 }
-                ValidateReadonlyAccessor(readonlyKeyword, indexAccessors);
+                ValidateReadonlyAccessor(indexerReadonly, indexAccessors);
                 indexers.Add(new InterfaceIndexerDeclarationSyntax(
-                    readonlyKeyword,
+                    indexerReadonly,
                     returnType,
                     thisKeyword,
                     indexOpen,
@@ -681,16 +686,17 @@ internal sealed class Parser
             SyntaxToken name = MatchToken(SyntaxKind.IdentifierToken);
             if (Current.Kind == SyntaxKind.OpenParenthesisToken)
             {
-                (returnType, methodReadonly) = FinishMethodReturnType(returnType, readonlyKeyword, methodReadonly);
+                (returnType, trailingReadonly) = FinishMethodReturnType(returnType, readonlyKeyword, trailingReadonly);
                 SyntaxToken open = MatchToken(SyntaxKind.OpenParenthesisToken);
                 (ImmutableArray<ParameterSyntax> parameters, ImmutableArray<SyntaxToken> methodCommas) = ParseParameterList();
                 SyntaxToken close = MatchToken(SyntaxKind.CloseParenthesisToken);
                 SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
-                methods.Add(new InterfaceMethodDeclarationSyntax(methodReadonly, returnType, name, open, parameters, methodCommas, close, semicolon));
+                methods.Add(new InterfaceMethodDeclarationSyntax(trailingReadonly, returnType, name, open, parameters, methodCommas, close, semicolon));
             }
             else
             {
-                ValidateAccessorReturnBinding(returnType);
+                (returnType, SyntaxToken? propertyReadonly) = FinishAccessorType(
+                    returnType, readonlyKeyword, trailingReadonly, "property");
                 SyntaxToken propertyOpen = MatchToken(SyntaxKind.OpenBraceToken);
                 var accessors = ImmutableArray.CreateBuilder<PropertyAccessorDeclarationSyntax>();
                 while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
@@ -702,9 +708,9 @@ internal sealed class Parser
                     SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
                     accessors.Add(new PropertyAccessorDeclarationSyntax(accessorKeyword, null, semicolon));
                 }
-                ValidateReadonlyAccessor(readonlyKeyword, accessors);
+                ValidateReadonlyAccessor(propertyReadonly, accessors);
                 properties.Add(new InterfacePropertyDeclarationSyntax(
-                    readonlyKeyword,
+                    propertyReadonly,
                     returnType,
                     name,
                     propertyOpen,
@@ -765,13 +771,6 @@ internal sealed class Parser
                     modifier.Kind == SyntaxKind.ThreadLocalKeyword
                         ? DiagnosticIds.InvalidThreadLocalPlacement
                         : DiagnosticIds.ModifierNotAllowed);
-    }
-
-    private void ValidateAccessorReturnBinding(TypeSyntax type)
-    {
-        if (type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is { } modifier)
-            Diagnostics.Report(modifier.Location, "return types cannot have a readonly pointer binding",
-                DiagnosticIds.ReadonlyReturnBindingNotAllowed);
     }
 
     private void ValidateReadonlyAccessor(SyntaxToken? modifier, IEnumerable<PropertyAccessorDeclarationSyntax> accessors)
@@ -839,7 +838,7 @@ internal sealed class Parser
         accessModifier ??= ParseAccessModifier();
 
         TypeSyntax returnType = ParseType();
-        SyntaxToken? methodReadonly = ParseMethodReadonlyKeyword();
+        SyntaxToken? methodReadonly = ParseCallableOrAccessorReadonlyKeyword();
         (returnType, methodReadonly) = FinishMethodReturnType(returnType, null, methodReadonly);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
         GenericParameterListSyntax? typeParameters = ParseGenericParameterList();
@@ -874,23 +873,59 @@ internal sealed class Parser
             semicolon) { ReadonlyKeyword = methodReadonly };
     }
 
-    private SyntaxToken? ParseMethodReadonlyKeyword() =>
-        Current.Kind == SyntaxKind.ReadonlyKeyword &&
-        Peek(1).Kind == SyntaxKind.IdentifierToken &&
-        Peek(2).Kind == SyntaxKind.OpenParenthesisToken
+    private SyntaxToken? ParseCallableOrAccessorReadonlyKeyword()
+    {
+        if (Current.Kind != SyntaxKind.ReadonlyKeyword) return null;
+        if (Peek(1).Kind == SyntaxKind.ThisKeyword) return NextToken();
+        return Peek(1).Kind == SyntaxKind.IdentifierToken &&
+               Peek(2).Kind is SyntaxKind.OpenParenthesisToken or SyntaxKind.OpenBraceToken
             ? NextToken()
             : null;
+    }
+
+    private (TypeSyntax Type, SyntaxToken? Readonly) FinishAccessorType(
+        TypeSyntax type, SyntaxToken? leadingReadonly, SyntaxToken? trailingReadonly, string declaration) =>
+        FinishMemberReturnType(type, leadingReadonly, trailingReadonly, declaration,
+            preserveLegacyLeadingByValueMember: true);
 
     private (TypeSyntax Type, SyntaxToken? Readonly) FinishMethodReturnType(
-        TypeSyntax type, SyntaxToken? leadingReadonly, SyntaxToken? methodReadonly)
+        TypeSyntax type, SyntaxToken? leadingReadonly, SyntaxToken? methodReadonly) =>
+        FinishMemberReturnType(type, leadingReadonly, methodReadonly, "method",
+            preserveLegacyLeadingByValueMember: false);
+
+    private (TypeSyntax Type, SyntaxToken? Readonly) FinishMemberReturnType(
+        TypeSyntax type, SyntaxToken? leadingReadonly, SyntaxToken? memberReadonly, string declaration,
+        bool preserveLegacyLeadingByValueMember)
     {
-        // A leading member qualifier belongs to the return type, never to this.
         if (leadingReadonly is not null)
         {
-            if (type.GetQualifier(SyntaxKind.ReadonlyKeyword) is not null)
-                Diagnostics.Report(type.GetQualifier(SyntaxKind.ReadonlyKeyword)!.Location, "duplicate readonly return type qualifier",
+            bool qualifiesType = !preserveLegacyLeadingByValueMember ||
+                type.Contains<PointerTypeSyntax>() || type.Contains<ReferenceTypeSyntax>();
+            if (qualifiesType)
+            {
+                if (type.GetQualifier(SyntaxKind.ReadonlyKeyword) is { } duplicate)
+                    Diagnostics.Report(duplicate.Location, "duplicate readonly return type qualifier",
+                        DiagnosticIds.DuplicateModifier);
+                else
+                    type = new QualifiedTypeSyntax(type, leadingReadonly);
+            }
+            else if (type.GetQualifier(SyntaxKind.ReadonlyKeyword) is { } duplicate)
+            {
+                Diagnostics.Report(duplicate.Location, DuplicateMemberReadonlyMessage(declaration),
                     DiagnosticIds.DuplicateModifier);
-            type = new QualifiedTypeSyntax(type, leadingReadonly);
+                type = type.WithoutQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Prefix);
+                memberReadonly ??= leadingReadonly;
+            }
+            else if (memberReadonly is not null)
+            {
+                Diagnostics.Report(memberReadonly.Location, DuplicateMemberReadonlyMessage(declaration),
+                    DiagnosticIds.DuplicateModifier);
+            }
+            else
+            {
+                // Compatibility for the historic `readonly int Value` spelling.
+                memberReadonly = leadingReadonly;
+            }
         }
 
         if (type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is { } pointerReadonly)
@@ -900,16 +935,20 @@ internal sealed class Parser
             if (type.Contains<ReferenceTypeSyntax>() || type.Contains<ArrayTypeSyntax>())
                 Diagnostics.Report(pointerReadonly.Location, "return types cannot have a readonly pointer binding",
                     DiagnosticIds.ReadonlyReturnBindingNotAllowed);
-            else if (methodReadonly is not null)
-                Diagnostics.Report(methodReadonly.Location, "duplicate readonly method qualifier",
+            else if (memberReadonly is not null)
+                Diagnostics.Report(memberReadonly.Location, DuplicateMemberReadonlyMessage(declaration),
                     DiagnosticIds.DuplicateModifier);
             else
-                methodReadonly = pointerReadonly;
+                memberReadonly = pointerReadonly;
             type = type.WithoutQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix);
         }
 
-        return (type, methodReadonly);
+        return (type, memberReadonly);
     }
+
+    private static string DuplicateMemberReadonlyMessage(string declaration) => declaration == "method"
+        ? "duplicate readonly method qualifier"
+        : $"duplicate readonly {declaration} modifier";
 
     private SyntaxToken? ParseAccessModifier() =>
         Current.Kind is SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword ? NextToken() : null;
