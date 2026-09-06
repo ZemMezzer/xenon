@@ -3,20 +3,26 @@ using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
 
-/// <summary>A nominal type introduced by a source declaration. Identity is the declaration, not its spelling or layout.</summary>
+/// <summary>A nominal type. Source syntax, when present, is optional origin metadata.</summary>
 public abstract class DeclaredTypeSymbol : TypeSymbol
 {
-    protected DeclaredTypeSymbol(string name, NamespaceSymbol containingNamespace)
-        : base(name, containingNamespace) { }
+    protected DeclaredTypeSymbol(string name, NamespaceSymbol containingNamespace,
+        string declarationKind, bool isDefinition = true, SymbolOrigin? origin = null,
+        SymbolDocumentation? documentation = null)
+        : base(name, containingNamespace)
+    {
+        DeclarationKind = declarationKind;
+        IsSemanticDefinition = isDefinition;
+        SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
+    }
 
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
     public string FullName => QualifiedName;
     public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
         format == TypeDisplayFormat.FullyQualified ? FullName : Name;
-    public abstract TypeDeclarationSyntax Declaration { get; }
-    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => [new(Declaration)];
-    public abstract string DeclarationKind { get; }
-    public override bool IsDefinition => true;
+    public string DeclarationKind { get; }
+    public override bool IsDefinition => IsSemanticDefinition;
+    private bool IsSemanticDefinition { get; }
     public abstract IEnumerable<Symbol> GetMembers();
 
     /// <summary>Visible members, including inherited declarations where the type's semantics permit them.</summary>

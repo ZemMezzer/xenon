@@ -58,18 +58,21 @@ internal sealed record LspCompletionItem(
     [property: JsonPropertyName("detail")] string Detail,
     [property: JsonPropertyName("insertText")] string InsertText,
     [property: JsonPropertyName("sortText")] string SortText,
-    [property: JsonPropertyName("filterText")] string FilterText);
+    [property: JsonPropertyName("filterText")] string FilterText,
+    [property: JsonPropertyName("documentation")] LspMarkupContent? Documentation = null);
 
 internal sealed record LspCompletionList(
     [property: JsonPropertyName("isIncomplete")] bool IsIncomplete,
     [property: JsonPropertyName("items")] LspCompletionItem[] Items);
 
 internal sealed record LspParameterInformation(
-    [property: JsonPropertyName("label")] string Label);
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("documentation")] LspMarkupContent? Documentation = null);
 
 internal sealed record LspSignatureInformation(
     [property: JsonPropertyName("label")] string Label,
-    [property: JsonPropertyName("parameters")] LspParameterInformation[] Parameters);
+    [property: JsonPropertyName("parameters")] LspParameterInformation[] Parameters,
+    [property: JsonPropertyName("documentation")] LspMarkupContent? Documentation = null);
 
 internal sealed record LspSignatureHelp(
     [property: JsonPropertyName("signatures")] LspSignatureInformation[] Signatures,

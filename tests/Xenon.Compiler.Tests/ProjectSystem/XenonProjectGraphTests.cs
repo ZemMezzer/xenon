@@ -149,8 +149,8 @@ public sealed class XenonProjectGraphTests
 
     private static XenonProject Copy(XenonProject project, string? name = null, XenonProjectType? type = null) =>
         new(name ?? project.Name, type ?? project.Type, project.Version, project.RootDirectory,
-            project.SourceRoot, project.ProjectFilePath, project.SourceFiles, project.NativeLibraries,
-            project.NativeLibraryPaths, project.ProjectReferences, project.DebugProfile, project.ReleaseProfile);
+            project.SourceRoot, project.ProjectFilePath, project.SourceFiles, project.Libraries,
+            project.LibraryPaths, project.ProjectReferences, project.DebugProfile, project.ReleaseProfile);
 
     private static void WriteProject(TemporaryDirectory directory, string name, string type,
         params string[] references)

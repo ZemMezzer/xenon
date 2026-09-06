@@ -8,6 +8,7 @@ public static class XenonBuildPaths
         XenonProjectType.Executable => GetExecutablePath(rootDirectory, projectName, profileName, targetTriple),
         XenonProjectType.StaticLibrary => GetStaticLibraryPath(rootDirectory, projectName, profileName, targetTriple),
         XenonProjectType.SharedLibrary => GetSharedLibraryPath(rootDirectory, projectName, profileName, targetTriple),
+        XenonProjectType.XenonLibrary => GetXenonLibraryPath(rootDirectory, projectName, profileName),
         _ => throw new ArgumentOutOfRangeException(nameof(type)),
     };
 
@@ -99,6 +100,18 @@ public static class XenonBuildPaths
         IsWindowsTarget(targetTriple)
             ? GetBuildArtifactPath(rootDirectory, projectName, profileName, targetTriple, projectName, ".lib")
             : null;
+
+    public static string GetXenonLibraryPath(
+        string rootDirectory,
+        string projectName,
+        string profileName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileName);
+        return Path.Combine(rootDirectory, "build", SanitizePathSegment(profileName),
+            $"{SanitizePathSegment(projectName)}.xelib");
+    }
 
     private static string GetBuildArtifactPath(
         string rootDirectory,

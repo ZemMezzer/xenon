@@ -120,12 +120,12 @@ public sealed class TemplateConformanceMatcher
             TemplateTypesMatch(required.Type, actual.Type, requiredTemplate, actual.Template),
         PropertySymbol actual => required.Name == actual.Name &&
             required.Accessibility == actual.Accessibility &&
-            required.IsStatic == actual.Declaration.IsStatic &&
-            required.IsReadonly == actual.Declaration.IsReadonly &&
+            required.IsStatic == actual.IsStatic &&
+            required.IsReadonly == actual.IsReadonly &&
             TemplateTypeMatchesNominal(required.Type, actual.Type, requiredTemplate),
         InterfacePropertySymbol actual => required.Name == actual.Name &&
             required.Accessibility == Accessibility.Public && !required.IsStatic &&
-            required.IsReadonly == actual.Declaration.IsReadonly &&
+            required.IsReadonly == actual.IsReadonly &&
             TemplateTypeMatchesNominal(required.Type, actual.Type, requiredTemplate),
         _ => false,
     };
@@ -139,12 +139,12 @@ public sealed class TemplateConformanceMatcher
             TemplateTypesMatch(required.Type, actual.Type, requiredTemplate, actual.Template) &&
             TemplateParametersMatch(required.Parameters, actual.Parameters, requiredTemplate, actual.Template),
         IndexerSymbol actual => required.Accessibility == actual.Accessibility &&
-            required.IsStatic == actual.Declaration.IsStatic &&
-            required.IsReadonly == actual.Declaration.IsReadonly &&
+            required.IsStatic == actual.IsStatic &&
+            required.IsReadonly == actual.IsReadonly &&
             TemplateTypeMatchesNominal(required.Type, actual.Type, requiredTemplate) &&
             TemplateParametersMatchNominal(required.Parameters, actual.Parameters, requiredTemplate),
         InterfaceIndexerSymbol actual => required.Accessibility == Accessibility.Public &&
-            !required.IsStatic && required.IsReadonly == actual.Declaration.IsReadonly &&
+            !required.IsStatic && required.IsReadonly == actual.IsReadonly &&
             TemplateTypeMatchesNominal(required.Type, actual.Type, requiredTemplate) &&
             TemplateParametersMatchNominal(required.Parameters, actual.Parameters, requiredTemplate),
         _ => false,
@@ -343,14 +343,14 @@ public sealed class TemplateConformanceMatcher
             actual.FunctionKind == FunctionKind.Constructor &&
             ParametersMatch(expected.Parameters, actual.Parameters, template, concrete),
         (TemplatePropertyRequirementSymbol expected, PropertySymbol actual) =>
-            expected.IsStatic == actual.Declaration.IsStatic &&
-            expected.IsReadonly == actual.Declaration.IsReadonly &&
+            expected.IsStatic == actual.IsStatic &&
+            expected.IsReadonly == actual.IsReadonly &&
             (!expected.HasGetter || actual.Getter is not null) &&
             (!expected.HasSetter || actual.Setter is not null) &&
             TypesMatch(expected.Type, actual.Type, template, concrete),
         (TemplateIndexerRequirementSymbol expected, IndexerSymbol actual) =>
-            expected.IsStatic == actual.Declaration.IsStatic &&
-            expected.IsReadonly == actual.Declaration.IsReadonly &&
+            expected.IsStatic == actual.IsStatic &&
+            expected.IsReadonly == actual.IsReadonly &&
             (!expected.HasGetter || actual.Getter is not null) &&
             (!expected.HasSetter || actual.Setter is not null) &&
             TypesMatch(expected.Type, actual.Type, template, concrete) &&

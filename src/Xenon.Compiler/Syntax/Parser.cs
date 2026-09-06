@@ -1471,6 +1471,18 @@ internal sealed class Parser
                 continue;
             }
 
+            if (Current.Kind == SyntaxKind.LessToken && IsTypeArgumentListFollowedByMemberAccess())
+            {
+                TypeArgumentListSyntax typeArguments = ParseTypeArgumentList();
+                SyntaxToken operatorToken = NextToken();
+                SyntaxToken memberToken = MatchToken(SyntaxKind.IdentifierToken);
+                expression = new MemberAccessExpressionSyntax(expression, operatorToken, memberToken)
+                {
+                    ReceiverTypeArguments = typeArguments,
+                };
+                continue;
+            }
+
             if (Current.Kind == SyntaxKind.OpenBracketToken)
             {
                 SyntaxToken openBracket = NextToken();
@@ -1516,6 +1528,12 @@ internal sealed class Parser
     }
 
     private bool IsTypeArgumentListFollowedByCall()
+        => IsTypeArgumentListFollowedBy(SyntaxKind.OpenParenthesisToken);
+
+    private bool IsTypeArgumentListFollowedByMemberAccess()
+        => IsTypeArgumentListFollowedBy(SyntaxKind.DotToken);
+
+    private bool IsTypeArgumentListFollowedBy(SyntaxKind followingKind)
     {
         int depth = 0;
         for (int offset = 0; ; offset++)
@@ -1540,7 +1558,7 @@ internal sealed class Parser
                 continue;
             }
 
-            if (depth == 0) return Peek(offset + 1).Kind == SyntaxKind.OpenParenthesisToken;
+            if (depth == 0) return Peek(offset + 1).Kind == followingKind;
             if (depth < 0) return false;
         }
     }

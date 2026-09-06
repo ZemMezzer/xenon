@@ -18,6 +18,7 @@ public sealed class SemanticModel
     internal SemanticModel(NamespaceSymbol globalNamespace, TypeFactory typeFactory,
         ImmutableArray<BoundFunction> functions, ImmutableArray<Diagnostic> semanticDiagnostics,
         ImmutableArray<SyntaxTree> syntaxTrees, SemanticInfoStore semanticInfo,
+        GenericImplementationStore? genericImplementations = null,
         bool requiresTargetLayout = false, SyntaxTree? primaryTree = null)
     {
         GlobalNamespace = globalNamespace;
@@ -27,6 +28,7 @@ public sealed class SemanticModel
         _syntaxTrees = syntaxTrees;
         _semanticInfo = semanticInfo;
         _primaryTree = primaryTree;
+        GenericImplementations = genericImplementations ?? GenericImplementationStore.Empty;
         Diagnostics = syntaxTrees.SelectMany(tree => tree.Diagnostics).Concat(semanticDiagnostics).ToImmutableArray();
         RequiresTargetLayout = requiresTargetLayout;
     }
@@ -37,10 +39,11 @@ public sealed class SemanticModel
     public ImmutableArray<Diagnostic> SemanticDiagnostics { get; }
     public ImmutableArray<Diagnostic> Diagnostics { get; }
     public bool RequiresTargetLayout { get; }
+    public GenericImplementationStore GenericImplementations { get; }
     public SyntaxTree? SyntaxTree => _primaryTree;
 
     internal SemanticModel ForTree(SyntaxTree tree) => new(GlobalNamespace, TypeFactory, Functions,
-        SemanticDiagnostics, _syntaxTrees, _semanticInfo, RequiresTargetLayout, tree);
+        SemanticDiagnostics, _syntaxTrees, _semanticInfo, GenericImplementations, RequiresTargetLayout, tree);
 
     public Symbol? GetDeclaredSymbol(SyntaxNode declaration, CancellationToken cancellationToken = default)
     {
@@ -136,7 +139,9 @@ public sealed class SemanticModel
         if (_primaryTree is not null)
             symbols = symbols.Where(symbol => symbol.DeclaringSyntaxReferences.Any(reference =>
                 ReferenceEquals(reference.Source, _primaryTree.Source)));
-        return symbols.OrderBy(symbol => symbol.Locations.FirstOrDefault().Span.Start)
+        return symbols.OrderBy(symbol => symbol.Locations is { IsEmpty: false } locations
+                ? locations[0].Span.Start
+                : int.MaxValue)
             .ThenBy(symbol => symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
     }
 
@@ -427,8 +432,7 @@ public sealed class SemanticModel
         if (symbol is SyntheticMemberSymbol) return true;
         if (symbol is not ParameterSymbol { Name: "value", ContainingSymbol: FunctionSymbol accessor })
             return false;
-        return ReferenceEquals(accessor.ContainingProperty?.Setter, accessor) ||
-               ReferenceEquals(accessor.ContainingIndexer?.Setter, accessor);
+        return accessor.AccessorKind == AccessorKind.Setter;
     }
 
     /// <summary>The semantic type associated with a symbol for editor navigation.</summary>

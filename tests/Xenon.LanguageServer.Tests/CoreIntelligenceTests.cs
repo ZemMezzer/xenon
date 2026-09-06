@@ -1,6 +1,9 @@
 using System.Reflection;
 using System.Text.Json;
 using Xenon.Compiler.Text;
+using Xenon.Compiler;
+using Xenon.Compiler.Libraries;
+using Xenon.ProjectSystem;
 using Xenon.LanguageServer.Protocol;
 using Xenon.LanguageServer.Text;
 
@@ -8,6 +11,146 @@ namespace Xenon.LanguageServer.Tests;
 
 public sealed class CoreIntelligenceTests
 {
+    [Fact]
+    public async Task LanguageServerProjectSnapshotLoadsOnlyXelibMetadataBodies()
+    {
+        using var directory = new TestDirectory();
+        directory.Write("src/main.xe",
+            "using Library; namespace App; int Main() { return Identity<int>(42); }");
+        string projectPath = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["Library.xelib"]
+            """);
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace Library; public T Identity<T>(T value) { return move value; }", "library.xe"));
+        File.WriteAllBytes(directory.PathOf("Library.xelib"),
+            XelibWriter.Write(library, new XelibWriteOptions("Library")));
+
+        WorkspaceDiscoveryResult discovered = WorkspaceDiscovery.Discover(projectPath, null, null);
+        using Workspace workspace = discovered.Workspace!;
+        Compilation toolingCompilation = await workspace.CurrentSnapshot.RootProject.GetCompilationAsync();
+        LibraryCompilationReference reference = Assert.IsType<LibraryCompilationReference>(
+            Assert.Single(toolingCompilation.References));
+
+        Assert.Empty(reference.ImplementationFunctions);
+        Assert.False(toolingCompilation.HasErrors, string.Join(Environment.NewLine,
+            toolingCompilation.Diagnostics.Select(item => item.Message)));
+    }
+
+    [Fact]
+    public async Task ReferencedXelibDocumentationReloadsAfterWatchedFileChange()
+    {
+        const string appSource = "using Library; namespace App; int Main() { Value(); Val }";
+        using var directory = new TestDirectory();
+        string sourcePath = directory.Write("src/main.xe", appSource);
+        string projectPath = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["Library.xelib"]
+            """);
+        string libraryPath = directory.PathOf("Library.xelib");
+        WriteLibrary("First documentation.");
+
+        string uri = DocumentUri.FromPath(sourcePath).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new
+        {
+            initializationOptions = new { workspacePath = projectPath },
+        }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = appSource },
+        }), default);
+
+        int call = appSource.IndexOf("Value()", StringComparison.Ordinal);
+        JsonElement first = await RequestAtAsync(session, "textDocument/hover", uri, appSource, call);
+        Assert.Contains("First documentation.", first.GetProperty("contents").GetProperty("value").GetString());
+        int completionOffset = appSource.LastIndexOf("Val ", StringComparison.Ordinal) + 3;
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri,
+            appSource, completionOffset);
+        JsonElement completionItem = completion.GetProperty("items").EnumerateArray()
+            .Single(candidate => candidate.GetProperty("label").GetString() == "Value");
+        Assert.Contains("First documentation.", completionItem.GetProperty("documentation")
+            .GetProperty("value").GetString());
+        JsonElement signature = await RequestAtAsync(session, "textDocument/signatureHelp", uri,
+            appSource, call + "Value(".Length);
+        Assert.Contains("First documentation.", signature.GetProperty("signatures")[0]
+            .GetProperty("documentation").GetProperty("value").GetString());
+
+        WriteLibrary("Updated documentation.");
+        await session.HandleNotificationAsync("workspace/didChangeWatchedFiles", LspTestProtocol.Json(new
+        {
+            changes = new[] { new { uri = DocumentUri.FromPath(libraryPath).AbsoluteUri, type = 2 } },
+        }), default);
+        JsonElement updated = await RequestAtAsync(session, "textDocument/hover", uri, appSource, call);
+        Assert.Contains("Updated documentation.",
+            updated.GetProperty("contents").GetProperty("value").GetString());
+
+        void WriteLibrary(string documentation)
+        {
+            Compilation compilation = Compilation.Create(SourceText.From($$"""
+                namespace Library;
+                /// <summary>{{documentation}}</summary>
+                public int Value() { return 42; }
+                """, "library.xe"));
+            File.WriteAllBytes(libraryPath,
+                XelibWriter.Write(compilation, new XelibWriteOptions("Library")));
+        }
+    }
+
+    [Fact]
+    public async Task DocumentationIsSerializedInHoverCompletionAndSignatureHelp()
+    {
+        const string source = """
+            namespace Example;
+            /// <summary>Adds an item.</summary>
+            /// <param name="value">The item to add.</param>
+            /// <returns>The result.</returns>
+            public int Add(int value) { return value; }
+            void Use() { Add(1); Ad }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("docs.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        int call = source.IndexOf("Add(1)", StringComparison.Ordinal);
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, call);
+        Assert.Contains("Adds an item.", hover.GetProperty("contents").GetProperty("value").GetString());
+
+        int completionOffset = source.LastIndexOf("Ad ", StringComparison.Ordinal) + 2;
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
+            completionOffset);
+        JsonElement item = completion.GetProperty("items").EnumerateArray()
+            .Single(candidate => candidate.GetProperty("label").GetString() == "Add");
+        Assert.Contains("Adds an item.", item.GetProperty("documentation").GetProperty("value").GetString());
+
+        JsonElement signature = await RequestAtAsync(session, "textDocument/signatureHelp", uri, source,
+            call + "Add(".Length);
+        JsonElement information = signature.GetProperty("signatures")[0];
+        Assert.Contains("Adds an item.", information.GetProperty("documentation").GetProperty("value").GetString());
+        Assert.Equal("The item to add.", information.GetProperty("parameters")[0]
+            .GetProperty("documentation").GetProperty("value").GetString());
+    }
+
     [Fact]
     public async Task GenericTemplateSyntaxFlowsThroughHoverDefinitionCompletionAndSemanticTokens()
     {

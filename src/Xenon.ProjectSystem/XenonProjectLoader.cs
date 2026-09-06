@@ -11,8 +11,8 @@ public static class XenonProjectLoader
         "project.type",
         "project.version",
         "source.root",
-        "native.libraries",
-        "native.library-paths",
+        "libraries.libraries",
+        "libraries.library-paths",
         "references.projects",
         "profile.debug.optimization",
         "profile.debug.debug-info",
@@ -117,6 +117,7 @@ public static class XenonProjectLoader
             "executable" => XenonProjectType.Executable,
             "static-library" => XenonProjectType.StaticLibrary,
             "shared-library" => XenonProjectType.SharedLibrary,
+            "xenon-library" => XenonProjectType.XenonLibrary,
             _ => throw Error(
                 fullPath,
                 settings["project.type"].Line,
@@ -146,13 +147,18 @@ public static class XenonProjectLoader
             "profile.release",
             XenonBuildProfile.Release,
             fullPath);
-        ImmutableArray<string> nativeLibraries = GetOptionalStringArray(
+        ImmutableArray<string> libraries = GetOptionalStringArray(
             settings,
-            "native.libraries",
-            fullPath);
-        ImmutableArray<string> nativeLibraryPaths = GetOptionalStringArray(
+            "libraries.libraries",
+            fullPath)
+            .Select(library => string.Equals(Path.GetExtension(library), ".xelib",
+                StringComparison.OrdinalIgnoreCase)
+                ? ProjectPath.Normalize(library, rootDirectory)
+                : library)
+            .ToImmutableArray();
+        ImmutableArray<string> libraryPaths = GetOptionalStringArray(
                 settings,
-                "native.library-paths",
+                "libraries.library-paths",
                 fullPath)
             .Select(path => ProjectPath.Normalize(path, rootDirectory))
             .ToImmutableArray();
@@ -170,8 +176,8 @@ public static class XenonProjectLoader
             sourceRoot,
             fullPath,
             sourceFiles,
-            nativeLibraries,
-            nativeLibraryPaths,
+            libraries,
+            libraryPaths,
             projectReferences,
             debugProfile,
             releaseProfile);

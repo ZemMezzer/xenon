@@ -7,4 +7,5 @@ public sealed record SyntaxToken(
     TextLocation Location,
     string Text,
     object? Value = null,
-    bool IsMissing = false);
+    bool IsMissing = false,
+    string? LeadingDocumentation = null);

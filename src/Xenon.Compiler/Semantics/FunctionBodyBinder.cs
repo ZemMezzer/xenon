@@ -250,7 +250,7 @@ internal sealed class FunctionBodyBinder
             {
                 var state = new LocalVariableSymbol(field.Name, field.Type, _function, false);
                 _constructorFields.Add(field, state);
-                if (field.Declaration.Initializer is not null)
+                if (field.HasInitializer)
                 {
                     _definitelyAssigned.Add(state);
                     _possiblyAssignedConstructorFields.Add(state);
@@ -265,7 +265,7 @@ internal sealed class FunctionBodyBinder
         bool callsThisConstructor = false;
         ConstructorDeclarationSyntax? constructorSyntax =
             _function.FunctionKind == FunctionKind.Constructor
-                ? _function.Declaration as ConstructorDeclarationSyntax
+                ? _function.ImplementationDeclaration as ConstructorDeclarationSyntax
                 : null;
 
         if (constructorSyntax is { HasThisInitializer: true } &&
@@ -311,7 +311,7 @@ internal sealed class FunctionBodyBinder
         {
             ConstructorDeclarationSyntax? syntax = constructorSyntax;
             ImmutableArray<ExpressionSyntax> baseArguments = syntax?.BaseArguments ?? [];
-            TextLocation location = syntax?.IdentifierToken.Location ?? _function.ContainingType!.Declaration.IdentifierToken.Location;
+            TextLocation location = syntax?.IdentifierToken.Location ?? body.OpenBraceToken.Location;
             _bindingBaseConstructorArguments = true;
             ImmutableArray<BoundExpression> arguments;
             try
@@ -431,8 +431,10 @@ internal sealed class FunctionBodyBinder
     }
 
     internal BoundExpression? BindFieldInitializer(FieldSymbol field)
+        => BindFieldInitializer(field, field.Declaration.Initializer);
+
+    internal BoundExpression? BindFieldInitializer(FieldSymbol field, ExpressionSyntax? syntax)
     {
-        ExpressionSyntax? syntax = field.Declaration.Initializer;
         if (syntax is null)
             return null;
 
@@ -452,7 +454,7 @@ internal sealed class FunctionBodyBinder
                     field,
                     IsPointerAccess: true);
             initializer = BindDestinationConstruction(target, destinationType, initializer, syntax,
-                field.Declaration.IdentifierToken.Location);
+                GetLocation(syntax));
         }
         else if (field.Type is AtomicTypeSymbol atomic && AtomicTypeRules.SupportsOperations(atomic.ElementType))
             initializer = ContextualizeConversion(ReadAtomicValue(initializer), atomic.ElementType, GetLocation(syntax));
@@ -1972,10 +1974,10 @@ internal sealed class FunctionBodyBinder
         if (_function.ContainingType is { } containingType)
         {
             ConstantSymbol? associatedConstant = containingType.FindMember<ConstantSymbol>(syntax.IdentifierToken.Text);
-            if (associatedConstant?.HasValue == true)
+            if (associatedConstant?.BoundValue is { } associatedValue)
             {
                 _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(associatedConstant);
-                return associatedConstant.BoundValue!;
+                return associatedValue;
             }
             if (associatedConstant is not null)
                 return new BoundErrorExpression();
@@ -2041,10 +2043,10 @@ internal sealed class FunctionBodyBinder
             syntax.IdentifierToken.Text,
             syntax.IdentifierToken.Location,
             _diagnostics);
-        if (constant?.HasValue == true)
+        if (constant?.BoundValue is { } constantValue)
         {
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(constant);
-            return constant.BoundValue!;
+            return constantValue;
         }
         if (constant is not null)
             return new BoundErrorExpression();
@@ -3344,7 +3346,8 @@ internal sealed class FunctionBodyBinder
 
     private int FindLastValueUse(LocalVariableSymbol variable, int afterPosition)
     {
-        return SyntaxNavigator.DescendantNodesAndSelf(_function.Declaration)
+        return SyntaxNavigator.DescendantNodesAndSelf(_function.ImplementationDeclaration ??
+                throw new InvalidOperationException($"function '{_function.Name}' has no implementation metadata"))
             .OfType<NameExpressionSyntax>()
             .Where(name => name.IdentifierToken.Location.Span.Start > afterPosition &&
                 string.Equals(name.IdentifierToken.Text, variable.Name, StringComparison.Ordinal))
@@ -4151,38 +4154,23 @@ internal sealed class FunctionBodyBinder
     {
         if (syntax.MemberToken.IsMissing)
         {
-            bool recordedStaticReceiver = false;
-            if (syntax.OperatorToken.Kind == SyntaxKind.DotToken &&
-                TryGetDottedName(syntax.Receiver, out ImmutableArray<SyntaxToken> receiverParts) &&
-                receiverParts.Length > 0 &&
-                _scope.Lookup(receiverParts[0].Text) is null &&
-                _function.ContainingType?.FindInstanceField(receiverParts[0].Text) is null)
+            if (TryResolveStaticTypeReceiver(syntax, out TypeSymbol? receiverType) &&
+                !TypeIdentity.AreSame(receiverType!, BuiltinTypes.Error))
             {
-                string[] receiverName = receiverParts.Select(part => part.Text).ToArray();
-                TypeSymbol? receiverType = _fileScope.ResolveQualifiedType(receiverName);
-                if (receiverType is null && receiverParts.Length == 1)
-                    receiverType = _fileScope.ResolveType(receiverParts[0].Text, receiverParts[0].Location,
-                        new DiagnosticBag());
-                if (receiverType is not null)
-                {
-                    RecordStaticReceiver(syntax.Receiver, receiverType);
-                    recordedStaticReceiver = true;
-                }
+                RecordStaticReceiver(syntax.Receiver, receiverType!);
             }
-            if (!recordedStaticReceiver)
+            else
                 _ = BindFieldReceiver(syntax.Receiver);
             _semanticInfo.Symbols[syntax] = new SymbolInfo(null, [], CandidateReason.Incomplete);
             return new BoundErrorExpression();
         }
-        if (syntax.OperatorToken.Kind == SyntaxKind.DotToken && TryGetDottedName(syntax, out ImmutableArray<SyntaxToken> qualifiedName) && qualifiedName.Length >= 2)
+        if (TryResolveStaticTypeReceiver(syntax, out TypeSymbol? resolvedStaticType))
         {
-            string[] typeParts = qualifiedName.Take(qualifiedName.Length - 1).Select(token => token.Text).ToArray();
-            TypeSymbol? resolved = typeParts.Length == 1
-                ? _fileScope.ResolveType(typeParts[0], syntax.Receiver is NameExpressionSyntax name ? name.IdentifierToken.Location : syntax.OperatorToken.Location, _diagnostics)
-                : _fileScope.ResolveQualifiedType(typeParts);
-            if (resolved is EnumTypeSymbol enumeration)
+            if (TypeIdentity.AreSame(resolvedStaticType!, BuiltinTypes.Error))
+                return new BoundErrorExpression();
+            if (resolvedStaticType is EnumTypeSymbol enumeration)
             {
-                ConstantSymbol? member = enumeration.FindMember(qualifiedName[^1].Text);
+                ConstantSymbol? member = enumeration.FindMember(syntax.MemberToken.Text);
                 if (member?.BoundValue is BoundExpression value)
                 {
                     RecordStaticReceiver(syntax.Receiver, enumeration);
@@ -4193,32 +4181,30 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.UnknownEnumMember);
                 return new BoundErrorExpression();
             }
-            if (resolved is DeclaredTypeSymbol staticType)
+            if (resolvedStaticType is DeclaredTypeSymbol staticType)
             {
-                if (staticType is StructTypeSymbol definition &&
-                    _function.ContainingStruct is StructTypeSymbol { GenericDefinition: not null } specialization &&
-                    ReferenceEquals(specialization.GenericDefinition, definition))
-                    staticType = specialization;
-                ConstantSymbol? constant = staticType.FindMember<ConstantSymbol>(qualifiedName[^1].Text);
-                if (constant?.HasValue == true)
+                ConstantSymbol? constant = staticType.FindMember<ConstantSymbol>(syntax.MemberToken.Text);
+                if (constant?.BoundValue is { } constantValue)
                 {
                     RecordStaticReceiver(syntax.Receiver, staticType);
                     RecordSymbolAndType(syntax, constant, constant.Type);
-                    return constant.BoundValue!;
+                    return constantValue;
                 }
                 if (constant is not null)
                     return new BoundErrorExpression();
 
-                FieldSymbol? staticField = staticType.FindStaticField(qualifiedName[^1].Text);
+                FieldSymbol? staticField = staticType.FindStaticField(syntax.MemberToken.Text);
                 if (staticField is not null)
                 {
                     if (!staticField.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, staticField.ContainingType))
                     {
-                        _diagnostics.Report(qualifiedName[^1].Location, $"static field '{staticField.Name}' is private in struct '{staticField.ContainingType.Name}'",
+                        RecordCandidates(syntax, null, [staticField], CandidateReason.Inaccessible);
+                        _diagnostics.Report(syntax.MemberToken.Location, $"static field '{staticField.Name}' is private in struct '{staticField.ContainingType.Name}'",
                             DiagnosticIds.InaccessibleSymbol);
                         return new BoundErrorExpression();
                     }
                     RecordStaticReceiver(syntax.Receiver, staticType);
+                    RecordSymbolAndType(syntax, staticField, staticField.Type);
                     return new BoundStaticFieldExpression(staticField);
                 }
             }
@@ -5205,16 +5191,10 @@ internal sealed class FunctionBodyBinder
 
     private bool IsFunctionPointerMemberTarget(MemberAccessExpressionSyntax member)
     {
-        if (member.OperatorToken.Kind == SyntaxKind.DotToken &&
-            TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts) && parts.Length >= 2)
-        {
-            string[] typeParts = parts.Take(parts.Length - 1).Select(token => token.Text).ToArray();
-            TypeSymbol? type = typeParts.Length == 1
-                ? _fileScope.ResolveType(typeParts[0], parts[0].Location, new DiagnosticBag())
-                : _fileScope.ResolveQualifiedType(typeParts);
-            if ((type as DeclaredTypeSymbol)?.FindStaticField(parts[^1].Text)?.Type is FunctionPointerTypeSymbol)
-                return true;
-        }
+        if (TryResolveStaticTypeReceiver(member, out TypeSymbol? type) &&
+            type is DeclaredTypeSymbol declaredType &&
+            declaredType.FindStaticField(member.MemberToken.Text)?.Type is FunctionPointerTypeSymbol)
+            return true;
 
         return TryGetExpressionType(member.Receiver, out TypeSymbol? receiverType) &&
             GetMemberContainer(receiverType!, member.OperatorToken.Kind)?.FindInstanceField(member.MemberToken.Text)?.Type
@@ -5428,21 +5408,22 @@ internal sealed class FunctionBodyBinder
         _ = ValidateGenericArguments(definition.Name, parameterTypes, arguments, syntax.Arguments, location,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordCandidates(syntax.Target, definition, [definition], CandidateReason.None);
-        return new BoundDeferredConstantExpression(SubstituteGenericType(definition.ReturnType, substitutions));
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.FunctionCall, null, definition, arguments, null,
+            SyntaxKind.EqualsToken, false,
+            SubstituteGenericType(definition.ReturnType, substitutions), typeArguments);
     }
 
     private BoundExpression? TryBindStaticMethodCall(MemberAccessExpressionSyntax target, ImmutableArray<BoundExpression> arguments,
         ImmutableArray<ExpressionSyntax> argumentSyntax, CallExpressionSyntax callSyntax)
     {
-        if (!TryGetDottedName(target, out ImmutableArray<SyntaxToken> parts) || parts.Length < 2)
+        if (!TryResolveStaticTypeReceiver(target, out TypeSymbol? resolved))
             return null;
-        string[] typeParts = parts.Take(parts.Length - 1).Select(token => token.Text).ToArray();
-        TypeSymbol? resolved = typeParts.Length == 1
-            ? _fileScope.ResolveType(typeParts[0], parts[0].Location, _diagnostics)
-            : _fileScope.ResolveQualifiedType(typeParts);
+        if (TypeIdentity.AreSame(resolved!, BuiltinTypes.Error))
+            return new BoundErrorExpression();
         if (resolved is not DeclaredTypeSymbol structType)
             return null;
-        FunctionSymbol? method = structType.FindMember<FunctionSymbol>(parts[^1].Text);
+        FunctionSymbol? method = structType.FindMember<FunctionSymbol>(target.MemberToken.Text);
         if (method is null || !method.IsStatic)
             return null;
         bool incomplete = callSyntax.CloseParenthesisToken.IsMissing;
@@ -5453,13 +5434,49 @@ internal sealed class FunctionBodyBinder
         if (!method.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, method.ContainingType))
         {
             RecordCandidates(target, null, [method], CandidateReason.Inaccessible);
-            _diagnostics.Report(parts[^1].Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
+            _diagnostics.Report(target.MemberToken.Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
                 DiagnosticIds.InaccessibleSymbol);
             return new BoundErrorExpression();
         }
-        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, parts[^1].Location,
+        arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, target.MemberToken.Location,
             incomplete ? completedArgumentCount : null);
         return new BoundCallExpression(method, arguments);
+    }
+
+    private bool TryResolveStaticTypeReceiver(
+        MemberAccessExpressionSyntax syntax,
+        out TypeSymbol? type)
+    {
+        type = null;
+        if (syntax.OperatorToken.Kind != SyntaxKind.DotToken ||
+            !TryGetDottedName(syntax.Receiver, out ImmutableArray<SyntaxToken> parts) ||
+            parts.IsEmpty)
+            return false;
+
+        string firstName = parts[0].Text;
+        if (_scope.Lookup(firstName) is not null ||
+            _function.ContainingType?.FindInstanceField(firstName) is not null)
+            return false;
+
+        if (syntax.ReceiverTypeArguments is { } typeArguments)
+        {
+            type = TypeResolver.Resolve(new NamedTypeSyntax(parts, [], typeArguments),
+                _fileScope, _diagnostics);
+        }
+        else
+        {
+            if (parts.Length > 1 && !_fileScope.CanStartQualifiedName(firstName))
+                return false;
+            type = parts.Length == 1
+                ? _fileScope.ResolveType(firstName, parts[0].Location, new DiagnosticBag())
+                : _fileScope.ResolveQualifiedType(parts.Select(part => part.Text).ToArray());
+        }
+
+        if (type is StructTypeSymbol definition &&
+            _function.ContainingStruct is StructTypeSymbol { GenericDefinition: not null } specialization &&
+            ReferenceEquals(specialization.GenericDefinition, definition))
+            type = specialization;
+        return type is not null;
     }
 
     private BoundExpression? TryBindQualifiedCallExpression(
@@ -6788,10 +6805,10 @@ internal sealed class FunctionBodyBinder
         {
             foreach (FieldSymbol field in structure.AllInstanceFields)
             {
-                if (field.Declaration.Initializer is null && TypeFacts.ContainsReferenceStorage(field.Type))
+                if (!field.HasInitializer && TypeFacts.ContainsReferenceStorage(field.Type))
                     _diagnostics.Report(location, $"field '{field.Name}' contains a reference and requires explicit initialization",
                         DiagnosticIds.ReferenceFieldRequiresExplicitInitialization);
-                if (field.Declaration.Initializer is null && field.Type is PinTypeSymbol)
+                if (!field.HasInitializer && field.Type is PinTypeSymbol)
                     _diagnostics.Report(location, $"pinned field '{field.Name}' requires final-destination initialization",
                         DiagnosticIds.PinnedRelocation);
             }
@@ -7595,7 +7612,9 @@ internal sealed class FunctionBodyBinder
             }
             RecordSymbolAndType(target, field.Symbol, field.Type);
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(field.Symbol);
-            return new BoundDeferredConstantExpression(field.Type);
+            return new BoundDeferredGenericOperationExpression(
+                BoundDeferredGenericOperationKind.FieldSet, receiver, field.Symbol, [], fieldValue,
+                syntax.OperatorToken.Kind, pointerAccess, field.Type);
         }
 
         GenericPropertyMember[] candidates = GenericConstraintMemberLookup
@@ -7641,7 +7660,9 @@ internal sealed class FunctionBodyBinder
         }
         RecordSymbolAndType(target, property.Symbol, property.Type);
         _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(property.Symbol);
-        return new BoundDeferredConstantExpression(property.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.PropertySet, receiver, property.Symbol, [], value,
+            syntax.OperatorToken.Kind, pointerAccess, property.Type);
     }
 
     private BoundExpression BindGenericIndexerAssignment(AssignmentExpressionSyntax syntax,
@@ -7689,7 +7710,9 @@ internal sealed class FunctionBodyBinder
         }
         RecordSymbolAndType(target, indexer.Symbol, indexer.Type);
         _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(indexer.Symbol);
-        return new BoundDeferredConstantExpression(indexer.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.IndexerSet, receiver, indexer.Symbol, indices, value,
+            syntax.OperatorToken.Kind, false, indexer.Type);
     }
 
     private BoundExpression BindGenericMemberGet(MemberAccessExpressionSyntax syntax, BoundExpression receiver,
@@ -7700,7 +7723,9 @@ internal sealed class FunctionBodyBinder
         if (field is not null)
         {
             RecordSymbolAndType(syntax, field.Symbol, field.Type);
-            return new BoundDeferredConstantExpression(field.Type);
+            return new BoundDeferredGenericOperationExpression(
+                BoundDeferredGenericOperationKind.FieldGet, receiver, field.Symbol, [], null,
+                SyntaxKind.EqualsToken, pointerAccess, field.Type);
         }
         return BindGenericPropertyGet(syntax, receiver, parameter, pointerAccess);
     }
@@ -7733,7 +7758,9 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         RecordSymbolAndType(syntax, property.Symbol, property.Type);
-        return new BoundDeferredConstantExpression(property.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.PropertyGet, receiver, property.Symbol, [], null,
+            SyntaxKind.EqualsToken, pointerAccess, property.Type);
     }
 
     private BoundExpression BindGenericMethodCall(MemberAccessExpressionSyntax target, BoundExpression receiver,
@@ -7770,7 +7797,8 @@ internal sealed class FunctionBodyBinder
         _ = ValidateGenericArguments(method.Symbol.Name, method.ParameterTypes, arguments, argumentSyntax,
             target.MemberToken.Location, incomplete ? completedArgumentCount : null);
         RecordSymbolAndType(target, method.Symbol, method.ReturnType);
-        return new BoundDeferredConstantExpression(method.ReturnType);
+        return new BoundDeferredGenericMethodCallExpression(receiver, method.Symbol, arguments,
+            pointerAccess, method.ReturnType);
     }
 
     private BoundExpression BindGenericIndexerGet(IndexExpressionSyntax syntax, BoundExpression receiver,
@@ -7796,7 +7824,9 @@ internal sealed class FunctionBodyBinder
         _ = ValidateGenericArguments("this", indexer.ParameterTypes, arguments, syntax.Arguments,
             syntax.OpenBracketToken.Location);
         RecordSymbolAndType(syntax, indexer.Symbol, indexer.Type);
-        return new BoundDeferredConstantExpression(indexer.Type);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.IndexerGet, receiver, indexer.Symbol, arguments, null,
+            SyntaxKind.EqualsToken, false, indexer.Type);
     }
 
     private BoundExpression BindGenericNewExpression(NewExpressionSyntax syntax, GenericParameterSymbol parameter)
@@ -7822,7 +7852,9 @@ internal sealed class FunctionBodyBinder
             syntax.NewKeyword.Location,
             syntax.CloseDelimiterToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordSymbolAndType(syntax, constructor.Symbol, _fileScope.TypeFactory.PointerTo(parameter));
-        return new BoundDeferredConstantExpression(_fileScope.TypeFactory.PointerTo(parameter));
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.Allocation, null, constructor.Symbol, arguments, null,
+            SyntaxKind.EqualsToken, false, _fileScope.TypeFactory.PointerTo(parameter));
     }
 
     private BoundExpression BindGenericConstructionExpression(CallExpressionSyntax syntax,
@@ -7850,7 +7882,9 @@ internal sealed class FunctionBodyBinder
             GetLocation(syntax.Target),
             incomplete ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordSymbolAndType(syntax.Target, constructor.Symbol, parameter);
-        return new BoundDeferredConstantExpression(parameter);
+        return new BoundDeferredGenericOperationExpression(
+            BoundDeferredGenericOperationKind.Construction, null, constructor.Symbol, arguments, null,
+            SyntaxKind.EqualsToken, false, parameter);
     }
 
     private T? ResolveGenericCandidate<T>(IEnumerable<T> source, Func<T, Symbol> getSymbol,

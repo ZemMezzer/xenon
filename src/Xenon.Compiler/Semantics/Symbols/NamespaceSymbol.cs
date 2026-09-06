@@ -19,8 +19,13 @@ public sealed class NamespaceSymbol : Symbol
     private ImmutableArray<SyntaxReference> _declarations = [];
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => _declarations;
 
-    internal void AddDeclaration(NamespaceDeclarationSyntax declaration, int partIndex) =>
+    internal void AddDeclaration(NamespaceDeclarationSyntax declaration, int partIndex)
+    {
         _declarations = _declarations.Add(new SyntaxReference(declaration, partIndex));
+        SymbolDocumentation documentation = SymbolDocumentation.FromDeclaration(declaration);
+        if (Documentation.IsEmpty && !documentation.IsEmpty)
+            SetMetadata(SymbolOrigin.Source(declaration), documentation);
+    }
 
     public NamespaceSymbol? Parent => ContainingSymbol as NamespaceSymbol;
 

@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Xenon.Compiler;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Text;
+using Xenon.Compiler.Libraries;
 
 namespace Xenon.ProjectSystem;
 
@@ -56,6 +57,8 @@ public sealed class ProjectSnapshot
             : referenceDocumentsToRebuild ?? documents.Select(item => item.Id).ToImmutableHashSet();
         DeclarationFingerprint = string.Join('|', documents.OrderBy(document => document.Id)
             .Select(document => $"{document.Id}:{document.DeclarationFingerprint}"));
+        LibraryFingerprint = CreateLibraryFingerprint(configuration);
+        DeclarationFingerprint += $"|xelib:{LibraryFingerprint}";
     }
 
     public ProjectId Id { get; }
@@ -64,6 +67,11 @@ public sealed class ProjectSnapshot
     public ImmutableArray<DocumentSnapshot> Documents { get; }
     public ImmutableArray<ProjectSnapshot> ProjectReferences { get; }
     public string DeclarationFingerprint { get; }
+    internal string LibraryFingerprint { get; }
+
+    internal static string CreateLibraryFingerprint(XenonProject project) => string.Join('|',
+        project.XenonLibraries.Select(path => XelibMetadataReader.ReadFile(path).Manifest.ContentIdentity)
+            .Order(StringComparer.Ordinal));
 
     public DocumentSnapshot GetDocument(DocumentId id) =>
         _documentsById.TryGetValue(id, out DocumentSnapshot? document) ? document :
@@ -88,7 +96,8 @@ public sealed class ProjectSnapshot
         await Task.Yield();
         cancellationToken.ThrowIfCancellationRequested();
         Compilation created = XenonProjectCompilationFactory.Create(Configuration, _profileName,
-            Documents.Select(document => document.SyntaxTree), dependencies, cancellationToken);
+            Documents.Select(document => document.SyntaxTree), dependencies, cancellationToken,
+            metadataOnlyXelib: true);
         cancellationToken.ThrowIfCancellationRequested();
         Compilation? winner = Interlocked.CompareExchange(ref _compilation, created, null);
         return winner ?? created;

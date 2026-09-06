@@ -1,6 +1,4 @@
 using System.Collections.Immutable;
-using Xenon.Compiler.Syntax;
-
 namespace Xenon.Compiler.Semantics.Symbols;
 
 /// <summary>Presentation only: these formats must not be used for type identity or native names.</summary>
@@ -68,8 +66,14 @@ public static class SymbolDisplay
 
     private static string GetName(Symbol symbol, bool qualified)
     {
-        static string Part(Symbol part) => part is FunctionSymbol { Declaration: PropertyAccessorDeclarationSyntax accessor }
-            ? accessor.KeywordToken.Text : part.Name;
+        static string Part(Symbol part) => part is FunctionSymbol function
+            ? function.AccessorKind switch
+            {
+                AccessorKind.Getter => "get",
+                AccessorKind.Setter => "set",
+                _ => part.Name,
+            }
+            : part.Name;
         if (!qualified) return Part(symbol);
         var parts = new Stack<string>();
         for (Symbol? current = symbol; current is not null; current = current.ContainingSymbol)
@@ -135,14 +139,14 @@ public static class SymbolDisplay
         FunctionSymbol function => MemberModifiers(function.Accessibility, function.IsStatic, function.IsAbstract,
             function.IsVirtual, function.IsOverride) + (function.IsExtern ? "extern " : function.IsExport ? "export " : ""),
         FieldSymbol field => MemberModifiers(field.Accessibility, field.IsStatic) + (field.IsThreadLocal ? "threadlocal " : ""),
-        PropertySymbol property => MemberModifiers(property.Accessibility, property.Declaration.IsStatic,
-            property.Declaration.IsAbstract, property.Declaration.IsVirtual, property.Declaration.IsOverride)
-            + (property.Declaration.IsReadonly ? "readonly " : ""),
-        IndexerSymbol indexer => MemberModifiers(indexer.Accessibility, indexer.Declaration.IsStatic,
-            indexer.Declaration.IsAbstract, indexer.Declaration.IsVirtual, indexer.Declaration.IsOverride)
-            + (indexer.Declaration.IsReadonly ? "readonly " : ""),
-        InterfacePropertySymbol property => "public abstract " + (property.Declaration.IsReadonly ? "readonly " : ""),
-        InterfaceIndexerSymbol indexer => "public abstract " + (indexer.Declaration.IsReadonly ? "readonly " : ""),
+        PropertySymbol property => MemberModifiers(property.Accessibility, property.IsStatic,
+            property.IsAbstract, property.IsVirtual, property.IsOverride)
+            + (property.IsReadonly ? "readonly " : ""),
+        IndexerSymbol indexer => MemberModifiers(indexer.Accessibility, indexer.IsStatic,
+            indexer.IsAbstract, indexer.IsVirtual, indexer.IsOverride)
+            + (indexer.IsReadonly ? "readonly " : ""),
+        InterfacePropertySymbol property => "public abstract " + (property.IsReadonly ? "readonly " : ""),
+        InterfaceIndexerSymbol indexer => "public abstract " + (indexer.IsReadonly ? "readonly " : ""),
         TemplateMemberRequirementSymbol requirement =>
             MemberModifiers(requirement.Accessibility, requirement.IsStatic) + (requirement.IsReadonly ? "readonly " : ""),
         _ => "",

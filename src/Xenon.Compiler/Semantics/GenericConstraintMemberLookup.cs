@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Text;
 
 namespace Xenon.Compiler.Semantics;
 
@@ -155,8 +156,11 @@ internal static class GenericConstraintMemberLookup
     {
         ImmutableArray<TypeSymbol> arguments = constructed.TypeArguments.Select(argument =>
             SubstituteTemplateSelf(argument, template, parameter, types, specializer)).ToImmutableArray();
+        TextLocation location = constructed.Locations is { IsEmpty: false } locations
+            ? locations[0]
+            : TextLocation.None;
         return (TypeSymbol?)specializer.GetOrCreate(constructed.GenericDefinition!, arguments,
-            constructed.Declaration.IdentifierToken.Location) ?? BuiltinTypes.Error;
+            location) ?? BuiltinTypes.Error;
     }
 
     private static bool IsConstraintAccessible(Symbol member) => member switch

@@ -19,6 +19,13 @@ public enum FunctionKind
     StorageDestructor,
 }
 
+public enum AccessorKind
+{
+    None,
+    Getter,
+    Setter,
+}
+
 public enum ArrayStorageKind
 {
     Unknown,
