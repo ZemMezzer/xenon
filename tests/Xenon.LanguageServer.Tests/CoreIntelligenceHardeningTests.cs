@@ -2,6 +2,7 @@ using System.Text.Json;
 using Xenon.Compiler;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics;
+using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xenon.LanguageServer.Protocol;
@@ -11,6 +12,58 @@ namespace Xenon.LanguageServer.Tests;
 
 public sealed class CoreIntelligenceHardeningTests
 {
+    [Fact]
+    public async Task ImportedXelibNestedReadonlyValueKeepsMembersVisibleForCompletion()
+    {
+        const string source = """
+            using Xenon.IO;
+            namespace App;
+            void Main()
+            {
+                Console.Out.
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("src/main.xe", source);
+        string project = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["Console.xelib"]
+            """);
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Xenon.IO;
+            struct ConsoleWriter
+            {
+                public void Write() {}
+            }
+            struct Console
+            {
+                public static readonly ConsoleWriter Out;
+            }
+            """, "console.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine,
+            library.Diagnostics.Select(diagnostic => diagnostic.Message)));
+        File.WriteAllBytes(directory.PathOf("Console.xelib"),
+            XelibWriter.Write(library, new XelibWriteOptions("Console")));
+
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, project, source);
+        JsonElement response = Result(await session.HandleRequestAsync(
+            "textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+
+        Assert.Contains(tokens, token => token.Text == "Console" && token.Type == 1);
+        Assert.Contains(tokens, token => token.Text == "Out" && token.Type == 9);
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
+            source.IndexOf("Console.Out.", StringComparison.Ordinal) + "Console.Out.".Length);
+        Assert.Contains("Write", Labels(completion));
+    }
+
     [Fact]
     public async Task ImportedXelibConstructorReceivesTheTypeSemanticToken()
     {
@@ -602,6 +655,107 @@ public sealed class CoreIntelligenceHardeningTests
         var tokens = DecodeTokens(source, response.GetProperty("data"));
 
         Assert.Equal(3, tokens.Count(token => token.Text == "Resource" && token.Type == 1));
+    }
+
+    [Fact]
+    public async Task ThisConstructorInitializersReceiveTheSelectedConstructorSemanticToken()
+    {
+        const string source = """
+            namespace App;
+            struct String
+            {
+                public String() : this(0, 0) {}
+                public String(int length, int capacity) {}
+                public String(byte marker) : this(0,) {}
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+
+        var thisTokens = tokens.Where(token => token.Text == "this").ToArray();
+        Assert.Equal(2, thisTokens.Length);
+        Assert.Single(thisTokens, token => token.Type == 1);
+
+        int initializer = source.IndexOf("this(0, 0)", StringComparison.Ordinal);
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, initializer);
+        Assert.Contains("String(int length, int capacity)",
+            hover.GetProperty("contents").GetProperty("value").GetString());
+
+        JsonElement definition = await RequestAtAsync(session, "textDocument/definition", uri,
+            source, initializer);
+        JsonElement target = Assert.Single(definition.EnumerateArray());
+        Assert.Equal(4, target.GetProperty("range").GetProperty("start").GetProperty("line").GetInt32());
+
+        JsonElement signature = await RequestAtAsync(session, "textDocument/signatureHelp", uri,
+            source, initializer + "this(".Length);
+        Assert.Contains("String(int length, int capacity)", signature.GetProperty("signatures")[0]
+            .GetProperty("label").GetString());
+
+        int incompleteInitializer = source.IndexOf("this(0,)", StringComparison.Ordinal);
+        JsonElement incompleteSignature = await RequestAtAsync(session, "textDocument/signatureHelp", uri,
+            source, incompleteInitializer + "this(0,".Length);
+        Assert.Contains(incompleteSignature.GetProperty("signatures").EnumerateArray(), candidate =>
+            candidate.GetProperty("label").GetString() == "String(int length, int capacity)");
+        Assert.Equal(1, incompleteSignature.GetProperty("activeParameter").GetInt32());
+
+        Compilation compilation = Compilation.Create(SourceText.From(source, "constructors.xe"));
+        SyntaxTree tree = Assert.Single(compilation.SyntaxTrees);
+        SemanticModel model = compilation.GetSemanticModel(tree);
+        ConstructorDeclarationSyntax declaration = SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
+            .OfType<ConstructorDeclarationSyntax>().First();
+        FunctionSymbol declared = Assert.IsType<FunctionSymbol>(model.GetDeclaredSymbol(declaration));
+        Assert.Same(declared, model.GetSymbolInfo(declaration).Symbol);
+        FunctionSymbol selected = Assert.IsType<FunctionSymbol>(
+            model.GetSymbolInfoAtPosition(tree, initializer).Symbol);
+        Assert.NotSame(declared, selected);
+        Assert.Equal(2, selected.Parameters.Length);
+    }
+
+    [Fact]
+    public async Task BaseConstructorInitializersExposeTheSelectedBaseConstructorSemantics()
+    {
+        const string source = """
+            namespace App;
+            struct Base
+            {
+                public Base(int value, int other) {}
+            }
+            struct Derived : Base
+            {
+                public Derived() : base(0, 0) {}
+                public Derived(byte marker) : base(0,) {}
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+        int initializer = source.IndexOf("base(0, 0)", StringComparison.Ordinal);
+
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, initializer);
+        Assert.Contains("Base(int value, int other)",
+            hover.GetProperty("contents").GetProperty("value").GetString());
+        JsonElement signature = await RequestAtAsync(session, "textDocument/signatureHelp", uri,
+            source, initializer + "base(".Length);
+        Assert.Contains("Base(int value, int other)", signature.GetProperty("signatures")[0]
+            .GetProperty("label").GetString());
+        JsonElement definition = await RequestAtAsync(session, "textDocument/definition", uri,
+            source, initializer);
+        JsonElement target = Assert.Single(definition.EnumerateArray());
+        Assert.Equal(3, target.GetProperty("range").GetProperty("start").GetProperty("line").GetInt32());
+
+        int incomplete = source.IndexOf("base(0,)", StringComparison.Ordinal);
+        JsonElement incompleteSignature = await RequestAtAsync(session, "textDocument/signatureHelp", uri,
+            source, incomplete + "base(0,".Length);
+        Assert.Contains(incompleteSignature.GetProperty("signatures").EnumerateArray(), candidate =>
+            candidate.GetProperty("label").GetString() == "Base(int value, int other)");
+        Assert.Equal(1, incompleteSignature.GetProperty("activeParameter").GetInt32());
     }
 
     private static string Project(string name) => $"""

@@ -287,6 +287,8 @@ internal sealed class FunctionBodyBinder
                 constructorSyntax.BaseKeyword!.Location);
             if (target is not null)
             {
+                _semanticInfo.ExplicitReferences.Add(new ResolvedSymbolReference(target,
+                    constructorSyntax.BaseKeyword.Location, ResolvedReferenceKind.Call));
                 if (ReferenceEquals(target, _function))
                 {
                     _diagnostics.Report(constructorSyntax.BaseKeyword.Location,
@@ -326,6 +328,9 @@ internal sealed class FunctionBodyBinder
             FunctionSymbol? baseConstructor = ResolveConstructor(baseType, arguments, baseArguments, location);
             if (baseConstructor is not null)
             {
+                if (syntax?.BaseKeyword is { } baseKeyword)
+                    _semanticInfo.ExplicitReferences.Add(new ResolvedSymbolReference(baseConstructor,
+                        baseKeyword.Location, ResolvedReferenceKind.Call));
                 if (!baseConstructor.IsPublic)
                 {
                     _diagnostics.Report(syntax?.BaseKeyword?.Location ?? location, $"constructor '{baseType.Name}' is private",
