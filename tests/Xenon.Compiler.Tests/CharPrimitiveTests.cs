@@ -154,7 +154,10 @@ public sealed class CharPrimitiveTests
         var target = LlvmTargetOptions.CreateHost();
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, target, "unicode-char");
 
-        Assert.Contains("define dllexport i32 @Unicode_Echo(i32", ir, StringComparison.Ordinal);
+        string exportStorage = target.Triple.Contains("windows", StringComparison.OrdinalIgnoreCase)
+            ? "dllexport "
+            : string.Empty;
+        Assert.Contains($"define {exportStorage}i32 @Unicode_Echo(i32", ir, StringComparison.Ordinal);
         Assert.Contains("ret i32 128512", ir, StringComparison.Ordinal);
         Assert.Contains("ret i64 4", ir, StringComparison.Ordinal);
         Assert.Equal("cdecl;fixed;i32(i32)", NativeSymbolNames.GetAbiSignature(
