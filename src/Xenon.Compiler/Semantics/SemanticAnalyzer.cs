@@ -115,6 +115,7 @@ internal sealed class SemanticAnalyzer
         ValidateInterfaceImplementations();
         _genericStructSpecializer!.CompleteMembers();
         DeclareFunctions();
+        ValidateDeclaredAccessibility();
         ValidateAbstractValueStorage();
         BindInstanceFieldInitializers();
         ValidateNativeSymbols();
@@ -2255,16 +2256,22 @@ internal sealed class SemanticAnalyzer
 
         var slots = type.BaseType?.VirtualMethods.ToBuilder() ?? ImmutableArray.CreateBuilder<FunctionSymbol>();
         var invalidAccessors = new HashSet<FunctionSymbol>();
+        var inheritedAccessorTargets = new Dictionary<FunctionSymbol, FunctionSymbol?>(
+            ReferenceEqualityComparer.Instance);
         foreach (PropertySymbol property in type.Properties)
         {
-            PropertySymbol? inherited = type.BaseType?.FindProperty(property.Name);
+            PropertySymbol? inherited = FindAccessibleInheritedProperty(type, property.Name);
+            if (property.Getter is { } getter) inheritedAccessorTargets.Add(getter, inherited?.Getter);
+            if (property.Setter is { } setter) inheritedAccessorTargets.Add(setter, inherited?.Setter);
             ValidateAccessorOverride($"property '{property.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'",
                 SymbolLocation(property), property.IsOverride, property.Getter, property.Setter,
                 inherited?.Getter, inherited?.Setter, invalidAccessors);
         }
         foreach (IndexerSymbol indexer in type.Indexers)
         {
-            IndexerSymbol? inherited = type.BaseType?.AllIndexers.FirstOrDefault(candidate => HaveSameParameterTypes(indexer.Parameters, candidate.Parameters));
+            IndexerSymbol? inherited = FindAccessibleInheritedIndexer(type, indexer.Parameters);
+            if (indexer.Getter is { } getter) inheritedAccessorTargets.Add(getter, inherited?.Getter);
+            if (indexer.Setter is { } setter) inheritedAccessorTargets.Add(setter, inherited?.Setter);
             ValidateAccessorOverride($"indexer '{indexer.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'",
                 SymbolLocation(indexer), indexer.IsOverride,
                 indexer.Getter, indexer.Setter, inherited?.Getter, inherited?.Setter, invalidAccessors);
@@ -2273,7 +2280,10 @@ internal sealed class SemanticAnalyzer
         {
             // Search inherited slots by member kind and the complete signature,
             // not the first declaration with this name in an intermediate type.
-            FunctionSymbol? inherited = type.BaseType?.VirtualMethods.FirstOrDefault(method.HasSameSignature);
+            FunctionSymbol? inherited = inheritedAccessorTargets.TryGetValue(method, out FunctionSymbol? accessorTarget)
+                ? accessorTarget
+                : type.BaseType?.VirtualMethods.FirstOrDefault(candidate =>
+                    method.HasSameSignature(candidate) && AccessibilityRules.IsAccessible(candidate, type));
             if (invalidAccessors.Contains(method)) continue;
             if (method.ContainingProperty is null && method.ContainingIndexer is null && !ValidateMethodOverride(method, inherited)) continue;
             if (method.IsStatic) continue;
@@ -2322,6 +2332,29 @@ internal sealed class SemanticAnalyzer
                     $"concrete struct '{type.FullName}' does not implement abstract member '{MemberName(member)}'; implement it or declare the struct 'abstract'",
                     DiagnosticIds.UnimplementedInterfaceMember);
         }
+    }
+
+    private static PropertySymbol? FindAccessibleInheritedProperty(StructTypeSymbol type, string name)
+    {
+        for (StructTypeSymbol? current = type.BaseType; current is not null; current = current.BaseType)
+        {
+            PropertySymbol? candidate = current.Properties.FirstOrDefault(property => property.Name == name);
+            if (candidate is not null && AccessibilityRules.IsAccessible(candidate, type)) return candidate;
+        }
+        return null;
+    }
+
+    private static IndexerSymbol? FindAccessibleInheritedIndexer(
+        StructTypeSymbol type,
+        ImmutableArray<ParameterSymbol> parameters)
+    {
+        for (StructTypeSymbol? current = type.BaseType; current is not null; current = current.BaseType)
+        {
+            IndexerSymbol? candidate = current.Indexers.FirstOrDefault(indexer =>
+                HaveSameParameterTypes(parameters, indexer.Parameters));
+            if (candidate is not null && AccessibilityRules.IsAccessible(candidate, type)) return candidate;
+        }
+        return null;
     }
 
     private bool ValidateMethodOverride(FunctionSymbol method, FunctionSymbol? inherited)
@@ -2375,7 +2408,7 @@ internal sealed class SemanticAnalyzer
     }
 
     private static bool HasCompatibleOverrideAccessibility(FunctionSymbol member, FunctionSymbol inherited) =>
-        AccessibilityFacts.DoesNotReduce(member.Accessibility, inherited.Accessibility);
+        AccessibilityRules.DoesNotReduceOverrideAccessibility(inherited, member);
 
     private TextLocation MemberLocation(FunctionSymbol method)
     {
@@ -2887,6 +2920,148 @@ internal sealed class SemanticAnalyzer
             }
         }
     }
+
+    private void ValidateDeclaredAccessibility()
+    {
+        foreach (StructTypeSymbol type in _structSymbols.Values)
+        {
+            ValidateGenericConstraints(type.TypeParameters, type);
+            if (type.BaseType is { } baseType)
+                ValidateTypeExposure(baseType, type, "base", SymbolLocation(type));
+            foreach (InterfaceTypeSymbol @interface in type.Interfaces)
+                ValidateTypeExposure(@interface, type, "interface", SymbolLocation(type));
+            foreach (FieldSymbol field in type.Fields.Concat(type.StaticFields))
+                ValidateTypeExposure(field.Type, field, "field", SymbolLocation(field));
+            foreach (ConstantSymbol constant in type.Constants)
+                ValidateTypeExposure(constant.Type, constant, "constant", SymbolLocation(constant));
+            foreach (PropertySymbol property in type.Properties)
+                ValidateTypeExposure(property.Type, property, "property", SymbolLocation(property));
+            foreach (IndexerSymbol indexer in type.Indexers)
+            {
+                ValidateTypeExposure(indexer.Type, indexer, "indexer", SymbolLocation(indexer));
+                foreach (ParameterSymbol parameter in indexer.Parameters)
+                    ValidateTypeExposure(parameter.Type, indexer, "parameter", SymbolLocation(parameter));
+            }
+            foreach (FunctionSymbol method in type.Methods.Where(method =>
+                         method.ContainingProperty is null && method.ContainingIndexer is null))
+                ValidateCallableExposure(method);
+            foreach (FunctionSymbol constructor in type.Constructors)
+                foreach (ParameterSymbol parameter in constructor.Parameters)
+                    ValidateTypeExposure(parameter.Type, constructor, "parameter", SymbolLocation(parameter));
+        }
+
+        foreach (InterfaceTypeSymbol type in _interfaceSymbols.Values)
+        {
+            foreach (InterfaceTypeSymbol baseType in type.BaseInterfaces)
+                ValidateTypeExposure(baseType, type, "base interface", SymbolLocation(type));
+            foreach (FunctionSymbol method in type.Methods)
+                ValidateCallableExposure(method);
+            foreach (InterfacePropertySymbol property in type.Properties)
+                ValidateTypeExposure(property.Type, property, "property", SymbolLocation(property));
+            foreach (InterfaceIndexerSymbol indexer in type.Indexers)
+            {
+                ValidateTypeExposure(indexer.Type, indexer, "indexer", SymbolLocation(indexer));
+                foreach (ParameterSymbol parameter in indexer.Parameters)
+                    ValidateTypeExposure(parameter.Type, indexer, "parameter", SymbolLocation(parameter));
+            }
+        }
+
+        foreach (TemplateSymbol template in _templateSymbols.Values)
+        foreach (TemplateMemberRequirementSymbol member in template.Members)
+        {
+            switch (member)
+            {
+                case TemplateMethodRequirementSymbol method:
+                    ValidateTypeExposure(method.ReturnType, method, "return", SymbolLocation(method));
+                    foreach (ParameterSymbol parameter in method.Parameters)
+                        ValidateTypeExposure(parameter.Type, method, "parameter", SymbolLocation(parameter));
+                    break;
+                case TemplateConstructorRequirementSymbol constructor:
+                    foreach (ParameterSymbol parameter in constructor.Parameters)
+                        ValidateTypeExposure(parameter.Type, constructor, "parameter", SymbolLocation(parameter));
+                    break;
+                case TemplatePropertyRequirementSymbol property:
+                    ValidateTypeExposure(property.Type, property, "property", SymbolLocation(property));
+                    break;
+                case TemplateIndexerRequirementSymbol indexer:
+                    ValidateTypeExposure(indexer.Type, indexer, "indexer", SymbolLocation(indexer));
+                    foreach (ParameterSymbol parameter in indexer.Parameters)
+                        ValidateTypeExposure(parameter.Type, indexer, "parameter", SymbolLocation(parameter));
+                    break;
+            }
+        }
+
+        foreach (FunctionSymbol function in _functionSymbols.Values)
+            ValidateCallableExposure(function);
+
+        var sourceConstants = new HashSet<ConstantSymbol>(ReferenceEqualityComparer.Instance);
+        foreach (NamespaceSymbol @namespace in _treeNamespaces.Values)
+        foreach (ConstantSymbol constant in @namespace.Constants)
+            if (constant.Origin.Kind == SymbolOriginKind.Source && sourceConstants.Add(constant))
+                ValidateTypeExposure(constant.Type, constant, "constant", SymbolLocation(constant));
+
+        foreach ((EnumTypeSymbol type, _) in _enums.Values)
+            foreach (FieldSymbol field in type.StaticFields)
+                ValidateTypeExposure(field.Type, field, "field", SymbolLocation(field));
+    }
+
+    private void ValidateCallableExposure(FunctionSymbol function)
+    {
+        if (function.FunctionKind != FunctionKind.Constructor)
+            ValidateTypeExposure(function.ReturnType, function, "return", SymbolLocation(function));
+        foreach (ParameterSymbol parameter in function.Parameters)
+            ValidateTypeExposure(parameter.Type, function, "parameter", SymbolLocation(parameter));
+        ValidateGenericConstraints(function.TypeParameters, function);
+    }
+
+    private void ValidateGenericConstraints(
+        ImmutableArray<GenericParameterSymbol> parameters,
+        Symbol exposingDeclaration)
+    {
+        foreach (GenericConstraintSymbol constraint in parameters.SelectMany(parameter => parameter.Constraints))
+        {
+            if (AccessibilityRules.IsSymbolAccessibleEnough(constraint.Target, exposingDeclaration)) continue;
+            _diagnostics.Report(
+                constraint.Declaration.Type.NameToken.Location,
+                $"inconsistent accessibility: generic constraint '{constraint.Target.Name}' is less accessible than {AccessibilitySubject(exposingDeclaration)}",
+                DiagnosticIds.InconsistentAccessibility);
+        }
+    }
+
+    private void ValidateTypeExposure(
+        TypeSymbol type,
+        Symbol exposingDeclaration,
+        string position,
+        TextLocation location)
+    {
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Error) ||
+            AccessibilityRules.IsTypeAccessibleEnough(type, exposingDeclaration, out Symbol? lessAccessible))
+            return;
+        _diagnostics.Report(
+            location,
+            $"inconsistent accessibility: {position} type '{lessAccessible!.Name}' is less accessible than {AccessibilitySubject(exposingDeclaration)}",
+            DiagnosticIds.InconsistentAccessibility);
+    }
+
+    private static string AccessibilitySubject(Symbol symbol) => symbol switch
+    {
+        FunctionSymbol { FunctionKind: FunctionKind.Constructor } function =>
+            $"constructor '{function.ContainingType!.Name}'",
+        FunctionSymbol function => $"function '{function.Name}'",
+        FieldSymbol field => $"field '{field.Name}'",
+        PropertySymbol property => $"property '{property.Name}'",
+        IndexerSymbol => "indexer 'this'",
+        InterfacePropertySymbol property => $"property '{property.Name}'",
+        InterfaceIndexerSymbol => "indexer 'this'",
+        ConstantSymbol constant => $"constant '{constant.Name}'",
+        StructTypeSymbol type => $"struct '{type.Name}'",
+        InterfaceTypeSymbol type => $"interface '{type.Name}'",
+        TemplateMethodRequirementSymbol method => $"template function '{method.Name}'",
+        TemplateConstructorRequirementSymbol constructor => $"template constructor '{constructor.Template.Name}'",
+        TemplatePropertyRequirementSymbol property => $"template property '{property.Name}'",
+        TemplateIndexerRequirementSymbol => "template indexer 'this'",
+        _ => $"declaration '{symbol.Name}'",
+    };
 
     private void ValidateNativeSymbols()
     {

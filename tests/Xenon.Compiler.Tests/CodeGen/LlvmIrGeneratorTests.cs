@@ -1144,14 +1144,14 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "abstract-vtable");
 
-        Assert.Contains("define internal i32 @" + ManagedSymbol("abstract-vtable", "Example.Entity.Score", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @" + ManagedSymbol("abstract-vtable", "Example.Entity.Score", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("unreachable", llvmIr, StringComparison.Ordinal);
         Assert.Contains("@" + ManagedSymbol("abstract-vtable", "Example.Enemy.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
 
         Compilation privateAbstract = CreateCompilation("""
             namespace Example;
 
-            abstract struct Entity
+            internal abstract struct Entity
             {
                 abstract void Update();
             }
@@ -1159,6 +1159,35 @@ public sealed class LlvmIrGeneratorTests
         Assert.Empty(privateAbstract.Diagnostics);
         string privateIr = new LlvmIrGenerator().Generate(privateAbstract, "private-abstract-vtable");
         Assert.Contains("define internal void @" + ManagedSymbol("private-abstract-vtable", "Example.Entity.Update", "function") + "(ptr", privateIr, StringComparison.Ordinal);
+
+        Compilation inheritedAbi = CreateCompilation("""
+            namespace Example;
+
+            public abstract struct Entity
+            {
+                internal abstract void Update();
+            }
+            """);
+        Assert.Empty(inheritedAbi.Diagnostics);
+        string inheritedAbiIr = new LlvmIrGenerator().Generate(inheritedAbi, "inherited-abstract-vtable");
+        Assert.Contains("define void @" + ManagedSymbol("inherited-abstract-vtable", "Example.Entity.Update", "function") + "(ptr", inheritedAbiIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("define internal void @" + ManagedSymbol("inherited-abstract-vtable", "Example.Entity.Update", "function") + "(ptr", inheritedAbiIr, StringComparison.Ordinal);
+        Assert.Contains(LlvmIrGenerator.GetProjectNativeExports(inheritedAbi, "inherited-abstract-vtable"),
+            export => export.Name == ManagedSymbol(
+                "inherited-abstract-vtable", "Example.Entity.Update", "function"));
+
+        Compilation genericAbi = CreateCompilation("""
+            namespace Example;
+
+            public abstract struct Entity<T>
+            {
+                internal abstract void Update();
+            }
+            """);
+        Assert.Empty(genericAbi.Diagnostics);
+        Assert.DoesNotContain(LlvmIrGenerator.GetProjectNativeExports(genericAbi, "generic-abstract-vtable"),
+            export => export.Name == ManagedSymbol(
+                "generic-abstract-vtable", "Example.Entity.Update", "function"));
     }
 
     [Fact]
