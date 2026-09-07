@@ -72,21 +72,27 @@ public sealed class TemplateSymbol : Symbol
 
     internal TemplateSymbol(string name, NamespaceSymbol containingNamespace, TemplateDeclarationSyntax declaration)
         : this(name, containingNamespace, SymbolOrigin.Source(declaration),
-            SymbolDocumentation.FromDeclaration(declaration))
+            SymbolDocumentation.FromDeclaration(declaration),
+            AccessibilityFacts.FromSyntax(declaration.AccessModifierToken,
+                declaration.SecondaryAccessModifierToken, Accessibility.Public))
     {
         Declaration = declaration;
         SetImplementation(new SourceSymbolImplementation(declaration));
     }
 
     internal TemplateSymbol(string name, NamespaceSymbol containingNamespace,
-        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null,
+        Accessibility accessibility = Accessibility.Public)
         : base(name, SymbolKind.Template, containingNamespace)
     {
         SelfType = new TemplateSelfTypeSymbol(this);
+        Accessibility = accessibility;
         SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
     }
 
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
+    public Accessibility Accessibility { get; }
+    public bool IsPublic => Accessibility == Accessibility.Public;
     internal TemplateDeclarationSyntax Declaration { get; } = null!;
     public ImmutableArray<TemplateMemberRequirementSymbol> Members => _members;
     internal TemplateSelfTypeSymbol SelfType { get; }

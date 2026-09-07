@@ -6,6 +6,26 @@ namespace Xenon.Compiler.Libraries;
 /// <summary>Explicit boundary between compiler-internal enums and stable XELIB wire tags.</summary>
 public static class XelibStableMappings
 {
+    public static XelibAccessibility ToXelib(Accessibility value) => value switch
+    {
+        Accessibility.Private => XelibAccessibility.Private,
+        Accessibility.Internal => XelibAccessibility.Internal,
+        Accessibility.Protected => XelibAccessibility.Protected,
+        Accessibility.ProtectedInternal => XelibAccessibility.ProtectedInternal,
+        Accessibility.Public => XelibAccessibility.Public,
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static Accessibility FromXelib(XelibAccessibility value) => value switch
+    {
+        XelibAccessibility.Private => Accessibility.Private,
+        XelibAccessibility.Internal => Accessibility.Internal,
+        XelibAccessibility.Protected => Accessibility.Protected,
+        XelibAccessibility.ProtectedInternal => Accessibility.ProtectedInternal,
+        XelibAccessibility.Public => Accessibility.Public,
+        _ => throw Invalid(nameof(value), value),
+    };
+
     public static XelibFunctionKind ToXelib(FunctionKind value) => value switch
     {
         FunctionKind.Ordinary => XelibFunctionKind.Ordinary,

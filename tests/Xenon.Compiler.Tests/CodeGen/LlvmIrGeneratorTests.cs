@@ -2771,6 +2771,55 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("call i32 %", ir, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Generator_LowersEnumStaticFieldsAsRealStaticStorage()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            enum Mode
+            {
+                Off,
+                public static int Count = 1;
+                public static Mode Default;
+            }
+            int Run()
+            {
+                Mode.Count = 42;
+                Mode.Default = Mode.Off;
+                return Mode.Count;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "enum-static-fields";
+        string ir = new LlvmIrGenerator().Generate(compilation, module);
+        Assert.Contains("@" + ManagedSymbol(module, "Example.Mode.Count", "static_field") + " =", ir,
+            StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol(module, "Example.Mode.Default", "static_field") + " =", ir,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_DoesNotEmitInstanceLayoutForStaticStruct()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            public static struct Utility
+            {
+                public static int Count = 42;
+                public static int Read() { return Utility.Count; }
+            }
+            int Run() { return Utility.Read(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "static-struct";
+        string ir = new LlvmIrGenerator().Generate(compilation, module);
+        Assert.DoesNotContain("%Example.Utility = type", ir, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol(module, "Example.Utility.Count", "static_field") + " =", ir,
+            StringComparison.Ordinal);
+    }
+
     private static Compilation CreateCompilation(string source) =>
         Compilation.Create(SourceText.From(source, "test.xe"));
 

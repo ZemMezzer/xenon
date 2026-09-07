@@ -80,6 +80,7 @@ public sealed record EnumDeclarationSyntax(
     ImmutableArray<EnumMemberDeclarationSyntax> Members) : TypeDeclarationSyntax(IdentifierToken)
 {
     public override SyntaxKind Kind => SyntaxKind.EnumDeclaration;
+    public ImmutableArray<FieldDeclarationSyntax> StaticFields { get; init; } = [];
 }
 
 public sealed record EnumMemberDeclarationSyntax(
@@ -119,6 +120,8 @@ public sealed record ModuleConstantDeclarationSyntax(
     SyntaxToken SemicolonToken) : MemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.ConstantDeclaration;
+    public SyntaxToken? AccessModifierToken { get; init; }
+    public bool IsPublic => AccessModifierToken is null or { Kind: SyntaxKind.PublicKeyword };
 }
 
 public sealed record TypeConstantDeclarationSyntax(
@@ -280,7 +283,13 @@ public sealed record StructDeclarationSyntax(
     SyntaxToken CloseBraceToken) : TypeDeclarationSyntax(IdentifierToken)
 {
     public SyntaxToken? AbstractKeyword { get; init; }
+    public SyntaxToken? ReadonlyKeyword { get; init; }
+    public SyntaxToken? StaticKeyword { get; init; }
+    public SyntaxToken? SealedKeyword { get; init; }
     public bool IsAbstract => AbstractKeyword is not null;
+    public bool IsReadonly => ReadonlyKeyword is not null;
+    public bool IsStatic => StaticKeyword is not null;
+    public bool IsSealed => SealedKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.StructDeclaration;
 
     public ImmutableArray<FieldDeclarationSyntax> Fields =>

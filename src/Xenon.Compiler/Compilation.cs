@@ -192,6 +192,57 @@ public sealed class Compilation
     public ImmutableArray<BoundFunction> GetStaticImplementationFunctions()
         => GetNativeReachability().Functions;
 
+    /// <summary>
+    /// Gets implementation-only native ABI roots referenced by portable generic bodies owned by
+    /// this compilation. These symbols are not part of the language-level export surface, but a
+    /// separately linked consumer may call or access them after instantiating a generic body.
+    /// </summary>
+    public ImmutableArray<Symbol> GetPortableGenericNativeAbiRoots()
+    {
+        var result = new HashSet<Symbol>(ReferenceEqualityComparer.Instance);
+
+        void AddSymbol(Symbol symbol)
+        {
+            switch (symbol)
+            {
+                case FunctionSymbol function when IsSymbolDefinedHere(function):
+                    result.Add(function);
+                    break;
+                case FieldSymbol { IsStatic: true } field when IsSymbolDefinedHere(field):
+                    result.Add(field);
+                    break;
+                case PropertySymbol property:
+                    if (property.Getter is { } getter) AddSymbol(getter);
+                    if (property.Setter is { } setter) AddSymbol(setter);
+                    break;
+                case IndexerSymbol indexer:
+                    if (indexer.Getter is { } indexerGetter) AddSymbol(indexerGetter);
+                    if (indexer.Setter is { } indexerSetter) AddSymbol(indexerSetter);
+                    break;
+            }
+        }
+
+        void Collect(BoundNode body) => XelibBodyCodec.Collect(body, _ => { }, AddSymbol);
+
+        foreach (var (definition, implementation) in GenericImplementations.Functions)
+            if (IsSymbolDefinedHere(definition) && implementation.PortableBody is { } body)
+                Collect(body);
+
+        foreach (var (definition, implementation) in GenericImplementations.Structs)
+        {
+            if (!IsSymbolDefinedHere(definition)) continue;
+            if (implementation.PortableInstanceInitializer is { } instanceInitializer)
+                Collect(instanceInitializer.Body);
+            foreach (BoundFunction staticInitializer in implementation.PortableStaticFieldInitializers)
+                Collect(staticInitializer.Body);
+            foreach (ConstantSymbol constant in definition.Constants)
+                if (constant.BoundValue is { } value)
+                    Collect(value);
+        }
+
+        return result.OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+    }
+
     /// <summary>Whether an imported XELIB symbol is required by this native link unit.</summary>
     public bool IsImportedSymbolNativeReachable(Symbol symbol)
     {
