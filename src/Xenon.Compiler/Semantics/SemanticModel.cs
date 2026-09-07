@@ -96,6 +96,11 @@ public sealed class SemanticModel
                 location.Source.FileId == tree.Source.FileId &&
                 IsPositionMatch(location.Span, position))
             .Select(item => (Info: item.Pair.Value, Span: item.Location!.Value.Span))
+            .Concat(_semanticInfo.ExplicitReferences
+                .Where(reference => reference.Location.Source.FileId == tree.Source.FileId &&
+                    IsPositionMatch(reference.Location.Span, position))
+                .Select(reference => (Info: SymbolInfo.FromSymbol(reference.Symbol),
+                    Span: reference.Location.Span)))
             .Concat(_semanticInfo.Declarations
                 .SelectMany(pair => pair.Value.DeclaringSyntaxReferences
                     .Where(reference => ReferenceEquals(reference.Declaration, pair.Key) &&
@@ -276,8 +281,11 @@ public sealed class SemanticModel
                 return [];
             if (sourceType is WeakTypeSymbol && access.OperatorToken.Kind != SyntaxKind.DotToken)
                 return [];
+            // Completion is an API-discovery surface. Keep accessible members visible even
+            // when a subsequent use may be rejected for mutating a readonly receiver; the
+            // expression binder remains the authority for that diagnostic.
             return LookupMembers(value.Type, position, new MemberLookupOptions(MemberAccessKind.Instance,
-                IncludeInaccessible: false, IsReadonlyReceiver: value.IsReadonly), cancellationToken);
+                IncludeInaccessible: false, IsReadonlyReceiver: false), cancellationToken);
         }
         return receiver.Kind == CompletionReceiverKind.Type
             ? LookupMembers(receiver.Type, position, new MemberLookupOptions(MemberAccessKind.Static), cancellationToken)
@@ -413,14 +421,17 @@ public sealed class SemanticModel
             cancellationToken.ThrowIfCancellationRequested();
             if (info.Symbol is not { } symbol || !IsReferenceableSymbol(symbol) ||
                 !TryGetReferenceLocation(syntax, out TextLocation location) ||
-                _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source) ||
-                !seen.Add((symbol, location.Source.FileId, location.Span)))
+                _primaryTree is not null && !ReferenceEquals(location.Source, _primaryTree.Source))
                 continue;
-            result.Add(new ResolvedSymbolReference(symbol, location, GetReferenceKind(syntax)));
-            if (symbol is FunctionSymbol { FunctionKind: FunctionKind.Constructor,
-                    ContainingType: DeclaredTypeSymbol constructedType } &&
-                seen.Add((constructedType, location.Source.FileId, location.Span)))
-                result.Add(new ResolvedSymbolReference(constructedType, location, ResolvedReferenceKind.Type));
+            AddReference(symbol, location, GetReferenceKind(syntax));
+        }
+        foreach (ResolvedSymbolReference reference in _semanticInfo.ExplicitReferences)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsReferenceableSymbol(reference.Symbol) ||
+                _primaryTree is not null && !ReferenceEquals(reference.Location.Source, _primaryTree.Source))
+                continue;
+            AddReference(reference.Symbol, reference.Location, reference.Kind);
         }
         foreach ((SyntaxNode syntax, TypeInfo info) in _semanticInfo.Types)
         {
@@ -436,6 +447,16 @@ public sealed class SemanticModel
         return result.OrderBy(item => item.Location.Source.Path, StringComparer.Ordinal)
             .ThenBy(item => item.Location.Span.Start).ThenBy(item => item.Location.Span.Length)
             .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+
+        void AddReference(Symbol symbol, TextLocation location, ResolvedReferenceKind kind)
+        {
+            if (seen.Add((symbol, location.Source.FileId, location.Span)))
+                result.Add(new ResolvedSymbolReference(symbol, location, kind));
+            if (symbol is FunctionSymbol { FunctionKind: FunctionKind.Constructor,
+                    ContainingType: DeclaredTypeSymbol constructedType } &&
+                seen.Add((constructedType, location.Source.FileId, location.Span)))
+                result.Add(new ResolvedSymbolReference(constructedType, location, ResolvedReferenceKind.Type));
+        }
     }
 
     private static bool IsReferenceableSymbol(Symbol symbol)

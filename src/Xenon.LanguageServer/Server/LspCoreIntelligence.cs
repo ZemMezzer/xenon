@@ -275,13 +275,32 @@ internal static class LspCoreIntelligence
     {
         (SemanticModel model, int position) = await ModelAndPositionAsync(context, lspPosition);
         SyntaxNode? call = SyntaxNavigator.DescendantNodesAndSelf(context.Document.SyntaxTree.Root)
-            .Where(node => node is CallExpressionSyntax or NewExpressionSyntax or IndexExpressionSyntax)
+            .Where(node => node is CallExpressionSyntax or NewExpressionSyntax or IndexExpressionSyntax or
+                ConstructorDeclarationSyntax { BaseKeyword: not null, BaseOpenParenthesisToken: not null })
             .Where(node => CallStart(node) <= position && position <= CallEnd(node))
             .OrderBy(node => SyntaxNavigator.GetSpan(node).Length).FirstOrDefault();
         if (call is null) return null;
-        SymbolInfo info = model.GetSymbolInfo(call, context.CancellationToken);
+        SymbolInfo info;
+        IEnumerable<Symbol?> available;
+        if (call is ConstructorDeclarationSyntax initializer)
+        {
+            info = model.GetSymbolInfoAtPosition(context.Document.SyntaxTree,
+                initializer.BaseKeyword!.Location.Span.Start, context.CancellationToken);
+            FunctionSymbol? declaration = model.GetDeclaredSymbol(initializer,
+                context.CancellationToken) as FunctionSymbol;
+            StructTypeSymbol? candidateType = initializer.HasThisInitializer
+                ? declaration?.ContainingStruct
+                : declaration?.ContainingStruct?.BaseType;
+            available = new[] { info.Symbol }.Concat(candidateType?.Constructors
+                .Where(candidate => !ReferenceEquals(candidate, declaration)).Cast<Symbol?>() ?? []);
+        }
+        else
+        {
+            info = model.GetSymbolInfo(call, context.CancellationToken);
+            available = new[] { info.Symbol }.Concat(info.CandidateSymbols);
+        }
         var seenCandidates = new HashSet<Symbol>(ReferenceEqualityComparer.Instance);
-        Symbol[] candidates = new[] { info.Symbol }.OfType<Symbol>().Concat(info.CandidateSymbols)
+        Symbol[] candidates = available.OfType<Symbol>()
             .Where(symbol => symbol is FunctionSymbol or IndexerSymbol or InterfaceIndexerSymbol or
                 SyntheticMemberSymbol { MemberKind: SyntheticMemberKind.Method })
             .Where(seenCandidates.Add).ToArray();
@@ -322,7 +341,8 @@ internal static class LspCoreIntelligence
                 int type = SemanticTokenType(reference.Symbol, declaration: false);
                 if (type >= 0)
                     tokens.Add((reference.Location.Span, type,
-                        SemanticModifiers(reference.Symbol, declaration: false), 1));
+                        SemanticModifiers(reference.Symbol, declaration: false),
+                        reference.Symbol is FunctionSymbol { FunctionKind: FunctionKind.Constructor } ? 4 : 1));
             }
         AddLanguageTokens(context.Document.SyntaxTree, tokens);
         var ordered = tokens.Where(item => item.Span.Length > 0)
@@ -733,6 +753,7 @@ internal static class LspCoreIntelligence
         CallExpressionSyntax call => call.CommaTokens,
         NewExpressionSyntax creation => creation.CommaTokens,
         IndexExpressionSyntax index => index.CommaTokens,
+        ConstructorDeclarationSyntax constructor => constructor.BaseCommaTokens,
         _ => [],
     };
 
@@ -741,6 +762,7 @@ internal static class LspCoreIntelligence
         CallExpressionSyntax call => call.OpenParenthesisToken.Location.Span.End,
         NewExpressionSyntax creation => creation.OpenDelimiterToken.Location.Span.End,
         IndexExpressionSyntax index => index.OpenBracketToken.Location.Span.End,
+        ConstructorDeclarationSyntax { BaseOpenParenthesisToken: { } open } => open.Location.Span.End,
         _ => int.MaxValue,
     };
 
@@ -749,6 +771,8 @@ internal static class LspCoreIntelligence
         CallExpressionSyntax call => call.CloseParenthesisToken.IsMissing ? call.CloseParenthesisToken.Location.Span.Start : call.CloseParenthesisToken.Location.Span.End,
         NewExpressionSyntax creation => creation.CloseDelimiterToken.IsMissing ? creation.CloseDelimiterToken.Location.Span.Start : creation.CloseDelimiterToken.Location.Span.End,
         IndexExpressionSyntax index => index.CloseBracketToken.IsMissing ? index.CloseBracketToken.Location.Span.Start : index.CloseBracketToken.Location.Span.End,
+        ConstructorDeclarationSyntax { BaseCloseParenthesisToken: { } close } =>
+            close.IsMissing ? close.Location.Span.Start : close.Location.Span.End,
         _ => -1,
     };
 
