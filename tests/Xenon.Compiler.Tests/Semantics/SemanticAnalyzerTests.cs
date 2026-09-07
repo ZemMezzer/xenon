@@ -1394,7 +1394,7 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_RejectsStructMethodOverloading()
+    public void Analyzer_AcceptsStructMethodOverloading()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -1411,10 +1411,10 @@ public sealed class SemanticAnalyzerTests
             }
             """);
 
-        Assert.Contains(
-            compilation.Diagnostics,
-            diagnostic => diagnostic.Message ==
-                "method overloading is not supported yet; struct 'Counter' may declare only one method named 'Add'");
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol counter = compilation.SemanticModel.GlobalNamespace.Namespaces.Single()
+            .Structs.Single(type => type.Name == "Counter");
+        Assert.Equal(2, counter.FindMethods("Add").Count());
     }
 
     [Fact]

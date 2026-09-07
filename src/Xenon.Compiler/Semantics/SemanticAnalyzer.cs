@@ -882,8 +882,23 @@ internal sealed class SemanticAnalyzer
                         }
                         TypeSymbol returnType = ResolveTemplateType(method.ReturnType, scope);
                         ImmutableArray<ParameterSymbol> parameters = BindTemplateParameters(method.Parameters, scope);
-                        members.Add(new TemplateMethodRequirementSymbol(template, returnType, parameters,
-                            TemplateAccessibility(method.AccessModifierToken), method));
+                        var requirement = new TemplateMethodRequirementSymbol(template, returnType, parameters,
+                            TemplateAccessibility(method.AccessModifierToken), method);
+                        TemplateMethodRequirementSymbol? duplicate = members
+                            .OfType<TemplateMethodRequirementSymbol>()
+                            .FirstOrDefault(candidate => candidate.Name == requirement.Name &&
+                                HaveSameParameterTypes(candidate.Parameters, requirement.Parameters) &&
+                                candidate.IsReadonly == requirement.IsReadonly);
+                        if (duplicate is not null)
+                        {
+                            _diagnostics.Report(method.IdentifierToken.Location,
+                                $"template method requirement '{requirement.ToDisplayString(SymbolDisplayFormat.Signature)}' is already declared; return type and parameter names do not distinguish overloads",
+                                DiagnosticIds.InvalidOverload,
+                                duplicate.Locations.Select(location =>
+                                    new RelatedDiagnosticLocation(location, "previous declaration")));
+                            break;
+                        }
+                        members.Add(requirement);
                         break;
                     }
                     case PropertyDeclarationSyntax property:
@@ -2385,14 +2400,15 @@ internal sealed class SemanticAnalyzer
                     parameters,
                     methodSyntax);
 
-                FunctionSymbol? sameName = methods.FirstOrDefault(candidate =>
-                    string.Equals(candidate.Name, method.Name, StringComparison.Ordinal));
-                if (sameName is not null && !CanFormReadonlyOverloadPair(sameName, method))
+                FunctionSymbol? duplicate = methods.FirstOrDefault(candidate =>
+                    candidate.HasSameOverloadSignature(method));
+                if (duplicate is not null && !CanFormReadonlyOverloadPair(duplicate, method))
                 {
                     _diagnostics.Report(
                         methodSyntax.IdentifierToken.Location,
-                        $"method overloading is not supported yet; struct '{type.Name}' may declare only one method named '{method.Name}'",
-                        DiagnosticIds.MethodOverloadingNotSupported);
+                        $"method '{method.ToDisplayString(SymbolDisplayFormat.Signature)}' is already declared in struct '{type.Name}'; return type and parameter names do not distinguish overloads",
+                        DiagnosticIds.InvalidOverload,
+                        duplicate.Locations.Select(location => new RelatedDiagnosticLocation(location, "previous declaration")));
                     continue;
                 }
 
@@ -2713,11 +2729,16 @@ internal sealed class SemanticAnalyzer
 
                 if (!@namespace.TryDeclareFunction(function))
                 {
-                    FunctionSymbol? previous = @namespace.FindFunction(function.Name);
+                    FunctionSymbol? previous = @namespace.FindFunctions(function.Name)
+                        .FirstOrDefault(function.HasSameOverloadSignature);
+                    string diagnosticId = previous is not null &&
+                        TypeIdentity.AreSame(previous.ReturnType, function.ReturnType)
+                            ? DiagnosticIds.DuplicateDeclaration
+                            : DiagnosticIds.InvalidOverload;
                     _diagnostics.Report(
                         declaration.IdentifierToken.Location,
                         $"function '{@namespace.FullName}.{function.Name}' is already declared",
-                        DiagnosticIds.DuplicateDeclaration,
+                        diagnosticId,
                         previous?.Locations.Select(location => new RelatedDiagnosticLocation(location, "previous declaration")));
                     continue;
                 }
@@ -2744,7 +2765,8 @@ internal sealed class SemanticAnalyzer
             FunctionSymbol previous = symbols[name];
             string? signature = NativeSymbolNames.GetAbiSignature(function, _constants.TargetLayout);
             string? previousSignature = NativeSymbolNames.GetAbiSignature(previous, _constants.TargetLayout);
-            if (function.IsExtern && previous.IsExtern)
+            if (function.IsExtern && previous.IsExtern &&
+                !ReferenceEquals(function.ContainingNamespace, previous.ContainingNamespace))
             {
                 if (signature is null || previousSignature is null)
                 {

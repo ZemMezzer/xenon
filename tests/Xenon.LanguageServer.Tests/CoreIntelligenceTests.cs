@@ -506,6 +506,61 @@ public sealed class CoreIntelligenceTests
         Assert.Contains("char", hover.GetProperty("contents").GetProperty("value").GetString());
     }
 
+    [Fact]
+    public async Task OverloadedMethodsFlowThroughCompletionSignatureHoverAndDefinition()
+    {
+        const string source = """
+            namespace Example;
+            struct Writer
+            {
+                public void Write(int value) {}
+                public void Write(char value) {}
+            }
+            void Use(Writer writer)
+            {
+                writer.Write(1);
+                writer.Write('A');
+                writer.Wri;
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("overloads.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        int completionOffset = source.LastIndexOf("Wri", StringComparison.Ordinal) + 3;
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
+            completionOffset);
+        JsonElement[] writeItems = completion.GetProperty("items").EnumerateArray()
+            .Where(item => item.GetProperty("label").GetString() == "Write").ToArray();
+        Assert.Equal(2, writeItems.Length);
+        Assert.Contains(writeItems, item => item.GetProperty("detail").GetString()!.Contains("int value"));
+        Assert.Contains(writeItems, item => item.GetProperty("detail").GetString()!.Contains("char value"));
+
+        int intCall = source.IndexOf("Write(1)", StringComparison.Ordinal);
+        JsonElement signatures = await RequestAtAsync(session, "textDocument/signatureHelp", uri, source,
+            intCall + "Write(".Length);
+        Assert.Equal(2, signatures.GetProperty("signatures").GetArrayLength());
+        int active = signatures.GetProperty("activeSignature").GetInt32();
+        Assert.Contains("int value", signatures.GetProperty("signatures")[active]
+            .GetProperty("label").GetString());
+
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, intCall);
+        Assert.Contains("Write(int value)", hover.GetProperty("contents").GetProperty("value").GetString());
+
+        int charCall = source.IndexOf("Write('A')", StringComparison.Ordinal);
+        JsonElement definition = await RequestAtAsync(session, "textDocument/definition", uri, source, charCall);
+        Assert.Equal(4, Assert.Single(definition.EnumerateArray()).GetProperty("range")
+            .GetProperty("start").GetProperty("line").GetInt32());
+    }
+
     private static async Task<JsonElement> RequestAtAsync(LanguageServerSession session, string method,
         string uri, string source, int offset, object? context = null, string? newName = null)
     {

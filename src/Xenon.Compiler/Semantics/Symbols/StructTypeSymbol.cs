@@ -202,9 +202,21 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
         _fields.FirstOrDefault(field => string.Equals(field.Name, name, StringComparison.Ordinal)) ??
         BaseType?.FindField(name);
 
-    public FunctionSymbol? FindMethod(string name) =>
-        _methods.FirstOrDefault(method => string.Equals(method.Name, name, StringComparison.Ordinal)) ??
-        BaseType?.FindMethod(name);
+    public IEnumerable<FunctionSymbol> FindMethods(string name)
+    {
+        var methods = new List<FunctionSymbol>();
+        foreach (FunctionSymbol method in _methods.Where(method =>
+                     string.Equals(method.Name, name, StringComparison.Ordinal))
+                 .Concat(BaseType?.FindMethods(name) ?? []))
+            if (!methods.Any(existing => existing.HasSameSignature(method))) methods.Add(method);
+        return methods;
+    }
+
+    public FunctionSymbol? FindMethod(string name)
+    {
+        FunctionSymbol[] candidates = FindMethods(name).ToArray();
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
 
     public PropertySymbol? FindProperty(string name) =>
         _properties.FirstOrDefault(property => string.Equals(property.Name, name, StringComparison.Ordinal)) ??
@@ -224,11 +236,11 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
         _constants.FirstOrDefault(constant => string.Equals(constant.Name, name, StringComparison.Ordinal)) ??
         BaseType?.FindConstant(name);
 
-    public FunctionSymbol? FindMethod(string name, bool isReadonly) =>
-        _methods.FirstOrDefault(method =>
-            string.Equals(method.Name, name, StringComparison.Ordinal) &&
-            method.IsReadonly == isReadonly) ??
-        BaseType?.FindMethod(name, isReadonly);
+    public FunctionSymbol? FindMethod(string name, bool isReadonly)
+    {
+        FunctionSymbol[] candidates = FindMethods(name).Where(method => method.IsReadonly == isReadonly).ToArray();
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
 
     public FunctionSymbol? FindInstanceMethod(string name, bool receiverIsReadonly)
     {

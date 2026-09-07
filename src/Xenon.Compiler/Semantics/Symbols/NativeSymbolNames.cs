@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace Xenon.Compiler.Semantics.Symbols;
 
 public static class NativeSymbolNames
@@ -33,8 +35,21 @@ public static class NativeSymbolNames
             return function.Name;
         }
 
-        return function.IsExport
-            ? function.FullName.Replace('.', '_')
-            : function.FullName;
+        if (function.IsExport)
+            return function.FullName.Replace('.', '_');
+
+        if (!RequiresSignatureMangle(function))
+            return function.FullName;
+
+        string signature = TypeSignature.Callable(function);
+        return $"{function.FullName}.__overload_{Convert.ToHexString(Encoding.UTF8.GetBytes(signature))}";
+    }
+
+    private static bool RequiresSignatureMangle(FunctionSymbol function)
+    {
+        if (function.ContainingType is { } containingType)
+            return containingType.GetMembers().OfType<FunctionSymbol>().Count(candidate =>
+                candidate.FunctionKind == function.FunctionKind && candidate.Name == function.Name) > 1;
+        return function.ContainingNamespace.FindFunctions(function.Name).Count > 1;
     }
 }

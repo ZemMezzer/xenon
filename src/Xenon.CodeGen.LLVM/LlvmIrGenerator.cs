@@ -416,7 +416,7 @@ public sealed class LlvmIrGenerator
     private static string GetFunctionNativeName(FunctionSymbol function, string abiIdentity) =>
         function.IsExtern || function.IsExport
             ? NativeSymbolNames.Get(function)
-            : MangleManagedName(abiIdentity, "function", function.FullName);
+            : MangleManagedName(abiIdentity, "function", NativeSymbolNames.Get(function));
 
     private string GetFunctionNativeName(FunctionSymbol function) =>
         GetFunctionNativeName(function, GetAbiIdentity(function));

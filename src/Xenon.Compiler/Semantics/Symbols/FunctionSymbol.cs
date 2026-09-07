@@ -453,10 +453,37 @@ public sealed class FunctionSymbol : Symbol
         (ContainingIndexer is not null || ContainingInterfaceIndexer is not null) ==
             (candidate.ContainingIndexer is not null || candidate.ContainingInterfaceIndexer is not null) &&
         string.Equals(Name, candidate.Name, StringComparison.Ordinal) &&
+        TypeParameters.Length == candidate.TypeParameters.Length &&
         IsStatic == candidate.IsStatic &&
         IsReadonly == candidate.IsReadonly &&
         Parameters.Length == candidate.Parameters.Length &&
-        Parameters.Zip(candidate.Parameters).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second.Type));
+        TypeSignature.Parameters(this) == TypeSignature.Parameters(candidate);
+
+    /// <summary>The source-level identity used to reject duplicate callable declarations.
+    /// Return type, parameter names, static state, and receiver readonly state are deliberately excluded.</summary>
+    public bool HasSameOverloadSignature(FunctionSymbol candidate) =>
+        FunctionKind == candidate.FunctionKind &&
+        AccessorKind == candidate.AccessorKind &&
+        (ContainingProperty is not null || ContainingInterfaceProperty is not null) ==
+            (candidate.ContainingProperty is not null || candidate.ContainingInterfaceProperty is not null) &&
+        (ContainingIndexer is not null || ContainingInterfaceIndexer is not null) ==
+            (candidate.ContainingIndexer is not null || candidate.ContainingInterfaceIndexer is not null) &&
+        string.Equals(Name, candidate.Name, StringComparison.Ordinal) &&
+        TypeParameters.Length == candidate.TypeParameters.Length &&
+        Parameters.Length == candidate.Parameters.Length &&
+        TypeSignature.Parameters(this) == TypeSignature.Parameters(candidate);
+
+    public bool ConflictsWithOverloadName(FunctionSymbol candidate, string proposedName)
+    {
+        if (!string.Equals(proposedName, candidate.Name, StringComparison.Ordinal) ||
+            TypeParameters.Length != candidate.TypeParameters.Length ||
+            Parameters.Length != candidate.Parameters.Length ||
+            TypeSignature.Parameters(this) != TypeSignature.Parameters(candidate))
+            return false;
+        bool readonlyReceiverPair = FunctionKind == FunctionKind.Method && candidate.FunctionKind == FunctionKind.Method &&
+            !IsStatic && !candidate.IsStatic && IsReadonly != candidate.IsReadonly;
+        return !readonlyReceiverPair;
+    }
 
     public bool Overrides(FunctionSymbol candidate) =>
         HasSameSignature(candidate) && TypeIdentity.AreSame(ReturnType, candidate.ReturnType);

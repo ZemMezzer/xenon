@@ -294,7 +294,10 @@ internal static class LspCoreIntelligence
                     ParameterDocumentation(candidate, parameter))).ToArray(),
                 Markup(candidate.Documentation))).ToArray();
         int maxParameter = signatures.Max(signature => signature.Parameters.Length);
-        return new LspSignatureHelp(signatures, 0,
+        int activeSignature = info.Symbol is null ? 0 : Array.FindIndex(candidates,
+            candidate => ReferenceEquals(candidate, info.Symbol));
+        if (activeSignature < 0) activeSignature = 0;
+        return new LspSignatureHelp(signatures, activeSignature,
             maxParameter == 0 ? 0 : Math.Min(activeParameter, maxParameter - 1));
     }
 

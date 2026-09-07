@@ -973,7 +973,7 @@ public sealed class SemanticModelTests
             (Example("struct Base {} interface IValue : Base {}"), DiagnosticIds.InterfaceBaseMustBeInterface),
             (Example("struct Value { public int this[] { get { return 1; } } }"), DiagnosticIds.IndexerRequiresParameter),
             (Example("void Test(void value) {}"), DiagnosticIds.VoidParameterType),
-            (Example("struct Value { public void Run(int value) {} public void Run(float value) {} }"), DiagnosticIds.MethodOverloadingNotSupported),
+            (Example("struct Value { public int Run(int value) { return 1; } public float Run(int other) { return 2.0f; } }"), DiagnosticIds.InvalidOverload),
             (Example("struct Value { public static int Item { get { return 1; } } }"), DiagnosticIds.StaticPropertyNotSupported),
             (Example("struct Value { public static int this[int index] { get { return index; } } }"), DiagnosticIds.StaticIndexerNotSupported),
             (Example("abstract abstract struct Value {}"), DiagnosticIds.DuplicateModifier),
