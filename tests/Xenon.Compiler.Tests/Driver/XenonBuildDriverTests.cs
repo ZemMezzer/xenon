@@ -2,6 +2,7 @@ using Xenon.CodeGen.LLVM;
 using Xenon.Driver;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Text;
 using Xenon.ProjectSystem;
 using Xunit;
 
@@ -41,13 +42,22 @@ public sealed class XenonBuildDriverTests
         Assert.True(File.Exists(result.ArtifactPath));
     }
 
-    [Fact]
-    public async Task ProjectReferenceGenericFunctionAndStructCompileLinkAndRunInConsumer()
+    [Theory]
+    [InlineData("static-library")]
+    [InlineData("shared-library")]
+    public async Task ProjectReferenceGenericImplementationAbiCompilesLinksAndRunsInConsumer(
+        string projectType)
     {
         using var directory = new TemporaryProject();
-        string libraryProject = directory.WriteDependencyProject("GenericLibrary", "static-library", """
+        string libraryProject = directory.WriteDependencyProject("GenericLibrary", projectType, """
             namespace GenericLibrary;
+            internal static struct GenericRuntime
+            {
+                internal static int Bonus = 1;
+            }
+            internal int Offset() { return 1; }
             public T Identity<T>(T value) { return move value; }
+            public int ReadOffset<T>() { return Offset() + GenericRuntime.Bonus; }
             struct Box<T>
             {
                 T value;
@@ -62,8 +72,8 @@ public sealed class XenonBuildDriverTests
             namespace GenericApp;
             int Main()
             {
-                Box<int> box = Box<int>(40);
-                return box.Offset + Identity<int>(box.Get());
+                Box<int> box = Box<int>(38);
+                return box.Offset + Identity<int>(box.Get()) + ReadOffset<int>();
             }
             """, libraryProject);
 
@@ -1135,6 +1145,88 @@ public sealed class XenonBuildDriverTests
                 """);
 
         Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+    }
+
+    [Fact]
+    public async Task StdShapedAccessibilityAndTypeModifiersWorkWithoutLibrarySources()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("StdShape", "xenon-library", """
+            namespace Xenon.IO;
+
+            internal struct ConsoleWriterState
+            {
+                public static int Seed = 40;
+            }
+
+            internal int Offset() { return 1; }
+
+            public enum ConsoleColor
+            {
+                Black,
+                White,
+                public static int Writes;
+                public static threadlocal int ThreadWrites = 1;
+                public static ConsoleColor Default;
+            }
+
+            public static struct Console
+            {
+                public static ConsoleWriter Out;
+                public static ConsoleWriter Error;
+                public static ConsoleReader In;
+                public static int Read()
+                {
+                    ConsoleColor.Default = ConsoleColor.White;
+                    ConsoleColor.Writes = ConsoleWriterState.Seed - 2;
+                    ConsoleColor.ThreadWrites += 1;
+                    if (ConsoleColor.Default != ConsoleColor.White) return 0;
+                    return ConsoleColor.Writes + ConsoleColor.ThreadWrites;
+                }
+            }
+
+            public sealed struct ConsoleWriter { public int Value; }
+            public struct ConsoleReader { public int Value; }
+            public struct ConsoleReaderBase
+            {
+                protected int Value;
+                protected ConsoleReaderBase(int value) { Value = value; }
+            }
+            public readonly struct ConsoleKey
+            {
+                int Code;
+                public ConsoleKey(int code) { Code = code; }
+                public int Read() { return Code; }
+            }
+
+            public int GenericOffset<T>() { return Offset(); }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "StdShapeApp", """
+                using Xenon.IO;
+                namespace StdShapeApp;
+                struct DerivedReader : ConsoleReaderBase
+                {
+                    public DerivedReader(int value) : base(value) {}
+                    public int Read() { return Value; }
+                }
+                int Main()
+                {
+                    ConsoleKey key = ConsoleKey(0);
+                    DerivedReader reader = DerivedReader(1);
+                    return Console.Read() + GenericOffset<int>() + reader.Read() + key.Read();
+                }
+                """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+        Compilation hiddenConsumer = Compilation.Create(new CompilationOptions(), app.Compilation!.References,
+            SourceText.From("""
+                using Xenon.IO;
+                namespace HiddenConsumer;
+                int Run() { ConsoleWriterState state; return Offset(); }
+                """, "hidden-consumer.xe"));
+        Assert.True(hiddenConsumer.HasErrors);
     }
 
     [Theory]

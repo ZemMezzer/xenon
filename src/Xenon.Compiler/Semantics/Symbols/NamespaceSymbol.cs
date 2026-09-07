@@ -62,14 +62,17 @@ public sealed class NamespaceSymbol : Symbol
     {
         foreach (NamespaceSymbol child in source.Namespaces.OrderBy(item => item.Name, StringComparer.Ordinal))
             GetOrAddNamespace(child.Name).ImportPublicMembers(child);
-        foreach (DeclaredTypeSymbol type in source.Types.OrderBy(item => item.Name, StringComparer.Ordinal))
+        foreach (DeclaredTypeSymbol type in source.Types.Where(item => item.IsPublic)
+                     .OrderBy(item => item.Name, StringComparer.Ordinal))
             AddCandidate(_types, type.Name, type);
         foreach (FunctionSymbol function in source.Functions.Where(item => item.IsPublic)
             .OrderBy(item => item.Name, StringComparer.Ordinal))
             AddCandidate(_functions, function.Name, function);
-        foreach (ConstantSymbol constant in source.Constants.OrderBy(item => item.Name, StringComparer.Ordinal))
+        foreach (ConstantSymbol constant in source.Constants.Where(item => item.IsPublic)
+                     .OrderBy(item => item.Name, StringComparer.Ordinal))
             AddCandidate(_constants, constant.Name, constant);
-        foreach (TemplateSymbol template in source.Templates.OrderBy(item => item.Name, StringComparer.Ordinal))
+        foreach (TemplateSymbol template in source.Templates.Where(item => item.IsPublic)
+                     .OrderBy(item => item.Name, StringComparer.Ordinal))
             AddCandidate(_templates, template.Name, template);
     }
 

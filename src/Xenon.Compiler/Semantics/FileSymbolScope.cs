@@ -49,7 +49,8 @@ internal sealed class FileSymbolScope
             .Concat(ContainingNamespace.Functions)
             .Concat(ContainingNamespace.Constants)
             .Concat(_importedNamespaces.SelectMany(ns => ns.Namespaces.Cast<Symbol>()
-                .Concat(ns.Types).Concat(ns.Templates).Concat(ns.Functions.Where(function => function.IsPublic)).Concat(ns.Constants)))
+                .Concat(ns.Types).Concat(ns.Templates).Concat(ns.Functions.Where(IsNamespaceAccessible))
+                .Concat(ns.Constants.Where(IsNamespaceAccessible))))
             .Concat(_aliasSymbols)
             .Distinct();
 
@@ -72,9 +73,8 @@ internal sealed class FileSymbolScope
         @namespace.Namespaces.Cast<Symbol>()
             .Concat(@namespace.Types)
             .Concat(@namespace.Templates)
-            .Concat(@namespace.Functions.Where(function =>
-                ReferenceEquals(@namespace, ContainingNamespace) || function.IsPublic))
-            .Concat(@namespace.Constants)
+            .Concat(@namespace.Functions.Where(IsNamespaceAccessible))
+            .Concat(@namespace.Constants.Where(IsNamespaceAccessible))
             .Where(symbol => symbol.IsUserVisible)
             .Distinct();
 
@@ -322,47 +322,27 @@ internal sealed class FileSymbolScope
             return null;
         }
 
-        var publicMatches = new List<FunctionSymbol>();
-        var privateMatches = new List<FunctionSymbol>();
+        var matches = new List<FunctionSymbol>();
         foreach (NamespaceSymbol imported in _importedNamespaces)
         {
             foreach (FunctionSymbol function in imported.FindFunctions(name))
-                if (function.IsPublic) publicMatches.Add(function); else privateMatches.Add(function);
+                if (IsNamespaceAccessible(function)) matches.Add(function);
         }
 
 
-        if (publicMatches.Count == 1)
+        if (matches.Count == 1)
         {
-            return publicMatches[0];
+            return matches[0];
         }
 
-        if (publicMatches.Count > 1)
+        if (matches.Count > 1)
         {
             diagnostics.Report(
                 location,
-                $"function name '{name}' is ambiguous between {FormatFunctionCandidates(publicMatches)}",
+                $"function name '{name}' is ambiguous between {FormatFunctionCandidates(matches)}",
                 DiagnosticIds.AmbiguousName);
             diagnosticReported = true;
             return null;
-        }
-
-
-        if (privateMatches.Count == 1)
-        {
-            FunctionSymbol inaccessible = privateMatches[0];
-            diagnostics.Report(
-                location,
-                $"function '{inaccessible.Name}' is private in namespace '{inaccessible.ContainingNamespace.FullName}'",
-                DiagnosticIds.InaccessibleSymbol);
-            diagnosticReported = true;
-        }
-        else if (privateMatches.Count > 1)
-        {
-            diagnostics.Report(
-                location,
-                $"function name '{name}' refers only to private functions in imported namespaces",
-                DiagnosticIds.InaccessibleSymbol);
-            diagnosticReported = true;
         }
 
         return null;
@@ -450,11 +430,10 @@ internal sealed class FileSymbolScope
         }
         FunctionSymbol function = candidates[0];
 
-        if (!ReferenceEquals(containingNamespace, ContainingNamespace) && !function.IsPublic)
+        if (!IsNamespaceAccessible(function))
         {
-            diagnostics.Report(
-                location,
-                $"function '{function.Name}' is private in namespace '{containingNamespace!.FullName}'",
+            diagnostics.Report(location,
+                $"function '{function.Name}' is inaccessible in namespace '{containingNamespace!.FullName}'",
                 DiagnosticIds.InaccessibleSymbol);
             diagnosticReported = true;
             return null;
@@ -462,6 +441,9 @@ internal sealed class FileSymbolScope
 
         return function;
     }
+
+    private bool IsNamespaceAccessible(Symbol symbol) =>
+        AccessibilityRules.IsAccessible(symbol, ContainingNamespace);
 
     public IReadOnlyList<FunctionSymbol> ResolveQualifiedFunctions(IReadOnlyList<string> parts)
     {

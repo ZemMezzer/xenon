@@ -12,15 +12,19 @@ public sealed class InterfaceTypeSymbol : DeclaredTypeSymbol
 
     internal InterfaceTypeSymbol(string name, NamespaceSymbol containingNamespace, InterfaceDeclarationSyntax declaration)
         : base(name, containingNamespace, "interface", origin: SymbolOrigin.Source(declaration),
-            documentation: SymbolDocumentation.FromDeclaration(declaration))
+            documentation: SymbolDocumentation.FromDeclaration(declaration),
+            accessibility: AccessibilityFacts.FromSyntax(declaration.AccessModifierToken,
+                declaration.SecondaryAccessModifierToken, Accessibility.Public))
     {
         Declaration = declaration;
         SetImplementation(new SourceSymbolImplementation(declaration));
     }
 
     internal InterfaceTypeSymbol(string name, NamespaceSymbol containingNamespace,
-        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
-        : base(name, containingNamespace, "interface", origin: origin, documentation: documentation) { }
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null,
+        Accessibility accessibility = Accessibility.Public)
+        : base(name, containingNamespace, "interface", origin: origin, documentation: documentation,
+            accessibility: accessibility) { }
 
     public override IEnumerable<Symbol> GetMembers() => Methods.Cast<Symbol>().Concat(Properties).Concat(Indexers);
     public override IEnumerable<Symbol> LookupMembers(string name) =>

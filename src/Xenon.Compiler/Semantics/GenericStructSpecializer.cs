@@ -103,7 +103,8 @@ internal sealed class GenericStructSpecializer
 
         string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
         var specialized = new StructTypeSymbol(name, _resolveNamespace(definition.ContainingNamespace), definition.IsAbstract,
-            SymbolOrigin.CompilerGenerated, definition.Documentation);
+            SymbolOrigin.CompilerGenerated, definition.Documentation, definition.Accessibility,
+            definition.IsReadonly, definition.IsStatic, definition.IsSealed);
         specialized.SetGenericSpecialization(definition, typeArguments);
         // Publish the skeleton before resolving fields so recursive constructed
         // types can find this in-progress specialization.

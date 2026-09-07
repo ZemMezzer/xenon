@@ -28,13 +28,15 @@ public static class SymbolDisplay
         {
             string display = type.ToDisplayString(qualified ? TypeDisplayFormat.FullyQualified : typeFormat);
             return format == SymbolDisplayFormat.Declaration && type is DeclaredTypeSymbol declared
-                ? $"{(declared is StructTypeSymbol { IsAbstract: true } ? "abstract " : "")}{declared.DeclarationKind} {display}"
+                ? TypeDeclaration(declared, display)
                 : display;
         }
         if (symbol is TemplateSymbol template)
         {
             string display = qualified ? template.QualifiedName : template.Name;
-            return format == SymbolDisplayFormat.Declaration ? $"template {display}" : display;
+            return format == SymbolDisplayFormat.Declaration
+                ? $"{AccessibilityFacts.ToDisplayText(template.Accessibility)} template {display}"
+                : display;
         }
 
         string name = GetName(symbol, qualified);
@@ -137,6 +139,19 @@ public static class SymbolDisplay
         return display.StartsWith("readonly ", StringComparison.Ordinal) ? display : "readonly " + display;
     }
 
+    private static string TypeDeclaration(DeclaredTypeSymbol type, string display)
+    {
+        string modifiers = AccessibilityFacts.ToDisplayText(type.Accessibility) + " ";
+        if (type is StructTypeSymbol structure)
+        {
+            if (structure.IsReadonly) modifiers += "readonly ";
+            if (structure.IsStatic) modifiers += "static ";
+            else if (structure.IsSealed) modifiers += "sealed ";
+            if (structure.IsAbstract) modifiers += "abstract ";
+        }
+        return $"{modifiers}{type.DeclarationKind} {display}";
+    }
+
     private static string Modifiers(Symbol symbol) => symbol switch
     {
         NamespaceSymbol => "namespace ",
@@ -151,12 +166,14 @@ public static class SymbolDisplay
         InterfaceIndexerSymbol => "public abstract ",
         TemplateMemberRequirementSymbol requirement =>
             MemberModifiers(requirement.Accessibility, requirement.IsStatic),
+        ConstantSymbol constant when constant.ContainingSymbol is NamespaceSymbol =>
+            AccessibilityFacts.ToDisplayText(constant.Accessibility) + " ",
         _ => "",
     };
 
     private static string MemberModifiers(Accessibility accessibility, bool isStatic, bool isAbstract = false,
         bool isVirtual = false, bool isOverride = false) =>
-        (accessibility == Accessibility.Public ? "public " : "private ")
+        AccessibilityFacts.ToDisplayText(accessibility) + " "
         + (isStatic ? "static " : "")
         + (isAbstract ? "abstract " : "")
         + (isVirtual ? "virtual " : "")

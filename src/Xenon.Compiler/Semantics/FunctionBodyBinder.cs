@@ -331,7 +331,7 @@ internal sealed class FunctionBodyBinder
                 if (syntax?.BaseKeyword is { } baseKeyword)
                     _semanticInfo.ExplicitReferences.Add(new ResolvedSymbolReference(baseConstructor,
                         baseKeyword.Location, ResolvedReferenceKind.Call));
-                if (!baseConstructor.IsPublic)
+                if (!IsAccessible(baseConstructor))
                 {
                     _diagnostics.Report(syntax?.BaseKeyword?.Location ?? location, $"constructor '{baseType.Name}' is private",
                         DiagnosticIds.InaccessibleSymbol);
@@ -1050,6 +1050,10 @@ internal sealed class FunctionBodyBinder
     {
         bool isConstant = syntax.Type.GetQualifier(SyntaxKind.ConstKeyword) is not null && !syntax.Type.Contains<PointerTypeSyntax>() && !syntax.Type.Contains<ReferenceTypeSyntax>();
         TypeSymbol type = TypeResolver.Resolve(isConstant ? syntax.Type.WithoutQualifier(SyntaxKind.ConstKeyword) : syntax.Type, _fileScope, _diagnostics);
+        if (ContainsStaticStruct(type))
+            _diagnostics.Report(syntax.Type.NameToken.Location,
+                "static structs cannot be used as local, pointer, reference, ownership, or array values",
+                DiagnosticIds.InvalidLocalType);
         if (type is StructTypeSymbol { IsAbstract: true } abstractType)
             _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{abstractType.Name}' cannot be instantiated",
                 DiagnosticIds.AbstractInstantiation);
@@ -2002,7 +2006,7 @@ internal sealed class FunctionBodyBinder
                         DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
                     return new BoundErrorExpression();
                 }
-                if (!field.IsPublic && !TypeIdentity.AreSame(containingType, field.ContainingType))
+                if (!IsAccessible(field))
                 {
                     _diagnostics.Report(syntax.IdentifierToken.Location, $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'",
                         DiagnosticIds.InaccessibleSymbol);
@@ -2053,6 +2057,14 @@ internal sealed class FunctionBodyBinder
             syntax.IdentifierToken.Text,
             syntax.IdentifierToken.Location,
             _diagnostics);
+        if (constant is not null && !IsAccessible(constant))
+        {
+            _semanticInfo.Symbols[syntax] = new SymbolInfo(null, [constant], CandidateReason.Inaccessible);
+            _diagnostics.Report(syntax.IdentifierToken.Location,
+                $"constant '{constant.Name}' is inaccessible from this context",
+                DiagnosticIds.InaccessibleSymbol);
+            return new BoundErrorExpression();
+        }
         if (constant?.BoundValue is { } constantValue)
         {
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(constant);
@@ -2174,8 +2186,7 @@ internal sealed class FunctionBodyBinder
             return true;
         }
 
-        if (!function.IsPublic && function.ContainingType is not null &&
-            !TypeIdentity.AreSame(_function.ContainingType, function.ContainingType))
+        if (function.ContainingType is not null && !IsAccessible(function))
         {
             _diagnostics.Report(nameToken.Location,
                 $"static method '{function.Name}' is private in struct '{function.ContainingType.Name}'",
@@ -2183,8 +2194,7 @@ internal sealed class FunctionBodyBinder
             address = new BoundErrorExpression();
             return true;
         }
-        if (!function.IsPublic && function.ContainingType is null &&
-            !ReferenceEquals(function.ContainingNamespace, _fileScope.ContainingNamespace))
+        if (function.ContainingType is null && !IsAccessible(function))
         {
             _diagnostics.Report(nameToken.Location,
                 $"function '{function.Name}' is private in namespace '{function.ContainingNamespace.FullName}'",
@@ -4245,6 +4255,21 @@ internal sealed class FunctionBodyBinder
                     _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(member);
                     return value;
                 }
+                FieldSymbol? enumField = enumeration.FindStaticField(syntax.MemberToken.Text);
+                if (enumField is not null)
+                {
+                    if (!IsAccessible(enumField))
+                    {
+                        RecordCandidates(syntax, null, [enumField], CandidateReason.Inaccessible);
+                        _diagnostics.Report(syntax.MemberToken.Location,
+                            $"static field '{enumField.Name}' is inaccessible from this context",
+                            DiagnosticIds.InaccessibleSymbol);
+                        return new BoundErrorExpression();
+                    }
+                    RecordStaticReceiver(syntax.Receiver, enumeration);
+                    RecordSymbolAndType(syntax, enumField, enumField.Type);
+                    return new BoundStaticFieldExpression(enumField);
+                }
                 _diagnostics.Report(syntax.MemberToken.Location, $"enum '{enumeration.Name}' has no valid member '{syntax.MemberToken.Text}'",
                     DiagnosticIds.UnknownEnumMember);
                 return new BoundErrorExpression();
@@ -4264,7 +4289,7 @@ internal sealed class FunctionBodyBinder
                 FieldSymbol? staticField = staticType.FindStaticField(syntax.MemberToken.Text);
                 if (staticField is not null)
                 {
-                    if (!staticField.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, staticField.ContainingType))
+                    if (!IsAccessible(staticField))
                     {
                         RecordCandidates(syntax, null, [staticField], CandidateReason.Inaccessible);
                         _diagnostics.Report(syntax.MemberToken.Location, $"static field '{staticField.Name}' is private in struct '{staticField.ContainingType.Name}'",
@@ -4385,7 +4410,7 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (!field.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, field.ContainingType))
+        if (!IsAccessible(field, receiver, pointerAccess))
         {
             _diagnostics.Report(
                 syntax.MemberToken.Location,
@@ -4536,7 +4561,7 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         if (receiver is BoundThisExpression) ValidateRequiredFields(location);
-        if (!property.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, property.ContainingType))
+        if (!IsAccessible(property, receiver, pointerAccess))
             _diagnostics.Report(location, $"property '{property.Name}' is private in struct '{property.ContainingType.Name}'",
                 DiagnosticIds.InaccessibleSymbol);
         if (property.Setter is not FunctionSymbol setter)
@@ -4596,7 +4621,7 @@ internal sealed class FunctionBodyBinder
     {
         ValidateProjectedReceiverMove(receiver, location);
         if (receiver is BoundThisExpression) ValidateRequiredFields(location);
-        if (!property.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, property.ContainingType))
+        if (!IsAccessible(property, receiver, isPointerAccess))
             _diagnostics.Report(location, $"property '{property.Name}' is private in struct '{property.ContainingType.Name}'",
                 DiagnosticIds.InaccessibleSymbol);
         if (property.Getter is not FunctionSymbol getter)
@@ -4645,11 +4670,27 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         if (syntax.Keyword.Kind != SyntaxKind.OffsetOfKeyword)
+        {
+            if (ContainsStaticStruct(type))
+            {
+                _diagnostics.Report(syntax.Type.NameToken.Location,
+                    "layout intrinsics are not defined for static structs",
+                    DiagnosticIds.InvalidBaseType);
+                return new BoundErrorExpression();
+            }
             return new BoundTypeLayoutExpression(syntax.Keyword.Kind, type, null);
+        }
 
         if (type is not StructTypeSymbol structType)
         {
             _diagnostics.Report(syntax.Type.NameToken.Location, "offsetof requires a struct type",
+                DiagnosticIds.OffsetOfRequiresStructType);
+            return new BoundErrorExpression();
+        }
+        if (structType.IsStatic)
+        {
+            _diagnostics.Report(syntax.Type.NameToken.Location,
+                "offsetof is not defined for static structs",
                 DiagnosticIds.OffsetOfRequiresStructType);
             return new BoundErrorExpression();
         }
@@ -4716,7 +4757,7 @@ internal sealed class FunctionBodyBinder
             if (indexer is null)
                 return new BoundErrorExpression();
             RecordSymbolAndType(syntax, indexer, indexer.Type);
-            if (!indexer.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, indexer.ContainingType))
+            if (!IsAccessible(indexer, receiver, pointerAccess: false))
             {
                 RecordCandidates(syntax, null, [indexer], CandidateReason.Inaccessible);
                 _diagnostics.Report(syntax.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'",
@@ -4823,7 +4864,7 @@ internal sealed class FunctionBodyBinder
                 return new BoundErrorExpression();
             RecordSymbolAndType(target, indexer, indexer.Type);
             _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(indexer);
-            if (!indexer.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, indexer.ContainingType))
+            if (!IsAccessible(indexer, receiver, pointerAccess: false))
             {
                 RecordCandidates(target, null, [indexer], CandidateReason.Inaccessible);
                 _diagnostics.Report(target.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'",
@@ -5001,6 +5042,14 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        if (structType.IsStatic)
+        {
+            _diagnostics.Report(syntax.Type.NameToken.Location,
+                $"static struct '{structType.Name}' cannot be instantiated",
+                DiagnosticIds.AbstractInstantiation);
+            return new BoundErrorExpression();
+        }
+
         if (structType.IsAbstract)
         {
             _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
@@ -5025,6 +5074,12 @@ internal sealed class FunctionBodyBinder
         TextLocation allocationLocation,
         ArrayStorageKind storage)
     {
+        if (ContainsStaticStruct(elementType))
+        {
+            _diagnostics.Report(elementLocation, "static structs cannot be used as array elements",
+                DiagnosticIds.InvalidBaseType);
+            return new BoundErrorExpression();
+        }
         ValidateArrayElementType(elementType, elementLocation);
         if (storage == ArrayStorageKind.Stack)
         {
@@ -5125,6 +5180,13 @@ internal sealed class FunctionBodyBinder
             return BindGenericConstructionExpression(syntax, genericParameter, arguments);
         if (callTargetType is StructTypeSymbol structType)
         {
+            if (structType.IsStatic)
+            {
+                _diagnostics.Report(name.IdentifierToken.Location,
+                    $"static struct '{structType.Name}' cannot be instantiated",
+                    DiagnosticIds.AbstractInstantiation);
+                return new BoundErrorExpression();
+            }
             if (structType.IsAbstract)
             {
                 _diagnostics.Report(name.IdentifierToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
@@ -5153,7 +5215,7 @@ internal sealed class FunctionBodyBinder
                 return new BoundErrorExpression();
             }
 
-            if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structType))
+            if (!IsAccessible(constructor))
             {
                 RecordCandidates(syntax.Target, null, structType.Constructors, CandidateReason.Inaccessible);
                 _diagnostics.Report(name.IdentifierToken.Location, $"constructor '{structType.Name}' is private",
@@ -5189,7 +5251,7 @@ internal sealed class FunctionBodyBinder
                         DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
                     return new BoundErrorExpression();
                 }
-                if (!method.IsPublic && !TypeIdentity.AreSame(containingType, method.ContainingType))
+                if (!IsAccessible(method))
                 {
                     RecordCandidates(syntax.Target, null, methodCandidates, CandidateReason.Inaccessible);
                     _diagnostics.Report(name.IdentifierToken.Location, $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
@@ -5238,7 +5300,7 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (!function.IsPublic && !ReferenceEquals(function.ContainingNamespace, _fileScope.ContainingNamespace))
+        if (!IsAccessible(function))
         {
             RecordCandidates(syntax.Target, null, functionCandidates, CandidateReason.Inaccessible);
             _diagnostics.Report(name.IdentifierToken.Location,
@@ -5484,7 +5546,7 @@ internal sealed class FunctionBodyBinder
             arguments, location, syntax.Target,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         if (definition is null) return new BoundErrorExpression();
-        if (!definition.IsPublic && !ReferenceEquals(definition.ContainingNamespace, _fileScope.ContainingNamespace))
+        if (!IsAccessible(definition))
         {
             _diagnostics.Report(location,
                 $"function '{definition.Name}' is private in namespace '{definition.ContainingNamespace.FullName}'",
@@ -5508,6 +5570,13 @@ internal sealed class FunctionBodyBinder
         var typeSyntax = new NamedTypeSyntax([name.IdentifierToken], [], typeArguments);
         TypeSymbol resolved = TypeResolver.Resolve(typeSyntax, _fileScope, _diagnostics);
         if (resolved is not StructTypeSymbol structure) return new BoundErrorExpression();
+        if (structure.IsStatic)
+        {
+            _diagnostics.Report(name.IdentifierToken.Location,
+                $"static struct '{structure.Name}' cannot be instantiated",
+                DiagnosticIds.AbstractInstantiation);
+            return new BoundErrorExpression();
+        }
         if (structure.IsAbstract)
         {
             _diagnostics.Report(name.IdentifierToken.Location,
@@ -5535,7 +5604,7 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.MissingConstructor);
             return new BoundErrorExpression();
         }
-        if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structure))
+        if (!IsAccessible(constructor))
             _diagnostics.Report(name.IdentifierToken.Location,
                 $"constructor '{structure.Name}' is private", DiagnosticIds.InaccessibleSymbol);
         arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments,
@@ -5598,7 +5667,7 @@ internal sealed class FunctionBodyBinder
             $"static method '{structType.Name}.{target.MemberToken.Text}'", target, out _,
             completedArgumentCount: incomplete ? completedArgumentCount : null);
         if (method is null) return new BoundErrorExpression();
-        if (!method.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, method.ContainingType))
+        if (!IsAccessible(method))
         {
             RecordCandidates(target, null, candidates, CandidateReason.Inaccessible);
             _diagnostics.Report(target.MemberToken.Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
@@ -5679,6 +5748,13 @@ internal sealed class FunctionBodyBinder
         StructTypeSymbol? structType = _fileScope.ResolveQualifiedType(parts) as StructTypeSymbol;
         if (structType is not null)
         {
+            if (structType.IsStatic)
+            {
+                _diagnostics.Report(target.MemberToken.Location,
+                    $"static struct '{structType.Name}' cannot be instantiated",
+                    DiagnosticIds.AbstractInstantiation);
+                return new BoundErrorExpression();
+            }
             if (structType.IsAbstract)
             {
                 _diagnostics.Report(target.MemberToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
@@ -5706,7 +5782,7 @@ internal sealed class FunctionBodyBinder
                 return new BoundErrorExpression();
             }
 
-            if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structType))
+            if (!IsAccessible(constructor))
             {
                 RecordCandidates(target, null, structType.Constructors, CandidateReason.Inaccessible);
                 _diagnostics.Report(target.MemberToken.Location, $"constructor '{structType.Name}' is private",
@@ -5725,7 +5801,7 @@ internal sealed class FunctionBodyBinder
             completedArgumentCount: incomplete ? completedArgumentCount : null);
         if (function is not null)
         {
-            if (!function.IsPublic && !ReferenceEquals(function.ContainingNamespace, _fileScope.ContainingNamespace))
+            if (!IsAccessible(function))
             {
                 RecordCandidates(target, null, functionCandidates, CandidateReason.Inaccessible);
                 _diagnostics.Report(target.MemberToken.Location,
@@ -5926,7 +6002,7 @@ internal sealed class FunctionBodyBinder
             if (methodCandidates.Length != 0)
                 return new BoundErrorExpression();
             RecordCandidates(target, null, methodCandidates,
-                namedMethod is not null && (hasReadonlyReceiver || !namedMethod.IsPublic)
+                namedMethod is not null && (hasReadonlyReceiver || !IsAccessible(namedMethod, receiver, pointerAccess))
                     ? CandidateReason.Inaccessible
                     : namedMethod?.IsStatic == true ? CandidateReason.NotInvocable : CandidateReason.NotFound);
             if (namedMethod?.IsStatic == true)
@@ -5960,7 +6036,7 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (!method.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, method.ContainingType))
+        if (!IsAccessible(method, receiver, pointerAccess))
         {
             RecordCandidates(target, null, methodCandidates, CandidateReason.Inaccessible);
             _diagnostics.Report(
@@ -6254,6 +6330,14 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        if (structType.IsStatic)
+        {
+            _diagnostics.Report(syntax.Type.NameToken.Location,
+                $"static struct '{structType.Name}' cannot be allocated",
+                DiagnosticIds.AbstractInstantiation);
+            return new BoundErrorExpression();
+        }
+
         if (structType.IsAbstract)
         {
             _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
@@ -6294,7 +6378,7 @@ internal sealed class FunctionBodyBinder
                 return new BoundErrorExpression();
             }
 
-            if (!constructor.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, structType))
+            if (!IsAccessible(constructor))
             {
                 RecordCandidates(syntax, null, structType.Constructors, CandidateReason.Inaccessible);
                 _diagnostics.Report(syntax.Type.NameToken.Location, $"constructor '{structType.Name}' is private",
@@ -6362,7 +6446,7 @@ internal sealed class FunctionBodyBinder
     private void ValidateDestructorAccess(FunctionSymbol? destructor, TextLocation location)
     {
         if (destructor?.FunctionKind is FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) return;
-        if (destructor is { IsPublic: false } && !TypeIdentity.AreSame(_function.ContainingType, destructor.ContainingType))
+        if (destructor is not null && !IsAccessible(destructor))
             _diagnostics.Report(location, $"destructor '{destructor.ContainingType!.Name}' is private",
                 DiagnosticIds.InaccessibleSymbol);
     }
@@ -6434,7 +6518,7 @@ internal sealed class FunctionBodyBinder
             convertedArguments[index] = argument;
             SetConvertedType(argumentSyntax[index], argument.Type);
 
-            if (!field.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, field.ContainingType))
+            if (!AccessibilityRules.IsAccessible(field, _function, structType))
             {
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
@@ -8497,6 +8581,36 @@ internal sealed class FunctionBodyBinder
             BoundMemberAccessExpression member => IsWritable(member.Receiver),
             _ => true,
         };
+    }
+
+    private bool IsAccessible(Symbol symbol) => AccessibilityRules.IsAccessible(symbol, _function);
+
+    private static bool ContainsStaticStruct(TypeSymbol type) => type switch
+    {
+        StructTypeSymbol { IsStatic: true } => true,
+        StructTypeSymbol { IsGenericSpecialization: true } structure =>
+            structure.TypeArguments.Any(ContainsStaticStruct),
+        PointerTypeSymbol pointer => ContainsStaticStruct(pointer.ElementType),
+        ReferenceTypeSymbol reference => ContainsStaticStruct(reference.ElementType),
+        ArrayTypeSymbol array => ContainsStaticStruct(array.ElementType),
+        AtomicTypeSymbol atomic => ContainsStaticStruct(atomic.ElementType),
+        OwnershipTypeSymbol ownership => ContainsStaticStruct(ownership.ElementType),
+        LifetimeModifierTypeSymbol modifier => ContainsStaticStruct(modifier.ElementType),
+        FunctionPointerTypeSymbol function => ContainsStaticStruct(function.ReturnType) ||
+            function.ParameterTypes.Any(ContainsStaticStruct),
+        _ => false,
+    };
+
+    private bool IsAccessible(Symbol symbol, BoundExpression receiver, bool pointerAccess)
+    {
+        DeclaredTypeSymbol? receiverType = pointerAccess ? receiver.Type switch
+        {
+            PointerTypeSymbol { ElementType: DeclaredTypeSymbol type } => type,
+            OwnershipTypeSymbol { ElementType: DeclaredTypeSymbol type } => type,
+            ReferenceTypeSymbol { ElementType: DeclaredTypeSymbol type } => type,
+            _ => receiver is BoundThisExpression @this ? @this.ContainingType : null,
+        } : receiver.Type as DeclaredTypeSymbol;
+        return AccessibilityRules.IsAccessible(symbol, _function, receiverType);
     }
 
     private bool IsReadonlyReceiver(BoundExpression receiver, bool pointerAccess) =>

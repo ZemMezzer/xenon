@@ -28,7 +28,8 @@ public sealed class FunctionSymbol : Symbol
         ReturnType = returnType;
         Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
-        Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
+        Accessibility = declaration.IsExport ? Accessibility.Public : AccessibilityFacts.FromSyntax(
+            declaration.AccessModifierToken, declaration.SecondaryAccessModifierToken, Accessibility.Private);
         FunctionKind = FunctionKind.Ordinary;
         IsReadonly = declaration.IsReadonly;
         SetTypeParameters(typeParameters.IsDefault ? [] : typeParameters);
@@ -111,12 +112,13 @@ public sealed class FunctionSymbol : Symbol
         ReturnType = returnType;
         Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
-        Accessibility = declaration.IsPublic ? Accessibility.Public : Accessibility.Private;
+        Accessibility = AccessibilityFacts.FromSyntax(declaration.AccessModifierToken,
+            declaration.SecondaryAccessModifierToken, Accessibility.Private);
         IsStatic = declaration.IsStatic;
         IsVirtual = declaration.IsVirtual;
         IsOverride = declaration.IsOverride;
         IsAbstract = declaration.IsAbstract;
-        IsReadonly = declaration.IsReadonly;
+        IsReadonly = declaration.IsReadonly || containingType is StructTypeSymbol { IsReadonly: true } && !declaration.IsStatic;
         IsDefinition = declaration.Body is not null;
         SetSourceOrigin(declaration);
         ApplyParameterDocumentation();
@@ -140,7 +142,8 @@ public sealed class FunctionSymbol : Symbol
         IsOverride = containingProperty.IsOverride;
         IsAbstract = containingProperty.IsAbstract;
         AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
-        IsReadonly = declaration.IsGetter && containingProperty.IsReadonly;
+        IsReadonly = declaration.IsGetter && containingProperty.IsReadonly ||
+            containingProperty.ContainingType is StructTypeSymbol { IsReadonly: true } && !containingProperty.IsStatic;
         IsDefinition = declaration.Body is not null;
         SetSourceOrigin(declaration, includeDocumentation: false);
     }
@@ -163,7 +166,8 @@ public sealed class FunctionSymbol : Symbol
         IsOverride = containingIndexer.IsOverride;
         IsAbstract = containingIndexer.IsAbstract;
         AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
-        IsReadonly = declaration.IsGetter && containingIndexer.IsReadonly;
+        IsReadonly = declaration.IsGetter && containingIndexer.IsReadonly ||
+            containingIndexer.ContainingType is StructTypeSymbol { IsReadonly: true } && !containingIndexer.IsStatic;
         IsDefinition = declaration.Body is not null;
         SetSourceOrigin(declaration, includeDocumentation: false);
     }

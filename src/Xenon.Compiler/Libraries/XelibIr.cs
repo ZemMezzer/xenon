@@ -62,6 +62,16 @@ public enum XelibSymbolKind : ushort
     TemplateIndexer = 17,
 }
 
+/// <summary>Stable wire representation of source accessibility.</summary>
+public enum XelibAccessibility : byte
+{
+    Private = 1,
+    Internal = 2,
+    Protected = 3,
+    ProtectedInternal = 4,
+    Public = 5,
+}
+
 [Flags]
 public enum XelibSymbolFlags : uint
 {
@@ -81,6 +91,9 @@ public enum XelibSymbolFlags : uint
     HasVirtualDispatch = 1 << 12,
     HasStackArrays = 1 << 13,
     HasScalarCleanup = 1 << 14,
+    ReadonlyStruct = 1 << 15,
+    StaticStruct = 1 << 16,
+    Sealed = 1 << 17,
 }
 
 public enum XelibFunctionKind : ushort
@@ -189,6 +202,7 @@ public sealed record XelibSymbolRecord
     public int ContainingSymbolId { get; init; }
     public int Order { get; init; }
     public XelibSymbolFlags Flags { get; init; }
+    public XelibAccessibility Accessibility { get; init; }
     public int TypeId { get; init; }
     public int ReturnTypeId { get; init; }
     public int Ordinal { get; init; }
