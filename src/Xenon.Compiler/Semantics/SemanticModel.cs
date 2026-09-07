@@ -307,12 +307,24 @@ public sealed class SemanticModel
             .Where(region => ReferenceEquals(region.Source, source) && Contains(region.Span, position, region.IncludeEnd))
             .OrderBy(region => region.Span.Length).Select(region => region.Type).FirstOrDefault();
         if (containingType is not null)
-            foreach (Symbol member in containingType.GetMembers().OrderBy(member => member.Name, StringComparer.Ordinal))
-                if (names.Add(member.Name)) result.Add(member);
+            AddVisibleGroups(containingType.GetMembers());
         if (_semanticInfo.FileScopes.TryGetValue(source, out FileSymbolScope? fileScope))
-            foreach (Symbol symbol in fileScope.GetFileSymbols().OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal))
-                if (names.Add(symbol.Name)) result.Add(symbol);
+            AddVisibleGroups(fileScope.GetFileSymbols());
         return result.ToImmutable();
+
+        void AddVisibleGroups(IEnumerable<Symbol> symbols)
+        {
+            foreach (IGrouping<string, Symbol> group in symbols
+                         .OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal)
+                         .GroupBy(symbol => symbol.Name, StringComparer.Ordinal))
+            {
+                if (!names.Add(group.Key)) continue;
+                Symbol[] overloads = group.OfType<FunctionSymbol>()
+                    .DistinctBy(method => method.ToDisplayString(SymbolDisplayFormat.Signature)).Cast<Symbol>().ToArray();
+                if (overloads.Length != 0) result.AddRange(overloads);
+                else result.Add(group.First());
+            }
+        }
     }
 
     public ImmutableArray<Symbol> LookupMembers(TypeSymbol receiverType, int position,
@@ -480,7 +492,9 @@ public sealed class SemanticModel
         if (symbol.ContainingSymbol is DeclaredTypeSymbol containingType)
             return containingType.GetMembers().Any(candidate =>
                 !ReferenceEquals(candidate, symbol) && ReferenceEquals(candidate.ContainingSymbol, containingType) &&
-                candidate.Name == newName);
+                (symbol is FunctionSymbol function && candidate is FunctionSymbol other
+                    ? function.ConflictsWithOverloadName(other, newName)
+                    : candidate.Name == newName));
         if (symbol.ContainingSymbol is EnumTypeSymbol enumeration)
             return enumeration.Members.Any(candidate => !ReferenceEquals(candidate, symbol) && candidate.Name == newName);
         if (symbol.ContainingSymbol is NamespaceSymbol @namespace)
@@ -492,7 +506,10 @@ public sealed class SemanticModel
                 ConstantSymbol => @namespace.Constants,
                 _ => [],
             };
-            return siblings.Any(candidate => !ReferenceEquals(candidate, symbol) && candidate.Name == newName);
+            return siblings.Any(candidate => !ReferenceEquals(candidate, symbol) &&
+                (symbol is FunctionSymbol function && candidate is FunctionSymbol other
+                    ? function.ConflictsWithOverloadName(other, newName)
+                    : candidate.Name == newName));
         }
         return false;
 

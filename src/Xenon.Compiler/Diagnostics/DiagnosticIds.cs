@@ -65,7 +65,7 @@ public static class DiagnosticIds
     public const string EnumValueOutOfRange = "XE2036";
     public const string MultipleStructBaseTypes = "XE2037";
     public const string InheritanceCycle = "XE2038";
-    public const string MethodOverloadingNotSupported = "XE2039";
+    public const string InvalidOverload = "XE2039";
     public const string DuplicateGetter = "XE2040";
     public const string UnimplementedInterfaceMember = "XE2041";
     public const string NoCompatibleOverrideTarget = "XE2042";

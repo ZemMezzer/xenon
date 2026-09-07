@@ -368,6 +368,16 @@ internal sealed class FileSymbolScope
         return null;
     }
 
+    /// <summary>Returns the overload set visible from this file. Declarations in the
+    /// containing namespace hide imported declarations, matching ordinary name lookup.</summary>
+    public IReadOnlyList<FunctionSymbol> ResolveFunctions(string name)
+    {
+        IReadOnlyList<FunctionSymbol> local = ContainingNamespace.FindFunctions(name);
+        if (local.Count != 0) return local;
+        return _importedNamespaces.SelectMany(@namespace => @namespace.FindFunctions(name))
+            .Distinct().ToArray();
+    }
+
     public ConstantSymbol? ResolveConstant(string name, TextLocation location, DiagnosticBag diagnostics)
     {
         IReadOnlyList<ConstantSymbol> local = ContainingNamespace.FindConstants(name);
@@ -451,6 +461,13 @@ internal sealed class FileSymbolScope
         }
 
         return function;
+    }
+
+    public IReadOnlyList<FunctionSymbol> ResolveQualifiedFunctions(IReadOnlyList<string> parts)
+    {
+        if (parts.Count < 2) return [];
+        NamespaceSymbol? containingNamespace = ResolveNamespacePrefix(parts, parts.Count - 1);
+        return containingNamespace?.FindFunctions(parts[^1]) ?? [];
     }
 
     public bool CanStartQualifiedName(string name) =>

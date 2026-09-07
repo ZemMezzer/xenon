@@ -15,6 +15,85 @@ namespace Xenon.Compiler.Tests.Libraries;
 public sealed class XelibContainerTests
 {
     [Fact]
+    public void CallableOverloadsRoundTripAndReachOnlySelectedXelibBodies()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace OverloadedLibrary;
+            struct Writer
+            {
+                public int Write(int value) { return 10; }
+                public int Write(char value) { return 20; }
+                public int Write(readonly byte* value) { return 30; }
+                public static int Parse(int value) { return 40; }
+                public static int Parse(char value) { return 50; }
+                public int Probe(int value) { return 90; }
+                public int readonly Probe(int value) { return 100; }
+            }
+            template ParserLike { int Parse(readonly byte* value); }
+            struct ParserBase
+            {
+                public virtual int Parse(readonly byte* value) { return 105; }
+            }
+            struct Parser : ParserBase
+            {
+                public override int Parse(readonly byte* value) { return 110; }
+                public int Parse(byte* value) { return 120; }
+            }
+            public int Invoke<T>(T value, byte* text) where T : ParserLike { return value.Parse(text); }
+            public int Pick(int value) { return 60; }
+            public int Pick(char value) { return 70; }
+            public int Pick(readonly byte* value) { return 80; }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("OverloadedLibrary")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using OverloadedLibrary;
+            namespace App;
+            int Read(readonly Writer& writer) { return writer.Probe(1); }
+            int Main()
+            {
+                Writer writer = Writer();
+                Parser parser = Parser();
+                byte* text = null;
+                function int(int)* callback = &Pick;
+                return writer.Write(1) + Writer.Parse('A') + Pick("x") + callback(2) +
+                    writer.Probe(1) + Read(writer) + Invoke<Parser>(parser, text);
+            }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction[] reachable = app.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(reachable, body => body.Symbol.Name == "Write" &&
+            TypeIdentity.AreSame(body.Symbol.Parameters[0].Type, BuiltinTypes.Int));
+        Assert.DoesNotContain(reachable, body => body.Symbol.Name == "Write" &&
+            TypeIdentity.AreSame(body.Symbol.Parameters[0].Type, BuiltinTypes.Char));
+        Assert.Contains(reachable, body => body.Symbol.Name == "Parse" &&
+            TypeIdentity.AreSame(body.Symbol.Parameters[0].Type, BuiltinTypes.Char));
+        Assert.Contains(reachable, body => body.Symbol.Name == "Pick" &&
+            body.Symbol.Parameters[0].Type is PointerTypeSymbol);
+        Assert.Contains(reachable, body => body.Symbol.Name == "Pick" &&
+            TypeIdentity.AreSame(body.Symbol.Parameters[0].Type, BuiltinTypes.Int));
+        Assert.Equal(2, reachable.Count(body => body.Symbol.Name == "Probe"));
+        Assert.Contains(reachable, body => body.Symbol.Name == "Probe" && !body.Symbol.IsReadonly);
+        Assert.Contains(reachable, body => body.Symbol.Name == "Probe" && body.Symbol.IsReadonly);
+        Assert.True(reachable.Any(body => body.Symbol.Name == "Parse" &&
+            body.Symbol.ContainingType?.Name == "Parser" &&
+            body.Symbol.Parameters[0].Type is PointerTypeSymbol { IsReadonly: true }),
+            string.Join(Environment.NewLine, reachable.Select(body =>
+                $"{body.Symbol.ContainingType?.Name}.{body.Symbol.ToDisplayString(SymbolDisplayFormat.Signature)}")));
+        Assert.DoesNotContain(reachable, body => body.Symbol.Name == "Parse" &&
+            body.Symbol.ContainingType?.Name == "Parser" &&
+            body.Symbol.Parameters[0].Type is PointerTypeSymbol { IsReadonly: false });
+
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+        Compilation targeted = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+    }
+
+    [Fact]
     public void PersistedSemanticKindsRoundTripThroughExplicitXelibMappings()
     {
         foreach (FunctionKind value in Enum.GetValues<FunctionKind>())
@@ -60,7 +139,7 @@ public sealed class XelibContainerTests
             item => item.Key.StartsWith("F:", StringComparison.Ordinal) &&
                 item.Key.Contains(":Value:0:", StringComparison.Ordinal));
 
-        Assert.EndsWith(":1:0", export.Key, StringComparison.Ordinal);
+        Assert.EndsWith(":1:0:False:False", export.Key, StringComparison.Ordinal);
         Assert.Contains(exports, item => item.Key.StartsWith(
             $"R:{(ushort)XelibSymbolKind.TemplateMethod}:", StringComparison.Ordinal));
         Assert.Contains(exports, item => item.Key.StartsWith(

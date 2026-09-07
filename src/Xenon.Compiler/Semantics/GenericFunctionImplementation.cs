@@ -284,7 +284,9 @@ internal sealed class LibraryGenericFunctionImplementation(
         TypeSymbol Type(int id) => specializer.StructSpecializer.Substitute(
             resolveType(id), substitutions);
         Symbol Symbol(XelibSymbolReference reference) => MapSymbol(resolveSymbol(reference), specialization);
-        return XelibBodyCodec.Decode(body, specialization, Type, Symbol, ResolveGenericMethod,
+        return XelibBodyCodec.Decode(body, specialization, Type, Symbol,
+            (receiver, requirement, arguments, isPointerAccess) =>
+                ResolveGenericMethod(receiver, requirement, arguments, isPointerAccess, specializer),
             (operation, receiver, requirement, arguments, value, operatorKind, isPointerAccess,
                 resultType, typeArguments) => ResolveGenericOperation(operation, receiver,
                 requirement, arguments, value, operatorKind, isPointerAccess, resultType,
@@ -469,7 +471,8 @@ internal sealed class LibraryGenericFunctionImplementation(
             $"generic operation '{operation}' for requirement '{requirement.Name}' cannot be resolved on '{type}'");
 
     private static BoundExpression ResolveGenericMethod(BoundExpression receiver, Symbol requirement,
-        ImmutableArray<BoundExpression> arguments, bool isPointerAccess)
+        ImmutableArray<BoundExpression> arguments, bool isPointerAccess,
+        GenericFunctionSpecializer specializer)
     {
         TypeSymbol receiverType = receiver.Type switch
         {
@@ -479,26 +482,94 @@ internal sealed class LibraryGenericFunctionImplementation(
             SharedTypeSymbol shared when isPointerAccess => shared.ElementType,
             _ => receiver.Type,
         };
+        ImmutableArray<TypeSymbol> requiredParameters = requirement switch
+        {
+            TemplateMethodRequirementSymbol template => template.Parameters.Select(parameter =>
+                SubstituteTemplateSelf(parameter.Type, template.Template, receiverType, specializer)).ToImmutableArray(),
+            FunctionSymbol function => function.Parameters.Select(parameter => parameter.Type).ToImmutableArray(),
+            _ => arguments.Select(argument => argument.Type).ToImmutableArray(),
+        };
+        TypeSymbol? requiredReturn = requirement switch
+        {
+            TemplateMethodRequirementSymbol template => SubstituteTemplateSelf(
+                template.ReturnType, template.Template, receiverType, specializer),
+            FunctionSymbol function => function.ReturnType,
+            _ => null,
+        };
+        bool? requiredStatic = requirement switch
+        {
+            TemplateMethodRequirementSymbol template => template.IsStatic,
+            FunctionSymbol function => function.IsStatic,
+            _ => null,
+        };
         if (receiverType is StructTypeSymbol structure)
         {
-            FunctionSymbol? method = structure.Methods.FirstOrDefault(candidate =>
-                candidate.Name == requirement.Name && candidate.Parameters.Length == arguments.Length &&
-                candidate.Parameters.Zip(arguments).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second.Type)));
-            if (method is not null)
-                return new BoundMethodCallExpression(receiver, method, arguments, isPointerAccess);
+            FunctionSymbol[] matches = structure.FindMethods(requirement.Name).Where(candidate =>
+                candidate.Name == requirement.Name && candidate.Parameters.Length == requiredParameters.Length &&
+                candidate.Parameters.Zip(requiredParameters).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second)) &&
+                (requiredReturn is null || TypeIdentity.AreSame(candidate.ReturnType, requiredReturn)) &&
+                (requiredStatic is null || candidate.IsStatic == requiredStatic) &&
+                RequirementReadonlyMatches(requirement, candidate)).ToArray();
+            if (matches.Length == 1)
+                return new BoundMethodCallExpression(receiver, matches[0], arguments, isPointerAccess);
         }
         if (receiverType is InterfaceTypeSymbol @interface)
         {
-            FunctionSymbol? method = @interface.AllMethods.FirstOrDefault(candidate =>
-                candidate.Name == requirement.Name && candidate.Parameters.Length == arguments.Length &&
-                candidate.Parameters.Zip(arguments).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second.Type)));
-            if (method is not null)
-                return new BoundInterfaceMethodCallExpression(receiver, @interface, method, arguments,
+            FunctionSymbol[] matches = @interface.FindMethods(requirement.Name).Where(candidate =>
+                candidate.Name == requirement.Name && candidate.Parameters.Length == requiredParameters.Length &&
+                candidate.Parameters.Zip(requiredParameters).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second)) &&
+                (requiredReturn is null || TypeIdentity.AreSame(candidate.ReturnType, requiredReturn)) &&
+                (requiredStatic is null || candidate.IsStatic == requiredStatic) &&
+                RequirementReadonlyMatches(requirement, candidate)).ToArray();
+            if (matches.Length == 1)
+                return new BoundInterfaceMethodCallExpression(receiver, @interface, matches[0], arguments,
                     isPointerAccess);
         }
         throw new XelibFormatException(XelibErrorCode.InvalidReference,
             $"generic method requirement '{requirement.Name}' cannot be resolved on '{receiverType}'");
     }
+
+    private static bool RequirementReadonlyMatches(Symbol requirement, FunctionSymbol candidate) =>
+        requirement switch
+        {
+            TemplateMethodRequirementSymbol template => template.IsReadonly == candidate.IsReadonly,
+            FunctionSymbol function => function.IsReadonly == candidate.IsReadonly,
+            _ => true,
+        };
+
+    private static TypeSymbol SubstituteTemplateSelf(TypeSymbol type, TemplateSymbol template,
+        TypeSymbol receiverType, GenericFunctionSpecializer specializer) => type switch
+    {
+        TemplateSelfTypeSymbol self when ReferenceEquals(self.Template, template) => receiverType,
+        PointerTypeSymbol pointer => specializer.Types.PointerTo(
+            SubstituteTemplateSelf(pointer.ElementType, template, receiverType, specializer), pointer.IsReadonly),
+        ReferenceTypeSymbol reference => specializer.Types.ReferenceTo(
+            SubstituteTemplateSelf(reference.ElementType, template, receiverType, specializer), reference.IsReadonly),
+        FunctionPointerTypeSymbol function => specializer.Types.FunctionPointer(
+            SubstituteTemplateSelf(function.ReturnType, template, receiverType, specializer),
+            function.ParameterTypes.Select(parameter =>
+                SubstituteTemplateSelf(parameter, template, receiverType, specializer))),
+        ArrayTypeSymbol array => specializer.Types.ArrayOf(
+            SubstituteTemplateSelf(array.ElementType, template, receiverType, specializer), array.Rank),
+        AtomicTypeSymbol atomic => specializer.Types.AtomicOf(
+            SubstituteTemplateSelf(atomic.ElementType, template, receiverType, specializer)),
+        UniqueTypeSymbol unique => specializer.Types.UniqueOf(
+            SubstituteTemplateSelf(unique.ElementType, template, receiverType, specializer)),
+        SharedTypeSymbol shared => specializer.Types.SharedOf(
+            SubstituteTemplateSelf(shared.ElementType, template, receiverType, specializer)),
+        WeakTypeSymbol weak => specializer.Types.WeakOf(
+            SubstituteTemplateSelf(weak.ElementType, template, receiverType, specializer)),
+        StorageTypeSymbol storage => specializer.Types.StorageOf(
+            SubstituteTemplateSelf(storage.ElementType, template, receiverType, specializer)),
+        PinTypeSymbol pin => specializer.Types.PinOf(
+            SubstituteTemplateSelf(pin.ElementType, template, receiverType, specializer)),
+        StructTypeSymbol { GenericDefinition: { } definition } constructed =>
+            specializer.StructSpecializer.GetOrCreate(definition,
+                constructed.TypeArguments.Select(argument =>
+                    SubstituteTemplateSelf(argument, template, receiverType, specializer)).ToImmutableArray(),
+                TextLocation.None) ?? type,
+        _ => type,
+    };
 
     private Symbol MapSymbol(Symbol source, FunctionSymbol specialization)
     {

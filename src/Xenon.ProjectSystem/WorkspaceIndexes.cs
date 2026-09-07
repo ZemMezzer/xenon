@@ -380,6 +380,7 @@ internal static class WorkspaceIndexBuilder
             "function",
             function.FunctionKind,
             function.QualifiedName,
+            function.TypeParameters.Length,
             Type(function.ReturnType),
             Parameters(function.Parameters),
             function.IsStatic,

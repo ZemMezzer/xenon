@@ -73,8 +73,17 @@ public sealed class NamespaceSymbol : Symbol
             AddCandidate(_templates, template.Name, template);
     }
 
-    internal bool TryDeclareFunction(FunctionSymbol function) =>
-        TryDeclare(_functions, function.Name, function);
+    internal bool TryDeclareFunction(FunctionSymbol function)
+    {
+        if (!_functions.TryGetValue(function.Name, out List<FunctionSymbol>? candidates))
+        {
+            _functions.Add(function.Name, [function]);
+            return true;
+        }
+        if (candidates.Any(function.HasSameOverloadSignature)) return false;
+        candidates.Add(function);
+        return true;
+    }
 
     internal FunctionSymbol? FindFunction(string name) =>
         FindSingle(_functions, name);

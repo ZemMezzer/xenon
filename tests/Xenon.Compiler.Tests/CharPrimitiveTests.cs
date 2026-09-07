@@ -209,7 +209,7 @@ public sealed class CharPrimitiveTests
         Assert.Contains(types, type => type.Kind == XelibTypeKind.Char && type.PrimitiveName is null);
         Assert.Contains(symbols, symbol => symbol.Name == "Smile" &&
             symbol.ConstantValue is { Kind: XelibConstantKind.UnicodeScalar, Value: "128512" });
-        Assert.Equal((ushort)3, container.Header.LibraryIrVersion);
+        Assert.Equal(XelibVersions.LibraryIr, container.Header.LibraryIrVersion);
         Assert.Equal((ushort)1, container.Header.ContainerVersion);
 
         LibraryCompilationReference reference = XelibReader.Read(bytes);

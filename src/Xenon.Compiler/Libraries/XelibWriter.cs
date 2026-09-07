@@ -250,7 +250,7 @@ internal static class XelibExportKey
         FunctionSymbol value => $"F:{Owner(value)}:{value.Name}:{value.TypeParameters.Length}:" +
             $"({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})" +
             $"->{TypeKey(value.ReturnType)}:{(ushort)XelibStableMappings.ToXelib(value.FunctionKind)}:" +
-            $"{(byte)XelibStableMappings.ToXelib(value.AccessorKind)}",
+            $"{(byte)XelibStableMappings.ToXelib(value.AccessorKind)}:{value.IsStatic}:{value.IsReadonly}",
         FieldSymbol value => $"D:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         PropertySymbol value => $"P:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         InterfacePropertySymbol value => $"P:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
@@ -259,11 +259,11 @@ internal static class XelibExportKey
         InterfaceIndexerSymbol value => $"I:{Owner(value)}:({string.Join(',', value.Parameters.Select(p => TypeKey(p.Type)))})" +
             $"->{TypeKey(value.Type)}",
         ConstantSymbol value => $"C:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
-        GenericParameterSymbol value => $"G:{Owner(value)}:{value.Ordinal}:{value.Name}",
+        GenericParameterSymbol value => $"G:{Owner(value)}:{value.Ordinal}",
         ParameterSymbol value => $"A:{Owner(value)}:{value.Ordinal}:{value.Name}:{TypeKey(value.Type)}",
         TemplateMethodRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateMethod)}:{Owner(value)}:" +
             $"{value.Name}:({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})" +
-            $"->{TypeKey(value.ReturnType)}",
+            $"->{TypeKey(value.ReturnType)}:{value.IsStatic}:{value.IsReadonly}",
         TemplateConstructorRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateConstructor)}:{Owner(value)}:" +
             $"({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})",
         TemplatePropertyRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateProperty)}:{Owner(value)}:" +

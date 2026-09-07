@@ -59,6 +59,7 @@ internal sealed class FunctionBodyBinder
     private ExpressionSyntax? _initializationTarget;
     private ExpressionSyntax? _fieldReceiverSyntax;
     private ExpressionSyntax? _unconsumedOwnershipExpression;
+    private FunctionPointerTypeSymbol? _expectedFunctionPointerType;
     private int _memberAccessBindingDepth;
     private sealed class MovePlace(
         object root,
@@ -438,7 +439,7 @@ internal sealed class FunctionBodyBinder
         if (syntax is null)
             return null;
 
-        BoundExpression initializer = BindExpression(syntax);
+        BoundExpression initializer = BindExpressionWithExpectedType(syntax, field.Type);
         TypeSymbol? destinationType = TryGetStorageType(field.Type, out StorageTypeSymbol storage)
             ? storage.ElementType
             : TypeFacts.IsPinned(field.Type)
@@ -1076,7 +1077,8 @@ internal sealed class FunctionBodyBinder
         }
 
         int diagnosticsBeforeInitializer = _diagnostics.Count;
-        BoundExpression? initializer = syntax.Initializer is null ? null : BindExpression(syntax.Initializer);
+        BoundExpression? initializer = syntax.Initializer is null ? null :
+            BindExpressionWithExpectedType(syntax.Initializer, type);
         bool isStorageDeclaration = TryGetStorageType(type, out StorageTypeSymbol storageType);
         bool isDirectPinDeclaration = !isStorageDeclaration && TypeFacts.IsPinned(type);
         if (type is ReferenceTypeSymbol && initializer is null)
@@ -1209,7 +1211,8 @@ internal sealed class FunctionBodyBinder
 
     private BoundReturnStatement BindReturnStatement(ReturnStatementSyntax syntax)
     {
-        BoundExpression? expression = syntax.Expression is null ? null : BindExpression(syntax.Expression);
+        BoundExpression? expression = syntax.Expression is null ? null :
+            BindExpressionWithExpectedType(syntax.Expression, _function.ReturnType);
         if (expression is not null)
         {
             expression = ContextualizeConversion(expression, _function.ReturnType, GetLocation(syntax.Expression!));
@@ -2071,7 +2074,7 @@ internal sealed class FunctionBodyBinder
     {
         address = null;
         var lookupDiagnostics = new DiagnosticBag();
-        FunctionSymbol? function;
+        FunctionSymbol[] candidates;
         SyntaxToken nameToken;
         if (syntax is NameExpressionSyntax name)
         {
@@ -2079,8 +2082,11 @@ internal sealed class FunctionBodyBinder
                 _function.ContainingType?.FindInstanceField(name.IdentifierToken.Text) is not null)
                 return false;
             nameToken = name.IdentifierToken;
-            function = _function.ContainingType?.FindMember<FunctionSymbol>(nameToken.Text) ??
-                _fileScope.ResolveFunction(nameToken.Text, nameToken.Location, lookupDiagnostics, out _);
+            candidates = _function.ContainingType is { } containingType
+                ? containingType.LookupMethods(nameToken.Text).ToArray()
+                : [];
+            if (candidates.Length == 0)
+                candidates = _fileScope.ResolveFunctions(nameToken.Text).ToArray();
         }
         else if (syntax is MemberAccessExpressionSyntax member &&
                  TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts) && parts.Length >= 2)
@@ -2090,17 +2096,62 @@ internal sealed class FunctionBodyBinder
             TypeSymbol? receiverType = receiverParts.Length == 1
                 ? _fileScope.ResolveType(receiverParts[0], parts[0].Location, lookupDiagnostics)
                 : _fileScope.ResolveQualifiedType(receiverParts);
-            function = (receiverType as DeclaredTypeSymbol)?.FindMember<FunctionSymbol>(nameToken.Text);
-            if (function is null)
-                function = _fileScope.ResolveQualifiedFunction(parts.Select(part => part.Text).ToArray(),
-                    nameToken.Location, lookupDiagnostics, out _);
+            candidates = receiverType is DeclaredTypeSymbol declaredType
+                ? declaredType.LookupMethods(nameToken.Text).ToArray()
+                : _fileScope.ResolveQualifiedFunctions(parts.Select(part => part.Text).ToArray()).ToArray();
         }
         else
         {
             return false;
         }
 
-        if (function is null) return false;
+        if (candidates.Length == 0) return false;
+        if (candidates.Length == 1 && candidates[0].HasImplicitThis)
+        {
+            FunctionSymbol instanceMethod = candidates[0];
+            RecordCandidates(syntax, null, candidates, CandidateReason.NotInvocable);
+            _diagnostics.Report(nameToken.Location,
+                $"cannot take the address of instance method '{instanceMethod.Name}'; bound method pointers are not supported",
+                DiagnosticIds.InvalidOperatorOperands);
+            address = new BoundErrorExpression();
+            return true;
+        }
+        if (candidates.Length == 1 && candidates[0].IsGenericDefinition)
+        {
+            FunctionSymbol genericFunction = candidates[0];
+            RecordCandidates(syntax, null, candidates, CandidateReason.NotInvocable);
+            _diagnostics.Report(nameToken.Location,
+                $"cannot take the address of generic function '{genericFunction.Name}' without a concrete specialization",
+                DiagnosticIds.GenericSpecializationNotImplemented);
+            address = new BoundErrorExpression();
+            return true;
+        }
+        FunctionSymbol[] addressable = candidates.Where(candidate =>
+            !candidate.HasImplicitThis && !candidate.IsGenericDefinition).ToArray();
+        // A lone function retains its actual pointer type so contextual conversion
+        // can issue the established type-mismatch diagnostic. Expected type is an
+        // overload discriminator only when there is a set to choose from.
+        if (candidates.Length > 1 && _expectedFunctionPointerType is { } expected)
+            addressable = addressable.Where(candidate =>
+                TypeIdentity.AreSame(candidate.ReturnType, expected.ReturnType) &&
+                candidate.Parameters.Length == expected.ParameterTypes.Length &&
+                candidate.Parameters.Zip(expected.ParameterTypes).All(pair =>
+                    TypeIdentity.AreSame(pair.First.Type, pair.Second))).ToArray();
+
+        if (addressable.Length != 1)
+        {
+            RecordCandidates(syntax, null, candidates,
+                addressable.Length > 1 ? CandidateReason.Ambiguous : CandidateReason.NotInvocable);
+            _diagnostics.Report(nameToken.Location,
+                addressable.Length > 1
+                    ? $"function address '&{nameToken.Text}' is ambiguous between: {FormatCallableCandidates(addressable)}"
+                    : $"no overload of '&{nameToken.Text}' matches the expected function-pointer type",
+                addressable.Length > 1 ? DiagnosticIds.AmbiguousCall : DiagnosticIds.NoMatchingCandidate);
+            address = new BoundErrorExpression();
+            return true;
+        }
+
+        FunctionSymbol function = addressable[0];
         if (function.HasImplicitThis)
         {
             _diagnostics.Report(nameToken.Location,
@@ -2127,8 +2178,17 @@ internal sealed class FunctionBodyBinder
             address = new BoundErrorExpression();
             return true;
         }
+        if (!function.IsPublic && function.ContainingType is null &&
+            !ReferenceEquals(function.ContainingNamespace, _fileScope.ContainingNamespace))
+        {
+            _diagnostics.Report(nameToken.Location,
+                $"function '{function.Name}' is private in namespace '{function.ContainingNamespace.FullName}'",
+                DiagnosticIds.InaccessibleSymbol);
+            address = new BoundErrorExpression();
+            return true;
+        }
 
-        _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(function);
+        RecordCandidates(syntax, function, candidates, CandidateReason.None);
         FunctionPointerTypeSymbol type = _fileScope.TypeFactory.FunctionPointer(
             function.ReturnType,
             function.Parameters.Select(parameter => parameter.Type));
@@ -3690,7 +3750,8 @@ internal sealed class FunctionBodyBinder
             _diagnostics.Report(GetLocation(syntax.Target),
                 $"cannot reassign possibly moved place '{assignedPlace!.DisplayName}' because this indirect or receiver field has no runtime lifetime flag; reinitialize it separately on each control-flow path",
                 DiagnosticIds.ConditionalMoveReinitializationNotTracked);
-        BoundExpression expression = ReadAtomicValue(BindExpression(syntax.Expression));
+        BoundExpression expression = ReadAtomicValue(BindExpressionWithExpectedType(
+            syntax.Expression, assignmentValueType));
         if (atomicTarget is not null && !AtomicTypeRules.SupportsOperations(atomicTarget.ElementType))
         {
             _diagnostics.Report(
@@ -5002,7 +5063,9 @@ internal sealed class FunctionBodyBinder
         var arguments = syntax.Arguments.Select((argument, index) =>
             isLifetimeOperation && index == 0
                 ? BindLifetimeInvalidationOperand(argument)
-                : BindExpression(argument)).ToImmutableArray();
+                : GetCallArgumentExpectedType(syntax, index) is { } expectedType
+                    ? BindExpressionWithExpectedType(argument, expectedType)
+                    : BindExpression(argument)).ToImmutableArray();
         if (syntax.TypeArguments is { } typeArguments)
             return BindExplicitGenericCall(syntax, typeArguments, arguments);
         bool incomplete = syntax.CloseParenthesisToken.IsMissing;
@@ -5099,24 +5162,22 @@ internal sealed class FunctionBodyBinder
 
         if (_function.ContainingType is { } containingType)
         {
-            FunctionSymbol[] methodCandidates = containingType.LookupMethods(name.IdentifierToken.Text)
-                .Where(candidate => !candidate.IsStatic).ToArray();
-            FunctionSymbol? method = FindInstanceMethod(containingType,
-                name.IdentifierToken.Text,
-                receiverIsReadonly: _function.IsReadonly);
-            if (method is null &&
-                _function.IsReadonly &&
-                containingType.FindMember<FunctionSymbol>(name.IdentifierToken.Text) is { IsStatic: false } mutableMethod)
-            {
-                RecordCandidates(syntax.Target, null, [mutableMethod], CandidateReason.Inaccessible);
-                _diagnostics.Report(name.IdentifierToken.Location, $"readonly method '{_function.Name}' cannot call mutable method '{mutableMethod.Name}' through 'this'",
-                    DiagnosticIds.MutableMethodOnReadonlyReceiver);
-                return new BoundErrorExpression();
-            }
+            FunctionSymbol[] methodCandidates = GetMethodOverloads(containingType,
+                name.IdentifierToken.Text, isStatic: false);
+            FunctionSymbol? method = methodCandidates.Length == 0 ? null : ResolveCallableOverload(
+                methodCandidates, arguments, name.IdentifierToken.Location,
+                $"method '{containingType.Name}.{name.IdentifierToken.Text}'", syntax.Target,
+                out _, _function.IsReadonly, incomplete ? completedArgumentCount : null);
             if (method is not null)
             {
-                CandidateReason methodReason = GetCallCandidateReason(method, arguments, incomplete, completedArgumentCount);
-                RecordCandidates(syntax.Target, method, methodCandidates, methodReason);
+                if (_function.IsReadonly && !method.IsReadonly)
+                {
+                    RecordCandidates(syntax.Target, null, methodCandidates, CandidateReason.Inaccessible);
+                    _diagnostics.Report(name.IdentifierToken.Location,
+                        $"readonly method '{_function.Name}' cannot call mutable method '{method.Name}' through 'this'",
+                        DiagnosticIds.MutableMethodOnReadonlyReceiver);
+                    return new BoundErrorExpression();
+                }
                 if (_bindingBaseConstructorArguments)
                 {
                     _diagnostics.Report(name.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments",
@@ -5152,21 +5213,32 @@ internal sealed class FunctionBodyBinder
                     arguments,
                     IsPointerAccess: true);
             }
+            if (methodCandidates.Length != 0)
+                return new BoundErrorExpression();
         }
 
-        FunctionSymbol? function = _fileScope.ResolveFunction(
-            name.IdentifierToken.Text,
-            name.IdentifierToken.Location,
-            _diagnostics,
-            out bool functionResolutionDiagnostic);
+        FunctionSymbol[] functionCandidates = _fileScope.ResolveFunctions(name.IdentifierToken.Text).ToArray();
+        FunctionSymbol? function = functionCandidates.Length == 0 ? null : ResolveCallableOverload(
+            functionCandidates, arguments, name.IdentifierToken.Location,
+            $"function '{name.IdentifierToken.Text}'", syntax.Target, out _,
+            completedArgumentCount: incomplete ? completedArgumentCount : null);
         if (function is null)
         {
-            if (!functionResolutionDiagnostic)
+            if (functionCandidates.Length == 0)
             {
                 _diagnostics.Report(name.IdentifierToken.Location, $"unknown function '{name.IdentifierToken.Text}'",
                     DiagnosticIds.UnknownFunction);
             }
 
+            return new BoundErrorExpression();
+        }
+
+        if (!function.IsPublic && !ReferenceEquals(function.ContainingNamespace, _fileScope.ContainingNamespace))
+        {
+            RecordCandidates(syntax.Target, null, functionCandidates, CandidateReason.Inaccessible);
+            _diagnostics.Report(name.IdentifierToken.Location,
+                $"function '{function.Name}' is private in namespace '{function.ContainingNamespace.FullName}'",
+                DiagnosticIds.InaccessibleSymbol);
             return new BoundErrorExpression();
         }
 
@@ -5200,6 +5272,81 @@ internal sealed class FunctionBodyBinder
             incomplete ? completedArgumentCount : null);
         return new BoundCallExpression(function, arguments);
     }
+
+    private TypeSymbol? GetCallArgumentExpectedType(CallExpressionSyntax syntax, int argumentIndex)
+    {
+        var candidates = new List<FunctionSymbol>();
+        if (syntax.Target is NameExpressionSyntax name)
+        {
+            if (_scope.Lookup(name.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol indirect)
+                return argumentIndex < indirect.ParameterTypes.Length
+                    ? indirect.ParameterTypes[argumentIndex]
+                    : null;
+
+            var lookupDiagnostics = new DiagnosticBag();
+            TypeSymbol? targetType = _fileScope.ResolveType(name.IdentifierToken.Text,
+                name.IdentifierToken.Location, lookupDiagnostics);
+            if (targetType is StructTypeSymbol structure)
+                candidates.AddRange(structure.Constructors);
+            else if (_function.ContainingType is { } containingType)
+                candidates.AddRange(GetMethodOverloads(containingType, name.IdentifierToken.Text,
+                    isStatic: false));
+            if (candidates.Count == 0)
+                candidates.AddRange(_fileScope.ResolveFunctions(name.IdentifierToken.Text));
+        }
+        else if (syntax.Target is MemberAccessExpressionSyntax member)
+        {
+            if (TryResolveStaticTypeReceiver(member, out TypeSymbol? staticType) &&
+                staticType is DeclaredTypeSymbol staticContainer)
+            {
+                candidates.AddRange(GetMethodOverloads(staticContainer, member.MemberToken.Text, isStatic: true));
+            }
+            else if (TryGetCallReceiverType(member.Receiver, out TypeSymbol? receiverType) &&
+                     GetCallMemberContainer(receiverType!, member.OperatorToken.Kind) is DeclaredTypeSymbol container)
+            {
+                candidates.AddRange(GetMethodOverloads(container, member.MemberToken.Text, isStatic: false));
+            }
+            else if (TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts))
+            {
+                candidates.AddRange(_fileScope.ResolveQualifiedFunctions(parts.Select(part => part.Text).ToArray()));
+            }
+        }
+
+        int suppliedCount = syntax.Arguments.Length;
+        FunctionSymbol[] viable = candidates.Where(candidate =>
+            candidate.Parameters.Length == suppliedCount && argumentIndex < candidate.Parameters.Length).ToArray();
+        if (viable.Length == 0) return null;
+        TypeSymbol expected = viable[0].Parameters[argumentIndex].Type;
+        return viable.Skip(1).All(candidate =>
+            TypeIdentity.AreSame(candidate.Parameters[argumentIndex].Type, expected))
+                ? expected
+                : null;
+    }
+
+    private bool TryGetCallReceiverType(ExpressionSyntax syntax, out TypeSymbol? type)
+    {
+        type = syntax switch
+        {
+            NameExpressionSyntax name => _scope.Lookup(name.IdentifierToken.Text)?.Type ??
+                _function.ContainingType?.FindInstanceField(name.IdentifierToken.Text)?.Type,
+            ThisExpressionSyntax => _function.ContainingType,
+            MemberAccessExpressionSyntax nested when
+                TryGetCallReceiverType(nested.Receiver, out TypeSymbol? nestedReceiver) =>
+                GetCallMemberContainer(nestedReceiver!, nested.OperatorToken.Kind)?
+                    .FindInstanceField(nested.MemberToken.Text)?.Type,
+            _ => null,
+        };
+        return type is not null;
+    }
+
+    private static DeclaredTypeSymbol? GetCallMemberContainer(TypeSymbol type, SyntaxKind operatorKind) =>
+        operatorKind == SyntaxKind.ArrowToken ? type switch
+        {
+            PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
+            UniqueTypeSymbol unique => unique.ElementType as DeclaredTypeSymbol,
+            SharedTypeSymbol shared => shared.ElementType as DeclaredTypeSymbol,
+            _ => null,
+        } : type as DeclaredTypeSymbol;
 
     private bool IsFunctionPointerMemberTarget(MemberAccessExpressionSyntax member)
     {
@@ -5302,8 +5449,7 @@ internal sealed class FunctionBodyBinder
     private BoundExpression BindExplicitGenericCall(CallExpressionSyntax syntax,
         TypeArgumentListSyntax typeArguments, ImmutableArray<BoundExpression> arguments)
     {
-        FunctionSymbol? definition = null;
-        bool diagnosticReported = false;
+        FunctionSymbol[] candidates = [];
         TextLocation location = typeArguments.LessToken.Location;
         if (syntax.Target is NameExpressionSyntax name)
         {
@@ -5312,37 +5458,39 @@ internal sealed class FunctionBodyBinder
                 new DiagnosticBag());
             if (possibleType is StructTypeSymbol { IsGenericDefinition: true })
                 return BindExplicitGenericStructConstruction(syntax, name, typeArguments, arguments);
-            definition = _fileScope.ResolveFunction(name.IdentifierToken.Text, location, _diagnostics,
-                out diagnosticReported);
+            candidates = _fileScope.ResolveFunctions(name.IdentifierToken.Text).ToArray();
         }
         else if (syntax.Target is MemberAccessExpressionSyntax member &&
                  TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts))
         {
             location = member.MemberToken.Location;
-            definition = _fileScope.ResolveQualifiedFunction(parts.Select(part => part.Text).ToArray(),
-                location, _diagnostics, out diagnosticReported);
+            candidates = _fileScope.ResolveQualifiedFunctions(parts.Select(part => part.Text).ToArray()).ToArray();
         }
-        if (definition is null)
+        if (candidates.Length == 0)
         {
-            if (!diagnosticReported)
-                _diagnostics.Report(location, "generic call target must name a function",
-                    DiagnosticIds.InvalidCallTarget);
-            return new BoundErrorExpression();
-        }
-        if (definition.TypeParameters.IsEmpty || definition.ContainingType is not null)
-        {
-            _diagnostics.Report(location, $"function '{definition.Name}' is not generic",
-                DiagnosticIds.GenericSpecializationNotImplemented);
+            _diagnostics.Report(location, "generic call target must name a function",
+                DiagnosticIds.InvalidCallTarget);
             return new BoundErrorExpression();
         }
 
         ImmutableArray<TypeSymbol> resolvedArguments = typeArguments.Arguments
             .Select(argument => TypeResolver.Resolve(argument, _fileScope, _diagnostics)).ToImmutableArray();
+        FunctionSymbol? definition = ResolveExplicitGenericOverload(candidates, resolvedArguments,
+            arguments, location, syntax.Target,
+            syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        if (definition is null) return new BoundErrorExpression();
+        if (!definition.IsPublic && !ReferenceEquals(definition.ContainingNamespace, _fileScope.ContainingNamespace))
+        {
+            _diagnostics.Report(location,
+                $"function '{definition.Name}' is private in namespace '{definition.ContainingNamespace.FullName}'",
+                DiagnosticIds.InaccessibleSymbol);
+            return new BoundErrorExpression();
+        }
         if (resolvedArguments.Any(ContainsGenericParameter))
             return BindOpenGenericCall(syntax, definition, resolvedArguments, arguments, location);
         FunctionSymbol? specialized = _genericSpecializer?.GetOrCreate(definition, resolvedArguments, location);
         if (specialized is null) return new BoundErrorExpression();
-        RecordCandidates(syntax.Target, specialized, [definition], CandidateReason.None);
+        SetSelectedSymbolPreservingCandidates(syntax.Target, specialized);
         arguments = ValidateFunctionArguments(specialized, arguments, syntax.Arguments, location,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         return new BoundCallExpression(specialized, arguments);
@@ -5417,7 +5565,7 @@ internal sealed class FunctionBodyBinder
             .ToDictionary(pair => pair.First, pair => pair.Second);
         ImmutableArray<TypeSymbol> parameterTypes = definition.Parameters
             .Select(parameter => SubstituteGenericType(parameter.Type, substitutions)).ToImmutableArray();
-        _ = ValidateGenericArguments(definition.Name, parameterTypes, arguments, syntax.Arguments, location,
+        arguments = ValidateGenericArguments(definition.Name, parameterTypes, arguments, syntax.Arguments, location,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordCandidates(syntax.Target, definition, [definition], CandidateReason.None);
         return new BoundDeferredGenericOperationExpression(
@@ -5435,17 +5583,19 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         if (resolved is not DeclaredTypeSymbol structType)
             return null;
-        FunctionSymbol? method = structType.FindMember<FunctionSymbol>(target.MemberToken.Text);
-        if (method is null || !method.IsStatic)
+        FunctionSymbol[] candidates = GetMethodOverloads(structType, target.MemberToken.Text, isStatic: true);
+        if (candidates.Length == 0)
             return null;
         bool incomplete = callSyntax.CloseParenthesisToken.IsMissing;
         int completedArgumentCount = GetCompletedArgumentCount(argumentSyntax, incomplete);
         RecordStaticReceiver(target.Receiver, structType);
-        RecordCandidates(target, method, [method],
-            GetCallCandidateReason(method, arguments, incomplete, completedArgumentCount));
+        FunctionSymbol? method = ResolveCallableOverload(candidates, arguments, target.MemberToken.Location,
+            $"static method '{structType.Name}.{target.MemberToken.Text}'", target, out _,
+            completedArgumentCount: incomplete ? completedArgumentCount : null);
+        if (method is null) return new BoundErrorExpression();
         if (!method.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, method.ContainingType))
         {
-            RecordCandidates(target, null, [method], CandidateReason.Inaccessible);
+            RecordCandidates(target, null, candidates, CandidateReason.Inaccessible);
             _diagnostics.Report(target.MemberToken.Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
                 DiagnosticIds.InaccessibleSymbol);
             return new BoundErrorExpression();
@@ -5563,21 +5713,36 @@ internal sealed class FunctionBodyBinder
             return new BoundConstructorCallExpression(structType, constructor, arguments);
         }
 
-        FunctionSymbol? function = _fileScope.ResolveQualifiedFunction(
-            parts,
-            target.MemberToken.Location,
-            _diagnostics,
-            out bool resolutionDiagnostic);
+        FunctionSymbol[] functionCandidates = _fileScope.ResolveQualifiedFunctions(parts).ToArray();
+        FunctionSymbol? function = functionCandidates.Length == 0 ? null : ResolveCallableOverload(
+            functionCandidates, arguments, target.MemberToken.Location,
+            $"function '{string.Join('.', parts)}'", target, out _,
+            completedArgumentCount: incomplete ? completedArgumentCount : null);
         if (function is not null)
         {
-            RecordCandidates(target, function, [function],
-                GetCallCandidateReason(function, arguments, incomplete, completedArgumentCount));
+            if (!function.IsPublic && !ReferenceEquals(function.ContainingNamespace, _fileScope.ContainingNamespace))
+            {
+                RecordCandidates(target, null, functionCandidates, CandidateReason.Inaccessible);
+                _diagnostics.Report(target.MemberToken.Location,
+                    $"function '{function.Name}' is private in namespace '{function.ContainingNamespace.FullName}'",
+                    DiagnosticIds.InaccessibleSymbol);
+                return new BoundErrorExpression();
+            }
+            if (function.IsGenericDefinition)
+            {
+                bool inferenceSucceeded = false;
+                FunctionSymbol? specialized = _genericSpecializer?.InferAndCreate(function, arguments,
+                    target.MemberToken.Location, out inferenceSucceeded);
+                if (specialized is null) return new BoundErrorExpression();
+                function = specialized;
+                SetSelectedSymbolPreservingCandidates(target, specialized);
+            }
             arguments = ValidateFunctionArguments(function, arguments, argumentSyntax, target.MemberToken.Location,
                 incomplete ? completedArgumentCount : null);
             return new BoundCallExpression(function, arguments);
         }
 
-        if (!resolutionDiagnostic)
+        if (functionCandidates.Length == 0)
         {
             _diagnostics.Report(
                 target.MemberToken.Location,
@@ -5733,16 +5898,28 @@ internal sealed class FunctionBodyBinder
             (pointerAccess && receiver.Type is PointerTypeSymbol { IsReadonly: true }) ||
             (!pointerAccess && IsAddressable(receiver) && !IsWritable(receiver));
 
-        FunctionSymbol[] methodCandidates = structType.LookupMethods(target.MemberToken.Text)
-            .Where(candidate => !candidate.IsStatic).ToArray();
-        FunctionSymbol? method = FindInstanceMethod(structType, target.MemberToken.Text, hasReadonlyReceiver || _function.IsReadonly);
-        // Prefer a readonly overload in readonly code, but retain a mutable
-        // candidate so the effect checker can report a disallowed call.
-        if (method is null && !hasReadonlyReceiver)
-            method = FindInstanceMethod(structType, target.MemberToken.Text, receiverIsReadonly: false);
+        FunctionSymbol[] methodCandidates = GetMethodOverloads(structType, target.MemberToken.Text,
+            isStatic: false);
+        bool filterMutableCandidates = hasReadonlyReceiver && methodCandidates.Any(candidate => candidate.IsReadonly);
+        FunctionSymbol? method = methodCandidates.Length == 0 ? null : ResolveCallableOverload(
+            methodCandidates, arguments, target.MemberToken.Location,
+            $"method '{structType.Name}.{target.MemberToken.Text}'", target, out _, filterMutableCandidates,
+            incomplete ? completedArgumentCount : null,
+            preferReadonly: _function.IsReadonly && !hasReadonlyReceiver);
         if (method is null)
         {
+            if (hasReadonlyReceiver && methodCandidates.Length != 0 &&
+                methodCandidates.All(candidate => !candidate.IsReadonly))
+            {
+                RecordCandidates(target, null, methodCandidates, CandidateReason.Inaccessible);
+                _diagnostics.Report(target.MemberToken.Location,
+                    $"mutable method '{methodCandidates[0].Name}' cannot be called on a readonly '{structType.Name}' receiver",
+                    DiagnosticIds.MutableMethodOnReadonlyReceiver);
+                return new BoundErrorExpression();
+            }
             FunctionSymbol? namedMethod = structType.FindMember<FunctionSymbol>(target.MemberToken.Text);
+            if (methodCandidates.Length != 0)
+                return new BoundErrorExpression();
             RecordCandidates(target, null, methodCandidates,
                 namedMethod is not null && (hasReadonlyReceiver || !namedMethod.IsPublic)
                     ? CandidateReason.Inaccessible
@@ -5769,8 +5946,14 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        RecordCandidates(target, method, methodCandidates,
-            GetCallCandidateReason(method, arguments, incomplete, completedArgumentCount));
+        if (hasReadonlyReceiver && !method.IsReadonly)
+        {
+            RecordCandidates(target, null, methodCandidates, CandidateReason.Inaccessible);
+            _diagnostics.Report(target.MemberToken.Location,
+                $"mutable method '{method.Name}' cannot be called on a readonly '{structType.Name}' receiver",
+                DiagnosticIds.MutableMethodOnReadonlyReceiver);
+            return new BoundErrorExpression();
+        }
 
         if (!method.IsPublic && !TypeIdentity.AreSame(_function.ContainingType, method.ContainingType))
         {
@@ -5985,12 +6168,24 @@ internal sealed class FunctionBodyBinder
         return type;
     }
 
-    private static FunctionSymbol? FindInstanceMethod(DeclaredTypeSymbol type, string name, bool receiverIsReadonly)
+    private static FunctionSymbol[] GetMethodOverloads(DeclaredTypeSymbol type, string name, bool isStatic)
     {
-        FunctionSymbol? Find(bool isReadonly) => type.LookupMethods(name)
-            .FirstOrDefault(method => method.IsReadonly == isReadonly);
-        if (!receiverIsReadonly && Find(false) is { IsStatic: false } mutable) return mutable;
-        return Find(true) is { IsStatic: false } readOnly ? readOnly : null;
+        var methods = new List<FunctionSymbol>();
+        foreach (FunctionSymbol method in type.LookupMethods(name).Where(candidate => candidate.IsStatic == isStatic))
+        {
+            // Lookup is derived-first. An override replaces only its matching inherited slot;
+            // unrelated inherited overloads remain candidates.
+            if (!methods.Any(existing => existing.HasSameSignature(method))) methods.Add(method);
+        }
+        return methods.ToArray();
+    }
+
+    private BoundExpression BindExpressionWithExpectedType(ExpressionSyntax syntax, TypeSymbol expectedType)
+    {
+        FunctionPointerTypeSymbol? previous = _expectedFunctionPointerType;
+        _expectedFunctionPointerType = expectedType as FunctionPointerTypeSymbol;
+        try { return BindExpression(syntax); }
+        finally { _expectedFunctionPointerType = previous; }
     }
 
     private BoundExpression BindNewExpression(NewExpressionSyntax syntax)
@@ -6287,6 +6482,222 @@ internal sealed class FunctionBodyBinder
         return CandidateReason.Incomplete;
     }
 
+    private FunctionSymbol? ResolveCallableOverload(
+        IEnumerable<FunctionSymbol> source,
+        ImmutableArray<BoundExpression> arguments,
+        TextLocation location,
+        string description,
+        SyntaxNode syntax,
+        out CandidateReason reason,
+        bool? receiverIsReadonly = null,
+        int? completedArgumentCount = null,
+        bool preferReadonly = false)
+    {
+        FunctionSymbol[] candidates = source.Distinct().ToArray();
+        int suppliedCount = completedArgumentCount ?? arguments.Length;
+        bool incomplete = completedArgumentCount.HasValue;
+        // Preserve detailed arity/conversion diagnostics when there is no overload
+        // decision to make. Validation after selection owns those messages.
+        if (candidates.Length == 1 && candidates[0].TypeParameters.IsEmpty)
+        {
+            FunctionSymbol single = candidates[0];
+            reason = receiverIsReadonly == true && !single.IsReadonly
+                ? CandidateReason.Inaccessible
+                : GetCallCandidateReason(single, arguments, incomplete, suppliedCount);
+            RecordCandidates(syntax, reason == CandidateReason.Inaccessible ? null : single,
+                candidates, reason);
+            return single;
+        }
+        var matches = new List<(FunctionSymbol Function, int[] Costs)>();
+        var constraintValidator = new GenericConstraintValidator();
+
+        foreach (FunctionSymbol candidate in candidates)
+        {
+            if (receiverIsReadonly == true && !candidate.IsReadonly) continue;
+            if (incomplete ? candidate.Parameters.Length < suppliedCount : candidate.Parameters.Length != suppliedCount)
+                continue;
+
+            ImmutableArray<TypeSymbol> parameterTypes = candidate.Parameters.Select(parameter => parameter.Type)
+                .ToImmutableArray();
+            if (candidate.TypeParameters.Length != 0)
+            {
+                if (incomplete)
+                {
+                    // Keep generic signatures available to tooling while the argument list is incomplete.
+                    // Concrete non-generic parameter positions can still disqualify the candidate.
+                    int[] partialCosts = parameterTypes.Take(suppliedCount).Zip(arguments.Take(suppliedCount))
+                        .Select(pair => ContainsGenericParameter(pair.First)
+                            ? 0
+                            : GetArgumentConversionCost(pair.First, pair.Second) ?? int.MaxValue)
+                        .ToArray();
+                    if (partialCosts.All(cost => cost != int.MaxValue)) matches.Add((candidate, partialCosts));
+                    continue;
+                }
+
+                if (!TryInferGenericTypeArguments(candidate, arguments, out ImmutableArray<TypeSymbol> inferred))
+                    continue;
+                bool constraintsSatisfied = true;
+                for (int index = 0; index < inferred.Length; index++)
+                {
+                    if (inferred[index] is GenericParameterSymbol inferredParameter)
+                    {
+                        if (candidate.TypeParameters[index].Constraints.All(required =>
+                                GenericConstraintGuarantees.IsGuaranteed(inferredParameter, required)))
+                            continue;
+                        constraintsSatisfied = false;
+                        break;
+                    }
+                    if (constraintValidator.Validate(candidate.TypeParameters[index], inferred[index]).IsValid) continue;
+                    constraintsSatisfied = false;
+                    break;
+                }
+                if (!constraintsSatisfied) continue;
+                var substitutions = candidate.TypeParameters.Zip(inferred)
+                    .ToDictionary(pair => pair.First, pair => pair.Second);
+                parameterTypes = parameterTypes.Select(type => SubstituteGenericType(type, substitutions))
+                    .ToImmutableArray();
+            }
+
+            int?[] classified = parameterTypes.Take(suppliedCount).Zip(arguments.Take(suppliedCount))
+                .Select(pair => GetArgumentConversionCost(pair.First, pair.Second)).ToArray();
+            if (classified.All(cost => cost.HasValue))
+                matches.Add((candidate, classified.Select(cost => cost!.Value).ToArray()));
+        }
+
+        if (matches.Count == 0)
+        {
+            reason = candidates.Length == 0 ? CandidateReason.NotFound
+                : candidates.All(candidate => incomplete
+                    ? candidate.Parameters.Length < suppliedCount
+                    : candidate.Parameters.Length != suppliedCount)
+                    ? CandidateReason.WrongArity
+                    : CandidateReason.NotInvocable;
+            RecordCandidates(syntax, null, candidates, reason);
+            if (!incomplete && candidates.Length != 0)
+                _diagnostics.Report(location,
+                    $"no overload of {description} matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
+                    reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+            return null;
+        }
+
+        List<(FunctionSymbol Function, int[] Costs)> best = matches.Where(candidate => !matches.Any(other =>
+            !ReferenceEquals(other.Function, candidate.Function) &&
+            IsBetterConversionSequence(other.Costs, candidate.Costs))).ToList();
+
+        if (best.Count > 1 && receiverIsReadonly == false)
+        {
+            var preferred = best.Where(candidate => candidate.Function.IsReadonly == preferReadonly).ToList();
+            if (preferred.Count == 1 && best.All(candidate =>
+                    candidate.Function.HasSameOverloadSignature(preferred[0].Function)))
+                best = preferred;
+        }
+        if (best.Count > 1)
+        {
+            var nonGeneric = best.Where(candidate => candidate.Function.TypeParameters.IsEmpty).ToList();
+            if (nonGeneric.Count == 1 && best.All(candidate => candidate.Costs.SequenceEqual(nonGeneric[0].Costs)))
+                best = nonGeneric;
+        }
+
+        if (best.Count == 1)
+        {
+            reason = incomplete ? CandidateReason.Incomplete : CandidateReason.None;
+            RecordCandidates(syntax, best[0].Function, candidates, reason);
+            return best[0].Function;
+        }
+
+        reason = incomplete ? CandidateReason.Incomplete : CandidateReason.Ambiguous;
+        RecordCandidates(syntax, null, candidates, reason);
+        if (!incomplete)
+        {
+            bool duplicateIdentity = best.Select(item => item.Function).All(candidate =>
+                candidate.HasSameOverloadSignature(best[0].Function));
+            _diagnostics.Report(location,
+                duplicateIdentity
+                    ? $"function name '{best[0].Function.Name}' is ambiguous between {string.Join(" and ", best.Select(item => $"'{item.Function.FullName}'"))}"
+                    : $"call to {description} is ambiguous between: {FormatCallableCandidates(best.Select(item => item.Function))}",
+                duplicateIdentity ? DiagnosticIds.AmbiguousName : DiagnosticIds.AmbiguousCall);
+        }
+        return null;
+    }
+
+    private static string FormatCallableCandidates(IEnumerable<FunctionSymbol> candidates) =>
+        string.Join(", ", candidates.Select(candidate =>
+            $"'{candidate.ToDisplayString(SymbolDisplayFormat.Signature)}'"));
+
+    private FunctionSymbol? ResolveExplicitGenericOverload(
+        IEnumerable<FunctionSymbol> source,
+        ImmutableArray<TypeSymbol> typeArguments,
+        ImmutableArray<BoundExpression> arguments,
+        TextLocation location,
+        SyntaxNode syntax,
+        int? completedArgumentCount)
+    {
+        FunctionSymbol[] named = source.Where(candidate => candidate.ContainingType is null).ToArray();
+        FunctionSymbol[] candidates = named.Where(candidate =>
+            candidate.TypeParameters.Length == typeArguments.Length && candidate.TypeParameters.Length != 0).ToArray();
+        if (candidates.Length == 0)
+        {
+            RecordCandidates(syntax, null, named, CandidateReason.WrongArity);
+            _diagnostics.Report(location,
+                $"no generic overload accepts {typeArguments.Length} type argument(s); candidates: {FormatCallableCandidates(named)}",
+                DiagnosticIds.GenericArityMismatch);
+            return null;
+        }
+
+        // With one generic declaration there is no overload decision. Preserve
+        // the dedicated specialization diagnostics for invalid constraints and
+        // the ordinary argument diagnostics for a bad call.
+        if (candidates.Length == 1)
+        {
+            RecordCandidates(syntax, candidates[0], candidates,
+                completedArgumentCount.HasValue ? CandidateReason.Incomplete : CandidateReason.None);
+            return candidates[0];
+        }
+
+        int suppliedCount = completedArgumentCount ?? arguments.Length;
+        bool incomplete = completedArgumentCount.HasValue;
+        var validator = new GenericConstraintValidator();
+        var matches = new List<(FunctionSymbol Function, int[] Costs)>();
+        foreach (FunctionSymbol candidate in candidates)
+        {
+            bool validConstraints = candidate.TypeParameters.Zip(typeArguments).All(pair =>
+                pair.Second is GenericParameterSymbol generic
+                    ? pair.First.Constraints.All(required =>
+                        GenericConstraintGuarantees.IsGuaranteed(generic, required))
+                    : validator.Validate(pair.First, pair.Second).IsValid);
+            if (!validConstraints) continue;
+            if (incomplete ? candidate.Parameters.Length < suppliedCount : candidate.Parameters.Length != suppliedCount)
+                continue;
+            var substitutions = candidate.TypeParameters.Zip(typeArguments)
+                .ToDictionary(pair => pair.First, pair => pair.Second);
+            TypeSymbol[] parameterTypes = candidate.Parameters.Select(parameter =>
+                SubstituteGenericType(parameter.Type, substitutions)).ToArray();
+            int?[] costs = parameterTypes.Take(suppliedCount).Zip(arguments.Take(suppliedCount))
+                .Select(pair => GetArgumentConversionCost(pair.First, pair.Second)).ToArray();
+            if (costs.All(cost => cost.HasValue))
+                matches.Add((candidate, costs.Select(cost => cost!.Value).ToArray()));
+        }
+
+        var best = matches.Where(candidate => !matches.Any(other =>
+            !ReferenceEquals(candidate.Function, other.Function) &&
+            IsBetterConversionSequence(other.Costs, candidate.Costs))).ToArray();
+        if (best.Length == 1)
+        {
+            RecordCandidates(syntax, best[0].Function, candidates,
+                incomplete ? CandidateReason.Incomplete : CandidateReason.None);
+            return best[0].Function;
+        }
+
+        CandidateReason reason = best.Length > 1 ? CandidateReason.Ambiguous : CandidateReason.NotInvocable;
+        RecordCandidates(syntax, null, candidates, incomplete ? CandidateReason.Incomplete : reason);
+        if (!incomplete)
+            _diagnostics.Report(location, best.Length > 1
+                    ? $"generic call is ambiguous between: {FormatCallableCandidates(best.Select(item => item.Function))}"
+                    : $"no generic overload matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
+                best.Length > 1 ? DiagnosticIds.AmbiguousCall : DiagnosticIds.NoMatchingCandidate);
+        return null;
+    }
+
     private ImmutableArray<BoundExpression> ValidateFunctionArguments(
         FunctionSymbol function,
         ImmutableArray<BoundExpression> arguments,
@@ -6361,58 +6772,9 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.MissingInterfaceMethod);
             return null;
         }
-        int suppliedCount = completedArgumentCount ?? arguments.Length;
-        bool incomplete = completedArgumentCount.HasValue;
-        // Preserve the established argument/readonly diagnostics for a single candidate.
-        if (candidates.Length == 1)
-        {
-            CandidateReason singleReason = readonlyReceiver && !candidates[0].IsReadonly
-                ? CandidateReason.Inaccessible
-                : incomplete
-                    ? GetCallCandidateReason(candidates[0], arguments, true, suppliedCount)
-                    : candidates[0].Parameters.Length != arguments.Length ? CandidateReason.WrongArity
-                    : CandidateReason.None;
-            RecordCandidates(syntax, singleReason == CandidateReason.Inaccessible ? null : candidates[0], candidates, singleReason);
-            return candidates[0];
-        }
-        var matches = candidates.Where(candidate =>
-                (incomplete ? candidate.Parameters.Length >= suppliedCount : candidate.Parameters.Length == arguments.Length) &&
-                (!readonlyReceiver || candidate.IsReadonly))
-            .Select(candidate => (Method: candidate, Costs: candidate.Parameters.Take(suppliedCount).Zip(arguments.Take(suppliedCount))
-                .Select(pair => GetArgumentConversionCost(pair.First.Type, pair.Second)).ToArray()))
-            .Where(candidate => candidate.Costs.All(cost => cost.HasValue))
-            .Select(candidate => (candidate.Method, Costs: candidate.Costs.Select(cost => cost!.Value).ToArray())).ToArray();
-        FunctionSymbol[] best = matches.Where(candidate => !matches.Any(other =>
-                !ReferenceEquals(other.Method, candidate.Method) && IsBetterConversionSequence(other.Costs, candidate.Costs)))
-            .Select(candidate => candidate.Method).ToArray();
-        if (best.Length == 1)
-        {
-            RecordCandidates(syntax, best[0], candidates,
-                incomplete ? CandidateReason.Incomplete : CandidateReason.None);
-            return best[0];
-        }
-        if (incomplete && best.Length > 1)
-        {
-            RecordCandidates(syntax, null, candidates, CandidateReason.Incomplete);
-            return null;
-        }
-        CandidateReason reason = best.Length == 0
-            ? candidates.All(candidate => incomplete
-                ? candidate.Parameters.Length < suppliedCount
-                : candidate.Parameters.Length != arguments.Length)
-                ? CandidateReason.WrongArity : CandidateReason.NotInvocable
-            : CandidateReason.Ambiguous;
-        RecordCandidates(syntax, null, candidates, reason);
-        _diagnostics.Report(location, best.Length == 0
-            ? $"no interface method '{type.Name}.{name}' matches the provided arguments"
-            : $"interface method call '{type.Name}.{name}' is ambiguous",
-            reason switch
-            {
-                CandidateReason.WrongArity => DiagnosticIds.WrongArity,
-                CandidateReason.Ambiguous => DiagnosticIds.AmbiguousCall,
-                _ => DiagnosticIds.NoMatchingCandidate,
-            });
-        return null;
+        return ResolveCallableOverload(candidates, arguments, location,
+            $"interface method '{type.Name}.{name}'", syntax, out _, readonlyReceiver,
+            completedArgumentCount);
     }
 
     private FunctionSymbol? ResolveConstructor(
@@ -7705,12 +8067,12 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.WriteThroughReadonlyReceiver);
             return new BoundErrorExpression();
         }
-        _ = ValidateGenericArguments("this", indexer.ParameterTypes, indices, target.Arguments,
+        indices = ValidateGenericArguments("this", indexer.ParameterTypes, indices, target.Arguments,
             target.OpenBracketToken.Location);
         BoundExpression value = BindExpression(syntax.Expression);
         if (isSimpleAssignment)
-            _ = ValidateGenericArguments("this", [indexer.Type], [value], [syntax.Expression],
-                target.OpenBracketToken.Location);
+            value = ValidateGenericArguments("this", [indexer.Type], [value], [syntax.Expression],
+                target.OpenBracketToken.Location)[0];
         else
         {
             SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
@@ -7807,7 +8169,7 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.MutableMethodOnReadonlyReceiver);
             return new BoundErrorExpression();
         }
-        _ = ValidateGenericArguments(method.Symbol.Name, method.ParameterTypes, arguments, argumentSyntax,
+        arguments = ValidateGenericArguments(method.Symbol.Name, method.ParameterTypes, arguments, argumentSyntax,
             target.MemberToken.Location, incomplete ? completedArgumentCount : null);
         RecordSymbolAndType(target, method.Symbol, method.ReturnType);
         return new BoundDeferredGenericMethodCallExpression(receiver, method.Symbol, arguments,
@@ -7834,7 +8196,7 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.GenericMemberNotGuaranteed);
             return new BoundErrorExpression();
         }
-        _ = ValidateGenericArguments("this", indexer.ParameterTypes, arguments, syntax.Arguments,
+        arguments = ValidateGenericArguments("this", indexer.ParameterTypes, arguments, syntax.Arguments,
             syntax.OpenBracketToken.Location);
         RecordSymbolAndType(syntax, indexer.Symbol, indexer.Type);
         return new BoundDeferredGenericOperationExpression(
@@ -7861,7 +8223,7 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.GenericConstructorNotGuaranteed);
             return new BoundErrorExpression();
         }
-        _ = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
+        arguments = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
             syntax.NewKeyword.Location,
             syntax.CloseDelimiterToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordSymbolAndType(syntax, constructor.Symbol, _fileScope.TypeFactory.PointerTo(parameter));
@@ -7891,7 +8253,7 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.GenericConstructorNotGuaranteed);
             return new BoundErrorExpression();
         }
-        _ = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
+        arguments = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
             GetLocation(syntax.Target),
             incomplete ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
         RecordSymbolAndType(syntax.Target, constructor.Symbol, parameter);
@@ -7923,21 +8285,27 @@ internal sealed class FunctionBodyBinder
                 candidate.Candidate,
                 Costs = candidate.Costs.Select(cost => cost!.Value).ToArray(),
             }).ToArray();
-        if (matches.Length == 1)
+        T[] bestMatches = matches
+            .Where(candidate => !matches.Any(other =>
+                !ReferenceEquals(other.Candidate, candidate.Candidate) &&
+                IsBetterConversionSequence(other.Costs, candidate.Costs)))
+            .Select(candidate => candidate.Candidate)
+            .ToArray();
+        if (bestMatches.Length == 1)
         {
-            RecordCandidates(syntax, getSymbol(matches[0].Candidate), candidates.Select(getSymbol),
+            RecordCandidates(syntax, getSymbol(bestMatches[0]), candidates.Select(getSymbol),
                 incomplete ? CandidateReason.Incomplete : CandidateReason.None);
-            return matches[0].Candidate;
+            return bestMatches[0];
         }
         CandidateReason reason = candidates.Length == 0 ? CandidateReason.NotFound
-            : matches.Length > 1 ? CandidateReason.Ambiguous
+            : bestMatches.Length > 1 ? CandidateReason.Ambiguous
             : candidates.All(candidate => getParameterTypes(candidate).Length != suppliedCount)
                 ? CandidateReason.WrongArity : CandidateReason.NotInvocable;
         RecordCandidates(syntax, null, candidates.Select(getSymbol), reason);
         if (candidates.Length != 0 && !incomplete)
-            _diagnostics.Report(location, matches.Length > 1 ? $"{description} is ambiguous" :
+            _diagnostics.Report(location, bestMatches.Length > 1 ? $"{description} is ambiguous" :
                 $"no {description} matches the provided arguments",
-                matches.Length > 1 ? DiagnosticIds.AmbiguousCall :
+                bestMatches.Length > 1 ? DiagnosticIds.AmbiguousCall :
                 reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
         return null;
     }
@@ -7980,7 +8348,33 @@ internal sealed class FunctionBodyBinder
     {
         if (_fileScope.GenericStructSpecializer is not null)
             return _fileScope.GenericStructSpecializer.Substitute(type, substitutions);
-        return type;
+        return type switch
+        {
+            GenericParameterSymbol parameter when substitutions.TryGetValue(parameter, out TypeSymbol? replacement) =>
+                replacement,
+            PointerTypeSymbol pointer => _fileScope.TypeFactory.PointerTo(
+                SubstituteGenericType(pointer.ElementType, substitutions), pointer.IsReadonly),
+            ReferenceTypeSymbol reference => _fileScope.TypeFactory.ReferenceTo(
+                SubstituteGenericType(reference.ElementType, substitutions), reference.IsReadonly),
+            FunctionPointerTypeSymbol function => _fileScope.TypeFactory.FunctionPointer(
+                SubstituteGenericType(function.ReturnType, substitutions),
+                function.ParameterTypes.Select(parameter => SubstituteGenericType(parameter, substitutions))),
+            ArrayTypeSymbol array => _fileScope.TypeFactory.ArrayOf(
+                SubstituteGenericType(array.ElementType, substitutions), array.Rank),
+            AtomicTypeSymbol atomic => _fileScope.TypeFactory.AtomicOf(
+                SubstituteGenericType(atomic.ElementType, substitutions)),
+            UniqueTypeSymbol unique => _fileScope.TypeFactory.UniqueOf(
+                SubstituteGenericType(unique.ElementType, substitutions)),
+            SharedTypeSymbol shared => _fileScope.TypeFactory.SharedOf(
+                SubstituteGenericType(shared.ElementType, substitutions)),
+            WeakTypeSymbol weak => _fileScope.TypeFactory.WeakOf(
+                SubstituteGenericType(weak.ElementType, substitutions)),
+            StorageTypeSymbol storage => _fileScope.TypeFactory.StorageOf(
+                SubstituteGenericType(storage.ElementType, substitutions)),
+            PinTypeSymbol pin => _fileScope.TypeFactory.PinOf(
+                SubstituteGenericType(pin.ElementType, substitutions)),
+            _ => type,
+        };
     }
 
     private bool TryInferGenericTypeArguments(FunctionSymbol definition,
