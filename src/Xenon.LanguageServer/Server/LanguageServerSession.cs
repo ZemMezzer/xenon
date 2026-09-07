@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Text.Json;
 using Xenon.Compiler.Text;
 using Xenon.LanguageServer.Protocol;
@@ -26,6 +27,7 @@ public sealed class LanguageServerRuntimeHooks
 
 public sealed class LanguageServerSession : IAsyncDisposable
 {
+    private static readonly long XelibScanIntervalTicks = Math.Max(1, Stopwatch.Frequency / 4);
     private readonly object _publicationGate = new();
     private readonly DocumentContextResolver _resolver = new();
     private readonly LanguageServerAnalysisContextFactory _analysisContexts;
@@ -45,6 +47,9 @@ public sealed class LanguageServerSession : IAsyncDisposable
     private long _reloadSequence;
     private bool _pendingSourceReconciliation;
     private bool _pendingConfigurationReconciliation;
+    private Dictionary<string, XelibFileStamp> _referencedXelibStamps =
+        new(DocumentUri.PathComparer);
+    private long _nextXelibScanTimestamp;
     private bool _disposed;
 
     public LanguageServerSession(Func<string, object?, Task> sendNotification, TextWriter? log = null,
@@ -136,19 +141,21 @@ public sealed class LanguageServerSession : IAsyncDisposable
         };
     }
 
-    private Task<object?> ExecuteCoreDocumentRequestAsync(string method, JsonElement parameters,
+    private async Task<object?> ExecuteCoreDocumentRequestAsync(string method, JsonElement parameters,
         CancellationToken cancellationToken)
     {
+        await RefreshChangedXelibReferencesAsync(cancellationToken).ConfigureAwait(false);
         string uri = RequireString(RequireObject(parameters, "textDocument"), "uri");
-        return ExecuteSemanticRequestAsync(uri,
+        return await ExecuteSemanticRequestAsync(uri,
             context => LspCoreIntelligence.HandleDocumentRequestAsync(context, method, parameters),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<object?> ExecuteWorkspaceSymbolRequestAsync(JsonElement parameters,
         CancellationToken cancellationToken)
     {
         EnsureRunning();
+        await RefreshChangedXelibReferencesAsync(cancellationToken).ConfigureAwait(false);
         string query = RequireString(parameters, "query");
         WorkspaceAnalysisRequest request;
         lock (_publicationGate)
@@ -347,12 +354,82 @@ public sealed class LanguageServerSession : IAsyncDisposable
                         : null;
                 Volatile.Write(ref _workspaces, [discovery.Workspace]);
                 _workspaceSetGeneration++;
+                _referencedXelibStamps = CaptureReferencedXelibStamps(discovery.Workspace);
             }
         }
         State = LanguageServerLifecycleState.InitializeResponded;
         return new LspInitializeResult(ServerCapabilities.CreateTyped(),
             new LspServerInfo("Xenon Language Server", XenonBuildInfo.Version));
     }
+
+    private async Task RefreshChangedXelibReferencesAsync(CancellationToken cancellationToken)
+    {
+        long now = Stopwatch.GetTimestamp();
+        if (now < Volatile.Read(ref _nextXelibScanTimestamp)) return;
+
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            now = Stopwatch.GetTimestamp();
+            if (now < Volatile.Read(ref _nextXelibScanTimestamp)) return;
+            Volatile.Write(ref _nextXelibScanTimestamp, checked(now + XelibScanIntervalTicks));
+
+            Xenon.ProjectSystem.Workspace? primary;
+            Dictionary<string, XelibFileStamp> previous;
+            lock (_publicationGate)
+            {
+                primary = _primaryWorkspace;
+                previous = _referencedXelibStamps;
+            }
+            if (primary is null || !CanReloadPrimaryWorkspace()) return;
+
+            Dictionary<string, XelibFileStamp> current = CaptureReferencedXelibStamps(primary);
+            if (XelibFileStampsEqual(previous, current)) return;
+
+            bool reloaded = await TryReloadPrimaryWorkspaceAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!reloaded) return;
+
+            Xenon.ProjectSystem.Workspace? refreshed;
+            Dictionary<string, XelibFileStamp> loaded;
+            lock (_publicationGate)
+            {
+                refreshed = _primaryWorkspace;
+                loaded = _referencedXelibStamps;
+            }
+            if (refreshed is not null &&
+                !XelibFileStampsEqual(loaded, CaptureReferencedXelibStamps(refreshed)))
+                Volatile.Write(ref _nextXelibScanTimestamp, 0);
+        }
+        finally
+        {
+            _mutationGate.Release();
+        }
+    }
+
+    private static Dictionary<string, XelibFileStamp> CaptureReferencedXelibStamps(
+        Xenon.ProjectSystem.Workspace workspace)
+    {
+        var result = new Dictionary<string, XelibFileStamp>(DocumentUri.PathComparer);
+        foreach (string path in workspace.CurrentSnapshot.Projects
+                     .SelectMany(project => project.Configuration.XenonLibraries)
+                     .Select(DocumentUri.NormalizePath)
+                     .Distinct(DocumentUri.PathComparer))
+        {
+            var file = new FileInfo(path);
+            result[path] = file.Exists
+                ? new XelibFileStamp(true, file.Length, file.LastWriteTimeUtc.Ticks)
+                : default;
+        }
+        return result;
+    }
+
+    private static bool XelibFileStampsEqual(IReadOnlyDictionary<string, XelibFileStamp> left,
+        IReadOnlyDictionary<string, XelibFileStamp> right) =>
+        left.Count == right.Count && left.All(pair =>
+            right.TryGetValue(pair.Key, out XelibFileStamp value) && value == pair.Value);
+
+    private readonly record struct XelibFileStamp(bool Exists, long Length, long LastWriteTicks);
 
     private static (string? ConfigurationPath, string? DiscoveryRoot) GetInitializationRetryTarget(
         string? explicitPath, string? rootUri, string? rootPath)
@@ -626,6 +703,9 @@ public sealed class LanguageServerSession : IAsyncDisposable
         var unpublished = new List<Xenon.ProjectSystem.Workspace>();
         try
         {
+            Dictionary<string, XelibFileStamp> reloadInputXelibStamps = previous is null
+                ? new Dictionary<string, XelibFileStamp>(DocumentUri.PathComparer)
+                : CaptureReferencedXelibStamps(previous);
             Dictionary<string, OpenDocumentState> overlays = CaptureOpenDocumentStates(published);
             WorkspaceDiscoveryResult? rediscovery = discoveryRoot is null ? null :
                 WorkspaceDiscovery.Discover(null, null, discoveryRoot, cancellationToken);
@@ -679,6 +759,10 @@ public sealed class LanguageServerSession : IAsyncDisposable
                     if (committed)
                     {
                         _primaryWorkspace = candidate;
+                        // Record the files from which the candidate was requested, not their
+                        // state at commit time. A library replaced while reconstruction is in
+                        // flight must remain dirty so the next semantic request reloads it again.
+                        _referencedXelibStamps = reloadInputXelibStamps;
                         if (rediscovery is not null)
                             _configurationPath = rediscovery.ConfigurationPath;
                         Volatile.Write(ref _workspaces, unpublished.ToArray());

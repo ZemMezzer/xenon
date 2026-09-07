@@ -15,6 +15,41 @@ namespace Xenon.Compiler.Tests.Libraries;
 public sealed class XelibContainerTests
 {
     [Fact]
+    public void ReadonlyLibraryMethodCanBeCalledThroughStaticReadonlyField()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Xenon.IO;
+            struct Text {}
+            struct ConsoleWriter
+            {
+                public void readonly WriteLine(Text& value) {}
+            }
+            struct Console
+            {
+                public static readonly ConsoleWriter Out;
+            }
+            """, "console.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Console")), metadataOnly: true);
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Xenon.IO;
+            namespace App;
+            void Main(Text& text)
+            {
+                Console.Out.WriteLine(text);
+            }
+            """, "app.xe"));
+
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        FunctionSymbol writeLine = Assert.IsType<StructTypeSymbol>(reference.GlobalNamespace.Namespaces.Single()
+            .Namespaces.Single().Types
+            .Single(type => type.Name == "ConsoleWriter")).Methods.Single();
+        Assert.True(writeLine.IsReadonly);
+    }
+
+    [Fact]
     public void CallableOverloadsRoundTripAndReachOnlySelectedXelibBodies()
     {
         Compilation library = Compilation.Create(SourceText.From("""

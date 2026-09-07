@@ -18,7 +18,11 @@ public sealed class CoreIntelligenceHardeningTests
         const string source = """
             using Xenon.IO;
             namespace App;
-            void Main()
+            void Main(Text& text)
+            {
+                Console.Out.WriteLine(text);
+            }
+            void Complete()
             {
                 Console.Out.
             }
@@ -36,9 +40,10 @@ public sealed class CoreIntelligenceHardeningTests
             """);
         Compilation library = Compilation.Create(SourceText.From("""
             namespace Xenon.IO;
+            struct Text {}
             struct ConsoleWriter
             {
-                public void Write() {}
+                public void readonly WriteLine(Text& text) {}
             }
             struct Console
             {
@@ -61,7 +66,105 @@ public sealed class CoreIntelligenceHardeningTests
         Assert.Contains(tokens, token => token.Text == "Out" && token.Type == 9);
         JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
             source.IndexOf("Console.Out.", StringComparison.Ordinal) + "Console.Out.".Length);
-        Assert.Contains("Write", Labels(completion));
+        Assert.Contains("WriteLine", Labels(completion));
+        Compilation app = await Assert.Single(session.Workspaces).CurrentSnapshot.RootProject
+            .GetCompilationAsync();
+        Assert.DoesNotContain(app.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("mutable method 'WriteLine'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SemanticRequestDetectsRebuiltXelibWithoutAFileWatchEvent()
+    {
+        const string source = """
+            using Xenon.IO;
+            namespace App;
+            void Main(Text& text)
+            {
+                Console.Out.WriteLine(text);
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("src/main.xe", source);
+        string project = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["Console.xelib"]
+            """);
+        string libraryPath = directory.PathOf("Console.xelib");
+        WriteLibrary(isReadonly: false, "Initial mutable version.");
+
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        int reloadAttempts = 0;
+        var hooks = new LanguageServerRuntimeHooks
+        {
+            BeforeReloadCommitAsync = _ => ++reloadAttempts switch
+            {
+                1 => Task.FromException(new IOException("simulated transient reload failure")),
+                2 => ReplaceWhileReloading(),
+                _ => Task.CompletedTask,
+            },
+        };
+        await using var session = await CreateSessionAsync(uri, project, source, hooks);
+        Compilation before = await Assert.Single(session.Workspaces).CurrentSnapshot.RootProject
+            .GetCompilationAsync();
+        Assert.Contains(before.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("mutable method 'WriteLine'", StringComparison.Ordinal));
+
+        WriteLibrary(isReadonly: true, "Intermediate readonly version.");
+        int writeLine = source.IndexOf("WriteLine", StringComparison.Ordinal);
+        _ = await RequestAtAsync(session, "textDocument/hover", uri, source, writeLine);
+        Compilation afterRejectedReload = await Assert.Single(session.Workspaces).CurrentSnapshot.RootProject
+            .GetCompilationAsync();
+        Assert.Contains(afterRejectedReload.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("mutable method 'WriteLine'", StringComparison.Ordinal));
+
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        JsonElement intermediate = await RequestAtAsync(session, "textDocument/hover", uri, source, writeLine);
+        Assert.Contains("Latest readonly version.",
+            intermediate.GetProperty("contents").GetProperty("value").GetString());
+
+        JsonElement latest = await RequestAtAsync(session, "textDocument/hover", uri, source, writeLine);
+        string latestHover = latest.GetProperty("contents").GetProperty("value").GetString()!;
+        Assert.Contains("readonly WriteLine", latestHover);
+        Assert.Contains("Latest readonly version.", latestHover);
+        Assert.Equal(3, reloadAttempts);
+
+        Compilation after = await Assert.Single(session.Workspaces).CurrentSnapshot.RootProject
+            .GetCompilationAsync();
+        Assert.DoesNotContain(after.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("mutable method 'WriteLine'", StringComparison.Ordinal));
+
+        Task ReplaceWhileReloading()
+        {
+            WriteLibrary(isReadonly: true, "Latest readonly version.");
+            return Task.CompletedTask;
+        }
+
+        void WriteLibrary(bool isReadonly, string documentation)
+        {
+            string modifier = isReadonly ? "readonly " : string.Empty;
+            Compilation library = Compilation.Create(SourceText.From($$"""
+                namespace Xenon.IO;
+                struct Text {}
+                struct ConsoleWriter
+                {
+                    /// <summary>{{documentation}}</summary>
+                    public void {{modifier}}WriteLine(Text& text) {}
+                }
+                struct Console
+                {
+                    public static readonly ConsoleWriter Out;
+                }
+                """, "console.xe"));
+            Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+            File.WriteAllBytes(libraryPath,
+                XelibWriter.Write(library, new XelibWriteOptions("Console")));
+        }
     }
 
     [Fact]
@@ -767,10 +870,10 @@ public sealed class CoreIntelligenceHardeningTests
         """;
 
     private static async Task<LanguageServerSession> CreateSessionAsync(string uri,
-        string? workspacePath, string source)
+        string? workspacePath, string source, LanguageServerRuntimeHooks? runtimeHooks = null)
     {
         var session = new LanguageServerSession((_, _) => Task.CompletedTask,
-            diagnosticDebounce: TimeSpan.Zero);
+            diagnosticDebounce: TimeSpan.Zero, runtimeHooks: runtimeHooks);
         object options = workspacePath is null
             ? new { rootUri = uri }
             : new { rootUri = uri, initializationOptions = new { workspacePath } };
