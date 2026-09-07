@@ -83,12 +83,14 @@ internal sealed class SemanticAnalyzer
         InitializeGenericStructSpecializer();
         DeclareTemplateMembers();
         BindTypeInheritance();
+        ValidateStructTypeModifiers();
         ValidateInheritanceCycles();
         MarkVirtualDispatchRequirements();
         DeclareInterfaceMethods();
         ValidateInheritedInterfaceMembers();
         AssignInterfaceMethodSlots();
         BindStructFields();
+        BindEnumStaticFields();
         _genericStructSpecializer!.CompleteFields();
         ValidateStructLayouts();
         DeclareConstants();
@@ -104,7 +106,8 @@ internal sealed class SemanticAnalyzer
         RegisterSourceGenericStructImplementations();
         _genericStructSpecializer!.CompleteConstants();
         foreach (StructTypeSymbol type in _structSymbols.Values)
-            if (type.Destructor is null && type.BaseType?.FindDestructor() is { IsPublic: false } inheritedDestructor)
+            if (type.Destructor is null && type.BaseType?.FindDestructor() is { } inheritedDestructor &&
+                !AccessibilityRules.IsAccessible(inheritedDestructor, type))
                 _diagnostics.Report(type.Declaration.IdentifierToken.Location,
                     $"destructor '{inheritedDestructor.ContainingType!.Name}' is private",
                     DiagnosticIds.InaccessibleSymbol);
@@ -112,6 +115,7 @@ internal sealed class SemanticAnalyzer
         ValidateInterfaceImplementations();
         _genericStructSpecializer!.CompleteMembers();
         DeclareFunctions();
+        ValidateDeclaredAccessibility();
         ValidateAbstractValueStorage();
         BindInstanceFieldInitializers();
         ValidateNativeSymbols();
@@ -883,7 +887,7 @@ internal sealed class SemanticAnalyzer
                         TypeSymbol returnType = ResolveTemplateType(method.ReturnType, scope);
                         ImmutableArray<ParameterSymbol> parameters = BindTemplateParameters(method.Parameters, scope);
                         var requirement = new TemplateMethodRequirementSymbol(template, returnType, parameters,
-                            TemplateAccessibility(method.AccessModifierToken), method);
+                            TemplateAccessibility(method.AccessModifierToken, method.SecondaryAccessModifierToken), method);
                         TemplateMethodRequirementSymbol? duplicate = members
                             .OfType<TemplateMethodRequirementSymbol>()
                             .FirstOrDefault(candidate => candidate.Name == requirement.Name &&
@@ -911,7 +915,7 @@ internal sealed class SemanticAnalyzer
                         }
                         members.Add(new TemplatePropertyRequirementSymbol(template,
                             ResolveTemplateType(property.Type, scope),
-                            TemplateAccessibility(property.AccessModifierToken), property));
+                            TemplateAccessibility(property.AccessModifierToken, property.SecondaryAccessModifierToken), property));
                         break;
                     case IndexerDeclarationSyntax indexer:
                         if (indexer.IsStatic)
@@ -924,12 +928,12 @@ internal sealed class SemanticAnalyzer
                         members.Add(new TemplateIndexerRequirementSymbol(template,
                             ResolveTemplateType(indexer.Type, scope),
                             BindTemplateParameters(indexer.Parameters, scope),
-                            TemplateAccessibility(indexer.AccessModifierToken), indexer));
+                            TemplateAccessibility(indexer.AccessModifierToken, indexer.SecondaryAccessModifierToken), indexer));
                         break;
                     case TemplateConstructorDeclarationSyntax constructor:
                         members.Add(new TemplateConstructorRequirementSymbol(template,
                             BindTemplateParameters(constructor.Parameters, scope),
-                            TemplateAccessibility(constructor.AccessModifierToken), constructor));
+                            TemplateAccessibility(constructor.AccessModifierToken, constructor.SecondaryAccessModifierToken), constructor));
                         break;
                 }
             }
@@ -958,8 +962,8 @@ internal sealed class SemanticAnalyzer
         return parameters.ToImmutable();
     }
 
-    private static Accessibility TemplateAccessibility(SyntaxToken? modifier) =>
-        modifier?.Kind == SyntaxKind.PrivateKeyword ? Accessibility.Private : Accessibility.Public;
+    private static Accessibility TemplateAccessibility(SyntaxToken? modifier, SyntaxToken? secondary) =>
+        AccessibilityFacts.FromSyntax(modifier, secondary, Accessibility.Public);
 
     private void BindStructFields()
     {
@@ -975,6 +979,7 @@ internal sealed class SemanticAnalyzer
                     fieldSyntax.Type,
                     scope,
                     _diagnostics);
+                ValidateStaticStructValueType(fieldType, fieldSyntax.Type.NameToken.Location, "field");
                 if (TypeIdentity.AreSame(fieldType, BuiltinTypes.Void))
                 {
                     _diagnostics.Report(fieldSyntax.Type.NameToken.Location, "field type cannot be 'void'",
@@ -994,7 +999,8 @@ internal sealed class SemanticAnalyzer
                     type,
                     fieldType,
                     fieldSyntax.IsStatic ? staticFields.Count : type.DeclaredFieldStart + fields.Count,
-                    fieldSyntax.IsPublic ? Accessibility.Public : Accessibility.Private,
+                    AccessibilityFacts.FromSyntax(fieldSyntax.AccessModifierToken,
+                        fieldSyntax.SecondaryAccessModifierToken, Accessibility.Private),
                     fieldSyntax.IsStatic,
                     fieldSyntax.IsReadonly,
                     null,
@@ -1010,6 +1016,34 @@ internal sealed class SemanticAnalyzer
         }
     }
 
+    private void BindEnumStaticFields()
+    {
+        foreach ((EnumDeclarationSyntax declaration, (EnumTypeSymbol type, SyntaxTree tree)) in _enums)
+        {
+            FileSymbolScope scope = _treeScopes[tree];
+            var fields = ImmutableArray.CreateBuilder<FieldSymbol>();
+            var names = declaration.Members.Select(member => member.IdentifierToken.Text)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (FieldDeclarationSyntax syntax in declaration.StaticFields)
+            {
+                TypeSymbol fieldType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                ValidateStaticStructValueType(fieldType, syntax.Type.NameToken.Location, "enum field");
+                if (TypeIdentity.AreSame(fieldType, BuiltinTypes.Void))
+                    _diagnostics.Report(syntax.Type.NameToken.Location, "field type cannot be 'void'",
+                        DiagnosticIds.VoidFieldType);
+                if (!names.Add(syntax.IdentifierToken.Text))
+                    _diagnostics.Report(syntax.IdentifierToken.Location,
+                        $"member '{syntax.IdentifierToken.Text}' is already declared in enum '{type.Name}'",
+                        DiagnosticIds.DuplicateDeclaration);
+                fields.Add(new FieldSymbol(syntax.IdentifierToken.Text, type, fieldType, fields.Count,
+                    AccessibilityFacts.FromSyntax(syntax.AccessModifierToken,
+                        syntax.SecondaryAccessModifierToken, Accessibility.Private),
+                    isStatic: true, syntax.IsReadonly, null, syntax));
+            }
+            type.StaticFields = fields.ToImmutable();
+        }
+    }
+
     private void BindStaticFieldInitializers()
     {
         // Layout queries are safe only after every struct's fields and layout are known.
@@ -1018,6 +1052,11 @@ internal sealed class SemanticAnalyzer
         foreach (FieldSymbol field in type.StaticFields.Where(field =>
             !field.IsThreadLocal && field.Declaration.Initializer is not null))
             BindStaticFieldInitializer(field, type, _structScopes[declaration]);
+
+        foreach ((EnumTypeSymbol type, SyntaxTree tree) in _enums.Values)
+        foreach (FieldSymbol field in type.StaticFields.Where(field =>
+            !field.IsThreadLocal && field.Declaration.Initializer is not null))
+            BindStaticFieldInitializer(field, type, _treeScopes[tree]);
     }
 
     private void BindThreadLocalFieldInitializers(GenericFunctionSpecializer genericFunctionSpecializer)
@@ -1027,6 +1066,12 @@ internal sealed class SemanticAnalyzer
         foreach (FieldSymbol field in type.StaticFields.Where(field =>
             field.IsThreadLocal && field.Declaration.Initializer is not null))
             BindThreadLocalFieldInitializer(field, _structScopes[declaration], _semanticInfo,
+                genericFunctionSpecializer, _synthesizedFunctions.Add);
+
+        foreach ((EnumTypeSymbol type, SyntaxTree tree) in _enums.Values)
+        foreach (FieldSymbol field in type.StaticFields.Where(field =>
+            field.IsThreadLocal && field.Declaration.Initializer is not null))
+            BindThreadLocalFieldInitializer(field, _treeScopes[tree], _semanticInfo,
                 genericFunctionSpecializer, _synthesizedFunctions.Add);
     }
 
@@ -1051,7 +1096,7 @@ internal sealed class SemanticAnalyzer
             _expressionLocations.TryAdd(entry.Key, entry.Value);
     }
 
-    private void BindStaticFieldInitializer(FieldSymbol field, StructTypeSymbol type, FileSymbolScope scope,
+    private void BindStaticFieldInitializer(FieldSymbol field, DeclaredTypeSymbol type, FileSymbolScope scope,
         FieldDeclarationSyntax? sourceDeclaration = null)
     {
         FieldDeclarationSyntax syntax = sourceDeclaration ?? field.Declaration;
@@ -1358,6 +1403,13 @@ internal sealed class SemanticAnalyzer
                 TypeSymbol target = TypeResolver.Resolve(layout.Type, _constantScopes[context], _diagnostics);
                 if (TypeIdentity.AreSame(target, BuiltinTypes.Void) || TypeIdentity.AreSame(target, BuiltinTypes.Error))
                     return null;
+                if (ContainsStaticStruct(target))
+                {
+                    _diagnostics.Report(layout.Type.NameToken.Location,
+                        "layout intrinsics are not defined for static structs",
+                        DiagnosticIds.InvalidBaseType);
+                    return null;
+                }
                 FieldSymbol? field = null;
                 if (layout.Keyword.Kind == SyntaxKind.OffsetOfKeyword)
                 {
@@ -1900,6 +1952,79 @@ internal sealed class SemanticAnalyzer
         }
     }
 
+    private void ValidateStructTypeModifiers()
+    {
+        foreach ((StructDeclarationSyntax declaration, StructTypeSymbol type) in _structSymbols)
+        {
+            if (type.IsAbstract && type.IsSealed)
+                _diagnostics.Report(declaration.IdentifierToken.Location,
+                    "abstract and sealed/static struct modifiers are incompatible",
+                    DiagnosticIds.ModifierNotAllowed);
+
+            if (type.BaseType is { IsSealed: true } sealedBase)
+            {
+                _diagnostics.Report(declaration.IdentifierToken.Location,
+                    $"struct '{type.Name}' cannot inherit from sealed struct '{sealedBase.Name}'",
+                    DiagnosticIds.InvalidBaseType);
+                type.ClearBaseType();
+            }
+
+            if ((type.IsReadonly && type.BaseType is not null) || type.BaseType is { IsReadonly: true })
+            {
+                _diagnostics.Report(declaration.IdentifierToken.Location,
+                    "readonly structs cannot participate in struct inheritance in this iteration",
+                    DiagnosticIds.InvalidBaseType);
+                type.ClearBaseType();
+            }
+
+            if (type.IsStatic)
+            {
+                if (type.IsGenericDefinition)
+                    _diagnostics.Report(declaration.IdentifierToken.Location,
+                        "generic static structs are not supported in this iteration",
+                        DiagnosticIds.GenericSpecializationNotImplemented);
+                if (!declaration.BaseTypes.IsEmpty)
+                    _diagnostics.Report(declaration.IdentifierToken.Location,
+                        "static structs cannot inherit or implement interfaces",
+                        DiagnosticIds.InvalidBaseType);
+                type.ClearBaseType();
+                type.SetInterfaces([]);
+
+                foreach (TypeMemberDeclarationSyntax member in declaration.Members)
+                {
+                    bool valid = member is TypeConstantDeclarationSyntax or FieldDeclarationSyntax { IsStatic: true } or
+                        MethodDeclarationSyntax { IsStatic: true } or PropertyDeclarationSyntax { IsStatic: true };
+                    if (!valid)
+                        _diagnostics.Report(MemberModifierLocation(member, declaration.IdentifierToken.Location),
+                            "static structs may contain only constants and explicitly static fields, methods, or properties",
+                            DiagnosticIds.ModifierNotAllowed);
+                }
+            }
+
+            if (type.IsSealed && !type.IsStatic)
+            {
+                foreach (TypeMemberDeclarationSyntax member in declaration.Members)
+                {
+                    bool meaninglessVirtual = member switch
+                    {
+                        MethodDeclarationSyntax method => method.IsVirtual || method.IsAbstract,
+                        PropertyDeclarationSyntax property => property.IsVirtual || property.IsAbstract,
+                        IndexerDeclarationSyntax indexer => indexer.IsVirtual || indexer.IsAbstract,
+                        DestructorDeclarationSyntax destructor => destructor.IsVirtual,
+                        _ => false,
+                    };
+                    if (meaninglessVirtual)
+                        _diagnostics.Report(MemberModifierLocation(member, declaration.IdentifierToken.Location),
+                            "sealed structs cannot introduce virtual or abstract members",
+                            DiagnosticIds.ModifierNotAllowed);
+                }
+            }
+        }
+    }
+
+    private static TextLocation MemberModifierLocation(TypeMemberDeclarationSyntax member, TextLocation fallback) =>
+        SyntaxNavigator.GetTokens(member).FirstOrDefault(token => !token.IsMissing)?.Location ?? fallback;
+
     private void ValidateInheritedInterfaceMembers()
     {
         foreach (InterfaceTypeSymbol type in _interfaceSymbols.Values)
@@ -1950,7 +2075,9 @@ internal sealed class SemanticAnalyzer
                         DiagnosticIds.DuplicateDeclaration);
                     continue;
                 }
-                methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, TypeResolver.ResolveReturnType(syntax.ReturnType, scope, _diagnostics), parameters, syntax));
+                TypeSymbol returnType = TypeResolver.ResolveReturnType(syntax.ReturnType, scope, _diagnostics);
+                ValidateStaticStructValueType(returnType, syntax.ReturnType.NameToken.Location, "return");
+                methods.Add(new FunctionSymbol(syntax.IdentifierToken.Text, type, returnType, parameters, syntax));
             }
             type.SetMethods(methods.ToImmutable());
 
@@ -1966,6 +2093,7 @@ internal sealed class SemanticAnalyzer
                 }
 
                 TypeSymbol propertyType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                ValidateStaticStructValueType(propertyType, syntax.Type.NameToken.Location, "property");
                 var property = new InterfacePropertySymbol(syntax.IdentifierToken.Text, type, propertyType, syntax);
                 if (syntax.Accessors.Count(accessor => accessor.IsGetter) > 1)
                     _diagnostics.Report(syntax.IdentifierToken.Location, $"interface property '{property.Name}' declares more than one getter",
@@ -2007,6 +2135,7 @@ internal sealed class SemanticAnalyzer
                     continue;
                 }
                 TypeSymbol indexerType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                ValidateStaticStructValueType(indexerType, syntax.Type.NameToken.Location, "indexer");
                 var indexer = new InterfaceIndexerSymbol(type, indexerType, parameters, syntax);
                 FunctionSymbol? getter = syntax.Getter is null
                     ? null
@@ -2127,16 +2256,22 @@ internal sealed class SemanticAnalyzer
 
         var slots = type.BaseType?.VirtualMethods.ToBuilder() ?? ImmutableArray.CreateBuilder<FunctionSymbol>();
         var invalidAccessors = new HashSet<FunctionSymbol>();
+        var inheritedAccessorTargets = new Dictionary<FunctionSymbol, FunctionSymbol?>(
+            ReferenceEqualityComparer.Instance);
         foreach (PropertySymbol property in type.Properties)
         {
-            PropertySymbol? inherited = type.BaseType?.FindProperty(property.Name);
+            PropertySymbol? inherited = FindAccessibleInheritedProperty(type, property.Name);
+            if (property.Getter is { } getter) inheritedAccessorTargets.Add(getter, inherited?.Getter);
+            if (property.Setter is { } setter) inheritedAccessorTargets.Add(setter, inherited?.Setter);
             ValidateAccessorOverride($"property '{property.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'",
                 SymbolLocation(property), property.IsOverride, property.Getter, property.Setter,
                 inherited?.Getter, inherited?.Setter, invalidAccessors);
         }
         foreach (IndexerSymbol indexer in type.Indexers)
         {
-            IndexerSymbol? inherited = type.BaseType?.AllIndexers.FirstOrDefault(candidate => HaveSameParameterTypes(indexer.Parameters, candidate.Parameters));
+            IndexerSymbol? inherited = FindAccessibleInheritedIndexer(type, indexer.Parameters);
+            if (indexer.Getter is { } getter) inheritedAccessorTargets.Add(getter, inherited?.Getter);
+            if (indexer.Setter is { } setter) inheritedAccessorTargets.Add(setter, inherited?.Setter);
             ValidateAccessorOverride($"indexer '{indexer.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'",
                 SymbolLocation(indexer), indexer.IsOverride,
                 indexer.Getter, indexer.Setter, inherited?.Getter, inherited?.Setter, invalidAccessors);
@@ -2145,7 +2280,10 @@ internal sealed class SemanticAnalyzer
         {
             // Search inherited slots by member kind and the complete signature,
             // not the first declaration with this name in an intermediate type.
-            FunctionSymbol? inherited = type.BaseType?.VirtualMethods.FirstOrDefault(method.HasSameSignature);
+            FunctionSymbol? inherited = inheritedAccessorTargets.TryGetValue(method, out FunctionSymbol? accessorTarget)
+                ? accessorTarget
+                : type.BaseType?.VirtualMethods.FirstOrDefault(candidate =>
+                    method.HasSameSignature(candidate) && AccessibilityRules.IsAccessible(candidate, type));
             if (invalidAccessors.Contains(method)) continue;
             if (method.ContainingProperty is null && method.ContainingIndexer is null && !ValidateMethodOverride(method, inherited)) continue;
             if (method.IsStatic) continue;
@@ -2194,6 +2332,29 @@ internal sealed class SemanticAnalyzer
                     $"concrete struct '{type.FullName}' does not implement abstract member '{MemberName(member)}'; implement it or declare the struct 'abstract'",
                     DiagnosticIds.UnimplementedInterfaceMember);
         }
+    }
+
+    private static PropertySymbol? FindAccessibleInheritedProperty(StructTypeSymbol type, string name)
+    {
+        for (StructTypeSymbol? current = type.BaseType; current is not null; current = current.BaseType)
+        {
+            PropertySymbol? candidate = current.Properties.FirstOrDefault(property => property.Name == name);
+            if (candidate is not null && AccessibilityRules.IsAccessible(candidate, type)) return candidate;
+        }
+        return null;
+    }
+
+    private static IndexerSymbol? FindAccessibleInheritedIndexer(
+        StructTypeSymbol type,
+        ImmutableArray<ParameterSymbol> parameters)
+    {
+        for (StructTypeSymbol? current = type.BaseType; current is not null; current = current.BaseType)
+        {
+            IndexerSymbol? candidate = current.Indexers.FirstOrDefault(indexer =>
+                HaveSameParameterTypes(parameters, indexer.Parameters));
+            if (candidate is not null && AccessibilityRules.IsAccessible(candidate, type)) return candidate;
+        }
+        return null;
     }
 
     private bool ValidateMethodOverride(FunctionSymbol method, FunctionSymbol? inherited)
@@ -2247,7 +2408,7 @@ internal sealed class SemanticAnalyzer
     }
 
     private static bool HasCompatibleOverrideAccessibility(FunctionSymbol member, FunctionSymbol inherited) =>
-        !inherited.IsPublic || member.IsPublic;
+        AccessibilityRules.DoesNotReduceOverrideAccessibility(inherited, member);
 
     private TextLocation MemberLocation(FunctionSymbol method)
     {
@@ -2389,6 +2550,7 @@ internal sealed class SemanticAnalyzer
                     methodSyntax.ReturnType,
                     scope,
                     _diagnostics);
+                ValidateStaticStructValueType(returnType, methodSyntax.ReturnType.NameToken.Location, "return");
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(
                     methodSyntax.Parameters,
                     scope);
@@ -2449,11 +2611,13 @@ internal sealed class SemanticAnalyzer
                 }
 
                 TypeSymbol propertyType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                ValidateStaticStructValueType(propertyType, syntax.Type.NameToken.Location, "property");
                 var property = new PropertySymbol(
                     syntax.IdentifierToken.Text,
                     type,
                     propertyType,
-                    syntax.IsPublic ? Accessibility.Public : Accessibility.Private,
+                    AccessibilityFacts.FromSyntax(syntax.AccessModifierToken,
+                        syntax.SecondaryAccessModifierToken, Accessibility.Private),
                     syntax);
 
                 PropertyAccessorDeclarationSyntax? getterSyntax = syntax.Getter;
@@ -2536,11 +2700,13 @@ internal sealed class SemanticAnalyzer
                         DiagnosticIds.StaticIndexerNotSupported);
 
                 TypeSymbol indexerType = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+                ValidateStaticStructValueType(indexerType, syntax.Type.NameToken.Location, "indexer");
                 var indexer = new IndexerSymbol(
                     type,
                     indexerType,
                     parameters,
-                    syntax.IsPublic ? Accessibility.Public : Accessibility.Private,
+                    AccessibilityFacts.FromSyntax(syntax.AccessModifierToken,
+                        syntax.SecondaryAccessModifierToken, Accessibility.Private),
                     syntax);
                 FunctionSymbol? getter = syntax.Getter is null
                     ? null
@@ -2629,7 +2795,8 @@ internal sealed class SemanticAnalyzer
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(constructorSyntax.Parameters, scope);
                 string signature = TypeSignature.Parameters(parameters);
                 var constructor = new FunctionSymbol(FunctionKind.Constructor, type, parameters, constructorSyntax,
-                    constructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
+                    AccessibilityFacts.FromSyntax(constructorSyntax.AccessModifierToken,
+                        constructorSyntax.SecondaryAccessModifierToken, Accessibility.Private));
                 if (!signatures.Add(signature))
                 {
                     _diagnostics.Report(constructorSyntax.IdentifierToken.Location,
@@ -2681,7 +2848,8 @@ internal sealed class SemanticAnalyzer
                     type,
                     [],
                     destructorSyntax,
-                    destructorSyntax.IsPublic ? Accessibility.Public : Accessibility.Private);
+                    AccessibilityFacts.FromSyntax(destructorSyntax.AccessModifierToken,
+                        destructorSyntax.SecondaryAccessModifierToken, Accessibility.Private));
                 type.SetDestructor(destructor);
                 _functionBodies.Add((destructor, destructorSyntax.Body, scope));
             }
@@ -2709,6 +2877,7 @@ internal sealed class SemanticAnalyzer
                 }
 
                 TypeSymbol returnType = TypeResolver.ResolveReturnType(declaration.ReturnType, declarationScope, _diagnostics);
+                ValidateStaticStructValueType(returnType, declaration.ReturnType.NameToken.Location, "return");
                 ImmutableArray<ParameterSymbol> parameters = BindParameters(declaration.Parameters, declarationScope);
                 var function = new FunctionSymbol(
                     declaration.IdentifierToken.Text,
@@ -2751,6 +2920,148 @@ internal sealed class SemanticAnalyzer
             }
         }
     }
+
+    private void ValidateDeclaredAccessibility()
+    {
+        foreach (StructTypeSymbol type in _structSymbols.Values)
+        {
+            ValidateGenericConstraints(type.TypeParameters, type);
+            if (type.BaseType is { } baseType)
+                ValidateTypeExposure(baseType, type, "base", SymbolLocation(type));
+            foreach (InterfaceTypeSymbol @interface in type.Interfaces)
+                ValidateTypeExposure(@interface, type, "interface", SymbolLocation(type));
+            foreach (FieldSymbol field in type.Fields.Concat(type.StaticFields))
+                ValidateTypeExposure(field.Type, field, "field", SymbolLocation(field));
+            foreach (ConstantSymbol constant in type.Constants)
+                ValidateTypeExposure(constant.Type, constant, "constant", SymbolLocation(constant));
+            foreach (PropertySymbol property in type.Properties)
+                ValidateTypeExposure(property.Type, property, "property", SymbolLocation(property));
+            foreach (IndexerSymbol indexer in type.Indexers)
+            {
+                ValidateTypeExposure(indexer.Type, indexer, "indexer", SymbolLocation(indexer));
+                foreach (ParameterSymbol parameter in indexer.Parameters)
+                    ValidateTypeExposure(parameter.Type, indexer, "parameter", SymbolLocation(parameter));
+            }
+            foreach (FunctionSymbol method in type.Methods.Where(method =>
+                         method.ContainingProperty is null && method.ContainingIndexer is null))
+                ValidateCallableExposure(method);
+            foreach (FunctionSymbol constructor in type.Constructors)
+                foreach (ParameterSymbol parameter in constructor.Parameters)
+                    ValidateTypeExposure(parameter.Type, constructor, "parameter", SymbolLocation(parameter));
+        }
+
+        foreach (InterfaceTypeSymbol type in _interfaceSymbols.Values)
+        {
+            foreach (InterfaceTypeSymbol baseType in type.BaseInterfaces)
+                ValidateTypeExposure(baseType, type, "base interface", SymbolLocation(type));
+            foreach (FunctionSymbol method in type.Methods)
+                ValidateCallableExposure(method);
+            foreach (InterfacePropertySymbol property in type.Properties)
+                ValidateTypeExposure(property.Type, property, "property", SymbolLocation(property));
+            foreach (InterfaceIndexerSymbol indexer in type.Indexers)
+            {
+                ValidateTypeExposure(indexer.Type, indexer, "indexer", SymbolLocation(indexer));
+                foreach (ParameterSymbol parameter in indexer.Parameters)
+                    ValidateTypeExposure(parameter.Type, indexer, "parameter", SymbolLocation(parameter));
+            }
+        }
+
+        foreach (TemplateSymbol template in _templateSymbols.Values)
+        foreach (TemplateMemberRequirementSymbol member in template.Members)
+        {
+            switch (member)
+            {
+                case TemplateMethodRequirementSymbol method:
+                    ValidateTypeExposure(method.ReturnType, method, "return", SymbolLocation(method));
+                    foreach (ParameterSymbol parameter in method.Parameters)
+                        ValidateTypeExposure(parameter.Type, method, "parameter", SymbolLocation(parameter));
+                    break;
+                case TemplateConstructorRequirementSymbol constructor:
+                    foreach (ParameterSymbol parameter in constructor.Parameters)
+                        ValidateTypeExposure(parameter.Type, constructor, "parameter", SymbolLocation(parameter));
+                    break;
+                case TemplatePropertyRequirementSymbol property:
+                    ValidateTypeExposure(property.Type, property, "property", SymbolLocation(property));
+                    break;
+                case TemplateIndexerRequirementSymbol indexer:
+                    ValidateTypeExposure(indexer.Type, indexer, "indexer", SymbolLocation(indexer));
+                    foreach (ParameterSymbol parameter in indexer.Parameters)
+                        ValidateTypeExposure(parameter.Type, indexer, "parameter", SymbolLocation(parameter));
+                    break;
+            }
+        }
+
+        foreach (FunctionSymbol function in _functionSymbols.Values)
+            ValidateCallableExposure(function);
+
+        var sourceConstants = new HashSet<ConstantSymbol>(ReferenceEqualityComparer.Instance);
+        foreach (NamespaceSymbol @namespace in _treeNamespaces.Values)
+        foreach (ConstantSymbol constant in @namespace.Constants)
+            if (constant.Origin.Kind == SymbolOriginKind.Source && sourceConstants.Add(constant))
+                ValidateTypeExposure(constant.Type, constant, "constant", SymbolLocation(constant));
+
+        foreach ((EnumTypeSymbol type, _) in _enums.Values)
+            foreach (FieldSymbol field in type.StaticFields)
+                ValidateTypeExposure(field.Type, field, "field", SymbolLocation(field));
+    }
+
+    private void ValidateCallableExposure(FunctionSymbol function)
+    {
+        if (function.FunctionKind != FunctionKind.Constructor)
+            ValidateTypeExposure(function.ReturnType, function, "return", SymbolLocation(function));
+        foreach (ParameterSymbol parameter in function.Parameters)
+            ValidateTypeExposure(parameter.Type, function, "parameter", SymbolLocation(parameter));
+        ValidateGenericConstraints(function.TypeParameters, function);
+    }
+
+    private void ValidateGenericConstraints(
+        ImmutableArray<GenericParameterSymbol> parameters,
+        Symbol exposingDeclaration)
+    {
+        foreach (GenericConstraintSymbol constraint in parameters.SelectMany(parameter => parameter.Constraints))
+        {
+            if (AccessibilityRules.IsSymbolAccessibleEnough(constraint.Target, exposingDeclaration)) continue;
+            _diagnostics.Report(
+                constraint.Declaration.Type.NameToken.Location,
+                $"inconsistent accessibility: generic constraint '{constraint.Target.Name}' is less accessible than {AccessibilitySubject(exposingDeclaration)}",
+                DiagnosticIds.InconsistentAccessibility);
+        }
+    }
+
+    private void ValidateTypeExposure(
+        TypeSymbol type,
+        Symbol exposingDeclaration,
+        string position,
+        TextLocation location)
+    {
+        if (TypeIdentity.AreSame(type, BuiltinTypes.Error) ||
+            AccessibilityRules.IsTypeAccessibleEnough(type, exposingDeclaration, out Symbol? lessAccessible))
+            return;
+        _diagnostics.Report(
+            location,
+            $"inconsistent accessibility: {position} type '{lessAccessible!.Name}' is less accessible than {AccessibilitySubject(exposingDeclaration)}",
+            DiagnosticIds.InconsistentAccessibility);
+    }
+
+    private static string AccessibilitySubject(Symbol symbol) => symbol switch
+    {
+        FunctionSymbol { FunctionKind: FunctionKind.Constructor } function =>
+            $"constructor '{function.ContainingType!.Name}'",
+        FunctionSymbol function => $"function '{function.Name}'",
+        FieldSymbol field => $"field '{field.Name}'",
+        PropertySymbol property => $"property '{property.Name}'",
+        IndexerSymbol => "indexer 'this'",
+        InterfacePropertySymbol property => $"property '{property.Name}'",
+        InterfaceIndexerSymbol => "indexer 'this'",
+        ConstantSymbol constant => $"constant '{constant.Name}'",
+        StructTypeSymbol type => $"struct '{type.Name}'",
+        InterfaceTypeSymbol type => $"interface '{type.Name}'",
+        TemplateMethodRequirementSymbol method => $"template function '{method.Name}'",
+        TemplateConstructorRequirementSymbol constructor => $"template constructor '{constructor.Template.Name}'",
+        TemplatePropertyRequirementSymbol property => $"template property '{property.Name}'",
+        TemplateIndexerRequirementSymbol => "template indexer 'this'",
+        _ => $"declaration '{symbol.Name}'",
+    };
 
     private void ValidateNativeSymbols()
     {
@@ -2921,6 +3232,7 @@ internal sealed class SemanticAnalyzer
         {
             ParameterSyntax syntax = parameterSyntax[index];
             TypeSymbol type = TypeResolver.Resolve(syntax.Type, scope, _diagnostics);
+            ValidateStaticStructValueType(type, syntax.Type.NameToken.Location, "parameter");
 
             if (TypeIdentity.AreSame(type, BuiltinTypes.Void))
             {
@@ -2941,6 +3253,30 @@ internal sealed class SemanticAnalyzer
 
         return parameters.ToImmutable();
     }
+
+    private void ValidateStaticStructValueType(TypeSymbol type, TextLocation location, string use)
+    {
+        if (!ContainsStaticStruct(type)) return;
+        _diagnostics.Report(location,
+            $"static structs cannot be used as a {use} value, pointer, reference, ownership, or array type",
+            DiagnosticIds.InvalidBaseType);
+    }
+
+    private static bool ContainsStaticStruct(TypeSymbol type) => type switch
+    {
+        StructTypeSymbol { IsStatic: true } => true,
+        StructTypeSymbol { IsGenericSpecialization: true } structure =>
+            structure.TypeArguments.Any(ContainsStaticStruct),
+        PointerTypeSymbol pointer => ContainsStaticStruct(pointer.ElementType),
+        ReferenceTypeSymbol reference => ContainsStaticStruct(reference.ElementType),
+        ArrayTypeSymbol array => ContainsStaticStruct(array.ElementType),
+        AtomicTypeSymbol atomic => ContainsStaticStruct(atomic.ElementType),
+        OwnershipTypeSymbol ownership => ContainsStaticStruct(ownership.ElementType),
+        LifetimeModifierTypeSymbol modifier => ContainsStaticStruct(modifier.ElementType),
+        FunctionPointerTypeSymbol function => ContainsStaticStruct(function.ReturnType) ||
+            function.ParameterTypes.Any(ContainsStaticStruct),
+        _ => false,
+    };
 
     private static ImmutableArray<GenericParameterSymbol> CreateGenericParameters(
         GenericParameterListSyntax? syntax, Symbol containingSymbol)

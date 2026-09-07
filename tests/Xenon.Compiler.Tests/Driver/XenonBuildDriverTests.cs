@@ -1,7 +1,9 @@
 using Xenon.CodeGen.LLVM;
 using Xenon.Driver;
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Text;
 using Xenon.ProjectSystem;
 using Xunit;
 
@@ -41,13 +43,22 @@ public sealed class XenonBuildDriverTests
         Assert.True(File.Exists(result.ArtifactPath));
     }
 
-    [Fact]
-    public async Task ProjectReferenceGenericFunctionAndStructCompileLinkAndRunInConsumer()
+    [Theory]
+    [InlineData("static-library")]
+    [InlineData("shared-library")]
+    public async Task ProjectReferenceGenericImplementationAbiCompilesLinksAndRunsInConsumer(
+        string projectType)
     {
         using var directory = new TemporaryProject();
-        string libraryProject = directory.WriteDependencyProject("GenericLibrary", "static-library", """
+        string libraryProject = directory.WriteDependencyProject("GenericLibrary", projectType, """
             namespace GenericLibrary;
+            internal static struct GenericRuntime
+            {
+                internal static int Bonus = 1;
+            }
+            internal int Offset() { return 1; }
             public T Identity<T>(T value) { return move value; }
+            public int ReadOffset<T>() { return Offset() + GenericRuntime.Bonus; }
             struct Box<T>
             {
                 T value;
@@ -62,8 +73,8 @@ public sealed class XenonBuildDriverTests
             namespace GenericApp;
             int Main()
             {
-                Box<int> box = Box<int>(40);
-                return box.Offset + Identity<int>(box.Get());
+                Box<int> box = Box<int>(38);
+                return box.Offset + Identity<int>(box.Get()) + ReadOffset<int>();
             }
             """, libraryProject);
 
@@ -1135,6 +1146,414 @@ public sealed class XenonBuildDriverTests
                 """);
 
         Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+    }
+
+    [Fact]
+    public async Task StdShapedAccessibilityAndTypeModifiersWorkWithoutLibrarySources()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("StdShape", "xenon-library", """
+            namespace Xenon.IO;
+
+            internal struct ConsoleWriterState
+            {
+                public static int Seed = 40;
+            }
+
+            internal int Offset() { return 1; }
+
+            public enum ConsoleColor
+            {
+                Black,
+                White,
+                public static int Writes;
+                public static threadlocal int ThreadWrites = 1;
+                public static ConsoleColor Default;
+            }
+
+            public static struct Console
+            {
+                public static ConsoleWriter Out;
+                public static ConsoleWriter Error;
+                public static ConsoleReader In;
+                public static int Read()
+                {
+                    ConsoleColor.Default = ConsoleColor.White;
+                    ConsoleColor.Writes = ConsoleWriterState.Seed - 2;
+                    ConsoleColor.ThreadWrites += 1;
+                    if (ConsoleColor.Default != ConsoleColor.White) return 0;
+                    return ConsoleColor.Writes + ConsoleColor.ThreadWrites;
+                }
+            }
+
+            public sealed struct ConsoleWriter { public int Value; }
+            public struct ConsoleReader { public int Value; }
+            public struct ConsoleReaderBase
+            {
+                protected int Value;
+                protected ConsoleReaderBase(int value) { Value = value; }
+            }
+            public readonly struct ConsoleKey
+            {
+                int Code;
+                public ConsoleKey(int code) { Code = code; }
+                public int Read() { return Code; }
+            }
+
+            public int GenericOffset<T>() { return Offset(); }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "StdShapeApp", """
+                using Xenon.IO;
+                namespace StdShapeApp;
+                struct DerivedReader : ConsoleReaderBase
+                {
+                    public DerivedReader(int value) : base(value) {}
+                    public int Read() { return Value; }
+                }
+                int Main()
+                {
+                    ConsoleKey key = ConsoleKey(0);
+                    DerivedReader reader = DerivedReader(1);
+                    return Console.Read() + GenericOffset<int>() + reader.Read() + key.Read();
+                }
+                """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+        Compilation hiddenConsumer = Compilation.Create(new CompilationOptions(), app.Compilation!.References,
+            SourceText.From("""
+                using Xenon.IO;
+                namespace HiddenConsumer;
+                int Run() { ConsoleWriterState state; return Offset(); }
+                """, "hidden-consumer.xe"));
+        Assert.True(hiddenConsumer.HasErrors);
+    }
+
+    [Fact]
+    public void InconsistentAccessibilityFailsTheDependencyBeforeXelibEmission()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("InvalidApi", "xenon-library", """
+            namespace InvalidApi;
+            internal struct Hidden {}
+            public Hidden Leak() { return Hidden(); }
+            """);
+        directory.WriteProject("InvalidApiApp", "executable",
+            "namespace InvalidApiApp; int Main() { return 42; }", libraryProject);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+
+        Assert.False(result.Success);
+        Assert.Equal(BuildStage.Compilation, result.Stage);
+        Assert.Contains(result.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.InconsistentAccessibility);
+        Assert.Null(result.ArtifactPath);
+    }
+
+    [Fact]
+    public async Task XelibProtectedInternalOverrideReusesVirtualSlotAndRunsWithoutSources()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("ProtectedOverride", "xenon-library", """
+            namespace ProtectedOverride;
+            public struct Base
+            {
+                protected internal virtual int Read() { return 1; }
+            }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "ProtectedOverrideApp", """
+                using ProtectedOverride;
+                namespace ProtectedOverrideApp;
+                public struct Derived : Base
+                {
+                    protected override int Read() { return 42; }
+                    public int Invoke() { return Read(); }
+                }
+                int Main()
+                {
+                    Derived value = Derived();
+                    return value.Invoke();
+                }
+                """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        StructTypeSymbol derived = app.Compilation!.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "ProtectedOverrideApp").Structs.Single();
+        FunctionSymbol overriding = derived.Methods.Single(method => method.Name == "Read");
+        FunctionSymbol inherited = derived.BaseType!.VirtualMethods.Single(method => method.Name == "Read");
+        Assert.Equal(inherited.VTableSlot, overriding.VTableSlot);
+    }
+
+    [Theory]
+    [InlineData("static-library")]
+    [InlineData("shared-library")]
+    public async Task ProjectReferencePreservesInaccessibleInternalVirtualSlotForBaseDispatch(
+        string projectType)
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("InternalVirtual", projectType, """
+            namespace InternalVirtual;
+            public struct Base
+            {
+                internal virtual int Read() { return 1; }
+            }
+            public int CallInternal(Base& value) { return value.Read(); }
+            """);
+        directory.WriteProject("InternalVirtualApp", "executable", """
+            using InternalVirtual;
+            namespace InternalVirtualApp;
+            public struct Derived : Base
+            {
+                public virtual int Read() { return 41; }
+            }
+            int Main()
+            {
+                Derived value = Derived();
+                return CallInternal(value) + value.Read();
+            }
+            """, libraryProject);
+
+        XenonBuildResult app = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task XelibInaccessibleInternalVirtualKeepsBaseDispatchAndGetsIndependentDerivedSlot()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("InternalVirtualXelib", "xenon-library", """
+            namespace InternalVirtualXelib;
+            public struct Base
+            {
+                internal virtual int Read() { return 1; }
+            }
+            public int CallInternal(Base& value) { return value.Read(); }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "InternalVirtualXelibApp", """
+                using InternalVirtualXelib;
+                namespace InternalVirtualXelibApp;
+                public struct Derived : Base
+                {
+                    public virtual int Read() { return 41; }
+                }
+                int Main()
+                {
+                    Derived value = Derived();
+                    return CallInternal(value) + value.Read();
+                }
+                """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        StructTypeSymbol derived = app.Compilation!.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "InternalVirtualXelibApp").Structs.Single();
+        FunctionSymbol inherited = derived.BaseType!.Methods.Single(method => method.Name == "Read");
+        FunctionSymbol independent = derived.Methods.Single(method => method.Name == "Read");
+        Assert.NotEqual(inherited.VTableSlot, independent.VTableSlot);
+        Assert.Same(inherited, derived.VirtualMethods[inherited.VTableSlot!.Value]);
+        Assert.Same(independent, derived.VirtualMethods[independent.VTableSlot!.Value]);
+    }
+
+    [Theory]
+    [InlineData("static-library")]
+    [InlineData("shared-library")]
+    public async Task XelibVirtualAbiRootSurvivesIntermediateNativeLibrary(string engineType)
+    {
+        using var directory = new TemporaryProject();
+        string baseProject = directory.WriteDependencyProject("VirtualAbiBase", "xenon-library", """
+            namespace VirtualAbiBase;
+            public struct Base
+            {
+                internal virtual int Read() { return 40; }
+                internal virtual int Value { get { return 1; } set {} }
+                internal virtual int this[int index] { get { return index; } set {} }
+                public virtual ~Base() {}
+            }
+            public int CallInternal(Base& value) { return value.Read(); }
+            """);
+        string baseProjectPath = Path.GetFullPath(Path.Combine(directory.Root, baseProject));
+        XenonBuildResult baseLibrary = new XenonBuildDriver().Build(new XenonBuildRequest(
+            baseProjectPath, OutputRoot: directory.OutputRoot));
+        Assert.True(baseLibrary.Success,
+            baseLibrary.Failure ?? string.Join(Environment.NewLine, baseLibrary.Diagnostics));
+        Directory.Delete(Path.Combine(Path.GetDirectoryName(baseProjectPath)!, "src"), recursive: true);
+
+        string engineProject = directory.WriteDependencyProject("VirtualAbiEngine", engineType, """
+            using VirtualAbiBase;
+            namespace VirtualAbiEngine;
+            public struct Derived : Base {}
+            public int Dispatch(Derived& value) { return CallInternal(value) + 1; }
+            """);
+        string engineProjectPath = Path.GetFullPath(Path.Combine(directory.Root, engineProject));
+        string engineDirectory = Path.GetDirectoryName(engineProjectPath)!;
+        string relativeLibrary = Path.GetRelativePath(engineDirectory, baseLibrary.ArtifactPath!)
+            .Replace('\\', '/');
+        File.AppendAllText(engineProjectPath, $"""
+
+            [libraries]
+            libraries = ["{relativeLibrary}"]
+            """);
+
+        directory.WriteProject("VirtualAbiApp", "executable", """
+            using VirtualAbiEngine;
+            namespace VirtualAbiApp;
+            public struct FinalDerived : Derived
+            {
+                public virtual int Read() { return 1; }
+            }
+            int Main()
+            {
+                FinalDerived value = FinalDerived();
+                return Dispatch(value) + value.Read();
+            }
+            """, engineProject);
+
+        XenonBuildResult app = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        StructTypeSymbol finalDerived = app.Compilation!.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "VirtualAbiApp").Structs.Single();
+        StructTypeSymbol derived = finalDerived.BaseType!;
+        FunctionSymbol inherited = derived.BaseType!.Methods.Single(method => method.Name == "Read");
+        FunctionSymbol independent = finalDerived.Methods.Single(method => method.Name == "Read");
+        Assert.Same(inherited, derived.VirtualMethods[inherited.VTableSlot!.Value]);
+        Assert.Same(inherited, finalDerived.VirtualMethods[inherited.VTableSlot.Value]);
+        Assert.NotEqual(inherited.VTableSlot, independent.VTableSlot);
+        Assert.Same(independent, finalDerived.VirtualMethods[independent.VTableSlot!.Value]);
+
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Theory]
+    [InlineData("static-library")]
+    [InlineData("shared-library")]
+    public async Task SourceVirtualAbiControlSurvivesIntermediateNativeLibrary(string libraryType)
+    {
+        using var directory = new TemporaryProject();
+        string baseProject = directory.WriteDependencyProject("SourceAbiBase", libraryType, """
+            namespace SourceAbiBase;
+            public struct Base
+            {
+                internal virtual int Read() { return 40; }
+            }
+            public int CallInternal(Base& value) { return value.Read(); }
+            """);
+        string engineProject = directory.WriteDependencyProject("SourceAbiEngine", libraryType, """
+            using SourceAbiBase;
+            namespace SourceAbiEngine;
+            public struct Derived : Base {}
+            public int Dispatch(Derived& value) { return CallInternal(value) + 1; }
+            """);
+        string engineProjectPath = Path.GetFullPath(Path.Combine(directory.Root, engineProject));
+        string engineDirectory = Path.GetDirectoryName(engineProjectPath)!;
+        string baseFromEngine = Path.GetRelativePath(engineDirectory,
+            Path.GetFullPath(Path.Combine(directory.Root, baseProject))).Replace('\\', '/');
+        File.AppendAllText(engineProjectPath, $"""
+
+            [references]
+            projects = ["{baseFromEngine}"]
+            """);
+
+        directory.WriteProject("SourceAbiApp", "executable", """
+            using SourceAbiEngine;
+            namespace SourceAbiApp;
+            public struct FinalDerived : Derived
+            {
+                public virtual int Read() { return 1; }
+            }
+            int Main()
+            {
+                FinalDerived value = FinalDerived();
+                return Dispatch(value) + value.Read();
+            }
+            """, engineProject);
+
+        XenonBuildResult app = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ClosedSourceVirtualLayoutsRetainXelibBodiesWithoutExportingThem()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("ClosedVirtualXelib", "xenon-library", """
+            namespace ClosedVirtualXelib;
+            public struct Base
+            {
+                internal virtual int Read() { return 1; }
+                internal virtual int Value { get { return 2; } set {} }
+                internal virtual int this[int index] { get { return index; } set {} }
+                public virtual ~Base() {}
+            }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "ClosedVirtualXelibApp", """
+                using ClosedVirtualXelib;
+                namespace ClosedVirtualXelibApp;
+                public sealed struct SealedDerived : Base {}
+                internal struct InternalDerived : Base {}
+                int Main() { return 42; }
+                """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        Assert.DoesNotContain(app.Compilation!.GetImplementationNativeAbiRoots().OfType<FunctionSymbol>(),
+            function => function.Origin.LibraryContentIdentity is not null);
+    }
+
+    [Fact]
+    public void SharedProjectReferenceExportsInheritedInaccessibleAbstractSlotStub()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("AbstractInternalVirtual", "shared-library", """
+            namespace AbstractInternalVirtual;
+            public abstract struct Base
+            {
+                internal abstract int Read();
+            }
+            """);
+        directory.WriteProject("AbstractInternalVirtualApp", "executable", """
+            using AbstractInternalVirtual;
+            namespace AbstractInternalVirtualApp;
+            public abstract struct Derived : Base {}
+            int Main() { return 42; }
+            """, libraryProject);
+
+        XenonBuildResult app = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
     }
 
     [Theory]

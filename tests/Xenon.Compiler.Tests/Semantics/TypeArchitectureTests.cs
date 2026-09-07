@@ -463,7 +463,7 @@ public sealed class TypeArchitectureTests
         Assert.Equal("Nested", scope.ToDisplayString(SymbolDisplayFormat.ShortName));
         Assert.Equal("Example.Nested", scope.ToDisplayString(SymbolDisplayFormat.QualifiedName));
         Assert.Equal("namespace Nested", scope.ToDisplayString(SymbolDisplayFormat.Declaration));
-        Assert.Equal("struct S", type.ToDisplayString(SymbolDisplayFormat.Declaration));
+        Assert.Equal("public struct S", type.ToDisplayString(SymbolDisplayFormat.Declaration));
         Assert.Equal(type.ToDisplayString(TypeDisplayFormat.FullyQualified), SymbolDisplay.ToDisplayString(type, SymbolDisplayFormat.QualifiedName));
         Assert.Equal("Transform", function.ToDisplayString(SymbolDisplayFormat.ShortName));
         Assert.Equal("Example.Nested.Transform", function.ToDisplayString(SymbolDisplayFormat.QualifiedName));
@@ -546,10 +546,10 @@ public sealed class TypeArchitectureTests
             """);
         var scope = compilation.SemanticModel.GlobalNamespace.Namespaces.Single();
         var contract = scope.Interfaces.Single();
-        Assert.Equal("interface I", SymbolDisplay.ToDisplayString(contract, SymbolDisplayFormat.Declaration));
-        Assert.Equal("enum E", SymbolDisplay.ToDisplayString(scope.Enums.Single(), SymbolDisplayFormat.Declaration));
+        Assert.Equal("public interface I", SymbolDisplay.ToDisplayString(contract, SymbolDisplayFormat.Declaration));
+        Assert.Equal("public enum E", SymbolDisplay.ToDisplayString(scope.Enums.Single(), SymbolDisplayFormat.Declaration));
         Assert.Equal("const Example.E Example.E.First", scope.Enums.Single().Members[0].ToDisplayString(SymbolDisplayFormat.QualifiedSignature));
-        Assert.Equal("const int Limit", scope.Constants.Single().ToDisplayString(SymbolDisplayFormat.Declaration));
+        Assert.Equal("public const int Limit", scope.Constants.Single().ToDisplayString(SymbolDisplayFormat.Declaration));
         Assert.Equal("public abstract int Value", contract.Properties[0].ToDisplayString(SymbolDisplayFormat.Declaration));
         Assert.Equal("int Example.I.this[int index]", contract.Indexers[0].ToDisplayString(SymbolDisplayFormat.QualifiedSignature));
         Assert.Equal("Example.I.Value.get", contract.Properties[0].Getter!.ToDisplayString(SymbolDisplayFormat.QualifiedName));

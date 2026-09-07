@@ -8,11 +8,12 @@ public abstract class DeclaredTypeSymbol : TypeSymbol
 {
     protected DeclaredTypeSymbol(string name, NamespaceSymbol containingNamespace,
         string declarationKind, bool isDefinition = true, SymbolOrigin? origin = null,
-        SymbolDocumentation? documentation = null)
+        SymbolDocumentation? documentation = null, Accessibility accessibility = Accessibility.Public)
         : base(name, containingNamespace)
     {
         DeclarationKind = declarationKind;
         IsSemanticDefinition = isDefinition;
+        Accessibility = accessibility;
         SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
     }
 
@@ -21,6 +22,8 @@ public abstract class DeclaredTypeSymbol : TypeSymbol
     public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
         format == TypeDisplayFormat.FullyQualified ? FullName : Name;
     public string DeclarationKind { get; }
+    public Accessibility Accessibility { get; }
+    public bool IsPublic => Accessibility == Accessibility.Public;
     public override bool IsDefinition => IsSemanticDefinition;
     private bool IsSemanticDefinition { get; }
     public abstract IEnumerable<Symbol> GetMembers();
