@@ -159,6 +159,7 @@ public static class DiagnosticIds
     public const string GenericConstructorNotGuaranteed = "XE2140";
     public const string GenericArityMismatch = "XE2141";
     public const string GenericConstraintNotSatisfied = "XE2142";
+    public const string InconsistentAccessibility = "XE2143";
     public const string DefiniteAssignment = "XE2201";
     public const string InvalidAssignmentTarget = "XE2202";
     public const string InvalidCondition = "XE2204";
