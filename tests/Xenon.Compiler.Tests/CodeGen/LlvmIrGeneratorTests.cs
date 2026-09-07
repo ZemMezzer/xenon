@@ -1144,14 +1144,14 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "abstract-vtable");
 
-        Assert.Contains("define internal i32 @" + ManagedSymbol("abstract-vtable", "Example.Entity.Score", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("define i32 @" + ManagedSymbol("abstract-vtable", "Example.Entity.Score", "function") + "(ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("unreachable", llvmIr, StringComparison.Ordinal);
         Assert.Contains("@" + ManagedSymbol("abstract-vtable", "Example.Enemy.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
 
         Compilation privateAbstract = CreateCompilation("""
             namespace Example;
 
-            abstract struct Entity
+            internal abstract struct Entity
             {
                 abstract void Update();
             }
@@ -1159,6 +1159,35 @@ public sealed class LlvmIrGeneratorTests
         Assert.Empty(privateAbstract.Diagnostics);
         string privateIr = new LlvmIrGenerator().Generate(privateAbstract, "private-abstract-vtable");
         Assert.Contains("define internal void @" + ManagedSymbol("private-abstract-vtable", "Example.Entity.Update", "function") + "(ptr", privateIr, StringComparison.Ordinal);
+
+        Compilation inheritedAbi = CreateCompilation("""
+            namespace Example;
+
+            public abstract struct Entity
+            {
+                internal abstract void Update();
+            }
+            """);
+        Assert.Empty(inheritedAbi.Diagnostics);
+        string inheritedAbiIr = new LlvmIrGenerator().Generate(inheritedAbi, "inherited-abstract-vtable");
+        Assert.Contains("define void @" + ManagedSymbol("inherited-abstract-vtable", "Example.Entity.Update", "function") + "(ptr", inheritedAbiIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("define internal void @" + ManagedSymbol("inherited-abstract-vtable", "Example.Entity.Update", "function") + "(ptr", inheritedAbiIr, StringComparison.Ordinal);
+        Assert.Contains(LlvmIrGenerator.GetProjectNativeExports(inheritedAbi, "inherited-abstract-vtable"),
+            export => export.Name == ManagedSymbol(
+                "inherited-abstract-vtable", "Example.Entity.Update", "function"));
+
+        Compilation genericAbi = CreateCompilation("""
+            namespace Example;
+
+            public abstract struct Entity<T>
+            {
+                internal abstract void Update();
+            }
+            """);
+        Assert.Empty(genericAbi.Diagnostics);
+        Assert.DoesNotContain(LlvmIrGenerator.GetProjectNativeExports(genericAbi, "generic-abstract-vtable"),
+            export => export.Name == ManagedSymbol(
+                "generic-abstract-vtable", "Example.Entity.Update", "function"));
     }
 
     [Fact]
@@ -2769,6 +2798,55 @@ public sealed class LlvmIrGeneratorTests
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(), "function-pointers");
         Assert.Contains("indirect.call", ir, StringComparison.Ordinal);
         Assert.Contains("call i32 %", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_LowersEnumStaticFieldsAsRealStaticStorage()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            enum Mode
+            {
+                Off,
+                public static int Count = 1;
+                public static Mode Default;
+            }
+            int Run()
+            {
+                Mode.Count = 42;
+                Mode.Default = Mode.Off;
+                return Mode.Count;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "enum-static-fields";
+        string ir = new LlvmIrGenerator().Generate(compilation, module);
+        Assert.Contains("@" + ManagedSymbol(module, "Example.Mode.Count", "static_field") + " =", ir,
+            StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol(module, "Example.Mode.Default", "static_field") + " =", ir,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_DoesNotEmitInstanceLayoutForStaticStruct()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            public static struct Utility
+            {
+                public static int Count = 42;
+                public static int Read() { return Utility.Count; }
+            }
+            int Run() { return Utility.Read(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        const string module = "static-struct";
+        string ir = new LlvmIrGenerator().Generate(compilation, module);
+        Assert.DoesNotContain("%Example.Utility = type", ir, StringComparison.Ordinal);
+        Assert.Contains("@" + ManagedSymbol(module, "Example.Utility.Count", "static_field") + " =", ir,
+            StringComparison.Ordinal);
     }
 
     private static Compilation CreateCompilation(string source) =>

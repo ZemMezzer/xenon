@@ -347,7 +347,8 @@ public sealed class SemanticModel
             return GenericConstraintMemberLookup.GetMembers(genericParameter)
                 .Where(member => member.IsUserVisible)
                 .Where(member => IsApplicableMember(member, options))
-                .Where(member => options.IncludeInaccessible || IsAccessible(member, GetContainingTypeAtPosition(position)))
+                .Where(member => options.IncludeInaccessible || IsAccessible(member,
+                    GetContainingTypeAtPosition(position), null))
                 .DistinctBy(member => member.ToDisplayString(SymbolDisplayFormat.Signature))
                 .OrderBy(member => member.Name, StringComparer.Ordinal)
                 .ThenBy(member => member.ToDisplayString(SymbolDisplayFormat.Signature), StringComparer.Ordinal)
@@ -368,7 +369,7 @@ public sealed class SemanticModel
         return AllMembers(type).Distinct()
             .Where(member => member.IsUserVisible)
             .Where(member => IsApplicableMember(member, options))
-            .Where(member => options.IncludeInaccessible || IsAccessible(member, withinType))
+            .Where(member => options.IncludeInaccessible || IsAccessible(member, withinType, type))
             .OrderBy(member => member.Name, StringComparer.Ordinal)
             .ThenBy(member => member.ToDisplayString(SymbolDisplayFormat.Signature), StringComparer.Ordinal)
             .ToImmutableArray();
@@ -615,15 +616,9 @@ public sealed class SemanticModel
         _ => false,
     };
 
-    private static bool IsAccessible(Symbol symbol, DeclaredTypeSymbol? withinType) => symbol switch
-    {
-        FieldSymbol field => field.IsPublic || ReferenceEquals(field.ContainingType, withinType),
-        FunctionSymbol function => function.IsPublic || ReferenceEquals(function.ContainingType, withinType),
-        PropertySymbol property => property.IsPublic || ReferenceEquals(property.ContainingType, withinType),
-        IndexerSymbol indexer => indexer.IsPublic || ReferenceEquals(indexer.ContainingType, withinType),
-        TemplateMemberRequirementSymbol requirement => requirement.IsPublic,
-        _ => true,
-    };
+    private bool IsAccessible(Symbol symbol, DeclaredTypeSymbol? withinType,
+        DeclaredTypeSymbol? receiverType = null) => AccessibilityRules.IsAccessible(
+            symbol, (Symbol?)withinType ?? GlobalNamespace, receiverType);
 
     private SourceText GetPrimarySource()
     {

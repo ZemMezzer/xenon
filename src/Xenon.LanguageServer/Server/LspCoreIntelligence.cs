@@ -393,7 +393,8 @@ internal static class LspCoreIntelligence
         SyntaxKind.ConstKeyword or SyntaxKind.ReadonlyKeyword or SyntaxKind.StaticKeyword or SyntaxKind.ThreadLocalKeyword or
             SyntaxKind.VirtualKeyword or SyntaxKind.OverrideKeyword or SyntaxKind.AbstractKeyword or
             SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword or SyntaxKind.PublicKeyword or
-            SyntaxKind.PrivateKeyword => 14,
+            SyntaxKind.PrivateKeyword or SyntaxKind.InternalKeyword or SyntaxKind.ProtectedKeyword or
+            SyntaxKind.SealedKeyword => 14,
         SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
             SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword or SyntaxKind.AtomicKeyword or
             SyntaxKind.FunctionKeyword => 16,

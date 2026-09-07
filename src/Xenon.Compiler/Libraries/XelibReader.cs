@@ -363,13 +363,15 @@ internal sealed class XelibSemanticReconstruction
             Symbol created = record.Kind switch
             {
                 XelibSymbolKind.Struct => new StructTypeSymbol(record.Name, owner,
-                    Has(record, XelibSymbolFlags.Abstract), Origin(record.Id), Documentation(record.Id)),
+                    Has(record, XelibSymbolFlags.Abstract), Origin(record.Id), Documentation(record.Id),
+                    Accessibility(record), Has(record, XelibSymbolFlags.ReadonlyStruct),
+                    Has(record, XelibSymbolFlags.StaticStruct), Has(record, XelibSymbolFlags.Sealed)),
                 XelibSymbolKind.Interface => new InterfaceTypeSymbol(record.Name, owner,
-                    Origin(record.Id), Documentation(record.Id)),
+                    Origin(record.Id), Documentation(record.Id), Accessibility(record)),
                 XelibSymbolKind.Enum => new EnumTypeSymbol(record.Name, owner,
-                    Origin(record.Id), Documentation(record.Id)),
+                    Origin(record.Id), Documentation(record.Id), Accessibility(record)),
                 XelibSymbolKind.Template => new TemplateSymbol(record.Name, owner,
-                    Origin(record.Id), Documentation(record.Id)),
+                    Origin(record.Id), Documentation(record.Id), Accessibility(record)),
                 _ => throw new InvalidOperationException(),
             };
             _symbols.Add(record.Id, created);
@@ -434,7 +436,8 @@ internal sealed class XelibSemanticReconstruction
                 XelibSymbolKind.Constant or XelibSymbolKind.EnumMember =>
                     new ConstantSymbol(record.Name, ResolveType(record.TypeId), owner,
                         ParseConstant(record.ConstantValue, ResolveType(record.TypeId)),
-                        record.ConstantValue is not null, Origin(record.Id), Documentation(record.Id)),
+                        record.ConstantValue is not null, Origin(record.Id), Documentation(record.Id),
+                        accessibility: Accessibility(record)),
                 XelibSymbolKind.TemplateMethod => CreateTemplateMethod(record, (TemplateSymbol)owner),
                 XelibSymbolKind.TemplateConstructor => new TemplateConstructorRequirementSymbol(
                     (TemplateSymbol)owner, Parameters(record), Accessibility(record),
@@ -571,6 +574,7 @@ internal sealed class XelibSemanticReconstruction
                     type.UnderlyingType = (PrimitiveTypeSymbol)ResolveType(record.TypeId);
                     type.Members = record.RelatedSymbolIds.Select(id =>
                         (ConstantSymbol)Symbol(id)).ToImmutableArray();
+                    type.StaticFields = Children<FieldSymbol>(record.Id, static item => item.IsStatic);
                     break;
                 case TemplateSymbol template:
                     template.SetMembers(_symbolRecords.Where(item => item.ContainingSymbolId == record.Id)
@@ -660,7 +664,8 @@ internal sealed class XelibSemanticReconstruction
     {
         var definition = (StructTypeSymbol)Resolve(Required(record.Symbol));
         var created = new StructTypeSymbol(definition.Name, definition.ContainingNamespace,
-            definition.IsAbstract, Origin(definition), definition.Documentation);
+            definition.IsAbstract, Origin(definition), definition.Documentation, definition.Accessibility,
+            definition.IsReadonly, definition.IsStatic, definition.IsSealed);
         created.SetGenericSpecialization(definition,
             record.TypeArgumentIds.Select(ResolveType).ToImmutableArray());
         return created;
@@ -756,8 +761,7 @@ internal sealed class XelibSemanticReconstruction
         ? symbol.Origin : SymbolOrigin.Library;
     private static bool Has(XelibSymbolRecord record, XelibSymbolFlags flag) => (record.Flags & flag) != 0;
     private static Accessibility Accessibility(XelibSymbolRecord record) =>
-        Has(record, XelibSymbolFlags.Public) ? Semantics.Symbols.Accessibility.Public :
-            Semantics.Symbols.Accessibility.Private;
+        XelibStableMappings.FromXelib(record.Accessibility);
 
     private static FunctionKind Map(XelibFunctionKind kind) => XelibStableMappings.FromXelib(kind);
 

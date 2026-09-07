@@ -477,6 +477,7 @@ internal sealed class XelibIrBuilder
                 break;
             case EnumTypeSymbol type:
                 foreach (ConstantSymbol item in type.Members) VisitSymbol(item);
+                foreach (FieldSymbol item in type.StaticFields) VisitSymbol(item);
                 break;
             case TemplateSymbol template:
                 foreach (TemplateMemberRequirementSymbol item in template.Members) VisitSymbol(item);
@@ -655,6 +656,7 @@ internal sealed class XelibIrBuilder
                 ? 0 : Id(symbol.ContainingSymbol),
             Order = GetOrder(symbol),
             Flags = GetFlags(symbol),
+            Accessibility = GetAccessibility(symbol),
         };
         return symbol switch
         {
@@ -786,17 +788,46 @@ internal sealed class XelibIrBuilder
     private bool IsExported(Symbol symbol) => symbol switch
     {
         NamespaceSymbol => true,
-        DeclaredTypeSymbol or TemplateSymbol => symbol.ContainingSymbol is NamespaceSymbol,
-        FunctionSymbol function => function.IsPublic || function.ContainingInterface is not null,
-        FieldSymbol field => field.IsPublic,
-        PropertySymbol property => property.IsPublic,
+        DeclaredTypeSymbol type => type.ContainingSymbol is NamespaceSymbol && type.IsPublic,
+        TemplateSymbol template => template.ContainingSymbol is NamespaceSymbol && template.IsPublic,
+        FunctionSymbol function => function.ContainingInterface is not null ||
+            AccessibilityFacts.IsExternallyInheritable(function.Accessibility) && HasPublicApiOwner(function),
+        FieldSymbol field => AccessibilityFacts.IsExternallyInheritable(field.Accessibility) && HasPublicApiOwner(field),
+        PropertySymbol property => AccessibilityFacts.IsExternallyInheritable(property.Accessibility) && HasPublicApiOwner(property),
         InterfacePropertySymbol => true,
-        IndexerSymbol indexer => indexer.IsPublic,
+        IndexerSymbol indexer => AccessibilityFacts.IsExternallyInheritable(indexer.Accessibility) && HasPublicApiOwner(indexer),
         InterfaceIndexerSymbol => true,
-        ConstantSymbol => true,
-        TemplateMemberRequirementSymbol => true,
+        ConstantSymbol constant => constant.ContainingSymbol is EnumTypeSymbol { IsPublic: true } ||
+            (constant.ContainingSymbol is NamespaceSymbol && constant.IsPublic) ||
+            AccessibilityFacts.IsExternallyInheritable(constant.Accessibility) && HasPublicApiOwner(constant),
+        TemplateMemberRequirementSymbol requirement =>
+            requirement.Template.IsPublic && AccessibilityFacts.IsExternallyInheritable(requirement.Accessibility),
         _ => false,
     };
+
+    private static bool HasPublicApiOwner(Symbol symbol) => symbol.ContainingSymbol switch
+    {
+        NamespaceSymbol => true,
+        DeclaredTypeSymbol type => type.IsPublic,
+        PropertySymbol property => property.ContainingType.IsPublic,
+        IndexerSymbol indexer => indexer.ContainingType.IsPublic,
+        TemplateSymbol template => template.IsPublic,
+        _ => false,
+    };
+
+    private static XelibAccessibility GetAccessibility(Symbol symbol) =>
+        XelibStableMappings.ToXelib(symbol switch
+        {
+            DeclaredTypeSymbol value => value.Accessibility,
+            TemplateSymbol value => value.Accessibility,
+            FunctionSymbol value => value.Accessibility,
+            FieldSymbol value => value.Accessibility,
+            PropertySymbol value => value.Accessibility,
+            IndexerSymbol value => value.Accessibility,
+            TemplateMemberRequirementSymbol value => value.Accessibility,
+            ConstantSymbol value => value.Accessibility,
+            _ => Accessibility.Public,
+        });
 
     private XelibSymbolReference Reference(Symbol symbol)
     {
@@ -924,6 +955,9 @@ internal sealed class XelibIrBuilder
                 break;
             case StructTypeSymbol value:
                 if (value.IsAbstract) result |= XelibSymbolFlags.Abstract;
+                if (value.IsReadonly) result |= XelibSymbolFlags.ReadonlyStruct;
+                if (value.IsStatic) result |= XelibSymbolFlags.StaticStruct;
+                if (value.IsSealed) result |= XelibSymbolFlags.Sealed;
                 if (value.HasVirtualDispatch) result |= XelibSymbolFlags.HasVirtualDispatch;
                 break;
             case ParameterSymbol value when value.IsReadonly:

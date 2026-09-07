@@ -192,6 +192,69 @@ public sealed class Compilation
     public ImmutableArray<BoundFunction> GetStaticImplementationFunctions()
         => GetNativeReachability().Functions;
 
+    /// <summary>
+    /// Gets implementation-only native ABI roots referenced by portable generic bodies or by
+    /// externally inheritable virtual layouts owned by this compilation. These symbols are not
+    /// part of the language-level export surface, but a separately linked consumer may reference
+    /// them while instantiating a generic body or constructing a derived virtual table.
+    /// </summary>
+    public ImmutableArray<Symbol> GetImplementationNativeAbiRoots()
+    {
+        var result = new HashSet<Symbol>(ReferenceEqualityComparer.Instance);
+
+        void AddSymbol(Symbol symbol)
+        {
+            switch (symbol)
+            {
+                case FunctionSymbol function when IsSymbolDefinedHere(function):
+                    result.Add(function);
+                    break;
+                case FieldSymbol { IsStatic: true } field when IsSymbolDefinedHere(field):
+                    result.Add(field);
+                    break;
+                case PropertySymbol property:
+                    if (property.Getter is { } getter) AddSymbol(getter);
+                    if (property.Setter is { } setter) AddSymbol(setter);
+                    break;
+                case IndexerSymbol indexer:
+                    if (indexer.Getter is { } indexerGetter) AddSymbol(indexerGetter);
+                    if (indexer.Setter is { } indexerSetter) AddSymbol(indexerSetter);
+                    break;
+            }
+        }
+
+        void Collect(BoundNode body) => XelibBodyCodec.Collect(body, _ => { }, AddSymbol);
+
+        foreach (var (definition, implementation) in GenericImplementations.Functions)
+            if (IsSymbolDefinedHere(definition) && implementation.PortableBody is { } body)
+                Collect(body);
+
+        foreach (var (definition, implementation) in GenericImplementations.Structs)
+        {
+            if (!IsSymbolDefinedHere(definition)) continue;
+            if (implementation.PortableInstanceInitializer is { } instanceInitializer)
+                Collect(instanceInitializer.Body);
+            foreach (BoundFunction staticInitializer in implementation.PortableStaticFieldInitializers)
+                Collect(staticInitializer.Body);
+            foreach (ConstantSymbol constant in definition.Constants)
+                if (constant.BoundValue is { } value)
+                    Collect(value);
+        }
+
+        void CollectVirtualLayoutRoots(NamespaceSymbol @namespace)
+        {
+            foreach (StructTypeSymbol type in @namespace.Structs.Where(type =>
+                         IsSymbolDefinedHere(type) && type.IsPublic && !type.IsSealed))
+                foreach (FunctionSymbol function in type.VirtualMethods.Where(IsSymbolDefinedInCurrentArtifact))
+                    result.Add(function);
+            foreach (NamespaceSymbol child in @namespace.Namespaces)
+                CollectVirtualLayoutRoots(child);
+        }
+        CollectVirtualLayoutRoots(SemanticModel.GlobalNamespace);
+
+        return result.OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
+    }
+
     /// <summary>Whether an imported XELIB symbol is required by this native link unit.</summary>
     public bool IsImportedSymbolNativeReachable(Symbol symbol)
     {
@@ -526,8 +589,26 @@ public sealed class Compilation
             foreach (InterfaceTypeSymbol type in @namespace.Interfaces.Where(IsSymbolDefinedHere)) MarkType(type);
             foreach (NamespaceSymbol child in @namespace.Namespaces) MarkSourceTypes(child);
         }
+        void SelectSourceVirtualLayoutImplementations(NamespaceSymbol @namespace)
+        {
+            foreach (StructTypeSymbol type in @namespace.Structs.Where(type =>
+                         IsSymbolDefinedHere(type) && type.IsConcreteType && type.HasVirtualDispatch))
+                foreach (FunctionSymbol function in type.VirtualMethods)
+                    Select(function);
+            foreach (NamespaceSymbol child in @namespace.Namespaces)
+                SelectSourceVirtualLayoutImplementations(child);
+        }
         MarkSourceTypes(SemanticModel.GlobalNamespace);
+        // Codegen emits every closed source vtable, including sealed/internal
+        // layouts that are not downstream ABI surfaces. Their imported XELIB
+        // targets still need bodies, but retain ordinary internal linkage.
+        SelectSourceVirtualLayoutImplementations(SemanticModel.GlobalNamespace);
         foreach (BoundFunction function in source) Inspect(function);
+        // A public source type can carry an inherited slot whose implementation
+        // was statically consumed from XELIB. Keep that implementation in this
+        // native artifact even when no source call site reaches it directly.
+        foreach (FunctionSymbol root in GetImplementationNativeAbiRoots().OfType<FunctionSymbol>())
+            Select(root);
         // Native exports are ABI roots even when no Xenon call site references them.
         foreach (FunctionSymbol export in available.Keys.Where(function => function.IsExport)) Select(export);
         while (pending.TryDequeue(out FunctionSymbol? symbol)) Inspect(available[symbol]);

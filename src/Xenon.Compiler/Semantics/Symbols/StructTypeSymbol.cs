@@ -21,17 +21,30 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
         NamespaceSymbol containingNamespace,
         StructDeclarationSyntax declaration)
         : base(name, containingNamespace, "struct", origin: SymbolOrigin.Source(declaration),
-            documentation: SymbolDocumentation.FromDeclaration(declaration))
+            documentation: SymbolDocumentation.FromDeclaration(declaration),
+            accessibility: AccessibilityFacts.FromSyntax(declaration.AccessModifierToken,
+                declaration.SecondaryAccessModifierToken, Accessibility.Public))
     {
         Declaration = declaration;
         IsAbstract = declaration.IsAbstract;
+        IsReadonly = declaration.IsReadonly;
+        IsStatic = declaration.IsStatic;
+        IsSealed = declaration.IsSealed || declaration.IsStatic;
         SetImplementation(new SourceSymbolImplementation(declaration));
     }
 
     internal StructTypeSymbol(string name, NamespaceSymbol containingNamespace, bool isAbstract,
-        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null)
-        : base(name, containingNamespace, "struct", origin: origin, documentation: documentation) =>
+        SymbolOrigin? origin = null, SymbolDocumentation? documentation = null,
+        Accessibility accessibility = Accessibility.Public, bool isReadonly = false,
+        bool isStatic = false, bool isSealed = false)
+        : base(name, containingNamespace, "struct", origin: origin, documentation: documentation,
+            accessibility: accessibility)
+    {
         IsAbstract = isAbstract;
+        IsReadonly = isReadonly;
+        IsStatic = isStatic;
+        IsSealed = isSealed || isStatic;
+    }
 
     public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short)
     {
@@ -112,6 +125,9 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     public int DeclaredFieldStart => (BaseType is null ? 0 : 1) + (IntroducesVirtualDispatch ? 1 : 0);
 
     public bool IsAbstract { get; }
+    public bool IsReadonly { get; }
+    public bool IsStatic { get; }
+    public bool IsSealed { get; }
 
     internal StructDeclarationSyntax Declaration { get; } = null!;
 
@@ -303,22 +319,29 @@ public sealed class ConstantSymbol : Symbol
         Type = type;
         Initializer = initializer;
         Declaration = declaration;
+        Accessibility = declaration is ModuleConstantDeclarationSyntax module
+            ? AccessibilityFacts.FromSyntax(module.AccessModifierToken,
+                module.SecondaryAccessModifierToken, Accessibility.Public)
+            : Accessibility.Public;
         SetSourceOrigin(declaration);
     }
 
     internal ConstantSymbol(string name, TypeSymbol type, Symbol containingSymbol, object? value,
         bool hasValue, SymbolOrigin? origin = null, SymbolDocumentation? documentation = null,
-        SymbolImplementation? implementation = null)
+        SymbolImplementation? implementation = null, Accessibility accessibility = Accessibility.Public)
         : base(name, SymbolKind.Constant, containingSymbol)
     {
         Type = type;
         Value = value;
         EvaluationState = hasValue ? ConstantEvaluationState.Evaluated : ConstantEvaluationState.Unresolved;
+        Accessibility = accessibility;
         SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
         SetImplementation(implementation);
     }
 
     public TypeSymbol Type { get; }
+    public Accessibility Accessibility { get; }
+    public bool IsPublic => Accessibility == Accessibility.Public;
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
     public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
     public object? Value { get; private set; }
@@ -364,7 +387,7 @@ public sealed class IndexerSymbol : Symbol
         Accessibility = accessibility;
         Declaration = declaration;
         IsStatic = declaration.IsStatic;
-        IsReadonly = declaration.IsReadonly;
+        IsReadonly = declaration.IsReadonly || containingType is StructTypeSymbol { IsReadonly: true } && !declaration.IsStatic;
         IsVirtual = declaration.IsVirtual;
         IsOverride = declaration.IsOverride;
         IsAbstract = declaration.IsAbstract;
@@ -455,7 +478,7 @@ public sealed class PropertySymbol : Symbol
         Accessibility = accessibility;
         Declaration = declaration;
         IsStatic = declaration.IsStatic;
-        IsReadonly = declaration.IsReadonly;
+        IsReadonly = declaration.IsReadonly || containingType is StructTypeSymbol { IsReadonly: true } && !declaration.IsStatic;
         IsVirtual = declaration.IsVirtual;
         IsOverride = declaration.IsOverride;
         IsAbstract = declaration.IsAbstract;
@@ -523,7 +546,8 @@ public sealed class FieldSymbol : Symbol
         Ordinal = ordinal;
         Accessibility = accessibility;
         IsStatic = isStatic;
-        IsReadonly = isReadonly || declaration.Type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is not null;
+        IsReadonly = isReadonly || !isStatic && containingType is StructTypeSymbol { IsReadonly: true } ||
+            declaration.Type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is not null;
         ConstantValue = constantValue;
         Declaration = declaration;
         IsThreadLocal = declaration.IsThreadLocal;
