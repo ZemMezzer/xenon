@@ -56,6 +56,7 @@ public sealed class SyntaxReference
         EnumMemberDeclarationSyntax syntax => syntax.IdentifierToken,
         ParameterSyntax syntax => syntax.IdentifierToken,
         VariableDeclarationStatementSyntax syntax => syntax.IdentifierToken,
+        CatchClauseSyntax { IdentifierToken: not null } syntax => syntax.IdentifierToken,
         _ => throw new ArgumentException($"Syntax kind '{Declaration.Kind}' is not a symbol declaration."),
     };
 }

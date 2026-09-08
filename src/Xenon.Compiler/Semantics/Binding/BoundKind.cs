@@ -13,6 +13,8 @@ public enum BoundKind
     ArrayMetadataExpression,
     BreakStatement,
     ContinueStatement,
+    TryStatement,
+    ThrowStatement,
     LiteralExpression,
     VariableExpression,
     ThisExpression,

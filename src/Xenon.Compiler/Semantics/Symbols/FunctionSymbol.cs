@@ -574,13 +574,13 @@ public sealed class ParameterSymbol : VariableSymbol
 
 public sealed class LocalVariableSymbol : VariableSymbol
 {
-    internal LocalVariableSymbol(string name, TypeSymbol type, FunctionSymbol containingFunction, bool isReadonly = false, VariableDeclarationStatementSyntax? declaration = null)
+    internal LocalVariableSymbol(string name, TypeSymbol type, FunctionSymbol containingFunction, bool isReadonly = false, SyntaxNode? declaration = null)
         : base(name, SymbolKind.LocalVariable, type, containingFunction, isReadonly)
     {
         Declaration = declaration;
     }
 
-    internal VariableDeclarationStatementSyntax? Declaration { get; }
+    internal SyntaxNode? Declaration { get; }
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
         Declaration is null ? [] : [new(Declaration)];
     public override bool IsDefinition => Declaration is not null;

@@ -164,11 +164,18 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                         .Where(dependency => dependency.Type == XenonProjectType.StaticLibrary)
                         .Any(dependency => LlvmIrGenerator.RequiresNativeThreadingRuntime(
                             compilations[dependency.Identity]));
+                bool requiresExceptionRuntime =
+                    LlvmIrGenerator.RequiresNativeExceptionRuntime(compilation) ||
+                    graph.GetNativeLinkOrder(project)
+                        .Where(dependency => dependency.Type == XenonProjectType.StaticLibrary)
+                        .Any(dependency => LlvmIrGenerator.RequiresNativeExceptionRuntime(
+                            compilations[dependency.Identity]));
                 var options = new NativeLinkOptions(
                     project.NativeLibraries.AddRange(dependencyArtifacts),
                     project.LibraryPaths,
                     exportedSymbols.Distinct(StringComparer.Ordinal).ToArray(),
-                    RequiresThreadingRuntime: requiresThreadingRuntime);
+                    RequiresThreadingRuntime: requiresThreadingRuntime,
+                    RequiresExceptionRuntime: requiresExceptionRuntime);
                 LinkedNativeArtifact artifact;
                 if (project.Type == XenonProjectType.Executable)
                 {

@@ -50,6 +50,7 @@ internal sealed class FunctionBodyBinder
     private int _repeatedEvaluationDepth;
     private readonly Stack<(HashSet<VariableSymbol> Entry, Dictionary<MovePlace, TextLocation> Sites, List<HashSet<MovePlace>> BreakMovedExits, List<HashSet<MovePlace>> BreakDefinitelyMovedExits, List<HashSet<MovePlace>> ContinueMovedExits)> _loopMoveContexts = [];
     private int _switchDepth;
+    private int _catchDepth;
     private readonly Stack<(int LoopDepth, List<HashSet<VariableSymbol>> Exits, List<HashSet<VariableSymbol>> PossiblyAssignedConstructorFieldExits, List<HashSet<MovePlace>> MovedExits, List<HashSet<MovePlace>> DefinitelyMovedExits, List<Dictionary<LocalVariableSymbol, ArrayState>> ArrayExits, List<Dictionary<MovePlace, StorageState>> StorageExits, List<Dictionary<MovePlace, ImmutableArray<ValueReference>>> ReferenceExits, List<Dictionary<MovePlace, BorrowRoot>> BorrowRootExits, List<Dictionary<string, ImmutableArray<ReferenceFieldOrigin>>> ConstructorReferenceExits)> _switchExits = [];
     private bool _bindingBaseConstructorArguments;
     private bool _suppressIntegerOperationDiagnostics;
@@ -162,6 +163,12 @@ internal sealed class FunctionBodyBinder
         Dictionary<MovePlace, BorrowRoot> BorrowRoots,
         Dictionary<string, ImmutableArray<ReferenceFieldOrigin>> ConstructorReferences);
     private readonly Dictionary<BoundExpression, (ExpressionFlow? True, ExpressionFlow? False)> _booleanFlows = new(ReferenceEqualityComparer.Instance);
+    private readonly Stack<List<ExpressionFlow>> _tryExceptionalFlows = [];
+    private readonly Stack<TryFinalizerFlowContext> _tryFinalizerFlows = [];
+    private sealed record TryFinalizerFlowContext(
+        int LoopDepth,
+        int SwitchDepth,
+        List<ExpressionFlow> Exits);
 
     private ExpressionFlow CaptureExpressionFlow() => new(CloneDefinitelyAssigned(), ClonePossiblyAssignedConstructorFields(), CloneMovedPlaces(), CloneDefinitelyMovedPlaces(), CloneArrayState(),
         CloneStorageState(), CloneValueReferenceMetadata(), CloneHandleBorrowRoots(), CloneConstructorReferenceOrigins());
@@ -590,8 +597,152 @@ internal sealed class FunctionBodyBinder
         SwitchStatementSyntax @switch => BindSwitchStatement(@switch),
         BreakStatementSyntax @break => BindBreakStatement(@break),
         ContinueStatementSyntax @continue => BindContinueStatement(@continue),
+        TryStatementSyntax @try => BindTryStatement(@try),
+        ThrowStatementSyntax @throw => BindThrowStatement(@throw),
         _ => throw new InvalidOperationException($"Unexpected statement syntax '{syntax.Kind}'."),
     };
+
+    private BoundTryStatement BindTryStatement(TryStatementSyntax syntax)
+    {
+        ExpressionFlow entry = CaptureExpressionFlow();
+        TryFinalizerFlowContext? finalizerFlow = syntax.FinallyBody is null
+            ? null
+            : new TryFinalizerFlowContext(_loopDepth, _switchDepth, []);
+        if (finalizerFlow is not null) _tryFinalizerFlows.Push(finalizerFlow);
+        var exceptionalFlows = new List<ExpressionFlow>();
+        _tryExceptionalFlows.Push(exceptionalFlows);
+        BoundBlockStatement body;
+        try
+        {
+            body = BindBlockStatement(syntax.Body);
+        }
+        finally
+        {
+            _tryExceptionalFlows.Pop();
+        }
+        var fallthrough = new List<ExpressionFlow>();
+        if (!AlwaysReturns(body)) fallthrough.Add(CaptureExpressionFlow());
+        ExpressionFlow handlerEntry = exceptionalFlows.Count == 0
+            ? entry
+            : exceptionalFlows.Aggregate((left, right) => MergeExpressionFlow(left, right)!);
+
+        var catches = ImmutableArray.CreateBuilder<BoundCatchClause>();
+        var precedingTypes = new List<TypeSymbol?>();
+        foreach (CatchClauseSyntax clause in syntax.Catches)
+        {
+            RestoreExpressionFlow(handlerEntry);
+            BoundScope previous = _scope;
+            _scope = new BoundScope(previous);
+            TypeSymbol? catchType = null;
+            LocalVariableSymbol? variable = null;
+            if (clause.Type is not null)
+            {
+                TypeSymbol declaredType = TypeResolver.Resolve(clause.Type, _fileScope, _diagnostics);
+                if (declaredType is not ReferenceTypeSymbol { IsReadonly: true } reference ||
+                    !TypeFacts.IsThrowableType(reference.ElementType))
+                {
+                    _diagnostics.Report(clause.Type.NameToken.Location,
+                        "typed catch parameters must have the form 'readonly T& name', where T is a throwable value type",
+                        DiagnosticIds.InvalidCatchType);
+                }
+                else
+                {
+                    catchType = reference.ElementType;
+                    variable = new LocalVariableSymbol(clause.IdentifierToken!.Text, declaredType,
+                        _function, isReadonly: true, clause);
+                    _semanticInfo.Declarations[clause] = variable;
+                    _localScopes.Add(variable, _scope);
+                    if (!_scope.TryDeclare(variable))
+                        _diagnostics.Report(clause.IdentifierToken.Location,
+                            $"variable '{variable.Name}' is already declared in this scope",
+                            DiagnosticIds.DuplicateDeclaration);
+                    _definitelyAssigned.Add(variable);
+                }
+            }
+
+            if (precedingTypes.Any(previousType => CatchCovers(previousType, catchType)))
+                _diagnostics.Report(clause.CatchKeyword.Location,
+                    "catch clause is unreachable because an earlier handler already covers its type",
+                    DiagnosticIds.UnreachableCatch);
+            precedingTypes.Add(catchType);
+
+            _catchDepth++;
+            BoundBlockStatement catchBody;
+            try
+            {
+                catchBody = BindBlockStatement(clause.Body, createScope: false);
+            }
+            finally
+            {
+                _catchDepth--;
+                _scope = previous;
+            }
+            if (!AlwaysReturns(catchBody)) fallthrough.Add(CaptureExpressionFlow());
+            catches.Add(new BoundCatchClause(catchType, variable, catchBody));
+        }
+
+        if (finalizerFlow is not null) _tryFinalizerFlows.Pop();
+
+        var finalizerInputs = new List<ExpressionFlow>(fallthrough);
+        finalizerInputs.AddRange(exceptionalFlows);
+        if (finalizerFlow is not null) finalizerInputs.AddRange(finalizerFlow.Exits);
+        ExpressionFlow merged = finalizerInputs.Count == 0
+            ? entry
+            : finalizerInputs.Aggregate((left, right) => MergeExpressionFlow(left, right)!);
+        RestoreExpressionFlow(merged);
+        BoundBlockStatement? finallyBody = syntax.FinallyBody is null
+            ? null
+            : BindBlockStatement(syntax.FinallyBody);
+        return new BoundTryStatement(body, catches.ToImmutable(), finallyBody);
+    }
+
+    private static bool CatchCovers(TypeSymbol? earlier, TypeSymbol? later)
+    {
+        if (earlier is null) return true;
+        if (later is null) return false;
+        if (TypeIdentity.AreSame(earlier, later)) return true;
+        if (earlier is not StructTypeSymbol earlierStruct || later is not StructTypeSymbol laterStruct)
+            return false;
+        for (StructTypeSymbol? candidate = laterStruct.BaseType; candidate is not null;
+             candidate = candidate.BaseType)
+            if (TypeIdentity.AreSame(candidate, earlierStruct)) return true;
+        return false;
+    }
+
+    private BoundThrowStatement BindThrowStatement(ThrowStatementSyntax syntax)
+    {
+        if (syntax.Expression is null)
+        {
+            if (_catchDepth == 0)
+                _diagnostics.Report(syntax.ThrowKeyword.Location,
+                    "a bare 'throw;' is only valid inside a catch handler",
+                    DiagnosticIds.RethrowOutsideCatch);
+            RecordExceptionalFlow();
+            return new BoundThrowStatement(null);
+        }
+
+        BoundExpression expression = BindExpression(syntax.Expression);
+        if (!TypeFacts.IsThrowableType(expression.Type))
+            _diagnostics.Report(GetLocation(syntax.Expression),
+                $"type '{expression.Type.ToDisplayString()}' cannot be stored as an exception value",
+                DiagnosticIds.InvalidThrownType);
+        else
+        {
+            ValidateDestructorAccessibility(expression.Type, GetLocation(syntax.Expression));
+            expression = ContextualizeConversion(expression, expression.Type, GetLocation(syntax.Expression));
+        }
+        expression = CompleteFullExpression(expression, resultConsumed: true);
+        RecordExceptionalFlow();
+        return new BoundThrowStatement(expression);
+    }
+
+    private void RecordExceptionalFlow()
+    {
+        if (_tryExceptionalFlows.Count == 0 && _tryFinalizerFlows.Count == 0) return;
+        ExpressionFlow flow = CaptureExpressionFlow();
+        foreach (List<ExpressionFlow> collector in _tryExceptionalFlows) collector.Add(flow);
+        foreach (TryFinalizerFlowContext context in _tryFinalizerFlows) context.Exits.Add(flow);
+    }
 
     private BoundIfStatement BindIfStatement(IfStatementSyntax syntax)
     {
@@ -1004,6 +1155,10 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.BreakOutsideLoopOrSwitch);
         }
 
+        RecordAbruptFinalizerFlow(finalizer => breaksSwitch
+            ? _switchDepth <= finalizer.SwitchDepth
+            : _loopDepth <= finalizer.LoopDepth);
+
         return new BoundBreakStatement();
     }
 
@@ -1016,6 +1171,8 @@ internal sealed class FunctionBodyBinder
         }
         else if (_loopMoveContexts.TryPeek(out var loopContext))
             loopContext.ContinueMovedExits.Add(CloneMovedPlaces());
+
+        RecordAbruptFinalizerFlow(finalizer => _loopDepth <= finalizer.LoopDepth);
 
         return new BoundContinueStatement();
     }
@@ -1264,6 +1421,7 @@ internal sealed class FunctionBodyBinder
         ValidateRequiredFields(syntax.ReturnKeyword.Location);
         if (expression is not null)
             expression = CompleteFullExpression(expression, resultConsumed: true);
+        RecordAbruptFinalizerFlow(_ => true);
         return new BoundReturnStatement(expression);
     }
 
@@ -1914,7 +2072,45 @@ internal sealed class FunctionBodyBinder
             IsReadonly: result.Type is PointerTypeSymbol { IsReadonly: true } or ReferenceTypeSymbol { IsReadonly: true } ||
                 IsAddressable(result) && !IsWritable(result),
             IsWritable: IsWritable(result));
+        if (CanThrowDuringEvaluation(expression)) RecordExceptionalFlow();
         return result;
+    }
+
+    private static bool CanThrowDuringEvaluation(BoundExpression expression) => expression switch
+    {
+        BoundCallExpression { Function.IsExtern: false } => true,
+        BoundIndirectCallExpression => true,
+        BoundMethodCallExpression { Method.IsExtern: false } => true,
+        BoundInterfaceMethodCallExpression => true,
+        BoundPropertySetExpression => true,
+        BoundInterfacePropertySetExpression => true,
+        BoundIndexerSetExpression => true,
+        BoundInterfaceIndexerSetExpression => true,
+        BoundCompoundAccessorAssignmentExpression => true,
+        BoundConstructorCallExpression => true,
+        BoundBaseLifecycleCallExpression { Function.IsExtern: false } => true,
+        BoundStorageConstructExpression { Constructor: not null } => true,
+        BoundStructConstructionExpression => true,
+        BoundArrayCreationExpression => true,
+        BoundNewExpression { Constructor: not null } => true,
+        BoundStaticFieldExpression { Field.IsThreadLocal: true } => true,
+        BoundFreeExpression { Destructor: not null } => true,
+        BoundExplicitDestructExpression { Destructor: not null } => true,
+        BoundAssignmentExpression assignment when !assignment.IsInitialization &&
+            TypeFacts.GetCompleteDestructor(assignment.Target.Type) is not null => true,
+        _ => false,
+    };
+
+    private void RecordAbruptFinalizerFlow(Func<TryFinalizerFlowContext, bool> leavesProtectedRegion)
+    {
+        if (_tryFinalizerFlows.Count == 0) return;
+        ExpressionFlow? flow = null;
+        foreach (TryFinalizerFlowContext finalizer in _tryFinalizerFlows)
+        {
+            if (!leavesProtectedRegion(finalizer)) continue;
+            flow ??= CaptureExpressionFlow();
+            finalizer.Exits.Add(flow);
+        }
     }
 
     private static BoundExpression DereferenceReference(BoundExpression expression) =>
@@ -7382,9 +7578,12 @@ internal sealed class FunctionBodyBinder
     {
         void Visit(BoundExpression child, bool childConsumed = false) =>
             CollectFullExpressionTemporaries(child, childConsumed, temporaries, registered);
-        void ConsumeAll(IEnumerable<BoundExpression> children)
+        void TransferAll(IEnumerable<BoundExpression> children)
         {
-            foreach (BoundExpression child in children) Visit(child, childConsumed: true);
+            // A call accepts its arguments only after every argument was evaluated.
+            // Keep destructible argument values guarded until codegen reaches that
+            // normal edge; a later argument may still throw.
+            foreach (BoundExpression child in children) Visit(child);
         }
 
         switch (expression)
@@ -7432,25 +7631,25 @@ internal sealed class FunctionBodyBinder
                 break;
             case BoundCompoundAccessorAssignmentExpression assignment:
                 Visit(assignment.Receiver);
-                ConsumeAll(assignment.Arguments);
+                TransferAll(assignment.Arguments);
                 Visit(assignment.Value, childConsumed: true);
                 break;
             case BoundCallExpression call:
-                ConsumeAll(call.Arguments);
+                TransferAll(call.Arguments);
                 break;
             case BoundIndirectCallExpression call:
                 Visit(call.Target);
-                ConsumeAll(call.Arguments);
+                TransferAll(call.Arguments);
                 break;
             case BoundFunctionAddressExpression:
                 break;
             case BoundMethodCallExpression call:
                 Visit(call.Receiver);
-                ConsumeAll(call.Arguments);
+                TransferAll(call.Arguments);
                 break;
             case BoundInterfaceMethodCallExpression call:
                 Visit(call.Receiver);
-                ConsumeAll(call.Arguments);
+                TransferAll(call.Arguments);
                 break;
             case BoundPropertySetExpression set:
                 Visit(set.Receiver);
@@ -7462,12 +7661,12 @@ internal sealed class FunctionBodyBinder
                 break;
             case BoundIndexerSetExpression set:
                 Visit(set.Receiver);
-                ConsumeAll(set.Arguments);
+                TransferAll(set.Arguments);
                 Visit(set.Value, childConsumed: true);
                 break;
             case BoundInterfaceIndexerSetExpression set:
                 Visit(set.Receiver);
-                ConsumeAll(set.Arguments);
+                TransferAll(set.Arguments);
                 Visit(set.Value, childConsumed: true);
                 break;
             case BoundMemberAccessExpression member:
@@ -7491,7 +7690,7 @@ internal sealed class FunctionBodyBinder
             case BoundStorageConstructExpression construction:
                 Visit(construction.Storage);
                 if (construction.Value is { } constructedValue) Visit(constructedValue, childConsumed: true);
-                ConsumeAll(construction.Arguments);
+                TransferAll(construction.Arguments);
                 break;
             case BoundExplicitDestructExpression destruction:
                 Visit(destruction.Target);
@@ -7504,13 +7703,13 @@ internal sealed class FunctionBodyBinder
                 foreach (BoundExpression argument in index.Indices) Visit(argument);
                 break;
             case BoundStructConstructionExpression construction:
-                ConsumeAll(construction.Arguments);
+                TransferAll(construction.Arguments);
                 break;
             case BoundConstructorCallExpression construction:
-                ConsumeAll(construction.Arguments);
+                TransferAll(construction.Arguments);
                 break;
             case BoundBaseLifecycleCallExpression call:
-                ConsumeAll(call.Arguments);
+                TransferAll(call.Arguments);
                 break;
             case BoundArrayCreationExpression array:
                 foreach (BoundExpression dimension in array.Dimensions) Visit(dimension);
@@ -7520,7 +7719,7 @@ internal sealed class FunctionBodyBinder
                 if (metadata.Dimension is { } metadataDimension) Visit(metadataDimension);
                 break;
             case BoundNewExpression allocation:
-                ConsumeAll(allocation.Arguments);
+                TransferAll(allocation.Arguments);
                 break;
             case BoundFreeExpression free:
                 Visit(free.Pointer);
@@ -7994,6 +8193,10 @@ internal sealed class FunctionBodyBinder
         ForStatementSyntax @for => GetStatementEnd(@for.Body),
         BreakStatementSyntax @break => (@break.SemicolonToken.Location.Span.End, @break.SemicolonToken.IsMissing),
         ContinueStatementSyntax @continue => (@continue.SemicolonToken.Location.Span.End, @continue.SemicolonToken.IsMissing),
+        ThrowStatementSyntax @throw => (@throw.SemicolonToken.Location.Span.End, @throw.SemicolonToken.IsMissing),
+        TryStatementSyntax @try when @try.FinallyBody is not null => GetStatementEnd(@try.FinallyBody),
+        TryStatementSyntax @try when !@try.Catches.IsEmpty => GetStatementEnd(@try.Catches[^1].Body),
+        TryStatementSyntax @try => GetStatementEnd(@try.Body),
         SwitchStatementSyntax @switch when @switch.CloseBraceToken is { } close => (close.Location.Span.End, close.IsMissing),
         _ => throw new InvalidOperationException($"Unexpected statement syntax '{syntax.Kind}'."),
     };

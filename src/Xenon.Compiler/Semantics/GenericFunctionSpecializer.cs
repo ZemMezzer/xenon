@@ -108,8 +108,57 @@ internal sealed class GenericFunctionSpecializer
 
         BoundBlockStatement body = implementation.Bind(specialized, substitutions,
             _diagnostics, _constants, this, _cancellationToken);
+        if (implementation is LibraryGenericFunctionImplementation)
+            ValidateLibraryExceptionTypes(body, location);
         _functions.Add(new BoundFunction(specialized, body));
         return specialized;
+    }
+
+    private void ValidateLibraryExceptionTypes(BoundStatement statement, TextLocation location)
+    {
+        switch (statement)
+        {
+            case BoundThrowStatement { Expression: { } expression }
+                when !TypeFacts.IsThrowableType(expression.Type):
+                _diagnostics.Report(location,
+                    $"type '{expression.Type.ToDisplayString()}' cannot be stored as an exception value",
+                    DiagnosticIds.InvalidThrownType);
+                break;
+            case BoundBlockStatement block:
+                foreach (BoundStatement child in block.Statements)
+                    ValidateLibraryExceptionTypes(child, location);
+                break;
+            case BoundIfStatement conditional:
+                ValidateLibraryExceptionTypes(conditional.ThenStatement, location);
+                if (conditional.ElseStatement is not null)
+                    ValidateLibraryExceptionTypes(conditional.ElseStatement, location);
+                break;
+            case BoundWhileStatement loop:
+                ValidateLibraryExceptionTypes(loop.Body, location);
+                break;
+            case BoundForStatement loop:
+                if (loop.Initializer is not null)
+                    ValidateLibraryExceptionTypes(loop.Initializer, location);
+                ValidateLibraryExceptionTypes(loop.Body, location);
+                break;
+            case BoundSwitchStatement selection:
+                foreach (BoundSwitchSection section in selection.Sections)
+                    ValidateLibraryExceptionTypes(section.Body, location);
+                break;
+            case BoundTryStatement protectedStatement:
+                ValidateLibraryExceptionTypes(protectedStatement.Body, location);
+                foreach (BoundCatchClause handler in protectedStatement.Catches)
+                {
+                    if (handler.Type is not null && !TypeFacts.IsThrowableType(handler.Type))
+                        _diagnostics.Report(location,
+                            "typed catch parameters must reference a throwable value type",
+                            DiagnosticIds.InvalidCatchType);
+                    ValidateLibraryExceptionTypes(handler.Body, location);
+                }
+                if (protectedStatement.FinallyBody is not null)
+                    ValidateLibraryExceptionTypes(protectedStatement.FinallyBody, location);
+                break;
+        }
     }
 
     public FunctionSymbol? InferAndCreate(FunctionSymbol definition,
