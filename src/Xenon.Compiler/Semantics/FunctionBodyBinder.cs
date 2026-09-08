@@ -163,12 +163,116 @@ internal sealed class FunctionBodyBinder
         Dictionary<MovePlace, BorrowRoot> BorrowRoots,
         Dictionary<string, ImmutableArray<ReferenceFieldOrigin>> ConstructorReferences);
     private readonly Dictionary<BoundExpression, (ExpressionFlow? True, ExpressionFlow? False)> _booleanFlows = new(ReferenceEqualityComparer.Instance);
-    private readonly Stack<List<ExpressionFlow>> _tryExceptionalFlows = [];
+    private sealed record ExceptionalFlow(ExpressionFlow State, TypeSymbol? Type);
+    private readonly Stack<List<ExceptionalFlow>> _tryExceptionalFlows = [];
+    private readonly Stack<ImmutableArray<TypeSymbol?>> _caughtExceptionTypes = [];
+    private readonly Stack<ArgumentFlowTransaction> _argumentFlowTransactions = [];
+    private readonly Dictionary<BoundExpression, ArgumentFlowTransaction> _argumentFlowCandidates =
+        new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<ArgumentFlowTransaction> _completedArgumentFlowTransactions = [];
     private readonly Stack<TryFinalizerFlowContext> _tryFinalizerFlows = [];
     private sealed record TryFinalizerFlowContext(
         int LoopDepth,
         int SwitchDepth,
         List<ExpressionFlow> Exits);
+    private sealed class ArgumentFlowTransaction
+    {
+        private sealed record AppliedRollback(
+            BoundExpression Expression,
+            ExpressionFlow Before,
+            ExpressionFlow After);
+        private readonly List<(BoundExpression Expression, MovePlace Place,
+            ExpressionFlow Before, ExpressionFlow After)> _moves = [];
+        private readonly Dictionary<BoundExpression, (ExpressionFlow Before, ExpressionFlow After)>
+            _candidates = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<BoundExpression, MovePlace> _candidatePlaces =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<BoundExpression> _materialized = new(ReferenceEqualityComparer.Instance);
+        private readonly List<(List<ExceptionalFlow> Sink, int Index,
+            ImmutableArray<AppliedRollback> Rollbacks)> _recordedRollbacks = [];
+        private readonly List<(TextLocation Location, string DisplayName,
+            ImmutableArray<BoundExpression> Candidates)> _pendingConflicts = [];
+        private ImmutableArray<AppliedRollback> _lastRollbacks = [];
+
+        public void RecordCandidate(
+            BoundExpression expression,
+            MovePlace place,
+            ExpressionFlow before,
+            ExpressionFlow after)
+        {
+            _candidates.Add(expression, (before, after));
+            _candidatePlaces.Add(expression, place);
+        }
+
+        public void AcceptArgument(BoundExpression expression)
+        {
+            expression = UnwrapDirectTransferredExpression(expression);
+            if (_candidates.TryGetValue(expression, out var move))
+                _moves.Add((expression, _candidatePlaces[expression], move.Before, move.After));
+        }
+
+        public bool HasDeferredMoveOverlapping(MovePlace place) =>
+            _moves.Any(move => PlacesOverlap(move.Place, place));
+
+        public void RecordPotentialConflict(MovePlace place, TextLocation location)
+        {
+            ImmutableArray<BoundExpression> candidates = _moves
+                .Where(move => PlacesOverlap(move.Place, place))
+                .Select(move => move.Expression)
+                .ToImmutableArray();
+            if (!candidates.IsEmpty)
+                _pendingConflicts.Add((location, place.DisplayName, candidates));
+        }
+
+        public void ReportPendingConflicts(DiagnosticBag diagnostics)
+        {
+            foreach (var conflict in _pendingConflicts)
+            {
+                if (conflict.Candidates.All(_materialized.Contains)) continue;
+                diagnostics.Report(conflict.Location,
+                    $"cannot reinitialize '{conflict.DisplayName}' after moving an overlapping place in an earlier argument; split the operations into separate statements",
+                    DiagnosticIds.ArgumentLifetimeConflict);
+            }
+        }
+
+        public ExpressionFlow Rollback(ExpressionFlow flow)
+        {
+            var rollbacks = ImmutableArray.CreateBuilder<AppliedRollback>(_moves.Count);
+            for (int index = _moves.Count - 1; index >= 0; index--)
+            {
+                ExpressionFlow beforeRollback = flow;
+                flow = ApplyExpressionFlowDelta(beforeRollback,
+                    _moves[index].After, _moves[index].Before);
+                rollbacks.Add(new AppliedRollback(
+                    _moves[index].Expression, beforeRollback, flow));
+            }
+            _lastRollbacks = rollbacks.ToImmutable();
+            return flow;
+        }
+
+        public void RecordRollback(List<ExceptionalFlow> sink, int index)
+        {
+            if (!_lastRollbacks.IsEmpty)
+                _recordedRollbacks.Add((sink, index, _lastRollbacks));
+            _lastRollbacks = [];
+        }
+
+        public void CommitMaterializedCandidate(BoundExpression expression)
+        {
+            if (!_materialized.Add(expression) || !_candidates.TryGetValue(expression, out var move)) return;
+            foreach (var rollback in _recordedRollbacks)
+            {
+                AppliedRollback? applied = rollback.Rollbacks.FirstOrDefault(item =>
+                    ReferenceEquals(item.Expression, expression));
+                if (applied is null) continue;
+                ExceptionalFlow recorded = rollback.Sink[rollback.Index];
+                rollback.Sink[rollback.Index] = recorded with
+                {
+                    State = ApplyExpressionFlowDelta(recorded.State, applied.After, applied.Before),
+                };
+            }
+        }
+    }
 
     private ExpressionFlow CaptureExpressionFlow() => new(CloneDefinitelyAssigned(), ClonePossiblyAssignedConstructorFields(), CloneMovedPlaces(), CloneDefinitelyMovedPlaces(), CloneArrayState(),
         CloneStorageState(), CloneValueReferenceMetadata(), CloneHandleBorrowRoots(), CloneConstructorReferenceOrigins());
@@ -198,6 +302,60 @@ internal sealed class FunctionBodyBinder
             MergeValueReferenceMetadata(a.References, b.References),
             MergeHandleBorrowRoots(a.BorrowRoots, b.BorrowRoots),
             MergeConstructorReferenceOrigins(a.ConstructorReferences, b.ConstructorReferences));
+    }
+
+    private static ExpressionFlow ApplyExpressionFlowDelta(
+        ExpressionFlow entry,
+        ExpressionFlow before,
+        ExpressionFlow after) => new(
+        ApplySetDelta(entry.Assigned, before.Assigned, after.Assigned),
+        ApplySetDelta(entry.PossiblyAssignedConstructorFields,
+            before.PossiblyAssignedConstructorFields, after.PossiblyAssignedConstructorFields),
+        ApplySetDelta(entry.Moved, before.Moved, after.Moved),
+        ApplySetDelta(entry.DefinitelyMoved, before.DefinitelyMoved, after.DefinitelyMoved),
+        ApplyDictionaryDelta(entry.Arrays, before.Arrays, after.Arrays),
+        ApplyDictionaryDelta(entry.Storages, before.Storages, after.Storages),
+        ApplyDictionaryDelta(entry.References, before.References, after.References,
+            static (left, right) => left.SequenceEqual(right)),
+        ApplyDictionaryDelta(entry.BorrowRoots, before.BorrowRoots, after.BorrowRoots),
+        ApplyDictionaryDelta(entry.ConstructorReferences, before.ConstructorReferences,
+            after.ConstructorReferences, static (left, right) => left.SequenceEqual(right)));
+
+    private static HashSet<T> ApplySetDelta<T>(
+        HashSet<T> entry,
+        HashSet<T> before,
+        HashSet<T> after)
+    {
+        var result = new HashSet<T>(entry, entry.Comparer);
+        foreach (T value in before.Concat(after).Distinct(before.Comparer))
+        {
+            bool wasPresent = before.Contains(value);
+            bool isPresent = after.Contains(value);
+            if (wasPresent == isPresent) continue;
+            if (isPresent) result.Add(value);
+            else result.Remove(value);
+        }
+        return result;
+    }
+
+    private static Dictionary<TKey, TValue> ApplyDictionaryDelta<TKey, TValue>(
+        Dictionary<TKey, TValue> entry,
+        Dictionary<TKey, TValue> before,
+        Dictionary<TKey, TValue> after,
+        Func<TValue, TValue, bool>? equals = null)
+        where TKey : notnull
+    {
+        equals ??= static (left, right) => EqualityComparer<TValue>.Default.Equals(left, right);
+        var result = new Dictionary<TKey, TValue>(entry, entry.Comparer);
+        foreach (TKey key in before.Keys.Concat(after.Keys).Distinct(before.Comparer))
+        {
+            bool hadBefore = before.TryGetValue(key, out TValue? beforeValue);
+            bool hasAfter = after.TryGetValue(key, out TValue? afterValue);
+            if (hadBefore == hasAfter && (!hadBefore || equals(beforeValue!, afterValue!))) continue;
+            if (hasAfter) result[key] = afterValue!;
+            else result.Remove(key);
+        }
+        return result;
     }
     private (ExpressionFlow? True, ExpressionFlow? False) BooleanFlow(BoundExpression expression)
     {
@@ -284,7 +442,7 @@ internal sealed class FunctionBodyBinder
             ImmutableArray<BoundExpression> arguments;
             try
             {
-                arguments = initializerArguments.Select(BindExpression).ToImmutableArray();
+                arguments = BindTransferredArguments(initializerArguments);
             }
             finally
             {
@@ -326,7 +484,7 @@ internal sealed class FunctionBodyBinder
             ImmutableArray<BoundExpression> arguments;
             try
             {
-                arguments = baseArguments.Select(BindExpression).ToImmutableArray();
+                arguments = BindTransferredArguments(baseArguments);
             }
             finally
             {
@@ -361,6 +519,8 @@ internal sealed class FunctionBodyBinder
         }
 
         BoundBlockStatement boundBody = BindBlockStatement(body, createScope: false);
+        foreach (ArgumentFlowTransaction transaction in _completedArgumentFlowTransactions)
+            transaction.ReportPendingConflicts(_diagnostics);
         if (!AlwaysReturns(boundBody)) RecordReceiverMoveEffectExit();
         MovePlace[][] receiverExitStates = _receiverMoveEffectExits
             .Select(exit => exit
@@ -609,7 +769,7 @@ internal sealed class FunctionBodyBinder
             ? null
             : new TryFinalizerFlowContext(_loopDepth, _switchDepth, []);
         if (finalizerFlow is not null) _tryFinalizerFlows.Push(finalizerFlow);
-        var exceptionalFlows = new List<ExpressionFlow>();
+        var exceptionalFlows = new List<ExceptionalFlow>();
         _tryExceptionalFlows.Push(exceptionalFlows);
         BoundBlockStatement body;
         try
@@ -622,15 +782,13 @@ internal sealed class FunctionBodyBinder
         }
         var fallthrough = new List<ExpressionFlow>();
         if (!AlwaysReturns(body)) fallthrough.Add(CaptureExpressionFlow());
-        ExpressionFlow handlerEntry = exceptionalFlows.Count == 0
-            ? entry
-            : exceptionalFlows.Aggregate((left, right) => MergeExpressionFlow(left, right)!);
 
         var catches = ImmutableArray.CreateBuilder<BoundCatchClause>();
         var precedingTypes = new List<TypeSymbol?>();
+        var remainingExceptionalFlows = new List<ExceptionalFlow>(exceptionalFlows);
+        var handlerExceptionalFlows = new List<ExceptionalFlow>();
         foreach (CatchClauseSyntax clause in syntax.Catches)
         {
-            RestoreExpressionFlow(handlerEntry);
             BoundScope previous = _scope;
             _scope = new BoundScope(previous);
             TypeSymbol? catchType = null;
@@ -656,7 +814,6 @@ internal sealed class FunctionBodyBinder
                         _diagnostics.Report(clause.IdentifierToken.Location,
                             $"variable '{variable.Name}' is already declared in this scope",
                             DiagnosticIds.DuplicateDeclaration);
-                    _definitelyAssigned.Add(variable);
                 }
             }
 
@@ -666,7 +823,26 @@ internal sealed class FunctionBodyBinder
                     DiagnosticIds.UnreachableCatch);
             precedingTypes.Add(catchType);
 
+            bool catchAll = clause.Type is null;
+            ExceptionalFlow[] matchingFlows = remainingExceptionalFlows
+                .Where(flow => catchAll || flow.Type is null ||
+                    CatchCovers(catchType, flow.Type))
+                .ToArray();
+            ExpressionFlow handlerEntry = matchingFlows.Length == 0
+                ? entry
+                : matchingFlows.Select(flow => flow.State)
+                    .Aggregate((left, right) => MergeExpressionFlow(left, right)!);
+            RestoreExpressionFlow(handlerEntry);
+            if (variable is not null) _definitelyAssigned.Add(variable);
+
             _catchDepth++;
+            ImmutableArray<TypeSymbol?> caughtTypes = matchingFlows
+                .Select(flow => flow.Type)
+                .Distinct()
+                .ToImmutableArray();
+            if (caughtTypes.IsEmpty) caughtTypes = [catchType];
+            _caughtExceptionTypes.Push(caughtTypes);
+            _tryExceptionalFlows.Push(handlerExceptionalFlows);
             BoundBlockStatement catchBody;
             try
             {
@@ -674,25 +850,73 @@ internal sealed class FunctionBodyBinder
             }
             finally
             {
+                _tryExceptionalFlows.Pop();
+                _caughtExceptionTypes.Pop();
                 _catchDepth--;
                 _scope = previous;
             }
             if (!AlwaysReturns(catchBody)) fallthrough.Add(CaptureExpressionFlow());
             catches.Add(new BoundCatchClause(catchType, variable, catchBody));
+            if (catchAll)
+                remainingExceptionalFlows.Clear();
+            else if (catchType is not null)
+                remainingExceptionalFlows.RemoveAll(flow =>
+                    flow.Type is not null && CatchCovers(catchType, flow.Type));
         }
 
         if (finalizerFlow is not null) _tryFinalizerFlows.Pop();
 
         var finalizerInputs = new List<ExpressionFlow>(fallthrough);
-        finalizerInputs.AddRange(exceptionalFlows);
+        finalizerInputs.AddRange(remainingExceptionalFlows.Select(flow => flow.State));
+        finalizerInputs.AddRange(handlerExceptionalFlows.Select(flow => flow.State));
         if (finalizerFlow is not null) finalizerInputs.AddRange(finalizerFlow.Exits);
         ExpressionFlow merged = finalizerInputs.Count == 0
             ? entry
             : finalizerInputs.Aggregate((left, right) => MergeExpressionFlow(left, right)!);
+        ExpressionFlow normalEntry = fallthrough.Count == 0
+            ? entry
+            : fallthrough.Aggregate((left, right) => MergeExpressionFlow(left, right)!);
         RestoreExpressionFlow(merged);
-        BoundBlockStatement? finallyBody = syntax.FinallyBody is null
-            ? null
-            : BindBlockStatement(syntax.FinallyBody);
+        BoundBlockStatement? finallyBody = null;
+        var escapingFlows = new List<ExceptionalFlow>(remainingExceptionalFlows);
+        escapingFlows.AddRange(handlerExceptionalFlows);
+        if (syntax.FinallyBody is not null)
+        {
+            var finallyExceptionalFlows = new List<ExceptionalFlow>();
+            _tryExceptionalFlows.Push(finallyExceptionalFlows);
+            try
+            {
+                finallyBody = BindBlockStatement(syntax.FinallyBody);
+            }
+            finally
+            {
+                _tryExceptionalFlows.Pop();
+            }
+            if (!AlwaysReturns(finallyBody))
+            {
+                ExpressionFlow completedFinally = CaptureExpressionFlow();
+                escapingFlows = escapingFlows
+                    .Select(flow => new ExceptionalFlow(
+                        ApplyExpressionFlowDelta(flow.State, merged, completedFinally),
+                        flow.Type)).ToList();
+                if (fallthrough.Count > 0)
+                    RestoreExpressionFlow(ApplyExpressionFlowDelta(
+                        normalEntry, merged, completedFinally));
+                else
+                    RestoreExpressionFlow(entry);
+            }
+            else if (AlwaysReturns(finallyBody))
+            {
+                escapingFlows.Clear();
+                RestoreExpressionFlow(entry);
+            }
+            escapingFlows.AddRange(finallyExceptionalFlows);
+        }
+        else
+        {
+            RestoreExpressionFlow(normalEntry);
+        }
+        PropagateExceptionalFlows(escapingFlows);
         return new BoundTryStatement(body, catches.ToImmutable(), finallyBody);
     }
 
@@ -717,7 +941,15 @@ internal sealed class FunctionBodyBinder
                 _diagnostics.Report(syntax.ThrowKeyword.Location,
                     "a bare 'throw;' is only valid inside a catch handler",
                     DiagnosticIds.RethrowOutsideCatch);
-            RecordExceptionalFlow();
+            if (_caughtExceptionTypes.TryPeek(out ImmutableArray<TypeSymbol?> caughtTypes))
+            {
+                foreach (TypeSymbol? caughtType in caughtTypes)
+                    RecordExceptionalFlow(caughtType);
+            }
+            else
+            {
+                RecordExceptionalFlow();
+            }
             return new BoundThrowStatement(null);
         }
 
@@ -732,16 +964,31 @@ internal sealed class FunctionBodyBinder
             expression = ContextualizeConversion(expression, expression.Type, GetLocation(syntax.Expression));
         }
         expression = CompleteFullExpression(expression, resultConsumed: true);
-        RecordExceptionalFlow();
+        RecordExceptionalFlow(expression.Type);
         return new BoundThrowStatement(expression);
     }
 
-    private void RecordExceptionalFlow()
+    private void RecordExceptionalFlow(TypeSymbol? type = null)
     {
-        if (_tryExceptionalFlows.Count == 0 && _tryFinalizerFlows.Count == 0) return;
+        if (_tryExceptionalFlows.Count == 0) return;
         ExpressionFlow flow = CaptureExpressionFlow();
-        foreach (List<ExpressionFlow> collector in _tryExceptionalFlows) collector.Add(flow);
-        foreach (TryFinalizerFlowContext context in _tryFinalizerFlows) context.Exits.Add(flow);
+        var rollbacks = new List<ArgumentFlowTransaction>();
+        foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+        {
+            flow = transaction.Rollback(flow);
+            rollbacks.Add(transaction);
+        }
+        List<ExceptionalFlow> sink = _tryExceptionalFlows.Peek();
+        int index = sink.Count;
+        sink.Add(new ExceptionalFlow(flow, type));
+        foreach (ArgumentFlowTransaction rollback in rollbacks)
+            rollback.RecordRollback(sink, index);
+    }
+
+    private void PropagateExceptionalFlows(IEnumerable<ExceptionalFlow> flows)
+    {
+        if (_tryExceptionalFlows.Count == 0) return;
+        _tryExceptionalFlows.Peek().AddRange(flows);
     }
 
     private BoundIfStatement BindIfStatement(IfStatementSyntax syntax)
@@ -2096,8 +2343,8 @@ internal sealed class FunctionBodyBinder
         BoundStaticFieldExpression { Field.IsThreadLocal: true } => true,
         BoundFreeExpression { Destructor: not null } => true,
         BoundExplicitDestructExpression { Destructor: not null } => true,
-        BoundAssignmentExpression assignment when !assignment.IsInitialization &&
-            TypeFacts.GetCompleteDestructor(assignment.Target.Type) is not null => true,
+        BoundCompareExchangeExpression { Target.Type: AtomicTypeSymbol atomic } when
+            TypeFacts.GetCompleteDestructor(atomic.ElementType) is not null => true,
         _ => false,
     };
 
@@ -2503,6 +2750,8 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        ExpressionFlow? beforeArgumentMove = _argumentFlowTransactions.Count == 0
+            ? null : CaptureExpressionFlow();
         if (place.Fields.IsEmpty && place.RootVariable is { } movedVariable)
             _definitelyAssigned.Remove(movedVariable);
         if (place.RootVariable is LocalVariableSymbol { Type: ArrayTypeSymbol } movedArray)
@@ -2518,6 +2767,12 @@ internal sealed class FunctionBodyBinder
         if (TypeFacts.ContainsReferenceStorage(source.Type) &&
             TryGetValueCarrierPlace(source, out MovePlace carrier))
             TransferValueReferenceMetadata(carrier, result, syntax.MoveKeyword.Location.Span.Start);
+        if (beforeArgumentMove is not null)
+        {
+            ArgumentFlowTransaction transaction = _argumentFlowTransactions.Peek();
+            transaction.RecordCandidate(result, place, beforeArgumentMove, CaptureExpressionFlow());
+            _argumentFlowCandidates.Add(result, transaction);
+        }
         return result;
     }
 
@@ -3921,6 +4176,13 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         BoundExpression effectiveTarget = initializesField ? rawTarget : DereferenceReference(target);
+        if (isSimpleAssignment && TryGetMovePlace(effectiveTarget, out MovePlace argumentAssignmentPlace) &&
+            _argumentFlowTransactions.Any(transaction =>
+                transaction.HasDeferredMoveOverlapping(argumentAssignmentPlace)))
+        {
+            foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+                transaction.RecordPotentialConflict(argumentAssignmentPlace, GetLocation(syntax.Target));
+        }
         if (isSimpleAssignment && TryGetStorageType(effectiveTarget.Type, out StorageTypeSymbol assignmentStorage))
             return BindStorageAssignment(syntax, effectiveTarget, assignmentStorage);
         if (isSimpleAssignment && TypeFacts.IsPinned(effectiveTarget.Type))
@@ -3939,6 +4201,10 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         target = effectiveTarget;
+        bool strongReceiverReplacement = isSimpleAssignment &&
+            _function.FunctionKind is FunctionKind.Method or FunctionKind.Destructor &&
+            GetThisMemberDepth(target) > 0 &&
+            TypeFacts.GetCompleteDestructor(target.Type) is not null;
         AtomicTypeSymbol? atomicTarget = target.Type as AtomicTypeSymbol;
         TypeSymbol assignmentValueType = atomicTarget?.ElementType ?? target.Type;
         MovePlace? assignedPlace = isSimpleAssignment && TryGetMovePlace(target, out MovePlace targetPlace)
@@ -4027,6 +4293,9 @@ internal sealed class FunctionBodyBinder
             ArrayStorageKind storage = GetArrayStorage(expression);
             if (target is BoundVariableExpression { Variable: LocalVariableSymbol local })
             {
+                // A later replacement must own one mutable cleanup node so the old array can
+                // be progressed safely before the new descriptor is committed.
+                local.RequiresArrayCleanupTransfer = true;
                 TrackArrayAssignment(local, expression, GetLocation(syntax.Expression));
             }
             else if (storage == ArrayStorageKind.Stack)
@@ -4054,6 +4323,22 @@ internal sealed class FunctionBodyBinder
                 _diagnostics.Report(syntax.OperatorToken.Location,
                     $"cannot move '{assignedPlace.DisplayName}' into itself",
                     DiagnosticIds.SelfMove);
+            bool replacementCanThrow = TypeFacts.GetCompleteDestructor(target.Type) is not null ||
+                target.Type is ArrayTypeSymbol replacementArray &&
+                TypeFacts.GetCompleteDestructor(replacementArray.ElementType) is not null &&
+                assignedPlace.RootVariable is LocalVariableSymbol { RequiresArrayCleanupTransfer: true };
+            if (!strongReceiverReplacement && target.Type is not AtomicTypeSymbol &&
+                movedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved &&
+                (!initializesField || requiresRuntimeInitializationCheck) &&
+                replacementCanThrow)
+            {
+                // Replacement commits the RHS lifetime before entering the old destructor,
+                // but the destination itself is dead if that destructor throws.
+                ExpressionFlow normalFlow = CaptureExpressionFlow();
+                MarkPlaceMoved(assignedPlace);
+                RecordExceptionalFlow();
+                RestoreExpressionFlow(normalFlow);
+            }
             if (assignedPlace.Fields.IsEmpty)
             {
                 ValidateDestructorAccessibility(assignedPlace.RootType, syntax.OperatorToken.Location);
@@ -4062,6 +4347,10 @@ internal sealed class FunctionBodyBinder
             }
             if (!assignmentIsInsideMovedPlace)
                 MarkPlaceReinitialized(assignedPlace);
+            if (target.Type is AtomicTypeSymbol &&
+                movedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved &&
+                replacementCanThrow)
+                RecordExceptionalFlow();
             if (assignedPlace.Fields.IsEmpty && assignedPlace.RootVariable is LocalVariableSymbol assignedLocal &&
                 TypeFacts.ContainsReferenceStorage(target.Type))
             {
@@ -4073,6 +4362,15 @@ internal sealed class FunctionBodyBinder
                 ValidateAggregateDestructionOrder(assignedLocal,
                     metadata.Select(reference => reference.Source).ToImmutableArray(),
                     syntax.OperatorToken.Location);
+            }
+            if (strongReceiverReplacement &&
+                movedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved &&
+                (!initializesField || requiresRuntimeInitializationCheck) &&
+                replacementCanThrow)
+            {
+                // Codegen installs the new receiver field before destroying a detached
+                // copy of the old value, so an exceptional exit still exposes a live field.
+                RecordExceptionalFlow();
             }
         }
         if (isSimpleAssignment) MarkConstructorFieldAssigned(target);
@@ -4088,6 +4386,17 @@ internal sealed class FunctionBodyBinder
                     : null,
             RequiresRuntimeInitializationCheck = requiresRuntimeInitializationCheck,
         };
+    }
+
+    private static int GetThisMemberDepth(BoundExpression expression)
+    {
+        int depth = 0;
+        while (expression is BoundMemberAccessExpression member)
+        {
+            depth++;
+            expression = member.Receiver;
+        }
+        return expression is BoundThisExpression ? depth : 0;
     }
 
     private BoundExpression BindSwapExpression(SwapExpressionSyntax syntax)
@@ -4934,7 +5243,7 @@ internal sealed class FunctionBodyBinder
         }
 
         BoundExpression receiver = BindExpression(syntax.Receiver);
-        ImmutableArray<BoundExpression> arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
 
         if (GetGenericReceiver(receiver.Type, pointerAccess: false) is GenericParameterSymbol genericParameter)
             return BindGenericIndexerGet(syntax, receiver, genericParameter, arguments);
@@ -5252,7 +5561,7 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.AbstractInstantiation);
         }
 
-        var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
         arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.Type.NameToken.Location);
         return new BoundStructConstructionExpression(structType, arguments);
     }
@@ -5316,12 +5625,13 @@ internal sealed class FunctionBodyBinder
     {
         bool isLifetimeOperation = syntax.TypeArguments is null &&
             syntax.Target is NameExpressionSyntax { IdentifierToken.Text: "destruct" };
-        var arguments = syntax.Arguments.Select((argument, index) =>
-            isLifetimeOperation && index == 0
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(
+            syntax.Arguments,
+            (argument, index) => isLifetimeOperation && index == 0
                 ? BindLifetimeInvalidationOperand(argument)
                 : GetCallArgumentExpectedType(syntax, index) is { } expectedType
                     ? BindExpressionWithExpectedType(argument, expectedType)
-                    : BindExpression(argument)).ToImmutableArray();
+                    : BindExpression(argument));
         if (syntax.TypeArguments is { } typeArguments)
             return BindExplicitGenericCall(syntax, typeArguments, arguments);
         bool incomplete = syntax.CloseParenthesisToken.IsMissing;
@@ -5534,6 +5844,32 @@ internal sealed class FunctionBodyBinder
         arguments = ValidateFunctionArguments(function, arguments, syntax.Arguments, name.IdentifierToken.Location,
             incomplete ? completedArgumentCount : null);
         return new BoundCallExpression(function, arguments);
+    }
+
+    private ImmutableArray<BoundExpression> BindTransferredArguments(
+        ImmutableArray<ExpressionSyntax> arguments,
+        Func<ExpressionSyntax, int, BoundExpression>? bind = null)
+    {
+        var transaction = new ArgumentFlowTransaction();
+        _argumentFlowTransactions.Push(transaction);
+        try
+        {
+            var bound = ImmutableArray.CreateBuilder<BoundExpression>(arguments.Length);
+            for (int index = 0; index < arguments.Length; index++)
+            {
+                BoundExpression argument = bind is null
+                    ? BindExpression(arguments[index])
+                    : bind(arguments[index], index);
+                bound.Add(argument);
+                transaction.AcceptArgument(argument);
+            }
+            return bound.ToImmutable();
+        }
+        finally
+        {
+            _argumentFlowTransactions.Pop();
+            _completedArgumentFlowTransactions.Add(transaction);
+        }
     }
 
     private TypeSymbol? GetCallArgumentExpectedType(CallExpressionSyntax syntax, int argumentIndex)
@@ -6479,7 +6815,7 @@ internal sealed class FunctionBodyBinder
 
         if (type is StorageTypeSymbol storage)
         {
-            ImmutableArray<BoundExpression> storageArguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+            ImmutableArray<BoundExpression> storageArguments = BindTransferredArguments(syntax.Arguments);
             if (!storageArguments.IsEmpty)
                 _diagnostics.Report(syntax.OpenDelimiterToken.Location,
                     $"storage allocation expects no initializer values, but {storageArguments.Length} were provided",
@@ -6494,7 +6830,7 @@ internal sealed class FunctionBodyBinder
 
         if (type is PrimitiveTypeSymbol primitive && !TypeIdentity.AreSame(type, BuiltinTypes.Void))
         {
-            ImmutableArray<BoundExpression> primitiveArguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+            ImmutableArray<BoundExpression> primitiveArguments = BindTransferredArguments(syntax.Arguments);
             if (primitiveArguments.Length > 1)
                 _diagnostics.Report(syntax.OpenDelimiterToken.Location,
                     $"primitive allocation of '{primitive.Name}' expects zero or one initializer value, but {primitiveArguments.Length} were provided",
@@ -6540,7 +6876,7 @@ internal sealed class FunctionBodyBinder
                 DiagnosticIds.AbstractInstantiation);
         }
 
-        var arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
         bool incomplete = syntax.CloseDelimiterToken.IsMissing;
         int completedArgumentCount = GetCompletedArgumentCount(syntax.Arguments, incomplete);
         FunctionSymbol? constructor = null;
@@ -7371,9 +7707,14 @@ internal sealed class FunctionBodyBinder
 
         expression = ReadAtomicValue(expression);
         expression = ContextualizeNull(expression, targetType);
-        expression = targetType is InterfaceTypeSymbol @interface && expression.Type is StructTypeSymbol source && source.Implements(@interface)
-            ? new BoundInterfaceConversionExpression(expression, source, @interface)
-            : expression;
+        if (targetType is InterfaceTypeSymbol @interface &&
+            expression.Type is StructTypeSymbol source && source.Implements(@interface))
+        {
+            if (_argumentFlowCandidates.TryGetValue(expression,
+                    out ArgumentFlowTransaction? transaction))
+                transaction.CommitMaterializedCandidate(expression);
+            expression = new BoundInterfaceConversionExpression(expression, source, @interface);
+        }
         return ApplyCopySemantics(expression, copyLocation);
     }
 
@@ -7562,28 +7903,53 @@ internal sealed class FunctionBodyBinder
     {
         var temporaries = ImmutableArray.CreateBuilder<BoundFullExpressionTemporary>();
         var registered = new HashSet<BoundExpression>(ReferenceEqualityComparer.Instance);
-        CollectFullExpressionTemporaries(expression, resultConsumed, temporaries, registered);
-        if (temporaries.Count == 0) return expression;
+        var transferred = new HashSet<BoundExpression>(ReferenceEqualityComparer.Instance);
+        CollectFullExpressionTemporaries(expression, resultConsumed, temporaries, registered, transferred);
+        if (temporaries.Any(temporary => !transferred.Contains(temporary.Value)))
+        {
+            // These temporaries remain live after the expression's normal value has
+            // been computed. Their destructors therefore observe the final flow state.
+            RecordExceptionalFlow();
+        }
+        if (temporaries.Count == 0 && !RequiresFullExpressionStackFrame(expression)) return expression;
         var fullExpression = new BoundFullExpression(expression, temporaries.ToImmutable());
         if (_expressionLocations.TryGetValue(expression, out TextLocation location))
             _expressionLocations[fullExpression] = location;
         return fullExpression;
     }
 
+    private static bool RequiresFullExpressionStackFrame(BoundExpression expression) =>
+        expression switch
+        {
+            BoundAssignmentExpression assignment when !assignment.IsInitialization &&
+                GetArrayStorage(assignment.Expression) != ArrayStorageKind.Stack &&
+                (TypeFacts.GetCompleteDestructor(assignment.Target.Type) is not null ||
+                 assignment.Target.Type is ArrayTypeSymbol array &&
+                 TypeFacts.GetCompleteDestructor(array.ElementType) is not null) => true,
+            BoundCompareExchangeExpression { Target.Type: AtomicTypeSymbol atomic } when
+                TypeFacts.GetCompleteDestructor(atomic.ElementType) is not null => true,
+            _ => false,
+        };
+
     private void CollectFullExpressionTemporaries(
         BoundExpression expression,
         bool consumed,
         ImmutableArray<BoundFullExpressionTemporary>.Builder temporaries,
-        HashSet<BoundExpression> registered)
+        HashSet<BoundExpression> registered,
+        HashSet<BoundExpression> transferred)
     {
         void Visit(BoundExpression child, bool childConsumed = false) =>
-            CollectFullExpressionTemporaries(child, childConsumed, temporaries, registered);
+            CollectFullExpressionTemporaries(child, childConsumed, temporaries, registered, transferred);
         void TransferAll(IEnumerable<BoundExpression> children)
         {
             // A call accepts its arguments only after every argument was evaluated.
             // Keep destructible argument values guarded until codegen reaches that
             // normal edge; a later argument may still throw.
-            foreach (BoundExpression child in children) Visit(child);
+            foreach (BoundExpression child in children)
+            {
+                transferred.Add(UnwrapDirectTransferredExpression(child));
+                Visit(child);
+            }
         }
 
         switch (expression)
@@ -7733,6 +8099,13 @@ internal sealed class FunctionBodyBinder
         ValidateDestructorAccessibility(expression.Type, location);
         temporaries.Add(new BoundFullExpressionTemporary(expression, destructor));
     }
+
+    private static BoundExpression UnwrapDirectTransferredExpression(BoundExpression expression) =>
+        expression switch
+        {
+            BoundFullExpression full => UnwrapDirectTransferredExpression(full.Expression),
+            _ => expression,
+        };
 
     private static bool IsTemporaryValue(BoundExpression expression) => expression is
         BoundMoveExpression or
@@ -8498,7 +8871,7 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindGenericNewExpression(NewExpressionSyntax syntax, GenericParameterSymbol parameter)
     {
-        ImmutableArray<BoundExpression> arguments = syntax.Arguments.Select(BindExpression).ToImmutableArray();
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
         GenericConstructorMember[] candidates = GenericConstraintMemberLookup
             .GetConstructors(parameter, _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
             .DistinctBy(constructor => string.Join(",", constructor.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified))))

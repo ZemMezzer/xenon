@@ -41,7 +41,9 @@ public sealed class ConcurrencyHardeningTests
             candidate => candidate.Symbol.Name == "Use");
         BoundAssignmentExpression[] assignments = function.Body.Statements
             .OfType<BoundExpressionStatement>()
-            .Select(statement => statement.Expression)
+            .Select(statement => statement.Expression is BoundFullExpression full
+                ? full.Expression
+                : statement.Expression)
             .OfType<BoundAssignmentExpression>()
             .ToArray();
         Assert.Equal(10, assignments.Length);
