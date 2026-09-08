@@ -231,4 +231,7 @@ public static class DiagnosticIds
     public const string UnreachableCatch = "XE2270";
     public const string ArgumentLifetimeConflict = "XE2271";
     public const string RecursiveValueLayout = "XE2600";
+    public const string InvalidOperatorDeclaration = "XE2272";
+    public const string InvalidConversionDeclaration = "XE2273";
+    public const string AmbiguousConversion = "XE2274";
 }

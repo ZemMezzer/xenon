@@ -115,6 +115,8 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = AccessibilityFacts.FromSyntax(declaration.AccessModifierToken,
             declaration.SecondaryAccessModifierToken, Accessibility.Private);
         IsStatic = declaration.IsStatic;
+        OperatorKind = declaration.IsOperator
+            ? OperatorFacts.FromSource(declaration.IdentifierToken.Text, parameters.Length) : null;
         IsVirtual = declaration.IsVirtual;
         IsOverride = declaration.IsOverride;
         IsAbstract = declaration.IsAbstract;
@@ -229,7 +231,8 @@ public sealed class FunctionSymbol : Symbol
         SymbolOrigin? origin = null,
         SymbolDocumentation? documentation = null,
         SymbolImplementation? implementation = null,
-        AccessorKind accessorKind = AccessorKind.None)
+        AccessorKind accessorKind = AccessorKind.None,
+        OperatorKind? operatorKind = null)
         : base(name, SymbolKind.Function, containingSymbol)
     {
         FunctionKind = functionKind;
@@ -246,6 +249,7 @@ public sealed class FunctionSymbol : Symbol
         IsDefinition = isDefinition;
         DelegatesToThisConstructor = delegatesToThisConstructor;
         AccessorKind = accessorKind;
+        OperatorKind = operatorKind;
         SetTypeParameters(typeParameters.IsDefault ? [] : typeParameters);
         SetMetadata(origin ?? SymbolOrigin.CompilerGenerated, documentation);
         SetImplementation(implementation);
@@ -404,12 +408,15 @@ public sealed class FunctionSymbol : Symbol
     public bool IsReadonly { get; }
 
     public AccessorKind AccessorKind { get; }
+    public OperatorKind? OperatorKind { get; }
+    public bool IsOperator => OperatorKind is not null;
+    public bool IsConversionOperator => OperatorFacts.IsConversion(OperatorKind);
 
     public bool IsAccessor => AccessorKind != AccessorKind.None;
 
     public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor;
     public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) && !IsAccessor;
-    public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor;
+    public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor && !IsOperator;
     public override bool IsDefinition { get; }
 
     public int? VTableSlot { get; private set; }
@@ -450,6 +457,8 @@ public sealed class FunctionSymbol : Symbol
     }
 
     public bool HasSameSignature(FunctionSymbol candidate) =>
+        OperatorKind == candidate.OperatorKind &&
+        (!IsConversionOperator || !candidate.IsConversionOperator || TypeIdentity.AreSame(ReturnType, candidate.ReturnType)) &&
         FunctionKind == candidate.FunctionKind &&
         AccessorKind == candidate.AccessorKind &&
         (ContainingProperty is not null || ContainingInterfaceProperty is not null) ==
@@ -466,6 +475,8 @@ public sealed class FunctionSymbol : Symbol
     /// <summary>The source-level identity used to reject duplicate callable declarations.
     /// Return type, parameter names, static state, and receiver readonly state are deliberately excluded.</summary>
     public bool HasSameOverloadSignature(FunctionSymbol candidate) =>
+        OperatorKind == candidate.OperatorKind &&
+        (!IsConversionOperator || !candidate.IsConversionOperator || TypeIdentity.AreSame(ReturnType, candidate.ReturnType)) &&
         FunctionKind == candidate.FunctionKind &&
         AccessorKind == candidate.AccessorKind &&
         (ContainingProperty is not null || ContainingInterfaceProperty is not null) ==

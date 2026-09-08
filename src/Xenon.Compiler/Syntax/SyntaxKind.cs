@@ -85,6 +85,7 @@ public enum SyntaxKind
     TemplateKeyword,
     WhereKeyword,
     StaticKeyword,
+    OperatorKeyword,
     ThreadLocalKeyword,
     VirtualKeyword,
     OverrideKeyword,

@@ -2965,6 +2965,132 @@ public sealed class XenonBuildDriverTests
         }
     }
 
+    [Fact]
+    public async Task SourceFreeUserDefinedOperatorsPreserveGenericBodiesAndTemporaryOwnership()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("UserOperators", "xenon-library", """
+            namespace UserOperators;
+            public struct Trace { public static int Destroyed; }
+            public struct Value
+            {
+                public int Id;
+                public ~Value() { Trace.Destroyed += 1; }
+                public static Value operator implicit(int value) { return Value { value }; }
+                public static Value operator +(Value left, int right)
+                {
+                    if (right < 0) throw 7;
+                    return Value { left.Id + right };
+                }
+            }
+            public struct Container
+            {
+                public int Stored;
+                public Value Item { get { return Value { Stored }; } set { Stored = value.Id; } }
+                public Value this[int index] { get { return Value { Stored }; } set { Stored = value.Id; } }
+            }
+            public struct Text
+            {
+                public readonly byte* Raw;
+                public static Text operator implicit(readonly byte* value) { return Text { value }; }
+                public static Text operator -(readonly Text& value) { return Text { value.Raw }; }
+                public static int operator explicit(readonly Text& value) { return 42; }
+            }
+            public struct Box<T>
+            {
+                public T Item;
+                public Box(T value) { Item = move value; }
+                public static Box<T> operator implicit(T value) { return Box<T>(move value); }
+                public static bool operator ==(readonly Box<T>& a, readonly Box<T>& b) { return true; }
+            }
+            public bool Equal<T>(readonly Box<T>& a, readonly Box<T>& b) { return a == b; }
+            public Box<int> Make() { return 11; }
+            public int ReadBox(readonly Box<int>& value) { return value.Item; }
+            void Read(readonly Value& value) {}
+            int Throwing() { throw 7; }
+            public int Run()
+            {
+                Container c = Container { 1 };
+                c.Item += 2;
+                if (c.Stored != 3 || Trace.Destroyed != 2) return 1;
+                c[0] += 2;
+                if (c.Stored != 5 || Trace.Destroyed != 4) return 2;
+                try { c.Item += -1; } catch (...) {}
+                if (c.Stored != 5 || Trace.Destroyed != 5) return 3;
+                try { c.Item += Throwing(); } catch (...) {}
+                if (c.Stored != 5 || Trace.Destroyed != 6) return 4;
+                Read(9);
+                if (Trace.Destroyed != 7) return 5;
+                Text text = "Hello";
+                Box<int> first = 1;
+                Box<int> second = 2;
+                if (!Equal<int>(first, second)) return 6;
+                return 42;
+            }
+            """);
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject, "UserOperatorsApp", """
+            using UserOperators;
+            namespace App;
+            int Main()
+            {
+                Box<int> value = Make();
+                if (ReadBox(value) != 11 || !Equal<int>(value, value)) return 10;
+                Text text = "Hello";
+                text = -text;
+                if (cast<int>(text) != 42) return 11;
+                return Run();
+            }
+            """);
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+    }
+
+    [Theory]
+    [InlineData(false, "42")]
+    [InlineData(true, "42")]
+    [InlineData(false, "value.Answer()")]
+    [InlineData(true, "value.Answer()")]
+    [InlineData(false, "Box<T>.StaticAnswer(value)")]
+    [InlineData(true, "Box<T>.StaticAnswer(value)")]
+    [InlineData(false, "34 + Box<long>.Width()")]
+    [InlineData(true, "34 + Box<long>.Width()")]
+    [InlineData(false, "42 + Widths<T*>.Width() - cast<int>(sizeof(T*))")]
+    [InlineData(true, "42 + Widths<T*>.Width() - cast<int>(sizeof(T*))")]
+    public async Task SourceFreeGenericConversionsIgnoreAccessorOrdering(bool precompiled, string result)
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("AccessorConversions", "xenon-library", $$"""
+            namespace AccessorConversions;
+            public struct Widths<T> { public static int Width() { return cast<int>(sizeof(T)); } }
+            public struct Box<T>
+            {
+                public int Value { get { return 3; } set {} }
+                public int this[int index] { get { return 4; } set {} }
+                public int readonly Answer() { return 42; }
+                public static int StaticAnswer(readonly Box<T>& value) { return 42; }
+                public static int Width() { return cast<int>(sizeof(T)); }
+                public static bool operator ==(readonly Box<T>& a, readonly Box<T>& b) { return true; }
+                public static bool operator !=(readonly Box<T>& a, readonly Box<T>& b) { return !(a == b); }
+                public static int operator explicit(readonly Box<T>& value) { return {{result}}; }
+            }
+            public int Convert<T>(readonly Box<T>& value) { return cast<int>(value); }
+            {{(precompiled ? "public Box<int> Make() { return Box<int>(); }" : "")}}
+            """);
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject, "AccessorConversionsApp", """
+            using AccessorConversions;
+            namespace App;
+            int ConvertHere<T>(readonly Box<T>& value) { return cast<int>(value); }
+            int Main()
+            {
+                Box<int> value = Box<int>();
+                if (value != value) return 3;
+                if (cast<int>(value) != 42) return 1;
+                if (Convert<int>(value) != 42) return 2;
+                return ConvertHere<int>(value);
+            }
+            """);
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
+    }
+
     private static async Task<XenonBuildResult> BuildXelibConsumerAsync(
         TemporaryProject directory, string libraryProject, string applicationName, string applicationSource)
     {
