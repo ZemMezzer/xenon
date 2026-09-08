@@ -1288,6 +1288,8 @@ internal sealed class Parser
                 DiagnosticIds.InvalidThreadLocalPlacement);
         }
         if (Current.Kind == SyntaxKind.SwitchKeyword) return ParseSwitchStatement();
+        if (Current.Kind == SyntaxKind.TryKeyword) return ParseTryStatement();
+        if (Current.Kind == SyntaxKind.ThrowKeyword) return ParseThrowStatement();
         if (Current.Kind == SyntaxKind.OpenBraceToken)
         {
             return ParseBlockStatement();
@@ -1329,6 +1331,56 @@ internal sealed class Parser
         }
 
         return ParseExpressionStatement();
+    }
+
+    private TryStatementSyntax ParseTryStatement()
+    {
+        SyntaxToken tryKeyword = MatchToken(SyntaxKind.TryKeyword);
+        BlockStatementSyntax body = ParseBlockStatement();
+        var catches = ImmutableArray.CreateBuilder<CatchClauseSyntax>();
+        while (Current.Kind == SyntaxKind.CatchKeyword)
+        {
+            SyntaxToken catchKeyword = NextToken();
+            SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+            TypeSyntax? type = null;
+            SyntaxToken? identifier = null;
+            ImmutableArray<SyntaxToken> ellipsis = [];
+            if (Current.Kind == SyntaxKind.DotToken)
+            {
+                ellipsis = [MatchToken(SyntaxKind.DotToken), MatchToken(SyntaxKind.DotToken),
+                    MatchToken(SyntaxKind.DotToken)];
+            }
+            else
+            {
+                type = ParseType();
+                identifier = MatchToken(SyntaxKind.IdentifierToken);
+            }
+            SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+            BlockStatementSyntax catchBody = ParseBlockStatement();
+            catches.Add(new CatchClauseSyntax(catchKeyword, openParenthesis, type, identifier,
+                ellipsis, closeParenthesis, catchBody));
+        }
+
+        SyntaxToken? finallyKeyword = null;
+        BlockStatementSyntax? finallyBody = null;
+        if (Current.Kind == SyntaxKind.FinallyKeyword)
+        {
+            finallyKeyword = NextToken();
+            finallyBody = ParseBlockStatement();
+        }
+        if (catches.Count == 0 && finallyBody is null)
+            Diagnostics.Report(tryKeyword.Location,
+                "a 'try' statement requires at least one 'catch' or 'finally' clause",
+                DiagnosticIds.TryRequiresHandler);
+        return new TryStatementSyntax(tryKeyword, body, catches.ToImmutable(), finallyKeyword, finallyBody);
+    }
+
+    private ThrowStatementSyntax ParseThrowStatement()
+    {
+        SyntaxToken keyword = MatchToken(SyntaxKind.ThrowKeyword);
+        ExpressionSyntax? expression = Current.Kind == SyntaxKind.SemicolonToken ? null : ParseExpression();
+        SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
+        return new ThrowStatementSyntax(keyword, expression, semicolon);
     }
 
     private SwitchStatementSyntax ParseSwitchStatement()

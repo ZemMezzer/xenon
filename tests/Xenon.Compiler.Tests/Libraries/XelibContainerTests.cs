@@ -213,6 +213,9 @@ public sealed class XelibContainerTests
     [Fact]
     public void HeaderAndSectionsRoundTrip()
     {
+        Assert.Equal((ushort)1, XelibVersions.Container);
+        Assert.Equal((ushort)1, XelibVersions.LibraryIr);
+        Assert.Equal((ushort)1, XelibVersions.Language);
         byte[] bytes = XelibContainer.Write([
             new XelibSection(XelibSectionKind.Manifest, XelibSectionFlags.Required,
                 Encoding.UTF8.GetBytes("manifest")),

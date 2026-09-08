@@ -21,6 +21,32 @@ public sealed class NativeLinkerTests
     [DllImport("kernel32.dll")]
     private static extern uint SetErrorMode(uint mode);
 
+    [Fact]
+    public void ExceptionCapableArtifactRequiresExplicitProcessRuntimeLibrary()
+    {
+        string directory = CreateTemporaryDirectory();
+        try
+        {
+            string objectPath = Path.Combine(directory, OperatingSystem.IsWindows() ? "empty.obj" : "empty.o");
+            File.WriteAllBytes(objectPath, []);
+            string outputPath = Path.Combine(directory, OperatingSystem.IsWindows() ? "app.exe" : "app");
+
+            LinkerException exception = Assert.Throws<LinkerException>(() =>
+                new NativeLinker().LinkExecutable(
+                    objectPath,
+                    outputPath,
+                    LlvmTargetPlatform.HostTriple,
+                    new NativeLinkOptions(RequiresExceptionRuntime: true)));
+
+            Assert.Contains("process-wide exception runtime", exception.Message,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(3)]
@@ -5496,12 +5522,12 @@ public sealed class NativeLinkerTests
                 {
                     Item[] inner = Item[1]; inner[0].Id = 3;
                     Item[] alias = inner;
-                    inner = Item[1]; inner[0].Id = 4;
                     alias[0].Id = 3;
+                    inner = Item[1]; inner[0].Id = 4;
                     Item[,] empty = Item[0,3];
                     if (empty.Length != 0 || empty.Rank != 2) Item.Count = -100;
                 }
-                if (Item.Trace != 43 || Item.Count != 2) Item.Count = -100;
+                if (Item.Trace != 34 || Item.Count != 2) Item.Count = -100;
             }
             int Early()
             {
@@ -5525,13 +5551,13 @@ public sealed class NativeLinkerTests
             int Main()
             {
                 Nested();
-                if (Item.Trace != 4321 || Item.Count != 4) return 1;
+                if (Item.Trace != 3421 || Item.Count != 4) return 1;
                 int beforeCleanup = Early();
-                if (beforeCleanup != 4321 || Item.Trace != 43215 || Item.Count != 5) return 2;
-                if (NestedEarly() != 7 || Item.Trace != 4321576 || Item.Count != 7) return 3;
+                if (beforeCleanup != 3421 || Item.Trace != 34215 || Item.Count != 5) return 2;
+                if (NestedEarly() != 7 || Item.Trace != 3421576 || Item.Count != 7) return 3;
                 Item.Trace = 0;
                 HeapReplacement();
-                if (Item.Trace != 98 || Item.Count != 9) return 4;
+                if (Item.Trace != 89 || Item.Count != 9) return 4;
                 return 42;
             }
             """, optimization));

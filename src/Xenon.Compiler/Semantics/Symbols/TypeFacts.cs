@@ -21,6 +21,39 @@ internal sealed record ValueEqualityFailure(
 
 public static class TypeFacts
 {
+    internal static bool IsThrowableType(TypeSymbol type) => IsThrowableType(type, []);
+
+    private static bool IsThrowableType(TypeSymbol type, HashSet<TypeSymbol> visited) => type switch
+    {
+        PrimitiveTypeSymbol primitive => !TypeIdentity.AreSame(primitive, BuiltinTypes.Void) &&
+            !TypeIdentity.AreSame(primitive, BuiltinTypes.Null) &&
+            !TypeIdentity.AreSame(primitive, BuiltinTypes.Error),
+        EnumTypeSymbol => true,
+        StructTypeSymbol { IsStatic: false } structure when
+            structure.IsConcreteType || structure.IsGenericDefinition ||
+            GenericTypeFacts.ContainsGenericParameter(structure) =>
+            !visited.Add(structure) ||
+            (structure.BaseType is null || IsThrowableStorage(structure.BaseType, visited)) &&
+            structure.Fields.All(field => IsThrowableStorage(field.Type, visited)),
+        OwnershipTypeSymbol => true,
+        _ => false,
+    };
+
+    private static bool IsThrowableStorage(TypeSymbol type, HashSet<TypeSymbol> visited) => type switch
+    {
+        PrimitiveTypeSymbol primitive => !TypeIdentity.AreSame(primitive, BuiltinTypes.Void) &&
+            !TypeIdentity.AreSame(primitive, BuiltinTypes.Null) &&
+            !TypeIdentity.AreSame(primitive, BuiltinTypes.Error),
+        EnumTypeSymbol => true,
+        OwnershipTypeSymbol => true,
+        GenericParameterSymbol => true,
+        StructTypeSymbol { IsStatic: false } structure =>
+            !visited.Add(structure) ||
+            (structure.BaseType is null || IsThrowableStorage(structure.BaseType, visited)) &&
+            structure.Fields.All(field => IsThrowableStorage(field.Type, visited)),
+        _ => false,
+    };
+
     public static bool CanCopy(TypeSymbol type) => GetCopyability(type) == Copyability.Copyable;
 
     public static Copyability GetCopyability(TypeSymbol type) =>
