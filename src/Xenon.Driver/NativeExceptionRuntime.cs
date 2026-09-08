@@ -2,6 +2,23 @@ namespace Xenon.Driver;
 
 internal static class NativeExceptionRuntime
 {
+    public static readonly string[] ExportedSymbols =
+    [
+        "__xenon_eh_allocate",
+        "__xenon_eh_object",
+        "__xenon_eh_activate",
+        "__xenon_eh_throw",
+        "__xenon_eh_current",
+        "__xenon_eh_matches",
+        "__xenon_eh_handle",
+        "__xenon_eh_abandon",
+        "__xenon_eh_replace_previous",
+        "__xenon_eh_cleanup",
+        "__xenon_eh_initialize",
+        "__xenon_eh_rethrow",
+        "__xenon_eh_terminate",
+    ];
+
     public const string Source = """
         #include <cstddef>
         #include <cstdint>

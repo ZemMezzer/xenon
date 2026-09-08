@@ -195,7 +195,7 @@ public sealed class LlvmConcurrencyTests
             {
                 public int Value;
                 public Resource(int value) { Value = value; }
-                public ~Resource() { Value = 0; }
+                public ~Resource() { Value = 0; throw 7; }
             }
 
             struct State
@@ -216,6 +216,8 @@ public sealed class LlvmConcurrencyTests
         if (triple.Contains("darwin", StringComparison.Ordinal))
         {
             Assert.Contains("_tlv_atexit", ir, StringComparison.Ordinal);
+            Assert.Contains("threadlocal_tlv_cleanup", ir, StringComparison.Ordinal);
+            Assert.Contains("__xenon_eh_cleanup", ir, StringComparison.Ordinal);
             Assert.DoesNotContain("pthread_key_create", ir, StringComparison.Ordinal);
             Assert.DoesNotContain("threadlocal_pthread_cleanup", ir, StringComparison.Ordinal);
         }

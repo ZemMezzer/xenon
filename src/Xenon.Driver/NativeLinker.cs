@@ -7,7 +7,9 @@ public sealed record NativeLinkOptions(
     IReadOnlyList<string>? LibraryPaths = null,
     IReadOnlyList<string>? ExportedSymbols = null,
     bool RequiresThreadingRuntime = false,
-    bool RequiresExceptionRuntime = false);
+    bool RequiresExceptionRuntime = false,
+    string? ExceptionRuntimeLibrary = null,
+    bool LinkCxxRuntime = false);
 
 public sealed record LinkedExecutable(string Path, string LinkerPath)
 {
@@ -62,6 +64,40 @@ public sealed class NativeLinker
             objectFilePath, outputPath, targetTriple, NativeArtifactKind.SharedLibrary,
             options ?? new NativeLinkOptions(), importLibraryPath);
 
+    public LinkedNativeArtifact LinkExceptionRuntimeLibrary(
+        string outputPath,
+        string targetTriple,
+        string? importLibraryPath = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetTriple);
+        string artifactPath = Path.GetFullPath(outputPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(artifactPath)!);
+        string sourcePath = Path.Combine(Path.GetDirectoryName(artifactPath)!,
+            $"xenon-eh-runtime-{Guid.NewGuid():N}.cpp");
+        string objectPath = Path.ChangeExtension(sourcePath,
+            OperatingSystem.IsWindows() ? ".obj" : ".o");
+        try
+        {
+            File.WriteAllText(sourcePath, NativeExceptionRuntime.Source);
+            LinkerCommand compile = CreateExceptionRuntimeCompileCommand(
+                sourcePath, objectPath, targetTriple);
+            _ = RunTool(compile, _workingDirectory ?? Directory.GetCurrentDirectory());
+            EnsureProduced(objectPath, "exception runtime object");
+            return CreateArtifact(objectPath, artifactPath, targetTriple,
+                NativeArtifactKind.SharedLibrary,
+                new NativeLinkOptions(
+                    ExportedSymbols: NativeExceptionRuntime.ExportedSymbols,
+                    LinkCxxRuntime: true),
+                importLibraryPath);
+        }
+        finally
+        {
+            DeleteIfExists(sourcePath);
+            DeleteIfExists(objectPath);
+        }
+    }
+
     private LinkedNativeArtifact CreateArtifact(
         string objectFilePath,
         string outputPath,
@@ -103,25 +139,22 @@ public sealed class NativeLinker
                 ? CreateTemporaryPath(finalImportLibraryPath)
                 : Path.Combine(temporaryDirectory, Path.GetFileName(finalImportLibraryPath));
 
-        string? exceptionSourcePath = null;
-        string? exceptionObjectPath = null;
         NativeProcessResult? processResult = null;
         try
         {
-            if (options.RequiresExceptionRuntime && kind is not NativeArtifactKind.StaticLibrary)
+            if (options.RequiresExceptionRuntime && kind is not NativeArtifactKind.StaticLibrary &&
+                string.IsNullOrWhiteSpace(options.ExceptionRuntimeLibrary))
             {
-                exceptionSourcePath = Path.Combine(Path.GetDirectoryName(temporaryPath)!,
-                    $"xenon-eh-{Guid.NewGuid():N}.cpp");
-                exceptionObjectPath = Path.ChangeExtension(exceptionSourcePath,
-                    OperatingSystem.IsWindows() ? ".obj" : ".o");
-                File.WriteAllText(exceptionSourcePath, NativeExceptionRuntime.Source);
-                LinkerCommand compileRuntime = CreateExceptionRuntimeCompileCommand(
-                    exceptionSourcePath, exceptionObjectPath, targetTriple);
-                _ = RunTool(compileRuntime, _workingDirectory ?? Directory.GetCurrentDirectory());
-                EnsureProduced(exceptionObjectPath, "exception runtime object");
+                throw new LinkerException(
+                    "exception-capable executables and shared libraries require the process-wide " +
+                    "exception runtime library produced by LinkExceptionRuntimeLibrary");
+            }
+            else if (options.RequiresExceptionRuntime && kind is not NativeArtifactKind.StaticLibrary)
+            {
                 options = options with
                 {
-                    Libraries = (options.Libraries ?? []).Append(exceptionObjectPath).ToArray(),
+                    Libraries = (options.Libraries ?? [])
+                        .Append(options.ExceptionRuntimeLibrary!).ToArray(),
                 };
             }
             LinkerCommand command = CreateHostCommand(
@@ -161,8 +194,6 @@ public sealed class NativeLinker
         {
             DeleteIfExists(temporaryPath);
             DeleteIfExists(temporaryImportLibraryPath);
-            DeleteIfExists(exceptionSourcePath);
-            DeleteIfExists(exceptionObjectPath);
             if (temporaryImportLibraryPath is not null)
             {
                 DeleteIfExists(Path.ChangeExtension(temporaryImportLibraryPath, ".exp"));
@@ -301,12 +332,13 @@ public sealed class NativeLinker
         NativeArtifactKind kind,
         NativeLinkOptions options)
     {
-        string? linker = options.RequiresExceptionRuntime
+        bool useCxxLinker = options.RequiresExceptionRuntime || options.LinkCxxRuntime;
+        string? linker = useCxxLinker
             ? FindExecutableOnPath(Environment.GetEnvironmentVariable("CXX"), "clang++", "c++", "g++")
             : FindExecutableOnPath(Environment.GetEnvironmentVariable("CC"), "clang", "cc", "gcc");
         if (linker is null)
         {
-            throw new LinkerException(options.RequiresExceptionRuntime
+            throw new LinkerException(useCxxLinker
                 ? "no host C++ linker driver was found; install clang++ or g++, or set CXX"
                 : "no host C linker driver was found; install clang or gcc, or set CC");
         }
@@ -327,6 +359,12 @@ public sealed class NativeLinker
             {
                 arguments.Add($"-Wl,-install_name,@rpath/{Path.GetFileName(finalOutputPath)}");
             }
+        }
+        else
+        {
+            arguments.Add("-Wl,-rpath,$ORIGIN");
+            if (kind is NativeArtifactKind.SharedLibrary)
+                arguments.Add($"-Wl,-soname,{Path.GetFileName(finalOutputPath)}");
         }
 
         arguments.Add(objectPath);

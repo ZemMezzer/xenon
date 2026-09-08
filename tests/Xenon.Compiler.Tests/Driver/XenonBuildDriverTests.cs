@@ -95,6 +95,474 @@ public sealed class XenonBuildDriverTests
     }
 
     [Fact]
+    public async Task SharedLibraryExceptionUsesProcessRuntimeAndUnwindsCallerCleanup()
+    {
+        using var directory = new TemporaryProject();
+        string engineProject = directory.WriteDependencyProject("ExceptionEngine", "shared-library", """
+            namespace ExceptionEngine;
+            public struct MyError
+            {
+                public int Code;
+                public MyError(int code) { Code = code; }
+            }
+            public void Fail() { throw MyError(40); }
+            """);
+        directory.WriteProject("SharedExceptionApp", "executable", """
+            using ExceptionEngine;
+            namespace SharedExceptionApp;
+            static struct State { public static int Destructions; }
+            struct Resource { public ~Resource() { State.Destructions++; } }
+            int Run()
+            {
+                Resource resource = Resource();
+                try { Fail(); }
+                catch (readonly MyError& error) { return error.Code; }
+                return 0;
+            }
+            int Main()
+            {
+                int result = Run();
+                if (result == 40 && State.Destructions == 1) return 42;
+                return 1;
+            }
+            """, engineProject);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, string.Join(Environment.NewLine,
+            new[] { result.Failure }.Concat(result.Diagnostics.Select(diagnostic => diagnostic.ToString()))));
+
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.True(process.ExitCode == 42,
+            $"exit={process.ExitCode}; stdout={process.Stdout}; stderr={process.Stderr}");
+    }
+
+    [Fact]
+    public async Task ExceptionCrossesTwoSharedModulesWithOneActiveRecord()
+    {
+        using var directory = new TemporaryProject();
+        string sourceProject = directory.WriteDependencyProject("ExceptionSource", "shared-library", """
+            namespace ExceptionSource;
+            public struct ModuleError
+            {
+                public int Code;
+                public ModuleError(int code) { Code = code; }
+            }
+            public void Fail() { throw ModuleError(41); }
+            """);
+        string bridgeProject = directory.WriteDependencyProject("ExceptionBridge", "shared-library", """
+            using ExceptionSource;
+            namespace ExceptionBridge;
+            public int Translate()
+            {
+                try { Fail(); }
+                catch (readonly ModuleError& error) { return error.Code + 1; }
+                return 1;
+            }
+            """, $"../{sourceProject}");
+        directory.WriteProject("SharedExceptionChain", "executable", """
+            using ExceptionBridge;
+            namespace SharedExceptionChain;
+            int Main() { return Translate(); }
+            """, bridgeProject);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, string.Join(Environment.NewLine,
+            new[] { result.Failure }.Concat(result.Diagnostics.Select(diagnostic => diagnostic.ToString()))));
+        string runtimePath = XenonBuildPaths.GetSharedLibraryPath(
+            directory.OutputRoot, "xenon-eh-runtime", "debug", LlvmTargetPlatform.HostTriple);
+        Assert.True(File.Exists(runtimePath), runtimePath);
+
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.True(process.ExitCode == 42,
+            $"exit={process.ExitCode}; stdout={process.Stdout}; stderr={process.Stderr}");
+    }
+
+    [Fact]
+    public async Task DestructorThrowDuringNormalScopeExitPropagates()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("NormalDestructorThrow", "executable", """
+            namespace NormalDestructorThrow;
+            struct Resource { public ~Resource() { throw 42; } }
+            int Main()
+            {
+                try { { Resource resource = Resource(); } }
+                catch (readonly int& error) { return error; }
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task VirtualDestructorThrowDuringNormalFreePropagates()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("VirtualDestructorThrow", "executable", """
+            namespace VirtualDestructorThrow;
+            struct Base { public virtual ~Base() { } }
+            struct Derived : Base { public override ~Derived() { throw 42; } }
+            int Main()
+            {
+                try
+                {
+                    Base* value = new Derived();
+                    free(value);
+                }
+                catch (readonly int& error) { return error; }
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task VirtualDestructorThrowDuringUnwindTerminates()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("VirtualDestructorDoubleThrow", "executable", """
+            namespace VirtualDestructorDoubleThrow;
+            struct First { }
+            struct Second { }
+            struct Base { public virtual ~Base() { } }
+            struct Derived : Base { public override ~Derived() { throw Second(); } }
+            int Main()
+            {
+                unique<Derived> value = new Derived();
+                throw First();
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, string.Join(Environment.NewLine,
+            new[] { result.Failure }.Concat(result.Diagnostics.Select(diagnostic => diagnostic.ToString()))));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.Contains("Unhandled exception", process.Stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ArrayDestructorThrowPropagatesAndRemainingElementsUnwindOnce()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("ArrayDestructorThrow", "executable", """
+            namespace ArrayDestructorThrow;
+            static struct State
+            {
+                public static int NextId;
+                public static int Trace;
+                public static int Next() { State.NextId++; return State.NextId; }
+            }
+            struct Item
+            {
+                public int Id = State.Next();
+                public ~Item()
+                {
+                    State.Trace = State.Trace * 10 + Id;
+                    if (Id == 2) throw 42;
+                }
+            }
+            int Main()
+            {
+                try { Item[] values = Item[3]; }
+                catch (readonly int& error) { }
+                if (State.Trace != 321) return 1;
+                State.NextId = 0;
+                State.Trace = 0;
+                try
+                {
+                    Item[] values = new Item[3];
+                    free(values);
+                }
+                catch (readonly int& error) { }
+                if (State.Trace == 321) return 42;
+                return 2;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, string.Join(Environment.NewLine,
+            new[] { result.Failure }.Concat(result.Diagnostics.Select(diagnostic => diagnostic.ToString()))));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ThrowingReplacementDestructorDoesNotDestroyOldValueTwice()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("ReplacementDestructorThrow", "executable", """
+            namespace ReplacementDestructorThrow;
+            static struct State { public static int Trace; }
+            struct Item
+            {
+                public int Id;
+                public Item(int id) { Id = id; }
+                public ~Item()
+                {
+                    State.Trace = State.Trace * 10 + Id;
+                    if (Id == 1) throw 7;
+                }
+            }
+            int Main()
+            {
+                try
+                {
+                    Item value = Item(1);
+                    value = Item(2);
+                }
+                catch (readonly int& error) { }
+                if (State.Trace == 12) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ThrowingFieldReplacementInsideDestructorCleansNewValueOnlyOnce()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("DestructorFieldReplacement", "executable", """
+            namespace DestructorFieldReplacement;
+            static struct State { public static int Trace; }
+            struct Field
+            {
+                public int Id;
+                public Field(int id) { Id = id; }
+                public ~Field()
+                {
+                    State.Trace = State.Trace * 10 + Id;
+                    if (Id == 1) throw 7;
+                }
+            }
+            struct Owner
+            {
+                public Field Value = Field(1);
+                public ~Owner() { this.Value = Field(2); }
+            }
+            int Main()
+            {
+                try { Owner value = Owner(); }
+                catch (readonly int& error) { }
+                if (State.Trace == 12) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task FinallyReturnValueSurvivesThrowFromSupersededReturnDestructor()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("FinallyReturnDestructorThrow", "executable", """
+            namespace FinallyReturnDestructorThrow;
+            static struct State { public static int Trace; }
+            struct Item
+            {
+                public int Id;
+                public Item(int id) { Id = id; }
+                public ~Item()
+                {
+                    State.Trace = State.Trace * 10 + Id;
+                    if (Id == 1) throw 7;
+                }
+            }
+            Item Make()
+            {
+                try { return Item(1); }
+                finally { return Item(2); }
+            }
+            int Main()
+            {
+                try { Item value = Make(); }
+                catch (readonly int& error) { }
+                if (State.Trace == 12) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ExceptionLeavingCatchDestroysCaughtValueBeforeFinally()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("CatchExceptionLifetime", "executable", """
+            namespace CatchExceptionLifetime;
+            static struct State { public static int Trace; }
+            struct Error
+            {
+                public ~Error() { State.Trace = State.Trace * 10 + 1; }
+            }
+            int Main()
+            {
+                try
+                {
+                    try { throw Error(); }
+                    catch (readonly Error& error) { throw 7; }
+                    finally { State.Trace = State.Trace * 10 + 2; }
+                }
+                catch (readonly int& error) { }
+                if (State.Trace == 12) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ThrowFromDestructorBodyStillDestroysFieldsAndBaseOnce()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("DestructorBodyThrow", "executable", """
+            namespace DestructorBodyThrow;
+            static struct State { public static int Trace; }
+            struct Base { public ~Base() { State.Trace = State.Trace * 10 + 3; } }
+            struct Field
+            {
+                public int Id;
+                public Field(int id) { Id = id; }
+                public ~Field() { State.Trace = State.Trace * 10 + Id; }
+            }
+            struct Owner : Base
+            {
+                public Field First = Field(1);
+                public Field Second = Field(2);
+                public ~Owner()
+                {
+                    State.Trace = State.Trace * 10 + 9;
+                    throw 7;
+                }
+            }
+            int Main()
+            {
+                try { Owner value = Owner(); }
+                catch (readonly int& error) { }
+                if (State.Trace == 9213) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ThrowFromFieldDestructorContinuesWithRemainingFieldAndBase()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("FieldDestructorThrow", "executable", """
+            namespace FieldDestructorThrow;
+            static struct State { public static int Trace; }
+            struct Base { public ~Base() { State.Trace = State.Trace * 10 + 3; } }
+            struct Field
+            {
+                public int Id;
+                public Field(int id) { Id = id; }
+                public ~Field()
+                {
+                    State.Trace = State.Trace * 10 + Id;
+                    if (Id == 2) throw 7;
+                }
+            }
+            struct Owner : Base
+            {
+                public Field First = Field(1);
+                public Field Second = Field(2);
+                public ~Owner() { }
+            }
+            int Main()
+            {
+                try { Owner value = Owner(); }
+                catch (readonly int& error) { }
+                if (State.Trace == 213) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
     public async Task XelibExceptionTypeIdentityMatchesWithoutLibrarySource()
     {
         using var directory = new TemporaryProject();
@@ -333,6 +801,297 @@ public sealed class XenonBuildDriverTests
     }
 
     [Fact]
+    public async Task NestedBareRethrowAbandonsCrossedOuterCatchRecord()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("NestedBareRethrow", "executable", """
+            namespace NestedBareRethrow;
+            static struct State { public static int Trace; }
+            struct First { public ~First() { State.Trace = State.Trace * 10 + 1; } }
+            struct Second { public ~Second() { State.Trace = State.Trace * 10 + 2; } }
+            int Main()
+            {
+                try
+                {
+                    try { throw First(); }
+                    catch (readonly First& first)
+                    {
+                        try { throw Second(); }
+                        catch (readonly Second& second) { throw; }
+                    }
+                }
+                catch (readonly Second& error) { }
+                if (State.Trace == 12) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task UnmatchedCatchCleansFunctionScopeBeforeCallerHandlesException()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("UnhandledCatchCleanup", "executable", """
+            namespace UnhandledCatchCleanup;
+            static struct State { public static int Trace; }
+            struct Guard { public ~Guard() { State.Trace++; } }
+            struct First { }
+            struct Second { }
+            void Fail()
+            {
+                Guard guard = Guard();
+                try { throw First(); }
+                catch (readonly Second& wrong) { }
+            }
+            int Main()
+            {
+                try { Fail(); }
+                catch (readonly First& error) { }
+                if (State.Trace == 1) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task UnmatchedInnerCatchRunsItsFinallyExactlyOnce()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("UnhandledCatchFinally", "executable", """
+            namespace UnhandledCatchFinally;
+            static struct State { public static int Trace; }
+            struct First { }
+            struct Second { }
+            int Main()
+            {
+                try
+                {
+                    try { throw First(); }
+                    catch (readonly Second& wrong) { }
+                    finally { State.Trace++; }
+                }
+                catch (readonly First& error) { }
+                if (State.Trace == 1) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ExceptionCaughtInsideExceptionalFinallyPreservesOriginalException()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("CaughtFinallyException", "executable", """
+            namespace CaughtFinallyException;
+            static struct State { public static int Trace; }
+            struct First { public ~First() { State.Trace = State.Trace * 10 + 1; } }
+            struct Second { public ~Second() { State.Trace = State.Trace * 10 + 2; } }
+            int Main()
+            {
+                try
+                {
+                    try { throw First(); }
+                    finally
+                    {
+                        try { throw Second(); }
+                        catch (readonly Second& handled) { }
+                    }
+                }
+                catch (readonly First& original) { }
+                if (State.Trace == 21) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task BareRethrowEscapingExceptionalFinallyReplacesOriginalException()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("FinallyBareRethrow", "executable", """
+            namespace FinallyBareRethrow;
+            static struct State { public static int Trace; }
+            struct First { public ~First() { State.Trace = State.Trace * 10 + 1; } }
+            struct Second { public ~Second() { State.Trace = State.Trace * 10 + 2; } }
+            int Main()
+            {
+                try
+                {
+                    try { throw First(); }
+                    finally
+                    {
+                        try { throw Second(); }
+                        catch (readonly Second& replacement) { throw; }
+                    }
+                }
+                catch (readonly Second& error) { }
+                if (State.Trace == 12) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ExceptionEscapingCatchInsideFinallySuppressesExactOriginalRecord()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("FinallyCatchReplacement", "executable", """
+            namespace FinallyCatchReplacement;
+            static struct State { public static int Trace; }
+            struct First { public ~First() { State.Trace = State.Trace * 10 + 1; } }
+            struct Second { public ~Second() { State.Trace = State.Trace * 10 + 2; } }
+            struct Third { public ~Third() { State.Trace = State.Trace * 10 + 3; } }
+            int Main()
+            {
+                try
+                {
+                    try { throw First(); }
+                    finally
+                    {
+                        try { throw Second(); }
+                        catch (readonly Second& active) { throw Third(); }
+                    }
+                }
+                catch (readonly Third& error) { }
+                if (State.Trace == 123) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task CompareExchangeCleansExpectedWhenDesiredEvaluationThrows()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("CompareExchangeCleanup", "executable", """
+            namespace CompareExchangeCleanup;
+            static struct State { public static int Trace; }
+            struct Item
+            {
+                public int Id;
+                public Item(int id) { Id = id; }
+                public ~Item() { State.Trace = State.Trace * 10 + Id; }
+            }
+            Item Fail() { throw 7; }
+            int Main()
+            {
+                atomic<Item> value = Item(0);
+                try { value : Item(1) --> Fail(); }
+                catch (readonly int& error) { }
+                if (State.Trace == 1) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ArrayReplacementThrowCleansNewHeapArrayAndRemainingOldElements()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("ArrayReplacementCleanup", "executable", """
+            namespace ArrayReplacementCleanup;
+            static struct State
+            {
+                public static int NextId;
+                public static int Trace;
+                public static int Next() { State.NextId++; return State.NextId; }
+            }
+            struct Item
+            {
+                public int Id = State.Next();
+                public ~Item()
+                {
+                    State.Trace = State.Trace * 10 + Id;
+                    if (Id == 2) throw 7;
+                }
+            }
+            int Main()
+            {
+                try
+                {
+                    Item[] values = Item[3];
+                    values = new Item[3];
+                }
+                catch (readonly int& error) { }
+                if (State.Trace == 326541) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
     public async Task UnmatchedNestedTryEscapesCatchAndAbandonsItsOldException()
     {
         using var directory = new TemporaryProject();
@@ -471,6 +1230,92 @@ public sealed class XenonBuildDriverTests
                 catch (readonly int& error) { }
                 if (State.Destructions == 2) return 42;
                 return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ReturnFromExceptionalFinallyCleansLocalsBeforeSuppressedException()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("ExceptionalFinallyReturnOrder", "executable", """
+            namespace ExceptionalFinallyReturnOrder;
+            static struct State { public static int Trace; }
+            struct Error { public ~Error() { State.Trace = State.Trace * 10 + 1; } }
+            struct Local { public ~Local() { State.Trace = State.Trace * 10 + 2; } }
+            void Run()
+            {
+                try { throw Error(); }
+                finally
+                {
+                    Local local = Local();
+                    return;
+                }
+            }
+            int Main()
+            {
+                Run();
+                if (State.Trace == 21) return 42;
+                return 1;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public async Task ReceiverFieldReplacementKeepsNewValueLiveWhenOldDestructorThrows()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("ReceiverReplacementException", "executable", """
+            namespace ReceiverReplacementException;
+            static struct State { public static int Trace; }
+            struct Field
+            {
+                public int Id;
+                public Field(int id) { Id = id; }
+                public ~Field()
+                {
+                    State.Trace = State.Trace * 10 + Id;
+                    if (Id == 1) throw 7;
+                }
+            }
+            struct Container
+            {
+                public Field Value;
+                public Container(int id) { Value = Field(id); }
+                public void Replace() { Value = Field(2); }
+            }
+            int Main()
+            {
+                State.Trace = 0;
+                {
+                    Container value = Container(1);
+                    try { value.Replace(); }
+                    catch (readonly int& error)
+                    {
+                        if (error != 7 || value.Value.Id != 2) return 1;
+                    }
+                }
+                if (State.Trace != 12) return 2;
+                return 42;
             }
             """);
 
@@ -2185,13 +3030,19 @@ public sealed class XenonBuildDriverTests
                 """);
         }
 
-        public string WriteDependencyProject(string name, string type, string source)
+        public string WriteDependencyProject(string name, string type, string source,
+            params string[] projectReferences)
         {
             string projectDirectory = Path.Combine(Root, name);
             string sourceRoot = Path.Combine(projectDirectory, "src");
             Directory.CreateDirectory(sourceRoot);
             File.WriteAllText(Path.Combine(sourceRoot, "main.xe"), source);
             string projectFile = Path.Combine(projectDirectory, $"{name}.xeproj");
+            string references = projectReferences.Length == 0 ? string.Empty : $"""
+
+                [references]
+                projects = [{string.Join(", ", projectReferences.Select(path => $"\"{path}\""))}]
+                """;
             File.WriteAllText(projectFile, $"""
                 [project]
                 name = "{name}"
@@ -2199,6 +3050,7 @@ public sealed class XenonBuildDriverTests
 
                 [source]
                 root = "src"
+                {references}
                 """);
             return Path.GetRelativePath(Root, projectFile).Replace('\\', '/');
         }

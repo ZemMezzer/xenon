@@ -118,11 +118,13 @@ internal sealed class GenericFunctionSpecializer
     {
         switch (statement)
         {
-            case BoundThrowStatement { Expression: { } expression }
-                when !TypeFacts.IsThrowableType(expression.Type):
-                _diagnostics.Report(location,
-                    $"type '{expression.Type.ToDisplayString()}' cannot be stored as an exception value",
-                    DiagnosticIds.InvalidThrownType);
+            case BoundThrowStatement { Expression: { } expression }:
+                if (!TypeFacts.IsThrowableType(expression.Type))
+                    _diagnostics.Report(location,
+                        $"type '{expression.Type.ToDisplayString()}' cannot be stored as an exception value",
+                        DiagnosticIds.InvalidThrownType);
+                else
+                    ValidateLibraryThrownDestructorAccessibility(expression.Type, location, []);
                 break;
             case BoundBlockStatement block:
                 foreach (BoundStatement child in block.Statements)
@@ -158,6 +160,44 @@ internal sealed class GenericFunctionSpecializer
                 if (protectedStatement.FinallyBody is not null)
                     ValidateLibraryExceptionTypes(protectedStatement.FinallyBody, location);
                 break;
+        }
+    }
+
+    private void ValidateLibraryThrownDestructorAccessibility(
+        TypeSymbol type,
+        TextLocation location,
+        HashSet<TypeSymbol> visited)
+    {
+        switch (type)
+        {
+            case AtomicTypeSymbol atomic:
+                ValidateLibraryThrownDestructorAccessibility(atomic.ElementType, location, visited);
+                return;
+            case LifetimeModifierTypeSymbol modifier:
+                ValidateLibraryThrownDestructorAccessibility(modifier.ElementType, location, visited);
+                return;
+            case WeakTypeSymbol:
+                return;
+            case UniqueTypeSymbol unique:
+                ValidateLibraryThrownDestructorAccessibility(unique.ElementType, location, visited);
+                return;
+            case SharedTypeSymbol shared:
+                ValidateLibraryThrownDestructorAccessibility(shared.ElementType, location, visited);
+                return;
+            case ArrayTypeSymbol array:
+                ValidateLibraryThrownDestructorAccessibility(array.ElementType, location, visited);
+                return;
+            case StructTypeSymbol structure:
+                if (!visited.Add(structure)) return;
+                if (structure.Destructor is { Accessibility: Accessibility.Private } destructor)
+                    _diagnostics.Report(location,
+                        $"destructor '{destructor.ContainingType!.Name}' is private",
+                        DiagnosticIds.InaccessibleSymbol);
+                if (structure.BaseType is { } baseType)
+                    ValidateLibraryThrownDestructorAccessibility(baseType, location, visited);
+                foreach (FieldSymbol field in structure.Fields)
+                    ValidateLibraryThrownDestructorAccessibility(field.Type, location, visited);
+                return;
         }
     }
 

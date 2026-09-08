@@ -229,5 +229,6 @@ public static class DiagnosticIds
     public const string InvalidCatchType = "XE2268";
     public const string InvalidThrownType = "XE2269";
     public const string UnreachableCatch = "XE2270";
+    public const string ArgumentLifetimeConflict = "XE2271";
     public const string RecursiveValueLayout = "XE2600";
 }
