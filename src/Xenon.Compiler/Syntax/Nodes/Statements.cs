@@ -2,6 +2,38 @@ using System.Collections.Immutable;
 
 namespace Xenon.Compiler.Syntax;
 
+public sealed record TryStatementSyntax(
+    SyntaxToken TryKeyword,
+    BlockStatementSyntax Body,
+    ImmutableArray<CatchClauseSyntax> Catches,
+    SyntaxToken? FinallyKeyword,
+    BlockStatementSyntax? FinallyBody) : StatementSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.TryStatement;
+}
+
+public sealed record CatchClauseSyntax(
+    SyntaxToken CatchKeyword,
+    SyntaxToken OpenParenthesisToken,
+    TypeSyntax? Type,
+    SyntaxToken? IdentifierToken,
+    ImmutableArray<SyntaxToken> EllipsisTokens,
+    SyntaxToken CloseParenthesisToken,
+    BlockStatementSyntax Body) : SyntaxNode
+{
+    public bool IsCatchAll => Type is null;
+    public override SyntaxKind Kind => SyntaxKind.CatchClause;
+}
+
+public sealed record ThrowStatementSyntax(
+    SyntaxToken ThrowKeyword,
+    ExpressionSyntax? Expression,
+    SyntaxToken SemicolonToken) : StatementSyntax
+{
+    public bool IsRethrow => Expression is null;
+    public override SyntaxKind Kind => SyntaxKind.ThrowStatement;
+}
+
 public sealed record SwitchStatementSyntax(
     SyntaxToken SwitchKeyword,
     ExpressionSyntax Expression,

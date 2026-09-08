@@ -448,6 +448,9 @@ public sealed class Compilation
         {
             switch (node)
             {
+                case BoundThrowStatement { Expression.Type: { } thrownType }:
+                    MarkDestructionRequirement(thrownType);
+                    break;
                 case BoundAssignmentExpression assignment
                     when assignment.OperatorKind == SyntaxKind.EqualsToken &&
                          !IsSameScalarStorage(assignment):

@@ -34,7 +34,7 @@ internal sealed partial class ReadonlyEffectAnalyzer
     }
 
     private sealed record Flow(MemoryState? Next = null, MemoryState? Break = null,
-        MemoryState? Continue = null, MemoryState? Return = null);
+        MemoryState? Continue = null, MemoryState? Return = null, MemoryState? Throw = null);
     private sealed record Cleanup(object Root, FunctionSymbol Destructor, BoundExpression Site, bool IsArray = true);
 
     private static MemoryState? Join(params MemoryState?[] states)
@@ -99,7 +99,8 @@ internal sealed partial class ReadonlyEffectAnalyzer
 
     private static Flow JoinFlow(Flow left, Flow right) => new(
         Join(left.Next, right.Next), Join(left.Break, right.Break),
-        Join(left.Continue, right.Continue), Join(left.Return, right.Return));
+        Join(left.Continue, right.Continue), Join(left.Return, right.Return),
+        Join(left.Throw, right.Throw));
 
     private Flow Visit(BoundStatement statement)
     {
@@ -148,6 +149,9 @@ internal sealed partial class ReadonlyEffectAnalyzer
                 return new(Break: _memory);
             case BoundContinueStatement:
                 return new(Continue: _memory);
+            case BoundThrowStatement thrown:
+                if (thrown.Expression is not null) Evaluate(thrown.Expression);
+                return new(Throw: _memory);
             case BoundIfStatement conditional:
             {
                 Evaluate(conditional.Condition);
@@ -184,6 +188,36 @@ internal sealed partial class ReadonlyEffectAnalyzer
                     result = JoinFlow(result, branch with { Next = Join(branch.Next, branch.Break), Break = null });
                 }
                 return result;
+            }
+            case BoundTryStatement protectedStatement:
+            {
+                MemoryState entry = _memory.Copy();
+                Flow body = Visit(protectedStatement.Body);
+                Flow result = body with
+                {
+                    Throw = protectedStatement.Catches.Any(handler => handler.IsCatchAll)
+                        ? null
+                        : body.Throw,
+                };
+                MemoryState handlerEntry = Join(entry, body.Throw) ?? entry;
+                foreach (BoundCatchClause handler in protectedStatement.Catches)
+                {
+                    _memory = handlerEntry.Copy();
+                    result = JoinFlow(result, Visit(handler.Body));
+                }
+                if (protectedStatement.FinallyBody is null) return result;
+                MemoryState? exits = Join(result.Next, result.Break, result.Continue,
+                    result.Return, result.Throw);
+                if (exits is null) return result;
+                _memory = exits;
+                Flow finalizer = Visit(protectedStatement.FinallyBody);
+                MemoryState? completed = finalizer.Next;
+                return new Flow(
+                    result.Next is null ? null : completed,
+                    Join(result.Break is null ? null : completed, finalizer.Break),
+                    Join(result.Continue is null ? null : completed, finalizer.Continue),
+                    Join(result.Return is null ? null : completed, finalizer.Return),
+                    Join(result.Throw is null ? null : completed, finalizer.Throw));
             }
             default:
                 throw new InvalidOperationException($"Missing readonly flow analysis for '{statement.Kind}'.");
@@ -239,7 +273,8 @@ internal sealed partial class ReadonlyEffectAnalyzer
         Flow flow;
         try { flow = visit(); }
         finally { _cleanupScopes.Pop(); }
-        var result = new Flow(Clean(flow.Next), Clean(flow.Break), Clean(flow.Continue), Clean(flow.Return));
+        var result = new Flow(Clean(flow.Next), Clean(flow.Break), Clean(flow.Continue),
+            Clean(flow.Return), Clean(flow.Throw));
         // A non-returning body has no exit state to clean, but its scope identity
         // must not escape into a caller's recursive effect fixed point.
         _memory.CleanupOrders.Remove(cleanups);

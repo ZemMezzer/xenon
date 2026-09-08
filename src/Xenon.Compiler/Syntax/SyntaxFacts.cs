@@ -78,6 +78,10 @@ public static class SyntaxFacts
             ["pin"] = SyntaxKind.PinKeyword,
             ["atomic"] = SyntaxKind.AtomicKeyword,
             ["function"] = SyntaxKind.FunctionKeyword,
+            ["try"] = SyntaxKind.TryKeyword,
+            ["catch"] = SyntaxKind.CatchKeyword,
+            ["finally"] = SyntaxKind.FinallyKeyword,
+            ["throw"] = SyntaxKind.ThrowKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
     private static readonly FrozenSet<SyntaxKind> KeywordKinds = Keywords.Values.ToFrozenSet();
     private static readonly string[] ContextualEditorKeywords = ["destruct"];

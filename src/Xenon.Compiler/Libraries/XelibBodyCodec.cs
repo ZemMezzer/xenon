@@ -15,6 +15,18 @@ public static class XelibBodyCodec
         if (node is BoundExpression expression) addType(expression.Type);
         switch (node)
         {
+            case BoundTryStatement value:
+                foreach (BoundCatchClause handler in value.Catches)
+                {
+                    if (handler.Type is not null) addType(handler.Type);
+                    if (handler.Variable is not null) addType(handler.Variable.Type);
+                }
+                break;
+            case BoundThrowStatement { Expression.Type: { } thrownType }:
+                addType(thrownType);
+                if (TypeFacts.GetCompleteDestructor(thrownType) is { } thrownDestructor)
+                    addSymbol(thrownDestructor);
+                break;
             case BoundVariableDeclarationStatement value:
                 addType(value.Variable.Type);
                 if ((value.Initializer is not null || value.Variable.Type is StorageTypeSymbol) &&
@@ -160,6 +172,10 @@ public static class XelibBodyCodec
 
     private static void CollectLocals(BoundNode node, Dictionary<LocalVariableSymbol, int> locals)
     {
+        if (node is BoundTryStatement protectedStatement)
+            foreach (BoundCatchClause handler in protectedStatement.Catches)
+                if (handler.Variable is { } variable && !locals.ContainsKey(variable))
+                    locals.Add(variable, locals.Count + 1);
         if (node is BoundVariableDeclarationStatement declaration && !locals.ContainsKey(declaration.Variable))
             locals.Add(declaration.Variable, locals.Count + 1);
         if (node is BoundVariableExpression { Variable: LocalVariableSymbol local } && !locals.ContainsKey(local))
@@ -219,6 +235,27 @@ public static class XelibBodyCodec
                             Children = section.Value is null ? [E(section.Body)] : [E(section.Value), E(section.Body)] })] };
             case BoundBreakStatement: return new XelibBodyNode { Opcode = XelibBodyOpcode.Break };
             case BoundContinueStatement: return new XelibBodyNode { Opcode = XelibBodyOpcode.Continue };
+            case BoundTryStatement value:
+                return new XelibBodyNode
+                {
+                    Opcode = XelibBodyOpcode.Try,
+                    Integer = value.Catches.Length,
+                    Flag1 = value.FinallyBody is not null,
+                    Children = [E(value.Body), .. value.Catches.Select(handler => new XelibBodyNode
+                    {
+                        Opcode = XelibBodyOpcode.Catch,
+                        TypeId = handler.Type is null ? 0 : typeId(handler.Type),
+                        LocalId = handler.Variable is null ? 0 : locals[handler.Variable],
+                        Children = [E(handler.Body)],
+                    }), .. value.FinallyBody is null ? [] : new[] { E(value.FinallyBody) }],
+                };
+            case BoundThrowStatement value:
+                return new XelibBodyNode
+                {
+                    Opcode = XelibBodyOpcode.Throw,
+                    Flag1 = value.Expression is not null,
+                    Children = value.Expression is null ? [] : [E(value.Expression)],
+                };
             case BoundLiteralExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Literal, TypeId = typeId(value.Type),
                     Constant = value.Value is null ? new XelibConstantValue(XelibConstantKind.Null, null) :
@@ -492,6 +529,36 @@ public static class XelibBodyCodec
                 }).ToImmutableArray());
             case XelibBodyOpcode.Break: return new BoundBreakStatement();
             case XelibBodyOpcode.Continue: return new BoundContinueStatement();
+            case XelibBodyOpcode.Try:
+            {
+                if (node.Integer < 0 || node.Children.Length != 1 + node.Integer + (node.Flag1 ? 1 : 0))
+                    throw Invalid("try node has an invalid child count");
+                BoundBlockStatement protectedBody = S(0) as BoundBlockStatement ??
+                    throw Invalid("try body is not a block");
+                var handlers = ImmutableArray.CreateBuilder<BoundCatchClause>(node.Integer);
+                for (int index = 0; index < node.Integer; index++)
+                {
+                    XelibBodyNode encoded = node.Children[index + 1];
+                    if (encoded.Opcode != XelibBodyOpcode.Catch || encoded.Children.Length != 1)
+                        throw Invalid("invalid catch node");
+                    BoundBlockStatement handlerBody = DecodeNode(encoded.Children[0], locals, type, symbol,
+                        deferredGenericMethod, deferredGenericOperation) as BoundBlockStatement ??
+                        throw Invalid("catch body is not a block");
+                    handlers.Add(new BoundCatchClause(
+                        encoded.TypeId == 0 ? null : type(encoded.TypeId),
+                        encoded.LocalId == 0 ? null : locals.GetValueOrDefault(encoded.LocalId) ??
+                            throw Invalid($"unknown catch local ID {encoded.LocalId}"),
+                        handlerBody));
+                }
+                BoundBlockStatement? finalizer = node.Flag1
+                    ? S(node.Integer + 1) as BoundBlockStatement ?? throw Invalid("finally body is not a block")
+                    : null;
+                return new BoundTryStatement(protectedBody, handlers.ToImmutable(), finalizer);
+            }
+            case XelibBodyOpcode.Throw:
+                if (node.Children.Length != (node.Flag1 ? 1 : 0))
+                    throw Invalid("throw node has an invalid child count");
+                return new BoundThrowStatement(node.Flag1 ? E(0) : null);
             case XelibBodyOpcode.Literal: return new BoundLiteralExpression(
                 ParseConstant(node.Constant, type(node.TypeId)), type(node.TypeId));
             case XelibBodyOpcode.Variable: return new BoundVariableExpression(Variable(node.LocalId, node.Symbol));
@@ -661,6 +728,10 @@ public static class XelibBodyCodec
         BoundForStatement value => new BoundNode?[] { value.Initializer, value.Condition, value.Increment, value.Body }.OfType<BoundNode>(),
         BoundSwitchStatement value => new[] { value.Expression }.Concat(value.Sections.SelectMany(section =>
             new BoundNode?[] { section.Value, section.Body }.OfType<BoundNode>())),
+        BoundTryStatement value => new BoundNode[] { value.Body }
+            .Concat(value.Catches.Select(handler => handler.Body))
+            .Concat(value.FinallyBody is null ? [] : [value.FinallyBody]),
+        BoundThrowStatement value => Optional(value.Expression),
         BoundUnaryExpression value => [value.Operand],
         BoundMoveExpression value => [value.Source],
         BoundCopyExpression value => [value.Source],
