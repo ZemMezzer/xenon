@@ -243,6 +243,7 @@ internal static class XelibExportKey
     public static string Create(Symbol symbol) => symbol switch
     {
         NamespaceSymbol value => $"N:{Tag(XelibSymbolKind.Namespace)}:{value.FullName}",
+        StructTypeSymbol { GenericDefinition: not null } value => TypeKey(value),
         StructTypeSymbol value => $"T:{Tag(XelibSymbolKind.Struct)}:{value.FullName}",
         InterfaceTypeSymbol value => $"T:{Tag(XelibSymbolKind.Interface)}:{value.FullName}",
         EnumTypeSymbol value => $"T:{Tag(XelibSymbolKind.Enum)}:{value.FullName}",
@@ -260,7 +261,7 @@ internal static class XelibExportKey
             $"->{TypeKey(value.Type)}",
         ConstantSymbol value => $"C:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         GenericParameterSymbol value => $"G:{Owner(value)}:{value.Ordinal}",
-        ParameterSymbol value => $"A:{Owner(value)}:{value.Ordinal}:{value.Name}:{TypeKey(value.Type)}",
+        ParameterSymbol value => $"A:{Create(value.ContainingSymbol!)}:{value.Ordinal}:{value.Name}:{TypeKey(value.Type)}",
         TemplateMethodRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateMethod)}:{Owner(value)}:" +
             $"{value.Name}:({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})" +
             $"->{TypeKey(value.ReturnType)}:{value.IsStatic}:{value.IsReadonly}",
@@ -588,6 +589,7 @@ internal sealed class XelibIrBuilder
             case StructTypeSymbol { GenericDefinition: not null } structure:
                 VisitExternalOrLocal(structure.GenericDefinition);
                 foreach (TypeSymbol argument in structure.TypeArguments) AddType(argument);
+                if (!structure.IsOpenGenericType) VisitExternalOrLocal(structure);
                 break;
             case DeclaredTypeSymbol declared: VisitExternalOrLocal(declared); break;
             case GenericParameterSymbol parameter: VisitExternalOrLocal(parameter); break;
@@ -618,7 +620,8 @@ internal sealed class XelibIrBuilder
         {
             StructTypeSymbol { GenericDefinition: not null } value => new(id, XelibTypeKind.ConstructedGeneric,
                 Symbol: Reference(value.GenericDefinition),
-                TypeArgumentIds: value.TypeArguments.Select(TypeId).ToImmutableArray()),
+                TypeArgumentIds: value.TypeArguments.Select(TypeId).ToImmutableArray(),
+                ConstructedSymbol: !value.IsOpenGenericType || _symbolIds.ContainsKey(value) ? Reference(value) : null),
             DeclaredTypeSymbol value => new(id, XelibTypeKind.Declared, Symbol: Reference(value)),
             GenericParameterSymbol value => new(id, XelibTypeKind.GenericParameter, Symbol: Reference(value)),
             TemplateSelfTypeSymbol value => new(id, XelibTypeKind.TemplateSelf, Symbol: Reference(value.Template)),
@@ -684,6 +687,7 @@ internal sealed class XelibIrBuilder
                 TypeParameterIds = value.TypeParameters.Select(Id).ToImmutableArray(),
                 FunctionKind = Map(value.FunctionKind),
                 AccessorKind = Map(value.AccessorKind),
+                OperatorKind = XelibOperatorKinds.Encode(value.OperatorKind),
                 RelatedSymbolIds = value.ThreadLocalField is null ? [] : [Id(value.ThreadLocalField)],
                 VTableSlot = value.VTableSlot,
                 ConstructorOverload = value.ConstructorOverload,

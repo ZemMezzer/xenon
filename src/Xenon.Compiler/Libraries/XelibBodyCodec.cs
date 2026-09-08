@@ -201,6 +201,8 @@ public static class XelibBodyCodec
         };
         switch (node)
         {
+            case BoundCapturedPlaceExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.CapturedPlace, TypeId = typeId(value.Type), Flag1 = value.OwnsValue };
             case BoundBlockStatement value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Block,
                     Flag1 = value.ExitCleanup is not null, Flag2 = value.RetainsStackStorage,
@@ -304,7 +306,8 @@ public static class XelibBodyCodec
             case BoundFullExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.FullExpression, TypeId = typeId(value.Type),
                     Children = [E(value.Expression)], Temporaries = value.Temporaries.Select(item =>
-                        new XelibTemporaryRecord(E(item.Value), symbol(item.Destructor))).ToImmutableArray() };
+                        new XelibTemporaryRecord(E(item.Value), symbol(item.Destructor),
+                            FindTemporaryPath(value.Expression, item.Value))).ToImmutableArray() };
             case BoundBinaryExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Binary, TypeId = typeId(value.Type),
                     Operator = Map(value.OperatorKind), Children = [E(value.Left), E(value.Right)] };
@@ -313,7 +316,7 @@ public static class XelibBodyCodec
                     Operator = Map(value.OperatorKind), Flag1 = value.IsInitialization,
                     MovedPlaceReinitialization = XelibStableMappings.ToXelib(value.MovedPlaceReinitialization),
                     Symbol = value.ConstructorField is null ? null : symbol(value.ConstructorField),
-                    Flag2 = value.RequiresRuntimeInitializationCheck,
+                    Flag2 = value.RequiresRuntimeInitializationCheck, Integer = value.CapturesTarget ? 1 : 0,
                     Children = [E(value.Target), E(value.Expression)] };
             case BoundCompareExchangeExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.CompareExchange, TypeId = typeId(value.Type),
@@ -325,7 +328,7 @@ public static class XelibBodyCodec
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.CompoundAccessorAssignment,
                     TypeId = typeId(value.Type), AuxTypeId = value.InterfaceType is null ? 0 : typeId(value.InterfaceType),
                     Symbol = symbol(value.Getter), Symbol2 = symbol(value.Setter), Operator = Map(value.OperatorKind),
-                    Flag1 = value.IsPointerAccess,
+                    Flag1 = value.IsPointerAccess, Flag2 = value.UsesUserOperator,
                     Children = [E(value.Receiver), .. value.Arguments.Select(E), E(value.Value)],
                     Integer = value.Arguments.Length };
             case BoundMethodCallExpression value:
@@ -449,7 +452,8 @@ public static class XelibBodyCodec
                     Symbol = value.Destructor is null ? null : symbol(value.Destructor), Children = [E(value.Pointer)] };
             case BoundCallExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Call, TypeId = typeId(value.Type),
-                    Symbol = symbol(value.Function), Children = value.Arguments.Select(E).ToImmutableArray() };
+                    Symbol = symbol(value.Function), Flag1 = value.IsExplicitConversion,
+                    Children = value.Arguments.Select(E).ToImmutableArray() };
             case BoundFunctionAddressExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.FunctionAddress,
                     TypeId = typeId(value.FunctionPointerType), Symbol = symbol(value.Function) };
@@ -580,13 +584,20 @@ public static class XelibBodyCodec
             case XelibBodyOpcode.SharedAdoption: return new BoundSharedAdoptionExpression(E(0), (SharedTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.WeakConversion: return new BoundWeakConversionExpression(E(0), (WeakTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.Lock: return new BoundLockExpression(E(0), (SharedTypeSymbol)type(node.TypeId));
-            case XelibBodyOpcode.FullExpression: return new BoundFullExpression(E(0), node.Temporaries.Select(item =>
-                new BoundFullExpressionTemporary((BoundExpression)DecodeNode(item.Value, locals, type, symbol,
-                        deferredGenericMethod, deferredGenericOperation),
-                    (FunctionSymbol)symbol(item.Destructor))).ToImmutableArray());
+            case XelibBodyOpcode.FullExpression:
+            {
+                BoundExpression expression = E(0);
+                return new BoundFullExpression(expression, node.Temporaries.Select(item =>
+                    new BoundFullExpressionTemporary(item.Path is { } path
+                        ? ResolveTemporaryPath(expression, path)
+                        : (BoundExpression)DecodeNode(item.Value, locals, type, symbol, deferredGenericMethod, deferredGenericOperation),
+                        (FunctionSymbol)symbol(item.Destructor))).ToImmutableArray());
+            }
             case XelibBodyOpcode.Binary: return new BoundBinaryExpression(E(0), Map(node.Operator), E(1), type(node.TypeId));
+            case XelibBodyOpcode.CapturedPlace: return new BoundCapturedPlaceExpression(type(node.TypeId), node.Flag1);
             case XelibBodyOpcode.Assignment: return new BoundAssignmentExpression(E(0), Map(node.Operator), E(1))
             {
+                CapturesTarget = node.Integer != 0,
                 IsInitialization = node.Flag1,
                 MovedPlaceReinitialization = XelibStableMappings.FromXelib(node.MovedPlaceReinitialization),
                 ConstructorField = node.Symbol is null ? null : Sym<FieldSymbol>(node.Symbol),
@@ -598,7 +609,8 @@ public static class XelibBodyCodec
                 return new BoundCompoundAccessorAssignmentExpression(E(0), F(node.Symbol), F(node.Symbol2),
                     node.Children.Skip(1).Take(node.Integer).Select((_, i) => E(i + 1)).ToImmutableArray(),
                     Map(node.Operator), E(node.Integer + 1), node.Flag1,
-                    node.AuxTypeId == 0 ? null : (InterfaceTypeSymbol)type(node.AuxTypeId));
+                    node.AuxTypeId == 0 ? null : (InterfaceTypeSymbol)type(node.AuxTypeId))
+                    { UsesUserOperator = node.Flag2 };
             case XelibBodyOpcode.MethodCall: return new BoundMethodCallExpression(E(0), F(node.Symbol),
                 node.Children.Skip(1).Select((_, i) => E(i + 1)).ToImmutableArray(), node.Flag1);
             case XelibBodyOpcode.DeferredGenericMethodCall:
@@ -616,7 +628,7 @@ public static class XelibBodyCodec
                  XelibBodyOpcode.DeferredGenericIndexerGet or
                  XelibBodyOpcode.DeferredGenericIndexerSet or
                  XelibBodyOpcode.DeferredGenericConstruction or
-                 XelibBodyOpcode.DeferredGenericAllocation:
+                 XelibBodyOpcode.DeferredGenericAllocation or XelibBodyOpcode.DeferredOperatorCall:
             {
                 if (deferredGenericOperation is null)
                     throw Invalid("deferred generic operation appears outside a generic implementation");
@@ -705,7 +717,7 @@ public static class XelibBodyCodec
                 node.Flag1, (PointerTypeSymbol)type(node.TypeId)) { IsDefaultInitialization = node.Flag2 };
             case XelibBodyOpcode.Free: return new BoundFreeExpression(E(0), node.Symbol is null ? null : F(node.Symbol));
             case XelibBodyOpcode.Call: return new BoundCallExpression(F(node.Symbol),
-                node.Children.Select((_, i) => E(i)).ToImmutableArray());
+                node.Children.Select((_, i) => E(i)).ToImmutableArray()) { IsExplicitConversion = node.Flag1 };
             case XelibBodyOpcode.FunctionAddress: return new BoundFunctionAddressExpression(F(node.Symbol),
                 (FunctionPointerTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.IndirectCall: return new BoundIndirectCallExpression(E(0),
@@ -714,6 +726,34 @@ public static class XelibBodyCodec
             case XelibBodyOpcode.DeferredConstant: return new BoundDeferredConstantExpression(type(node.TypeId));
             default: throw Invalid($"unknown body opcode {(ushort)node.Opcode}");
         }
+    }
+
+    private static ImmutableArray<int> FindTemporaryPath(BoundNode root, BoundExpression temporary)
+    {
+        var path = new List<int>();
+        bool Find(BoundNode node)
+        {
+            if (ReferenceEquals(node, temporary)) return true;
+            int index = 0;
+            foreach (BoundNode child in Children(node))
+            {
+                path.Add(index++);
+                if (Find(child)) return true;
+                path.RemoveAt(path.Count - 1);
+            }
+            return false;
+        }
+        return Find(root) ? path.ToImmutableArray() : throw Invalid("temporary is not part of its full expression");
+    }
+
+    private static BoundExpression ResolveTemporaryPath(BoundNode root, ImmutableArray<int> path)
+    {
+        foreach (int index in path)
+        {
+            if (index < 0) throw Invalid("invalid temporary expression path");
+            root = Children(root).ElementAtOrDefault(index) ?? throw Invalid("invalid temporary expression path");
+        }
+        return root as BoundExpression ?? throw Invalid("temporary path does not identify an expression");
     }
 
     private static IEnumerable<BoundNode> Children(BoundNode node) => node switch
@@ -900,6 +940,7 @@ public static class XelibBodyCodec
         BoundDeferredGenericOperationKind.IndexerSet => XelibBodyOpcode.DeferredGenericIndexerSet,
         BoundDeferredGenericOperationKind.Construction => XelibBodyOpcode.DeferredGenericConstruction,
         BoundDeferredGenericOperationKind.Allocation => XelibBodyOpcode.DeferredGenericAllocation,
+        BoundDeferredGenericOperationKind.OperatorCall => XelibBodyOpcode.DeferredOperatorCall,
         _ => throw Invalid($"deferred generic operation '{value}' cannot be represented"),
     };
 
@@ -914,6 +955,7 @@ public static class XelibBodyCodec
         XelibBodyOpcode.DeferredGenericIndexerSet => BoundDeferredGenericOperationKind.IndexerSet,
         XelibBodyOpcode.DeferredGenericConstruction => BoundDeferredGenericOperationKind.Construction,
         XelibBodyOpcode.DeferredGenericAllocation => BoundDeferredGenericOperationKind.Allocation,
+        XelibBodyOpcode.DeferredOperatorCall => BoundDeferredGenericOperationKind.OperatorCall,
         _ => throw Invalid($"opcode '{value}' is not a deferred generic operation"),
     };
 }

@@ -215,6 +215,8 @@ public sealed record MethodDeclarationSyntax(
     BlockStatementSyntax? Body,
     SyntaxToken? SemicolonToken) : TypeMemberDeclarationSyntax
 {
+    public SyntaxToken? OperatorKeyword { get; init; }
+    public bool IsOperator => OperatorKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.MethodDeclaration;
 
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;

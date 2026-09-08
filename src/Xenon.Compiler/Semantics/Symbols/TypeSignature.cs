@@ -43,7 +43,8 @@ internal static class TypeSignature
     }
 
     public static string Callable(FunctionSymbol function) =>
-        $"{function.Name}`{function.TypeParameters.Length}({Parameters(function)})";
+        $"{(function.OperatorKind is { } kind && kind != OperatorKind.Invalid ? "operator:" + OperatorFacts.GetNativeName(kind) : function.Name)}`{function.TypeParameters.Length}({Parameters(function)})" +
+        (function.IsConversionOperator ? $"->{Get(function.ReturnType)}" : "");
 
     public static string Method(FunctionSymbol method) => Callable(method);
 }

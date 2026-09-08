@@ -1,0 +1,56 @@
+namespace OperatorLifetime;
+struct Trace { public static int Destroyed; }
+struct Fault {}
+struct Value
+{
+    public int Id;
+    public ~Value() { Trace.Destroyed = Trace.Destroyed * 10 + Id; }
+    public static Value operator implicit(int value) { return Value { value }; }
+    public static Value operator +(readonly Value& left, int right)
+    {
+        if (right < 0) throw Fault();
+        return Value { left.Id + right };
+    }
+}
+void Read(readonly Value& value) {}
+struct Counts { public static int Destroyed; }
+struct Owned
+{
+    public int Id;
+    public ~Owned() { Counts.Destroyed += 1; }
+    public static Owned operator +(Owned left, int right)
+    {
+        if (right < 0) throw Fault();
+        return Owned { left.Id + right };
+    }
+}
+struct Container
+{
+    public int Stored;
+    public Owned Item { get { return Owned { Stored }; } set { Stored = value.Id; } }
+    public Owned this[int index] { get { return Owned { Stored }; } set { Stored = value.Id; } }
+}
+int Throwing() { throw Fault(); }
+int Main()
+{
+    {
+        Value value = 1;
+        value += 2;
+        if (Trace.Destroyed != 1 || value.Id != 3) return 1;
+        try { value += -1; }
+        catch (readonly Fault& fault) { if (value.Id != 3 || Trace.Destroyed != 1) return 2; }
+        Read(4);
+        if (Trace.Destroyed != 14) return 3;
+    }
+    if (Trace.Destroyed != 143) return 4;
+    Container c = Container { 1 };
+    c.Item += 2;
+    if (c.Stored != 3 || Counts.Destroyed != 2) return 5;
+    c[0] += 2;
+    if (c.Stored != 5 || Counts.Destroyed != 4) return 6;
+    try { c.Item += -1; } catch (...) {}
+    if (c.Stored != 5 || Counts.Destroyed != 5) return 7;
+    try { c.Item += Throwing(); } catch (...) {}
+    if (c.Stored != 5 || Counts.Destroyed != 6) return 8;
+    return 42;
+}

@@ -505,7 +505,8 @@ internal sealed class XelibSemanticReconstruction
                     Has(record, XelibSymbolFlags.Abstract), Has(record, XelibSymbolFlags.Extern),
                     Has(record, XelibSymbolFlags.Export), Has(record, XelibSymbolFlags.Definition),
                     Has(record, XelibSymbolFlags.DelegatesToThisConstructor), typeParameters,
-                    Origin(record.Id), Documentation(record.Id), accessorKind: Map(record.AccessorKind));
+                    Origin(record.Id), Documentation(record.Id), accessorKind: Map(record.AccessorKind),
+                    operatorKind: XelibOperatorKinds.Decode(record.OperatorKind, record.ParameterIds.Length));
             }
             created.HasStackArrays = Has(record, XelibSymbolFlags.HasStackArrays);
             created.HasScalarCleanup = Has(record, XelibSymbolFlags.HasScalarCleanup);
@@ -663,7 +664,9 @@ internal sealed class XelibSemanticReconstruction
     private StructTypeSymbol Constructed(XelibTypeRecord record)
     {
         var definition = (StructTypeSymbol)Resolve(Required(record.Symbol));
-        var created = new StructTypeSymbol(definition.Name, definition.ContainingNamespace,
+        var created = record.ConstructedSymbol is { } reference
+            ? (StructTypeSymbol)Resolve(reference)
+            : new StructTypeSymbol(definition.Name, definition.ContainingNamespace,
             definition.IsAbstract, Origin(definition), definition.Documentation, definition.Accessibility,
             definition.IsReadonly, definition.IsStatic, definition.IsSealed);
         created.SetGenericSpecialization(definition,

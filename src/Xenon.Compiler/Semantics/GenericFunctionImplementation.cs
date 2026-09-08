@@ -283,7 +283,7 @@ internal sealed class LibraryGenericFunctionImplementation(
         cancellationToken.ThrowIfCancellationRequested();
         TypeSymbol Type(int id) => specializer.StructSpecializer.Substitute(
             resolveType(id), substitutions);
-        Symbol Symbol(XelibSymbolReference reference) => MapSymbol(resolveSymbol(reference), specialization);
+        Symbol Symbol(XelibSymbolReference reference) => MapSymbol(resolveSymbol(reference), specialization, specializer.StructSpecializer, substitutions);
         return XelibBodyCodec.Decode(body, specialization, Type, Symbol,
             (receiver, requirement, arguments, isPointerAccess) =>
                 ResolveGenericMethod(receiver, requirement, arguments, isPointerAccess, specializer),
@@ -298,6 +298,17 @@ internal sealed class LibraryGenericFunctionImplementation(
         BoundExpression? value, SyntaxKind operatorKind, bool isPointerAccess, TypeSymbol resultType,
         ImmutableArray<TypeSymbol> typeArguments, GenericFunctionSpecializer specializer)
     {
+        if (operation == BoundDeferredGenericOperationKind.OperatorCall)
+        {
+            if (requirement is not FunctionSymbol operatorDefinition ||
+                typeArguments is not [StructTypeSymbol owner] || owner.GenericDefinition is null)
+                throw InvalidGenericOperation(operation, requirement, resultType);
+            operatorDefinition = specializer.StructSpecializer.GetFunctionDefinition(operatorDefinition);
+            if (specializer.StructSpecializer.FindSpecializedFunction(operatorDefinition, owner) is not { } function)
+                throw InvalidGenericOperation(operation, requirement, owner);
+            // For this opcode the context flag denotes an explicit conversion, not receiver access.
+            return new BoundCallExpression(function, arguments) { IsExplicitConversion = isPointerAccess };
+        }
         if (operation == BoundDeferredGenericOperationKind.FunctionCall)
         {
             if (requirement is not FunctionSymbol definition)
@@ -571,22 +582,30 @@ internal sealed class LibraryGenericFunctionImplementation(
         _ => type,
     };
 
-    private Symbol MapSymbol(Symbol source, FunctionSymbol specialization)
+    private Symbol MapSymbol(Symbol source, FunctionSymbol specialization, GenericStructSpecializer structSpecializer,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions)
     {
         if (ReferenceEquals(source, definition)) return specialization;
         if (source is ParameterSymbol parameter && parameter.ContainingSymbol is FunctionSymbol owner)
         {
-            if (MapFunction(owner, specialization) is { } mapped &&
+            if (MapFunction(owner, specialization, structSpecializer, substitutions) is { } mapped &&
                 parameter.Ordinal >= 0 && parameter.Ordinal < mapped.Parameters.Length)
                 return mapped.Parameters[parameter.Ordinal];
         }
 
+        if (source is FunctionSymbol callable)
+            return MapFunction(callable, specialization, structSpecializer, substitutions) ?? source;
         StructTypeSymbol? definitionOwner = definition.ContainingStruct;
         StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
-        if (definitionOwner is null || specializedOwner is null ||
-            ContainingStruct(source) is not { } sourceOwner ||
-            !ReferenceEquals(sourceOwner, definitionOwner))
-            return source;
+        if (ContainingStruct(source) is not { } sourceOwner) return source;
+        if (!ReferenceEquals(sourceOwner, definitionOwner))
+        {
+            if (sourceOwner.GenericDefinition is null) return source;
+            specializedOwner = (StructTypeSymbol)structSpecializer.Substitute(sourceOwner, substitutions);
+            if (ReferenceEquals(specializedOwner, sourceOwner)) return source;
+            definitionOwner = sourceOwner;
+        }
+        if (definitionOwner is null || specializedOwner is null) return source;
 
         return source switch
         {
@@ -595,23 +614,28 @@ internal sealed class LibraryGenericFunctionImplementation(
             ConstantSymbol constant => MapByIndex(definitionOwner.Constants, specializedOwner.Constants, constant) ?? source,
             PropertySymbol property => MapByIndex(definitionOwner.Properties, specializedOwner.Properties, property) ?? source,
             IndexerSymbol indexer => MapByIndex(definitionOwner.Indexers, specializedOwner.Indexers, indexer) ?? source,
-            FunctionSymbol function => MapFunction(function, specialization) ?? source,
             _ => source,
         };
     }
 
-    private FunctionSymbol? MapFunction(FunctionSymbol source, FunctionSymbol specialization)
+    private FunctionSymbol? MapFunction(FunctionSymbol source, FunctionSymbol specialization, GenericStructSpecializer structSpecializer,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions)
     {
         if (ReferenceEquals(source, definition)) return specialization;
         StructTypeSymbol? definitionOwner = definition.ContainingStruct;
         StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
-        if (definitionOwner is null || specializedOwner is null ||
-            !ReferenceEquals(source.ContainingStruct, definitionOwner))
-            return null;
-        return MapByIndex(definitionOwner.Methods, specializedOwner.Methods, source) ??
-            MapByIndex(definitionOwner.Constructors, specializedOwner.Constructors, source) ??
-            (ReferenceEquals(definitionOwner.Destructor, source) ? specializedOwner.Destructor : null) ??
-            (ReferenceEquals(definitionOwner.InstanceInitializer, source) ? specializedOwner.InstanceInitializer : null);
+        if (source.ContainingStruct is not { } sourceOwner) return null;
+        if (!ReferenceEquals(sourceOwner, definitionOwner))
+        {
+            if (sourceOwner.GenericDefinition is null) return null;
+            specializedOwner = (StructTypeSymbol)structSpecializer.Substitute(sourceOwner, substitutions);
+            if (ReferenceEquals(specializedOwner, sourceOwner)) return source;
+        }
+        if (specializedOwner is null) return null;
+        source = structSpecializer.GetFunctionDefinition(source);
+        return structSpecializer.FindSpecializedFunction(source, specializedOwner) ??
+            (ReferenceEquals(source.ContainingStruct?.Destructor, source) ? specializedOwner.Destructor : null) ??
+            (ReferenceEquals(source.ContainingStruct?.InstanceInitializer, source) ? specializedOwner.InstanceInitializer : null);
     }
 
     private static T? MapByIndex<T>(ImmutableArray<T> definitions,

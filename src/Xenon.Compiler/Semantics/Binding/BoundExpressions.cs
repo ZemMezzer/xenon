@@ -122,6 +122,12 @@ public sealed record BoundBinaryExpression(
     public override BoundKind Kind => BoundKind.BinaryExpression;
 }
 
+/// <summary>The place captured by the nearest enclosing derived compound assignment.</summary>
+public sealed record BoundCapturedPlaceExpression(TypeSymbol ValueType, bool OwnsValue = false) : BoundExpression(ValueType)
+{
+    public override BoundKind Kind => BoundKind.CapturedPlaceExpression;
+}
+
 public sealed record BoundAssignmentExpression(
     BoundExpression Target,
     SyntaxKind OperatorKind,
@@ -129,6 +135,7 @@ public sealed record BoundAssignmentExpression(
         Target.Type is AtomicTypeSymbol atomic ? atomic.ElementType : Target.Type)
 {
     public override BoundKind Kind => BoundKind.AssignmentExpression;
+    public bool CapturesTarget { get; init; }
     public bool IsInitialization { get; init; }
     public MovedPlaceReinitializationState MovedPlaceReinitialization { get; init; }
     public bool ReinitializesMovedPlace =>
@@ -170,6 +177,7 @@ public sealed record BoundCompoundAccessorAssignmentExpression(
     InterfaceTypeSymbol? InterfaceType) : BoundExpression(Getter.ReturnType)
 {
     public override BoundKind Kind => BoundKind.CompoundAccessorAssignmentExpression;
+    public bool UsesUserOperator { get; init; }
 }
 
 public sealed record BoundMethodCallExpression(
@@ -392,6 +400,7 @@ public sealed record BoundCallExpression(
     FunctionSymbol Function,
     ImmutableArray<BoundExpression> Arguments) : BoundExpression(Function.ReturnType)
 {
+    public bool IsExplicitConversion { get; init; }
     public override BoundKind Kind => BoundKind.CallExpression;
 }
 
@@ -444,6 +453,7 @@ public enum BoundDeferredGenericOperationKind : ushort
     IndexerSet = 7,
     Construction = 8,
     Allocation = 9,
+    OperatorCall = 10,
 }
 
 /// <summary>

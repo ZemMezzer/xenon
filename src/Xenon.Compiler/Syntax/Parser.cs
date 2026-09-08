@@ -287,6 +287,19 @@ internal sealed class Parser
                         { SecondaryAccessModifierToken = secondaryAccess });
                     continue;
                 }
+                if (Current.Kind == SyntaxKind.OperatorKeyword)
+                {
+                    SyntaxToken operatorKeyword = NextToken();
+                    SyntaxToken operatorKind = Current.Kind is SyntaxKind.OpenParenthesisToken or SyntaxKind.EndOfFileToken
+                        ? MatchToken(SyntaxKind.IdentifierToken) : NextToken();
+                    ValidateMemberModifiers("operator", modifiers, SyntaxKind.PublicKeyword,
+                        SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.ReadonlyKeyword);
+                    (type, trailingReadonly) = FinishMethodReturnType(type, @readonly, trailingReadonly);
+                    members.Add(ParseMethodDeclaration(accessModifier, @static, @virtual, @override,
+                        @abstract, trailingReadonly, type, operatorKind) with
+                        { SecondaryAccessModifierToken = secondaryAccess, OperatorKeyword = operatorKeyword });
+                    continue;
+                }
                 SyntaxToken memberIdentifier = MatchToken(SyntaxKind.IdentifierToken);
                 if (Current.Kind == SyntaxKind.OpenParenthesisToken)
                 {
@@ -1002,6 +1015,7 @@ internal sealed class Parser
     private SyntaxToken? ParseCallableOrAccessorReadonlyKeyword()
     {
         if (Current.Kind != SyntaxKind.ReadonlyKeyword) return null;
+        if (Peek(1).Kind == SyntaxKind.OperatorKeyword) return NextToken();
         if (Peek(1).Kind == SyntaxKind.ThisKeyword) return NextToken();
         return Peek(1).Kind == SyntaxKind.IdentifierToken &&
                Peek(2).Kind is SyntaxKind.OpenParenthesisToken or SyntaxKind.OpenBraceToken
