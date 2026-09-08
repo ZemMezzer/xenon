@@ -27,6 +27,7 @@ public static class DiagnosticIds
     public const string InvalidTemplateConstructorName = "XE1013";
     public const string InvalidTemplateMember = "XE1014";
     public const string DuplicateGenericParameter = "XE1015";
+    public const string TryRequiresHandler = "XE1016";
     public const string DuplicateDeclaration = "XE2001";
     public const string UnknownIdentifier = "XE2002";
     public const string TypeMismatch = "XE2003";
@@ -224,5 +225,10 @@ public static class DiagnosticIds
     public const string AmbiguousConstructorFieldInitialization = "XE2264";
     public const string ConditionalMoveReinitializationNotTracked = "XE2265";
     public const string InvalidUnicodeScalarCast = "XE2266";
+    public const string RethrowOutsideCatch = "XE2267";
+    public const string InvalidCatchType = "XE2268";
+    public const string InvalidThrownType = "XE2269";
+    public const string UnreachableCatch = "XE2270";
+    public const string ArgumentLifetimeConflict = "XE2271";
     public const string RecursiveValueLayout = "XE2600";
 }

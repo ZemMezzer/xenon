@@ -58,6 +58,7 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
             var compilations = new Dictionary<string, Compilation>(StringComparer.OrdinalIgnoreCase);
             var artifacts = new Dictionary<string, LinkedNativeArtifact>(StringComparer.OrdinalIgnoreCase);
             var libraryReferences = new Dictionary<string, LibraryCompilationReference>(StringComparer.OrdinalIgnoreCase);
+            LinkedNativeArtifact? exceptionRuntimeArtifact = null;
 
             foreach (XenonProject project in graph.BuildOrder)
             {
@@ -164,11 +165,29 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                         .Where(dependency => dependency.Type == XenonProjectType.StaticLibrary)
                         .Any(dependency => LlvmIrGenerator.RequiresNativeThreadingRuntime(
                             compilations[dependency.Identity]));
+                bool requiresExceptionRuntime =
+                    LlvmIrGenerator.RequiresNativeExceptionRuntime(compilation) ||
+                    graph.GetNativeLinkOrder(project)
+                        .Any(dependency => LlvmIrGenerator.RequiresNativeExceptionRuntime(
+                            compilations[dependency.Identity]));
+                if (requiresExceptionRuntime && project.Type is not XenonProjectType.StaticLibrary &&
+                    exceptionRuntimeArtifact is null)
+                {
+                    string runtimePath = XenonBuildPaths.GetSharedLibraryPath(
+                        outputRoot, "xenon-eh-runtime", request.Profile, triple);
+                    string? runtimeImportPath = XenonBuildPaths.GetImportLibraryPath(
+                        outputRoot, "xenon-eh-runtime", request.Profile, triple);
+                    exceptionRuntimeArtifact = linker.LinkExceptionRuntimeLibrary(
+                        runtimePath, triple, runtimeImportPath);
+                }
                 var options = new NativeLinkOptions(
                     project.NativeLibraries.AddRange(dependencyArtifacts),
                     project.LibraryPaths,
                     exportedSymbols.Distinct(StringComparer.Ordinal).ToArray(),
-                    RequiresThreadingRuntime: requiresThreadingRuntime);
+                    RequiresThreadingRuntime: requiresThreadingRuntime,
+                    RequiresExceptionRuntime: requiresExceptionRuntime,
+                    ExceptionRuntimeLibrary: exceptionRuntimeArtifact?.ImportLibraryPath ??
+                        exceptionRuntimeArtifact?.Path);
                 LinkedNativeArtifact artifact;
                 if (project.Type == XenonProjectType.Executable)
                 {

@@ -6,7 +6,10 @@ public sealed record NativeLinkOptions(
     IReadOnlyList<string>? Libraries = null,
     IReadOnlyList<string>? LibraryPaths = null,
     IReadOnlyList<string>? ExportedSymbols = null,
-    bool RequiresThreadingRuntime = false);
+    bool RequiresThreadingRuntime = false,
+    bool RequiresExceptionRuntime = false,
+    string? ExceptionRuntimeLibrary = null,
+    bool LinkCxxRuntime = false);
 
 public sealed record LinkedExecutable(string Path, string LinkerPath)
 {
@@ -61,6 +64,40 @@ public sealed class NativeLinker
             objectFilePath, outputPath, targetTriple, NativeArtifactKind.SharedLibrary,
             options ?? new NativeLinkOptions(), importLibraryPath);
 
+    public LinkedNativeArtifact LinkExceptionRuntimeLibrary(
+        string outputPath,
+        string targetTriple,
+        string? importLibraryPath = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetTriple);
+        string artifactPath = Path.GetFullPath(outputPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(artifactPath)!);
+        string sourcePath = Path.Combine(Path.GetDirectoryName(artifactPath)!,
+            $"xenon-eh-runtime-{Guid.NewGuid():N}.cpp");
+        string objectPath = Path.ChangeExtension(sourcePath,
+            OperatingSystem.IsWindows() ? ".obj" : ".o");
+        try
+        {
+            File.WriteAllText(sourcePath, NativeExceptionRuntime.Source);
+            LinkerCommand compile = CreateExceptionRuntimeCompileCommand(
+                sourcePath, objectPath, targetTriple);
+            _ = RunTool(compile, _workingDirectory ?? Directory.GetCurrentDirectory());
+            EnsureProduced(objectPath, "exception runtime object");
+            return CreateArtifact(objectPath, artifactPath, targetTriple,
+                NativeArtifactKind.SharedLibrary,
+                new NativeLinkOptions(
+                    ExportedSymbols: NativeExceptionRuntime.ExportedSymbols,
+                    LinkCxxRuntime: true),
+                importLibraryPath);
+        }
+        finally
+        {
+            DeleteIfExists(sourcePath);
+            DeleteIfExists(objectPath);
+        }
+    }
+
     private LinkedNativeArtifact CreateArtifact(
         string objectFilePath,
         string outputPath,
@@ -102,11 +139,26 @@ public sealed class NativeLinker
                 ? CreateTemporaryPath(finalImportLibraryPath)
                 : Path.Combine(temporaryDirectory, Path.GetFileName(finalImportLibraryPath));
 
-        LinkerCommand command = CreateHostCommand(
-            objectPath, temporaryPath, artifactPath, targetTriple, kind, options, temporaryImportLibraryPath);
         NativeProcessResult? processResult = null;
         try
         {
+            if (options.RequiresExceptionRuntime && kind is not NativeArtifactKind.StaticLibrary &&
+                string.IsNullOrWhiteSpace(options.ExceptionRuntimeLibrary))
+            {
+                throw new LinkerException(
+                    "exception-capable executables and shared libraries require the process-wide " +
+                    "exception runtime library produced by LinkExceptionRuntimeLibrary");
+            }
+            else if (options.RequiresExceptionRuntime && kind is not NativeArtifactKind.StaticLibrary)
+            {
+                options = options with
+                {
+                    Libraries = (options.Libraries ?? [])
+                        .Append(options.ExceptionRuntimeLibrary!).ToArray(),
+                };
+            }
+            LinkerCommand command = CreateHostCommand(
+                objectPath, temporaryPath, artifactPath, targetTriple, kind, options, temporaryImportLibraryPath);
             // Preserve existing callers' relative native-library semantics. The build driver supplies its project root.
             processResult = RunTool(command, _workingDirectory ?? Directory.GetCurrentDirectory());
             EnsureProduced(temporaryPath, kind.ToString().ToLowerInvariant());
@@ -149,6 +201,28 @@ public sealed class NativeLinker
             if (temporaryDirectory is not null && Directory.Exists(temporaryDirectory))
                 Directory.Delete(temporaryDirectory, recursive: false);
         }
+    }
+
+    private static LinkerCommand CreateExceptionRuntimeCompileCommand(
+        string sourcePath,
+        string objectPath,
+        string targetTriple)
+    {
+        EnsureHostTarget(targetTriple);
+        if (OperatingSystem.IsWindows())
+        {
+            WindowsToolchain toolchain = DiscoverWindowsToolchain(GetMsvcArchitecture(targetTriple));
+            return new LinkerCommand(toolchain.CompilerPath,
+                ["/nologo", "/c", "/EHsc", "/std:c++17", "/O2",
+                    .. toolchain.IncludeDirectories.Select(path => $"/I{path}"),
+                    $"/Fo{objectPath}", sourcePath]);
+        }
+        string? compiler = FindExecutableOnPath(
+            Environment.GetEnvironmentVariable("CXX"), "clang++", "c++", "g++");
+        if (compiler is null)
+            throw new LinkerException("no host C++ compiler was found for the Xenon exception runtime");
+        return new LinkerCommand(compiler,
+            ["-std=c++17", "-fexceptions", "-fPIC", "-O2", "-c", sourcePath, "-o", objectPath]);
     }
 
     private static LinkerCommand CreateHostCommand(
@@ -258,11 +332,15 @@ public sealed class NativeLinker
         NativeArtifactKind kind,
         NativeLinkOptions options)
     {
-        string? linker = FindExecutableOnPath(
-            Environment.GetEnvironmentVariable("CC"), "clang", "cc", "gcc");
+        bool useCxxLinker = options.RequiresExceptionRuntime || options.LinkCxxRuntime;
+        string? linker = useCxxLinker
+            ? FindExecutableOnPath(Environment.GetEnvironmentVariable("CXX"), "clang++", "c++", "g++")
+            : FindExecutableOnPath(Environment.GetEnvironmentVariable("CC"), "clang", "cc", "gcc");
         if (linker is null)
         {
-            throw new LinkerException("no host C linker driver was found; install clang or gcc, or set CC");
+            throw new LinkerException(useCxxLinker
+                ? "no host C++ linker driver was found; install clang++ or g++, or set CXX"
+                : "no host C linker driver was found; install clang or gcc, or set CC");
         }
 
         var arguments = new List<string>();
@@ -281,6 +359,12 @@ public sealed class NativeLinker
             {
                 arguments.Add($"-Wl,-install_name,@rpath/{Path.GetFileName(finalOutputPath)}");
             }
+        }
+        else
+        {
+            arguments.Add("-Wl,-rpath,$ORIGIN");
+            if (kind is NativeArtifactKind.SharedLibrary)
+                arguments.Add($"-Wl,-soname,{Path.GetFileName(finalOutputPath)}");
         }
 
         arguments.Add(objectPath);
@@ -393,15 +477,19 @@ public sealed class NativeLinker
                     continue;
                 }
 
-                (string ucrt, string sdk) = DiscoverWindowsSdkLibraries(architecture);
-                return new WindowsToolchain(linkerPath, librarianPath, libraryDirectory, ucrt, sdk);
+                (string ucrt, string sdk, string[] sdkIncludes) = DiscoverWindowsSdkLibraries(architecture);
+                string compilerPath = Path.Combine(toolDirectory, "cl.exe");
+                if (!File.Exists(compilerPath)) continue;
+                return new WindowsToolchain(linkerPath, librarianPath, compilerPath,
+                    libraryDirectory, ucrt, sdk,
+                    [Path.Combine(toolsRoot, "include"), .. sdkIncludes]);
             }
         }
 
         throw new LinkerException("MSVC linker was not found; install the Visual Studio C++ build tools workload");
     }
 
-    private static (string UniversalCrt, string WindowsSdk) DiscoverWindowsSdkLibraries(string architecture)
+    private static (string UniversalCrt, string WindowsSdk, string[] Includes) DiscoverWindowsSdkLibraries(string architecture)
     {
         string windowsKitsRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Windows Kits", "10", "Lib");
@@ -418,7 +506,13 @@ public sealed class NativeLinker
             if (File.Exists(Path.Combine(universalCrt, "libucrt.lib")) &&
                 File.Exists(Path.Combine(windowsSdk, "kernel32.lib")))
             {
-                return (universalCrt, windowsSdk);
+                string includeRoot = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                    "Windows Kits", "10", "Include", Path.GetFileName(versionDirectory));
+                string[] includes = new[] { "ucrt", "shared", "um", "winrt" }
+                    .Select(name => Path.Combine(includeRoot, name))
+                    .Where(Directory.Exists).ToArray();
+                return (universalCrt, windowsSdk, includes);
             }
         }
 
@@ -525,7 +619,9 @@ public sealed class NativeLinker
     private sealed record WindowsToolchain(
         string LinkerPath,
         string LibrarianPath,
+        string CompilerPath,
         string VisualCppLibraryDirectory,
         string UniversalCrtLibraryDirectory,
-        string WindowsSdkLibraryDirectory);
+        string WindowsSdkLibraryDirectory,
+        IReadOnlyList<string> IncludeDirectories);
 }

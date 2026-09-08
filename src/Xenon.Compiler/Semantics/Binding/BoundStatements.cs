@@ -12,21 +12,44 @@ public sealed record BoundSwitchStatement(
 
 public sealed record BoundSwitchSection(BoundExpression? Value, BoundBlockStatement Body);
 
+public sealed record BoundTryStatement(
+    BoundBlockStatement Body,
+    ImmutableArray<BoundCatchClause> Catches,
+    BoundBlockStatement? FinallyBody) : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.TryStatement;
+}
+
+public sealed record BoundCatchClause(
+    TypeSymbol? Type,
+    LocalVariableSymbol? Variable,
+    BoundBlockStatement Body)
+{
+    public bool IsCatchAll => Type is null;
+}
+
+public sealed record BoundThrowStatement(BoundExpression? Expression) : BoundStatement
+{
+    public bool IsRethrow => Expression is null;
+    public override BoundKind Kind => BoundKind.ThrowStatement;
+}
+
 public static class BoundControlFlow
 {
     public static bool AlwaysReturns(BoundStatement statement) => statement switch
     {
-        BoundReturnStatement => true,
+        BoundReturnStatement or BoundThrowStatement => true,
         BoundBlockStatement block => BlockReturns(block),
         BoundIfStatement { ElseStatement: not null } conditional => AlwaysReturns(conditional.ThenStatement) && AlwaysReturns(conditional.ElseStatement),
         BoundSwitchStatement selection => selection.Sections.Any(section => section.Value is null) &&
             selection.Sections.All(section => section.Body.Statements.IsEmpty || AlwaysReturns(section.Body)),
+        BoundTryStatement @try => TryAlwaysReturns(@try),
         _ => false,
     };
 
     public static bool TerminatesSection(BoundStatement statement) => statement switch
     {
-        BoundBreakStatement or BoundReturnStatement or BoundContinueStatement => true,
+        BoundBreakStatement or BoundReturnStatement or BoundContinueStatement or BoundThrowStatement => true,
         BoundBlockStatement block => block.Statements.Any(TerminatesSection),
         BoundIfStatement { ElseStatement: not null } conditional => TerminatesSection(conditional.ThenStatement) && TerminatesSection(conditional.ElseStatement),
         _ => AlwaysReturns(statement),
@@ -40,6 +63,13 @@ public static class BoundControlFlow
             if (TerminatesSection(statement)) return false;
         }
         return false;
+    }
+
+    private static bool TryAlwaysReturns(BoundTryStatement statement)
+    {
+        if (statement.FinallyBody is not null && AlwaysReturns(statement.FinallyBody)) return true;
+        return AlwaysReturns(statement.Body) &&
+            statement.Catches.All(@catch => AlwaysReturns(@catch.Body));
     }
 }
 
