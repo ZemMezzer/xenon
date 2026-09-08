@@ -1522,9 +1522,9 @@ public sealed class LlvmIrGenerator
             landing.AddClause(LLVMValueRef.CreateConstPointerNull(pointer));
             LLVMValueRef nativeException = builder.BuildExtractValue(landing, 0, "native.exception");
             LLVMTypeRef beginType = LLVMTypeRef.CreateFunction(pointer, [pointer], false);
-            LLVMValueRef begin = function.GlobalParent.AddFunction("__cxa_begin_catch", beginType);
+            LLVMValueRef begin = GetOrAddFunction(function.GlobalParent, "__cxa_begin_catch", beginType);
             LLVMTypeRef endType = LLVMTypeRef.CreateFunction(_context.VoidType, [], false);
-            LLVMValueRef end = function.GlobalParent.AddFunction("__cxa_end_catch", endType);
+            LLVMValueRef end = GetOrAddFunction(function.GlobalParent, "__cxa_end_catch", endType);
             builder.BuildCall2(beginType, begin, new[] { nativeException }, string.Empty);
             builder.BuildCall2(endType, end, Array.Empty<LLVMValueRef>(), string.Empty);
             builder.BuildBr(terminate);
@@ -1543,6 +1543,12 @@ public sealed class LlvmIrGenerator
         return existing.Handle != IntPtr.Zero
             ? existing
             : module.AddFunction(name, LLVMTypeRef.CreateFunction(_context.Int32Type, [], true));
+    }
+
+    private static LLVMValueRef GetOrAddFunction(LLVMModuleRef module, string name, LLVMTypeRef type)
+    {
+        LLVMValueRef existing = module.GetNamedFunction(name);
+        return existing.Handle != IntPtr.Zero ? existing : module.AddFunction(name, type);
     }
 
     private void EmitFunctionBodies(ImmutableArray<BoundFunction> functions)
@@ -2931,9 +2937,9 @@ public sealed class LlvmIrGenerator
                 landing.AddClause(LLVMValueRef.CreateConstPointerNull(pointer));
                 LLVMValueRef nativeException = _builder.BuildExtractValue(landing, 0, "native.exception");
                 LLVMTypeRef beginType = LLVMTypeRef.CreateFunction(pointer, [pointer], false);
-                LLVMValueRef begin = _llvmFunction.GlobalParent.AddFunction("__cxa_begin_catch", beginType);
+                LLVMValueRef begin = GetOrAddFunction("__cxa_begin_catch", beginType);
                 LLVMTypeRef endType = LLVMTypeRef.CreateFunction(_context.VoidType, [], false);
-                LLVMValueRef end = _llvmFunction.GlobalParent.AddFunction("__cxa_end_catch", endType);
+                LLVMValueRef end = GetOrAddFunction("__cxa_end_catch", endType);
                 _builder.BuildCall2(beginType, begin, new[] { nativeException }, string.Empty);
                 _builder.BuildCall2(endType, end, Array.Empty<LLVMValueRef>(), string.Empty);
                 _builder.BuildBr(continuation);
@@ -2950,6 +2956,13 @@ public sealed class LlvmIrGenerator
             return existing.Handle != IntPtr.Zero
                 ? existing
                 : module.AddFunction(name, LLVMTypeRef.CreateFunction(_context.Int32Type, [], true));
+        }
+
+        private LLVMValueRef GetOrAddFunction(string name, LLVMTypeRef type)
+        {
+            LLVMModuleRef module = _llvmFunction.GlobalParent;
+            LLVMValueRef existing = module.GetNamedFunction(name);
+            return existing.Handle != IntPtr.Zero ? existing : module.AddFunction(name, type);
         }
 
         private void EmitCleanupAndFinalizersForException(
