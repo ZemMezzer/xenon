@@ -30,6 +30,12 @@ public static class NativeSymbolNames
     {
         ArgumentNullException.ThrowIfNull(function);
 
+        if (function.OperatorKind is { } kind && kind != OperatorKind.Invalid)
+        {
+            string operatorSignature = TypeSignature.Callable(function);
+            return $"{function.ContainingType!.FullName}.__operator.{OperatorFacts.GetNativeName(kind)}.__overload_{Convert.ToHexString(Encoding.UTF8.GetBytes(operatorSignature))}";
+        }
+
         if (function.IsExtern)
         {
             return function.Name;

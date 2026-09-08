@@ -1,0 +1,54 @@
+namespace UserDefinedOperators;
+struct Number
+{
+    public int Value;
+    public static Number operator implicit(int value) { return Number { value }; }
+    public static int operator explicit(readonly Number& value) { return value.Value; }
+    public static Number operator +(readonly Number& a, readonly Number& b) { return Number { a.Value + b.Value }; }
+    public static Number operator -(readonly Number& a) { return Number { -a.Value }; }
+    public static bool operator ==(readonly Number& a, readonly Number& b) { return a.Value % 2 == b.Value % 2; }
+    public static bool operator !=(readonly Number& a, readonly Number& b) { return !(a == b); }
+}
+struct Text
+{
+    public readonly byte* Raw;
+    public static Text operator implicit(readonly byte* value) { return Text { value }; }
+    public static Text operator +(readonly Text& a, readonly Text& b) { return Text { b.Raw }; }
+    public static bool operator ==(readonly Text& a, readonly Text& b) { return *a.Raw == *b.Raw; }
+}
+struct Probe
+{
+    public static int Receivers;
+    public static int Indices;
+    public static int Values;
+    public Number Stored;
+    public Number this[int index] { get { return Stored; } set { Stored = value; } }
+    public Number Property { get { return Stored; } set { Stored = value; } }
+    public static Probe* Get(Probe* value) { Probe.Receivers += 1; return value; }
+    public static int Index() { Probe.Indices += 1; return 0; }
+    public static Number Delta() { Probe.Values += 1; return 3; }
+}
+int Pick(readonly byte* raw) { return 1; }
+int Pick(Text text) { return 2; }
+int Main()
+{
+    Number n = 2;
+    n += 3;
+    if (cast<int>(n) != 5 || cast<int>(-n) != -5) return 1;
+    Number seven = 7;
+    if (!(n == seven) || n != seven) return 2;
+    Text text = "Mira";
+    Text greeting = "Hello " + text;
+    if (!(greeting == "M") || Pick("raw") != 1) return 3;
+    Probe probe = Probe { n };
+    Probe.Get(&probe)->Property += Probe.Delta();
+    if (Probe.Receivers != 1 || Probe.Values != 1 || cast<int>(probe.Stored) != 8) return 4;
+    probe[Probe.Index()] += Probe.Delta();
+    if (Probe.Indices != 1 || Probe.Values != 2 || cast<int>(probe.Stored) != 11) return 5;
+    Number[] values = new Number[1];
+    values[0] = 10;
+    values[Probe.Index()] += Probe.Delta();
+    if (Probe.Indices != 2 || Probe.Values != 3 || cast<int>(values[0]) != 13) return 6;
+    free(values);
+    return 42;
+}

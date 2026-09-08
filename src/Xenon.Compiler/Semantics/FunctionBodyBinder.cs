@@ -8,7 +8,7 @@ using Xenon.Compiler.Text;
 
 namespace Xenon.Compiler.Semantics;
 
-internal sealed class FunctionBodyBinder
+internal sealed partial class FunctionBodyBinder
 {
     private readonly FunctionSymbol _function;
     private readonly FileSymbolScope _fileScope;
@@ -18,6 +18,7 @@ internal sealed class FunctionBodyBinder
     private readonly CancellationToken _cancellationToken;
     private readonly GenericFunctionSpecializer? _genericSpecializer;
     private readonly Dictionary<BoundExpression, TextLocation> _expressionLocations = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<BoundExpression, ExpressionSyntax> _expressionSyntax = new(ReferenceEqualityComparer.Instance);
     internal IReadOnlyDictionary<BoundExpression, TextLocation> ExpressionLocations => _expressionLocations;
     private readonly HashSet<VariableSymbol> _definitelyAssigned = [];
     private readonly HashSet<VariableSymbol> _possiblyAssignedConstructorFields = [];
@@ -2294,6 +2295,7 @@ internal sealed class FunctionBodyBinder
             _semanticInfo.Symbols.TryAdd(syntax, new SymbolInfo(null, [],
                 syntax is MissingExpressionSyntax ? CandidateReason.Incomplete : CandidateReason.NotFound));
         _expressionLocations[expression] = GetLocation(syntax);
+        _expressionSyntax[expression] = syntax;
         if (expression is BoundThisExpression && !ReferenceEquals(syntax, _fieldReceiverSyntax))
             ValidateRequiredFields(GetLocation(syntax));
         if (!IsInitializationTargetSyntax(syntax) && expression is BoundMemberAccessExpression { Receiver: BoundThisExpression } fieldRead &&
@@ -2313,6 +2315,7 @@ internal sealed class FunctionBodyBinder
             ValidateBorrowedPlaceRead(borrowPlace, borrowAlias, GetLocation(syntax));
         BoundExpression result = DereferenceReference(expression);
         _expressionLocations[result] = GetLocation(syntax);
+        _expressionSyntax[result] = syntax;
         _semanticInfo.Receivers[syntax] = new ReceiverInfo(
             result.Type,
             IsStatic: false,
@@ -2527,6 +2530,8 @@ internal sealed class FunctionBodyBinder
             TryBindFunctionAddress(syntax.Operand, out BoundExpression? functionAddress))
             return functionAddress!;
         BoundExpression operand = BindExpression(syntax.Operand);
+        if (TryBindUserOperator(syntax.OperatorToken.Kind, [operand], [syntax.Operand], syntax,
+            syntax.OperatorToken.Location, out BoundExpression? userOperator)) return userOperator!;
         return BindUnaryExpression(syntax.OperatorToken, operand, isPostfix: false);
     }
 
@@ -4001,7 +4006,22 @@ internal sealed class FunctionBodyBinder
 
     private BoundExpression BindBinaryExpression(BinaryExpressionSyntax syntax)
     {
+        if (syntax.OperatorToken.Kind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken)
+            return BindBinaryExpressionCore(syntax, null);
+        var transaction = new ArgumentFlowTransaction();
+        _argumentFlowTransactions.Push(transaction);
+        try { return BindBinaryExpressionCore(syntax, transaction); }
+        finally
+        {
+            _argumentFlowTransactions.Pop();
+            _completedArgumentFlowTransactions.Add(transaction);
+        }
+    }
+
+    private BoundExpression BindBinaryExpressionCore(BinaryExpressionSyntax syntax, ArgumentFlowTransaction? transaction)
+    {
         BoundExpression left = ReadAtomicValue(BindExpression(syntax.Left));
+        transaction?.AcceptArgument(left);
         bool shortCircuit = syntax.OperatorToken.Kind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken;
         var leftFlow = shortCircuit ? BooleanFlow(left) : default;
         bool isAnd = syntax.OperatorToken.Kind == SyntaxKind.AmpersandAmpersandToken;
@@ -4015,6 +4035,7 @@ internal sealed class FunctionBodyBinder
         BoundExpression right;
         try { right = ReadAtomicValue(BindExpression(syntax.Right)); }
         finally { _suppressIntegerOperationDiagnostics = previousSuppression; }
+        transaction?.AcceptArgument(right);
 
         var rightFlow = shortCircuit ? BooleanFlow(right) : default;
         (ExpressionFlow? True, ExpressionFlow? False) resultFlow = default;
@@ -4040,6 +4061,9 @@ internal sealed class FunctionBodyBinder
             }
         }
 
+        if (!shortCircuit && TryBindUserOperator(syntax.OperatorToken.Kind, [left, right],
+            [syntax.Left, syntax.Right], syntax, syntax.OperatorToken.Location, out BoundExpression? userOperator))
+            return userOperator!;
         TypeSymbol? resultType = GetBinaryResultType(left.Type, syntax.OperatorToken.Kind, right.Type);
 
         if (resultType is null)
@@ -4201,6 +4225,19 @@ internal sealed class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         target = effectiveTarget;
+        BoundExpression? compoundExpression = isSimpleAssignment ? null : ReadAtomicValue(BindExpressionWithExpectedType(
+            syntax.Expression, target.Type is AtomicTypeSymbol targetAtomic ? targetAtomic.ElementType : target.Type));
+        bool capturesTarget = false;
+        if (!isSimpleAssignment && target.Type is not AtomicTypeSymbol &&
+            TryBindUserOperator(GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind),
+                [target, compoundExpression!], [syntax.Target, syntax.Expression], syntax,
+                syntax.OperatorToken.Location, out BoundExpression? compoundResult))
+        {
+            compoundExpression = CaptureOperatorOperand(DereferenceReference(compoundResult!), target);
+            capturesTarget = true;
+            isSimpleAssignment = true;
+            RecordExceptionalFlow();
+        }
         bool strongReceiverReplacement = isSimpleAssignment &&
             _function.FunctionKind is FunctionKind.Method or FunctionKind.Destructor &&
             GetThisMemberDepth(target) > 0 &&
@@ -4227,7 +4264,7 @@ internal sealed class FunctionBodyBinder
             _diagnostics.Report(GetLocation(syntax.Target),
                 $"cannot reassign possibly moved place '{assignedPlace!.DisplayName}' because this indirect or receiver field has no runtime lifetime flag; reinitialize it separately on each control-flow path",
                 DiagnosticIds.ConditionalMoveReinitializationNotTracked);
-        BoundExpression expression = ReadAtomicValue(BindExpressionWithExpectedType(
+        BoundExpression expression = compoundExpression ?? ReadAtomicValue(BindExpressionWithExpectedType(
             syntax.Expression, assignmentValueType));
         if (atomicTarget is not null && !AtomicTypeRules.SupportsOperations(atomicTarget.ElementType))
         {
@@ -4375,8 +4412,9 @@ internal sealed class FunctionBodyBinder
         }
         if (isSimpleAssignment) MarkConstructorFieldAssigned(target);
 
-        return new BoundAssignmentExpression(target, syntax.OperatorToken.Kind, expression)
+        return new BoundAssignmentExpression(target, capturesTarget ? SyntaxKind.EqualsToken : syntax.OperatorToken.Kind, expression)
         {
+            CapturesTarget = capturesTarget,
             IsInitialization = initializesField || initializesAtomicLocal,
             MovedPlaceReinitialization = movedPlaceReinitialization,
             ConstructorField = isSimpleAssignment && fieldTarget is not null &&
@@ -5215,6 +5253,8 @@ internal sealed class FunctionBodyBinder
         BoundExpression expression = BindExpression(syntax.Expression);
         if (!TypeFacts.CanExplicitlyCast(targetType, expression.Type))
         {
+            if (TryBindUserConversion(expression, targetType, syntax.CastKeyword.Location,
+                explicitContext: true, out BoundExpression? conversion, syntax)) return conversion!;
             if (!TypeIdentity.AreSame(targetType, BuiltinTypes.Error) && !TypeIdentity.AreSame(expression.Type, BuiltinTypes.Error))
                 _diagnostics.Report(syntax.CastKeyword.Location, $"cast from '{expression.Type.ToDisplayString()}' to '{targetType.Name}' is not a valid primitive cast",
                     DiagnosticIds.InvalidCast);
@@ -5471,6 +5511,18 @@ internal sealed class FunctionBodyBinder
             GetLocation(syntax.Target));
         BoundExpression value = BindExpression(syntax.Expression);
         SyntaxKind binaryOperator = GetBinaryOperatorForCompoundAssignment(syntax.OperatorToken.Kind);
+        var current = new BoundMethodCallExpression(receiver, getter, arguments, isPointerAccess);
+        if (TryBindUserOperator(binaryOperator, [current, value], [syntax.Target, syntax.Expression], syntax,
+            syntax.OperatorToken.Location, out BoundExpression? compoundResult))
+        {
+            BoundExpression converted = ContextualizeConversion(DereferenceReference(compoundResult!), getter.ReturnType,
+                syntax.OperatorToken.Location);
+            if (!TypeFacts.CanAssign(getter.ReturnType, converted.Type))
+                ReportCannotConvert(syntax.OperatorToken.Location, converted.Type, getter.ReturnType);
+            return new BoundCompoundAccessorAssignmentExpression(receiver, getter, setter, arguments,
+                binaryOperator, CaptureOperatorOperand(converted, current), isPointerAccess, interfaceType)
+                { UsesUserOperator = true };
+        }
         ValidateIntegerOperation(new BoundMethodCallExpression(receiver, getter, arguments, isPointerAccess),
             binaryOperator, value, syntax.OperatorToken.Location);
         TypeSymbol? resultType = GetBinaryResultType(getter.ReturnType, binaryOperator, value.Type);
@@ -6141,6 +6193,9 @@ internal sealed class FunctionBodyBinder
                 $"constructor '{structure.Name}' is private", DiagnosticIds.InaccessibleSymbol);
         arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments,
             name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
+        if (structure is { IsOpenGenericType: true, GenericDefinition: { } genericDefinition })
+            return new BoundDeferredGenericOperationExpression(BoundDeferredGenericOperationKind.Construction,
+                null, genericDefinition, arguments, null, SyntaxKind.EqualsToken, false, structure);
         return new BoundConstructorCallExpression(structure, constructor, arguments);
     }
 
@@ -7343,26 +7398,26 @@ internal sealed class FunctionBodyBinder
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
-            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType, GetLocation(argumentSyntax[index]));
+            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType, (argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])));
             convertedArguments[index] = argument;
-            SetConvertedType(argumentSyntax[index], argument.Type);
+            if (!argumentSyntax.IsEmpty) SetConvertedType(argumentSyntax[index], argument.Type);
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
-                _diagnostics.Report(GetLocation(argumentSyntax[index]), "stack array cannot be passed to another function",
+                _diagnostics.Report((argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])), "stack array cannot be passed to another function",
                     DiagnosticIds.StackArrayPassedAsArgument);
             }
 
             if (!TypeFacts.CanAssign(parameterType, argument.Type))
             {
-                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
+                ReportCannotConvert((argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])), argument.Type, parameterType);
             }
 
             if (parameterType is ReferenceTypeSymbol parameterReference &&
                 TryGetBorrowPlace(argument, out BorrowPlace argumentPlace,
                     out LocalVariableSymbol? argumentAlias))
             {
-                TextLocation argumentLocation = GetLocation(argumentSyntax[index]);
+                TextLocation argumentLocation = (argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index]));
                 ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly,
                     argumentAlias, argumentLocation);
                 if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, argumentPlace) &&
@@ -7566,7 +7621,14 @@ internal sealed class FunctionBodyBinder
         return strictlyBetter;
     }
 
-    private static int? GetArgumentConversionCost(TypeSymbol parameterType, BoundExpression argument)
+    private int? GetArgumentConversionCost(TypeSymbol parameterType, BoundExpression argument)
+    {
+        int? standard = GetStandardArgumentConversionCost(parameterType, argument);
+        if (standard is not null || _userConversionDepth != 0) return standard;
+        return FindUserConversions(argument, parameterType, explicitContext: false).Length != 0 ? int.MaxValue - 1 : null;
+    }
+
+    private static int? GetStandardArgumentConversionCost(TypeSymbol parameterType, BoundExpression argument)
     {
         int? standardCost = TypeFacts.GetImplicitConversionCost(parameterType, argument.Type);
         if (standardCost is not null)
@@ -7606,6 +7668,10 @@ internal sealed class FunctionBodyBinder
         TypeSymbol targetType,
         TextLocation copyLocation)
     {
+        if (_userConversionDepth == 0 && GetStandardArgumentConversionCost(targetType, expression) is null &&
+            TryBindUserConversion(expression, targetType, copyLocation, explicitContext: false,
+                out BoundExpression? conversion))
+            return conversion!;
         if (targetType is UniqueTypeSymbol uniqueType)
         {
             ValidateDestructorAccessibility(uniqueType, copyLocation);
@@ -8003,6 +8069,9 @@ internal sealed class FunctionBodyBinder
             case BoundCallExpression call:
                 TransferAll(call.Arguments);
                 break;
+            case BoundDeferredGenericOperationExpression { Operation: BoundDeferredGenericOperationKind.OperatorCall } call:
+                TransferAll(call.Arguments);
+                break;
             case BoundIndirectCallExpression call:
                 Visit(call.Target);
                 TransferAll(call.Arguments);
@@ -8108,6 +8177,7 @@ internal sealed class FunctionBodyBinder
         };
 
     private static bool IsTemporaryValue(BoundExpression expression) => expression is
+        BoundCapturedPlaceExpression { OwnsValue: true } or
         BoundMoveExpression or
         BoundCopyExpression or
         BoundUniqueAdoptionExpression or
@@ -8115,6 +8185,7 @@ internal sealed class FunctionBodyBinder
         BoundWeakConversionExpression or
         BoundLockExpression or
         BoundCallExpression or
+        BoundDeferredGenericOperationExpression { Operation: BoundDeferredGenericOperationKind.OperatorCall } or
         BoundIndirectCallExpression or
         BoundMethodCallExpression or
         BoundInterfaceMethodCallExpression or

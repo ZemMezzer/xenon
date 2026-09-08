@@ -35,6 +35,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private readonly HashSet<(TextLocation Location, string Message)> _reported = [];
     private readonly HashSet<StructTypeSymbol> _initializing = [];
     private object? _initializerReceiver;
+    private readonly Stack<HashSet<object>> _capturedPlaces = [];
     private TextLocation _location = fallbackLocation;
 
     public void Analyze(BoundBlockStatement body)
@@ -70,6 +71,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     {
         switch (expression)
         {
+            case BoundCapturedPlaceExpression captured:
+                return Read(CapturedAddress(captured), captured.Type);
             case BoundErrorExpression or BoundTypeLayoutExpression or BoundDeferredConstantExpression:
                 return [];
             case BoundLiteralExpression literal:
@@ -182,7 +185,9 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             {
                 HashSet<object> target = Address(assignment.Target);
                 HashSet<object> current = assignment.OperatorKind == SyntaxKind.EqualsToken ? [] : Read(target, assignment.Target.Type);
-                HashSet<object> value = Capture(Evaluate(assignment.Expression), assignment.Expression.Type, assignment);
+                HashSet<object> value = Capture(assignment.CapturesTarget
+                    ? EvaluateCaptured(assignment.Expression, target) : Evaluate(assignment.Expression),
+                    assignment.Expression.Type, assignment);
                 if (assignment.OperatorKind != SyntaxKind.EqualsToken)
                 {
                     value.UnionWith(current);
@@ -259,7 +264,12 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 if (set.InterfaceType is { } interfaceType) targetReceiver = InterfaceReceiver(targetReceiver, interfaceType, out interfaceTypes);
                 HashSet<object>[] arguments = EvaluateArguments(set.Arguments);
                 HashSet<object> value = InvokeMember(set.Getter, arguments, targetReceiver, set, interfaceTypes);
-                value.UnionWith(Evaluate(set.Value));
+                if (set.UsesUserOperator)
+                {
+                    StoreValue([Root(set)], value, set.Type);
+                    value = EvaluateCaptured(set.Value, [Root(set)]);
+                }
+                else value.UnionWith(Evaluate(set.Value));
                 return InvokeMember(set.Setter, [.. arguments, value], targetReceiver, set, interfaceTypes);
             }
             case BoundConstructorCallExpression construction:
@@ -347,10 +357,27 @@ internal sealed partial class ReadonlyEffectAnalyzer(
         }
     }
 
+    private HashSet<object> EvaluateCaptured(BoundExpression expression, HashSet<object> address)
+    {
+        _capturedPlaces.Push(address);
+        try { return Evaluate(expression); }
+        finally { _capturedPlaces.Pop(); }
+    }
+
+    private HashSet<object> CapturedAddress(BoundCapturedPlaceExpression captured)
+    {
+        HashSet<object> address = _capturedPlaces.Peek();
+        if (!captured.OwnsValue) return address;
+        StoreValue([Root(captured)], Read(address, captured.Type), captured.Type);
+        return [Root(captured)];
+    }
+
     private HashSet<object> Address(BoundExpression expression)
     {
         switch (expression)
         {
+            case BoundCapturedPlaceExpression captured:
+                return CapturedAddress(captured);
             case BoundThisExpression:
                 return Evaluate(expression);
             case BoundVariableExpression variable:

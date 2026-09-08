@@ -561,6 +561,44 @@ public sealed class CoreIntelligenceTests
             .GetProperty("start").GetProperty("line").GetInt32());
     }
 
+    [Fact]
+    public async Task OperatorExpressionsAndConversionLiteralsNavigateToDeclarations()
+    {
+        const string source = """
+            namespace Example;
+            struct Number
+            {
+                public static Number operator implicit(int value) { return Number(); }
+                public static Number operator +(readonly Number& a, readonly Number& b) { return Number(); }
+            }
+            void Use() { Number a = 1; Number b = a + a; }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("operators.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+        int operation = source.LastIndexOf('+');
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, operation);
+        Assert.Contains("operator +", hover.GetProperty("contents").GetProperty("value").GetString());
+        JsonElement definition = await RequestAtAsync(session, "textDocument/definition", uri, source, operation);
+        Assert.Equal(4, Assert.Single(definition.EnumerateArray()).GetProperty("range").GetProperty("start").GetProperty("line").GetInt32());
+        JsonElement references = await RequestAtAsync(session, "textDocument/references", uri, source,
+            operation, new { includeDeclaration = true });
+        Assert.Equal(2, references.GetArrayLength());
+        int literal = source.LastIndexOf("1;", StringComparison.Ordinal);
+        JsonElement conversion = await RequestAtAsync(session, "textDocument/definition", uri, source, literal);
+        Assert.Equal(3, Assert.Single(conversion.EnumerateArray()).GetProperty("range").GetProperty("start").GetProperty("line").GetInt32());
+        await Assert.ThrowsAsync<JsonRpcException>(() =>
+            RequestAtAsync(session, "textDocument/prepareRename", uri, source, operation));
+    }
+
     private static async Task<JsonElement> RequestAtAsync(LanguageServerSession session, string method,
         string uri, string source, int offset, object? context = null, string? newName = null)
     {

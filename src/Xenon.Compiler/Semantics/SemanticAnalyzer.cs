@@ -40,6 +40,7 @@ internal sealed class SemanticAnalyzer
     private readonly GenericImplementationStoreBuilder _genericImplementations;
     private readonly GenericStructImplementationServices _genericImplementationServices;
     private GenericStructSpecializer? _genericStructSpecializer;
+    private readonly HashSet<(FunctionSymbol, FunctionSymbol)> _reportedConversionConflicts = [];
 
     private SemanticAnalyzer(ImmutableArray<SyntaxTree> syntaxTrees, TypeFactory typeFactory,
         ImmutableArray<NamespaceSymbol> referencedNamespaces,
@@ -114,6 +115,7 @@ internal sealed class SemanticAnalyzer
         BuildVirtualMethodTables();
         ValidateInterfaceImplementations();
         _genericStructSpecializer!.CompleteMembers();
+        ValidateConversionPairs();
         DeclareFunctions();
         ValidateDeclaredAccessibility();
         ValidateAbstractValueStorage();
@@ -158,6 +160,7 @@ internal sealed class SemanticAnalyzer
         }
         StabilizeCallableSummaries();
         BindSpecializedStructFunctions(functions, genericSpecializer);
+        ValidateConversionPairs();
         ValidateCallableMoveEffects();
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
@@ -2556,11 +2559,14 @@ internal sealed class SemanticAnalyzer
                     scope);
 
                 var method = new FunctionSymbol(
-                    methodSyntax.IdentifierToken.Text,
+                    methodSyntax.IsOperator ? "operator " + methodSyntax.IdentifierToken.Text : methodSyntax.IdentifierToken.Text,
                     type,
                     returnType,
                     parameters,
                     methodSyntax);
+
+                if (method.IsOperator)
+                    ValidateOperatorDeclaration(method, methodSyntax, methods);
 
                 FunctionSymbol? duplicate = methods.FirstOrDefault(candidate =>
                     candidate.HasSameOverloadSignature(method));
@@ -2582,6 +2588,75 @@ internal sealed class SemanticAnalyzer
             }
 
             type.SetMethods(methods.ToImmutable());
+        }
+    }
+
+    private void ValidateOperatorDeclaration(FunctionSymbol method, MethodDeclarationSyntax syntax,
+        IEnumerable<FunctionSymbol> previous)
+    {
+        string? error = null;
+        bool IsOwner(TypeSymbol operand) => OperatorFacts.ValueType(operand) is StructTypeSymbol structure &&
+            (TypeIdentity.AreSame(structure, method.ContainingStruct) ||
+             ReferenceEquals(structure.GenericDefinition, method.ContainingStruct) &&
+             structure.TypeArguments.Length == method.ContainingStruct!.TypeParameters.Length &&
+             structure.TypeArguments.Zip(method.ContainingStruct.TypeParameters)
+                 .All(pair => TypeIdentity.AreSame(pair.First, pair.Second)));
+        if (!method.IsStatic) error = "operator declarations must be static";
+        else if (!OperatorFacts.IsAllowed(method.OperatorKind!.Value, method.Parameters.Length))
+            error = $"operator '{syntax.IdentifierToken.Text}' cannot be overloaded with {method.Parameters.Length} parameter(s)";
+        else if (method.IsVirtual || method.IsOverride || method.IsAbstract)
+            error = "operator declarations cannot have instance method modifiers";
+        else if (method.IsConversionOperator)
+        {
+            TypeSymbol source = OperatorFacts.ValueType(method.Parameters[0].Type);
+            if (method.ReturnType is ReferenceTypeSymbol)
+                error = "user-defined conversion to a reference is not supported";
+            else if (method.OperatorKind == OperatorKind.ImplicitConversion && method.ReturnType is PointerTypeSymbol or FunctionPointerTypeSymbol)
+                error = "an implicit user-defined conversion cannot produce a raw pointer, reference, or function pointer";
+            else if (TypeIdentity.AreSame(source, method.ReturnType))
+                error = "a conversion source and destination must differ";
+            else if (!IsOwner(source) && !IsOwner(method.ReturnType))
+                error = "a conversion must be declared in its source or destination struct";
+            else if (previous.Any(candidate => candidate.IsConversionOperator && candidate.Parameters.Length == 1 &&
+                TypeIdentity.AreSame(candidate.ReturnType, method.ReturnType) &&
+                TypeIdentity.AreSame(candidate.Parameters[0].Type, method.Parameters[0].Type)))
+                error = "duplicate conversion source/destination pair; implicit conversions also apply in explicit casts";
+        }
+        else if (!method.Parameters.Any(parameter => IsOwner(parameter.Type)))
+            error = "an operator must have at least one operand of its declaring struct type";
+        if (error is not null)
+            _diagnostics.Report(syntax.IdentifierToken.Location, error,
+                method.IsConversionOperator ? DiagnosticIds.InvalidConversionDeclaration : DiagnosticIds.InvalidOperatorDeclaration);
+    }
+
+    private void ValidateConversionPairs()
+    {
+        static IEnumerable<StructTypeSymbol> Structs(NamespaceSymbol scope) =>
+            scope.Structs.Concat(scope.Namespaces.SelectMany(Structs));
+        var declarations = new Dictionary<FunctionSymbol, FunctionSymbol>(ReferenceEqualityComparer.Instance);
+        foreach (SpecializedStructFunction specialization in _genericStructSpecializer!.SpecializedFunctions)
+            declarations.Add(specialization.Specialized, specialization.Definition);
+        FunctionSymbol Declaration(FunctionSymbol function) => declarations.GetValueOrDefault(function, function);
+        FunctionSymbol[] conversions = Structs(_globalNamespace)
+            .Concat(_referencedNamespaces.SelectMany(Structs))
+            .Concat(_genericStructSpecializer!.Specializations)
+            .Distinct().SelectMany(type => type.Methods)
+            .Where(method => method.IsConversionOperator && method.Parameters.Length == 1).Distinct().ToArray();
+        foreach (FunctionSymbol conversion in conversions)
+            if (!declarations.ContainsKey(conversion))
+                declarations.Add(conversion, _genericStructSpecializer.GetFunctionDefinition(conversion));
+        for (int i = 0; i < conversions.Length; i++)
+        for (int j = i + 1; j < conversions.Length; j++)
+        {
+            FunctionSymbol left = conversions[i], right = conversions[j];
+            if (left.OperatorKind == right.OperatorKind || !OperatorFacts.HaveSameConversionPair(left, right)) continue;
+            FunctionSymbol a = Declaration(left), b = Declaration(right);
+            if (_reportedConversionConflicts.Contains((b, a)) || !_reportedConversionConflicts.Add((a, b))) continue;
+            TextLocation location = b.Locations.FirstOrDefault();
+            if (location == default) location = a.Locations.FirstOrDefault();
+            _diagnostics.Report(location,
+                $"conflicting implicit and explicit conversions for '{OperatorFacts.ValueType(left.Parameters[0].Type).ToDisplayString()}' to '{left.ReturnType.ToDisplayString()}': '{a.ToDisplayString(SymbolDisplayFormat.QualifiedSignature)}' and '{b.ToDisplayString(SymbolDisplayFormat.QualifiedSignature)}'",
+                DiagnosticIds.InvalidConversionDeclaration);
         }
     }
 
