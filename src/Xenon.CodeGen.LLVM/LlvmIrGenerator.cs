@@ -2098,6 +2098,7 @@ public sealed class LlvmIrGenerator
         private readonly Dictionary<BoundMoveExpression, LLVMValueRef> _arrayMoveCleanupState = new(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<BoundArrayCreationExpression, LLVMValueRef> _arrayCreationCleanupNodes = new(ReferenceEqualityComparer.Instance);
         private Dictionary<BoundExpression, FullExpressionTemporarySlot>? _fullExpressionTemporaries;
+        private readonly Stack<LLVMValueRef> _capturedPlaces = [];
         private List<FullExpressionTemporarySlot>? _fullExpressionTemporaryOrder;
         private readonly List<FullExpressionStackFrame> _fullExpressionStackFrames = [];
         private PendingReturnValue? _pendingReturn;
@@ -3595,6 +3596,7 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitExpressionCore(BoundExpression expression) => expression switch
         {
+            BoundCapturedPlaceExpression => _builder.BuildLoad2(_mapType(expression.Type), _capturedPlaces.Peek(), "compound.current"),
             BoundLiteralExpression literal => EmitLiteral(literal),
             BoundVariableExpression variable => EmitVariable(variable),
             BoundThisExpression => _thisValue,
@@ -4860,7 +4862,10 @@ public sealed class LlvmIrGenerator
             if (expression.OperatorKind == SyntaxKind.EqualsToken && sameScalarStorage)
                 return _builder.BuildLoad2(_mapType(expression.Target.Type), address, "self.assignment");
 
-            LLVMValueRef value = EmitExpression(expression.Expression);
+            LLVMValueRef value;
+            if (expression.CapturesTarget) _capturedPlaces.Push(address);
+            try { value = EmitExpression(expression.Expression); }
+            finally { if (expression.CapturesTarget) _capturedPlaces.Pop(); }
             bool mayDestroyPreviousValue = expression.OperatorKind == SyntaxKind.EqualsToken &&
                 !sameScalarStorage &&
                 expression.MovedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved &&
@@ -5981,6 +5986,7 @@ public sealed class LlvmIrGenerator
         {
             if (_fullExpressionTemporaries?.TryGetValue(expression, out FullExpressionTemporarySlot? temporary) == true)
                 return EmitFullExpressionTemporaryAddress(expression, temporary);
+            if (expression is BoundCapturedPlaceExpression) return _capturedPlaces.Peek();
             return EmitAddressCore(expression);
         }
 
@@ -6257,8 +6263,10 @@ public sealed class LlvmIrGenerator
                     table,
                     arguments,
                     "interface.get");
-                LLVMValueRef value = EmitExpression(expression.Value);
-                LLVMValueRef result = EmitArithmetic(expression.OperatorKind, expression.Type, current, value, expression.Value.Type);
+                LLVMValueRef result = expression.UsesUserOperator
+                    ? EmitCompoundOperatorValue(expression, current)
+                    : EmitArithmetic(expression.OperatorKind, expression.Type, current,
+                        EmitExpression(expression.Value), expression.Value.Type);
                 EmitInterfaceAccessorCall(
                     interfaceType,
                     expression.Setter,
@@ -6284,13 +6292,10 @@ public sealed class LlvmIrGenerator
                 receiver,
                 instanceArguments,
                 "accessor.get");
-            LLVMValueRef instanceValue = EmitExpression(expression.Value);
-            LLVMValueRef instanceResult = EmitArithmetic(
-                expression.OperatorKind,
-                expression.Type,
-                instanceCurrent,
-                instanceValue,
-                expression.Value.Type);
+            LLVMValueRef instanceResult = expression.UsesUserOperator
+                ? EmitCompoundOperatorValue(expression, instanceCurrent)
+                : EmitArithmetic(expression.OperatorKind, expression.Type, instanceCurrent,
+                    EmitExpression(expression.Value), expression.Value.Type);
             EmitInstanceAccessorCall(
                 expression.Setter,
                 receiverType,
@@ -6298,6 +6303,16 @@ public sealed class LlvmIrGenerator
                 [.. instanceArguments, instanceResult],
                 string.Empty);
             return instanceResult;
+        }
+
+        private LLVMValueRef EmitCompoundOperatorValue(BoundCompoundAccessorAssignmentExpression expression,
+            LLVMValueRef current)
+        {
+            LLVMValueRef address = _builder.BuildAlloca(_mapType(expression.Type), "compound.getter");
+            _builder.BuildStore(current, address);
+            _capturedPlaces.Push(address);
+            try { return EmitExpression(expression.Value); }
+            finally { _capturedPlaces.Pop(); }
         }
 
         private LLVMValueRef EmitInterfaceAccessorCall(
@@ -6494,6 +6509,7 @@ public sealed class LlvmIrGenerator
 
         private static bool IsAddressable(BoundExpression expression) => expression switch
         {
+            BoundCapturedPlaceExpression => true,
             BoundVariableExpression => true,
             BoundStaticFieldExpression => true,
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,

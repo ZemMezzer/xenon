@@ -55,6 +55,41 @@ internal sealed class GenericStructSpecializer
     public IEnumerable<SpecializedStructFunction> SpecializedFunctions => _specializedFunctions.Select(entry =>
         new SpecializedStructFunction(entry.Key.Definition, entry.Key.Owner, entry.Value));
 
+    internal FunctionSymbol GetFunctionDefinition(FunctionSymbol function)
+    {
+        if (_specializedFunctions.FirstOrDefault(entry => ReferenceEquals(entry.Value, function)).Key.Definition is { } definition)
+            return definition;
+        if (function.ContainingStruct is { Origin.Kind: SymbolOriginKind.Library, GenericDefinition: { } genericDefinition } owner)
+            return genericDefinition.Methods.FirstOrDefault(candidate =>
+                ReferenceEquals(FindSpecializedFunction(candidate, owner), function)) ?? function;
+        return function;
+    }
+
+    internal FunctionSymbol? FindSpecializedFunction(FunctionSymbol definition, StructTypeSymbol owner)
+    {
+        if (_specializedFunctions.TryGetValue((definition, owner), out FunctionSymbol? function)) return function;
+        // Complete closed types loaded from XELIB are reused without respecializing their bodies.
+        // Match their substituted callable signature, never their position among accessors/methods.
+        if (owner.Origin.Kind != SymbolOriginKind.Library || owner.GenericDefinition is not { } genericDefinition ||
+            !ReferenceEquals(definition.ContainingStruct, genericDefinition)) return null;
+        var substitutions = genericDefinition.TypeParameters.Zip(owner.TypeArguments)
+            .ToDictionary(pair => pair.First, pair => pair.Second);
+        TypeSymbol result = Substitute(definition.ReturnType, substitutions);
+        TypeSymbol[] parameters = definition.Parameters.Select(parameter => Substitute(parameter.Type, substitutions)).ToArray();
+        IEnumerable<FunctionSymbol> candidates = owner.Methods
+            .Concat(owner.Properties.SelectMany(property => new[] { property.Getter, property.Setter }.OfType<FunctionSymbol>()))
+            .Concat(owner.Indexers.SelectMany(indexer => new[] { indexer.Getter, indexer.Setter }.OfType<FunctionSymbol>()))
+            .Concat(owner.Constructors)
+            .Concat(new[] { owner.Destructor, owner.InstanceInitializer }.OfType<FunctionSymbol>());
+        return candidates.Distinct().SingleOrDefault(candidate =>
+            candidate.FunctionKind == definition.FunctionKind && candidate.OperatorKind == definition.OperatorKind &&
+            candidate.AccessorKind == definition.AccessorKind && candidate.IsStatic == definition.IsStatic &&
+            candidate.IsReadonly == definition.IsReadonly && candidate.TypeParameters.Length == definition.TypeParameters.Length &&
+            (candidate.Name == definition.Name || definition.FunctionKind == FunctionKind.Constructor) &&
+            TypeIdentity.AreSame(candidate.ReturnType, result) && candidate.Parameters.Length == parameters.Length &&
+            candidate.Parameters.Zip(parameters).All(pair => TypeIdentity.AreSame(pair.First.Type, pair.Second)));
+    }
+
     public void CompleteFields()
     {
         _fieldsReady = true;
@@ -100,6 +135,15 @@ internal sealed class GenericStructSpecializer
             EnsureAvailable(existing);
             return existing;
         }
+
+        // A source-free library can already own the complete closed specialization.
+        // Reuse its nominal identity for signatures, bodies and consumer expressions.
+        StructTypeSymbol? imported = definition.ContainingNamespace.Structs.FirstOrDefault(type =>
+            type.Origin.Kind == SymbolOriginKind.Library && !type.IsOpenGenericType &&
+            ReferenceEquals(type.GenericDefinition, definition) &&
+            type.TypeArguments.Length == typeArguments.Length &&
+            type.TypeArguments.Zip(typeArguments).All(pair => TypeIdentity.AreSame(pair.First, pair.Second)));
+        if (imported is not null) return imported;
 
         string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
         var specialized = new StructTypeSymbol(name, _resolveNamespace(definition.ContainingNamespace), definition.IsAbstract,
@@ -354,7 +398,7 @@ internal sealed class GenericStructSpecializer
             source.IsOverride, source.IsAbstract, source.IsExtern, source.IsExport,
             source.IsDefinition, source.DelegatesToThisConstructor, origin: SymbolOrigin.CompilerGenerated,
             documentation: source.Documentation, implementation: source.Implementation,
-            accessorKind: source.AccessorKind);
+            accessorKind: source.AccessorKind, operatorKind: source.OperatorKind);
         function.HasStackArrays = source.HasStackArrays;
         function.HasScalarCleanup = source.HasScalarCleanup;
         return function;

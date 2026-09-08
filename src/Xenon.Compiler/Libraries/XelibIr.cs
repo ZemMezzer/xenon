@@ -169,7 +169,8 @@ public sealed record XelibTypeRecord(
     ImmutableArray<int> ParameterTypeIds = default,
     ImmutableArray<int> TypeArgumentIds = default,
     bool IsReadonly = false,
-    int Rank = 0);
+    int Rank = 0,
+    XelibSymbolReference? ConstructedSymbol = null);
 
 public sealed record XelibParameterRecord(
     int Id,
@@ -208,6 +209,7 @@ public sealed record XelibSymbolRecord
     public int Ordinal { get; init; }
     public XelibFunctionKind FunctionKind { get; init; }
     public XelibAccessorKind AccessorKind { get; init; }
+    public string? OperatorKind { get; init; }
     public int? VTableSlot { get; init; }
     public int ConstructorOverload { get; init; }
     public int ConstructorOverloadCount { get; init; } = 1;
@@ -329,6 +331,8 @@ public enum XelibBodyOpcode : ushort
     DeferredGenericIndexerSet = 76,
     DeferredGenericConstruction = 77,
     DeferredGenericAllocation = 78,
+    CapturedPlace = 79,
+    DeferredOperatorCall = 80,
 }
 
 public enum XelibOperator : ushort
@@ -383,7 +387,8 @@ public sealed record XelibLocalRecord(
     bool RequiresArrayCleanupTransfer,
     XelibSymbolReference? Destructor);
 
-public sealed record XelibTemporaryRecord(XelibBodyNode Value, XelibSymbolReference Destructor);
+public sealed record XelibTemporaryRecord(XelibBodyNode Value, XelibSymbolReference Destructor,
+    ImmutableArray<int>? Path = null);
 
 public sealed record XelibBodyNode
 {

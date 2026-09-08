@@ -64,6 +64,13 @@ public sealed class SemanticModel
             ? SymbolInfo.FromSymbol(type) : SymbolInfo.None;
     }
 
+    public SymbolInfo GetConversionSymbolInfo(SyntaxNode syntax, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(syntax);
+        cancellationToken.ThrowIfCancellationRequested();
+        return _semanticInfo.Conversions.GetValueOrDefault(syntax, SymbolInfo.None);
+    }
+
     public TypeInfo GetTypeInfo(SyntaxNode syntax, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(syntax);
@@ -668,6 +675,11 @@ public sealed class SemanticModel
             NewExpressionSyntax value => value.Type.NameToken,
             StructPositionalConstructionExpressionSyntax value => value.Type.NameToken,
             CallExpressionSyntax value => GetReferenceToken(value.Target),
+            BinaryExpressionSyntax value => value.OperatorToken,
+            UnaryExpressionSyntax value => value.OperatorToken,
+            AssignmentExpressionSyntax value => value.OperatorToken,
+            CastExpressionSyntax value => value.CastKeyword,
+            LiteralExpressionSyntax value => value.LiteralToken,
             IndexExpressionSyntax value => value.OpenBracketToken,
             ThisExpressionSyntax value => value.ThisKeyword,
             TypeLayoutExpressionSyntax value when value.FieldToken is not null => value.FieldToken,

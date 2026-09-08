@@ -66,4 +66,5 @@ public enum BoundKind
     DeferredConstantExpression,
     DeferredGenericMethodCallExpression,
     DeferredGenericOperationExpression,
+    CapturedPlaceExpression,
 }

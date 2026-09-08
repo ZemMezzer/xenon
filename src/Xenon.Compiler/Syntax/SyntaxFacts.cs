@@ -33,6 +33,7 @@ public static class SyntaxFacts
             ["template"] = SyntaxKind.TemplateKeyword,
             ["where"] = SyntaxKind.WhereKeyword,
             ["static"] = SyntaxKind.StaticKeyword,
+            ["operator"] = SyntaxKind.OperatorKeyword,
             ["threadlocal"] = SyntaxKind.ThreadLocalKeyword,
             ["virtual"] = SyntaxKind.VirtualKeyword,
             ["override"] = SyntaxKind.OverrideKeyword,

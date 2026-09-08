@@ -10,6 +10,7 @@ internal sealed class SemanticInfoStore
 {
     public Dictionary<SyntaxNode, Symbol> Declarations { get; } = new(ReferenceEqualityComparer.Instance);
     public Dictionary<SyntaxNode, SymbolInfo> Symbols { get; } = new(ReferenceEqualityComparer.Instance);
+    public Dictionary<SyntaxNode, SymbolInfo> Conversions { get; } = new(ReferenceEqualityComparer.Instance);
     public Dictionary<SyntaxNode, TypeInfo> Types { get; } = new(ReferenceEqualityComparer.Instance);
     public Dictionary<ExpressionSyntax, ReceiverInfo> Receivers { get; } = new(ReferenceEqualityComparer.Instance);
     public List<ResolvedSymbolReference> ExplicitReferences { get; } = [];
