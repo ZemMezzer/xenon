@@ -9,6 +9,20 @@ namespace Xenon.Compiler.Semantics.Symbols;
 /// </summary>
 public sealed class TypeFactory
 {
+    internal sealed record Snapshot(
+        HashSet<(TypeSymbol Element, bool Readonly)> PointerKeys,
+        HashSet<(TypeSymbol Element, bool Readonly)> ReferenceKeys,
+        HashSet<(TypeSymbol Element, int Rank)> ArrayKeys,
+        HashSet<TypeSymbol> AtomicKeys,
+        HashSet<TypeSymbol> UniqueKeys,
+        HashSet<TypeSymbol> SharedKeys,
+        HashSet<TypeSymbol> WeakKeys,
+        HashSet<TypeSymbol> StorageKeys,
+        HashSet<TypeSymbol> PinKeys,
+        HashSet<FunctionPointerTypeSymbol> FunctionPointers,
+        HashSet<FunctionValueTypeSymbol> FunctionValues,
+        Dictionary<TypeSymbol, FunctionSymbol?> Destructors);
+
     private readonly ConcurrentDictionary<(TypeSymbol Element, bool Readonly), PointerTypeSymbol> _pointers = new();
     private readonly ConcurrentDictionary<(TypeSymbol Element, bool Readonly), ReferenceTypeSymbol> _references = new();
     private readonly ConcurrentDictionary<(TypeSymbol Element, int Rank), ArrayTypeSymbol> _arrays = new();
@@ -102,6 +116,80 @@ public sealed class TypeFactory
         [.. _unique.Values, .. _shared.Values, .. _weak.Values];
     internal IReadOnlyCollection<StorageTypeSymbol> StorageTypes => [.. _storage.Values];
     internal IReadOnlyCollection<FunctionValueTypeSymbol> FunctionValueTypes => [.. _functionValues];
+
+    internal Snapshot CaptureSnapshot()
+    {
+        FunctionPointerTypeSymbol[] functionPointers;
+        FunctionValueTypeSymbol[] functionValues;
+        lock (_functionPointers) functionPointers = [.. _functionPointers];
+        lock (_functionValues) functionValues = [.. _functionValues];
+        TypeSymbol[] destructible = _unique.Values.Cast<TypeSymbol>()
+            .Concat(_shared.Values).Concat(_weak.Values).Concat(_storage.Values)
+            .Concat(functionValues).ToArray();
+        var destructors = new Dictionary<TypeSymbol, FunctionSymbol?>(ReferenceEqualityComparer.Instance);
+        foreach (TypeSymbol type in destructible)
+            destructors.TryAdd(type, GetDestructor(type));
+        return new Snapshot(
+            [.. _pointers.Keys], [.. _references.Keys], [.. _arrays.Keys],
+            [.. _atomic.Keys], [.. _unique.Keys], [.. _shared.Keys], [.. _weak.Keys],
+            [.. _storage.Keys], [.. _pin.Keys],
+            new HashSet<FunctionPointerTypeSymbol>(functionPointers, ReferenceEqualityComparer.Instance),
+            new HashSet<FunctionValueTypeSymbol>(functionValues, ReferenceEqualityComparer.Instance),
+            destructors);
+    }
+
+    internal void Rollback(Snapshot snapshot)
+    {
+        RemoveNewKeys(_pointers, snapshot.PointerKeys);
+        RemoveNewKeys(_references, snapshot.ReferenceKeys);
+        RemoveNewKeys(_arrays, snapshot.ArrayKeys);
+        RemoveNewKeys(_atomic, snapshot.AtomicKeys);
+        RemoveNewKeys(_unique, snapshot.UniqueKeys);
+        RemoveNewKeys(_shared, snapshot.SharedKeys);
+        RemoveNewKeys(_weak, snapshot.WeakKeys);
+        RemoveNewKeys(_storage, snapshot.StorageKeys);
+        RemoveNewKeys(_pin, snapshot.PinKeys);
+        lock (_functionPointers)
+            _functionPointers.RemoveAll(type => !snapshot.FunctionPointers.Contains(type));
+        lock (_functionValues)
+            _functionValues.RemoveAll(type => !snapshot.FunctionValues.Contains(type));
+        foreach ((TypeSymbol type, FunctionSymbol? destructor) in snapshot.Destructors)
+            SetDestructor(type, destructor);
+    }
+
+    private static FunctionSymbol? GetDestructor(TypeSymbol type) => type switch
+    {
+        OwnershipTypeSymbol ownership => ownership.CompleteDestructor,
+        StorageTypeSymbol storage => storage.CompleteDestructor,
+        FunctionValueTypeSymbol function => function.CompleteDestructor,
+        _ => null,
+    };
+
+    private static void SetDestructor(TypeSymbol type, FunctionSymbol? destructor)
+    {
+        switch (type)
+        {
+            case OwnershipTypeSymbol ownership:
+                ownership.CompleteDestructor = destructor;
+                break;
+            case StorageTypeSymbol storage:
+                storage.CompleteDestructor = destructor;
+                break;
+            case FunctionValueTypeSymbol function:
+                function.CompleteDestructor = destructor;
+                break;
+        }
+    }
+
+    private static void RemoveNewKeys<TKey, TValue>(
+        ConcurrentDictionary<TKey, TValue> dictionary,
+        HashSet<TKey> originalKeys)
+        where TKey : notnull
+    {
+        foreach (TKey key in dictionary.Keys)
+            if (!originalKeys.Contains(key))
+                dictionary.TryRemove(key, out _);
+    }
 
     internal void EnsureOwnershipDestructor(
         OwnershipTypeSymbol type,

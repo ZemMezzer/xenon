@@ -181,6 +181,17 @@ internal sealed partial class FunctionBodyBinder
         List<ExpressionFlow> Exits);
     private sealed class ArgumentFlowTransaction
     {
+        public sealed record DeferredCaptureBorrow(BorrowPlace Place, bool IsReadonly);
+        private sealed record DeferredLambdaCapture(
+            LambdaExpressionSyntax Syntax,
+            ExpressionFlow Before,
+            ExpressionFlow After,
+            ImmutableArray<DeferredCaptureBorrow> Borrows,
+            Action<IReadOnlyDictionary<MovePlace, TextLocation?>> RollbackAuxiliaryState)
+        {
+            public Dictionary<MovePlace, TextLocation?> SupersedingMutations { get; } = [];
+            public HashSet<MovePlace> DeferredDependentMutations { get; } = [];
+        }
         private sealed record AppliedRollback(
             BoundExpression Expression,
             ExpressionFlow Before,
@@ -192,10 +203,27 @@ internal sealed partial class FunctionBodyBinder
         private readonly Dictionary<BoundExpression, MovePlace> _candidatePlaces =
             new(ReferenceEqualityComparer.Instance);
         private readonly HashSet<BoundExpression> _materialized = new(ReferenceEqualityComparer.Instance);
-        private readonly List<(LambdaExpressionSyntax Syntax, ExpressionFlow Before, ExpressionFlow After)>
-            _deferredLambdaCaptures = [];
+        private readonly List<DeferredLambdaCapture> _deferredLambdaCaptures = [];
         private readonly HashSet<LambdaExpressionSyntax> _materializedLambdas =
             new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<LambdaExpressionSyntax, (Action Commit, Action Rollback)> _lambdaArtifacts =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<LambdaExpressionSyntax> _rolledBackLambdaArtifacts =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<LambdaExpressionSyntax> _rolledBackLambdaState =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<Diagnostic, HashSet<LambdaExpressionSyntax>> _deferredCaptureDiagnostics =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly List<Action> _generatedArtifactRollbacks = [];
+        private int _rolledBackGeneratedArtifactCount;
+        private TypeFactory.Snapshot? _typeFactorySnapshot;
+        private GenericStructSpecializer? _transactionalStructSpecializer;
+        private GenericFunctionSpecializer? _transactionalFunctionSpecializer;
+        private GenericStructSpecializer? _parentStructSpecializer;
+        private GenericFunctionSpecializer? _parentFunctionSpecializer;
+        private bool _transactionalSpecializersInitialized;
+        private bool _generatedArtifactsCommitted;
+        private bool _preserveDeferredDependentMoves;
         private readonly List<(List<ExceptionalFlow> Sink, int Index,
             ImmutableArray<AppliedRollback> Rollbacks)> _recordedRollbacks = [];
         private readonly List<(TextLocation Location, string DisplayName,
@@ -222,21 +250,239 @@ internal sealed partial class FunctionBodyBinder
         public void RecordDeferredLambdaCapture(
             LambdaExpressionSyntax syntax,
             ExpressionFlow before,
-            ExpressionFlow after) =>
-            _deferredLambdaCaptures.Add((syntax, before, after));
+            ExpressionFlow after,
+            ImmutableArray<DeferredCaptureBorrow> borrows,
+            Action<IReadOnlyDictionary<MovePlace, TextLocation?>> rollbackAuxiliaryState) =>
+            _deferredLambdaCaptures.Add(new DeferredLambdaCapture(
+                syntax, before, after, borrows, rollbackAuxiliaryState));
 
-        public void CommitDeferredLambdaCapture(LambdaExpressionSyntax syntax) =>
-            _materializedLambdas.Add(syntax);
+        public (GenericStructSpecializer? Struct, GenericFunctionSpecializer? Function)
+            GetTransactionalSpecializers(
+                GenericStructSpecializer? structSpecializer,
+                GenericFunctionSpecializer? functionSpecializer,
+                DiagnosticBag diagnostics)
+        {
+            if (!_transactionalSpecializersInitialized)
+            {
+                _parentStructSpecializer = structSpecializer;
+                _parentFunctionSpecializer = functionSpecializer;
+                _transactionalStructSpecializer = structSpecializer?.CreateSpeculative(diagnostics);
+                _transactionalFunctionSpecializer = functionSpecializer?.CreateSpeculative(
+                    diagnostics, _transactionalStructSpecializer);
+                _transactionalSpecializersInitialized = true;
+            }
+            return (_transactionalStructSpecializer, _transactionalFunctionSpecializer);
+        }
 
-        public ExpressionFlow RollbackUnmaterializedLambdaCaptures(ExpressionFlow flow)
+        public void RecordSubsequentPlaceMutation(
+            MovePlace place,
+            TextLocation? moveLocation,
+            bool deferredDependent)
+        {
+            foreach (DeferredLambdaCapture capture in _deferredLambdaCaptures)
+            {
+                if (_rolledBackLambdaState.Contains(capture.Syntax) ||
+                    !capture.After.Moved.Except(capture.Before.Moved)
+                        .Any(moved => PlacesOverlap(moved, place)))
+                    continue;
+                capture.SupersedingMutations.Remove(place);
+                capture.SupersedingMutations[place] = moveLocation;
+                if (deferredDependent) capture.DeferredDependentMutations.Add(place);
+                else capture.DeferredDependentMutations.Remove(place);
+            }
+        }
+
+        public void RecordMaterializedLambda(
+            LambdaExpressionSyntax syntax,
+            Action commitArtifacts,
+            Action rollbackArtifacts) =>
+            _lambdaArtifacts.TryAdd(syntax, (commitArtifacts, rollbackArtifacts));
+
+        public void RecordGeneratedArtifactRollback(Action rollback) =>
+            _generatedArtifactRollbacks.Add(rollback);
+
+        public void EnsureTypeFactorySnapshot(TypeFactory typeFactory)
+        {
+            if (_typeFactorySnapshot is not null) return;
+            _typeFactorySnapshot = typeFactory.CaptureSnapshot();
+            RecordGeneratedArtifactRollback(() => typeFactory.Rollback(_typeFactorySnapshot));
+        }
+
+        public void CommitDeferredLambdaCaptures()
+        {
+            if (!_generatedArtifactsCommitted)
+            {
+                if (_transactionalStructSpecializer is not null)
+                    _parentStructSpecializer?.MergeFrom(_transactionalStructSpecializer);
+                if (_transactionalFunctionSpecializer is not null)
+                    _parentFunctionSpecializer?.MergeFrom(_transactionalFunctionSpecializer);
+                _generatedArtifactsCommitted = true;
+            }
+            foreach (var entry in _lambdaArtifacts)
+                if (_materializedLambdas.Add(entry.Key))
+                    entry.Value.Commit();
+        }
+
+        public void PreserveDeferredDependentMoves() =>
+            _preserveDeferredDependentMoves = true;
+
+        public bool HasDeferredMoveContribution(MovePlace place) =>
+            _deferredLambdaCaptures.Any(capture =>
+                !_materializedLambdas.Contains(capture.Syntax) &&
+                !_rolledBackLambdaState.Contains(capture.Syntax) &&
+                capture.After.Moved.Except(capture.Before.Moved)
+                    .Any(moved => PlacesOverlap(moved, place)));
+
+        public bool HasRolledBackLambdaCaptures => _rolledBackLambdaState.Count != 0;
+
+        public bool RecordDeferredMoveDiagnostic(MovePlace place, Diagnostic diagnostic)
+        {
+            LambdaExpressionSyntax[] contributors = _deferredLambdaCaptures
+                .Where(capture => !_materializedLambdas.Contains(capture.Syntax) &&
+                    capture.After.Moved.Except(capture.Before.Moved)
+                        .Any(moved => PlacesOverlap(moved, place)))
+                .Select(capture => capture.Syntax)
+                .ToArray();
+            foreach (LambdaExpressionSyntax contributor in contributors)
+                AddDiagnosticDependency(diagnostic, contributor);
+            return contributors.Length != 0;
+        }
+
+        public bool HasDeferredBorrowCapture(LambdaExpressionSyntax syntax, BorrowPlace place) =>
+            !_materializedLambdas.Contains(syntax) &&
+            _deferredLambdaCaptures.Any(capture => ReferenceEquals(capture.Syntax, syntax) &&
+                capture.Borrows.Any(borrow => BorrowPlacesOverlap(borrow.Place, place)));
+
+        public bool TryGetDeferredBorrowConflict(
+            BorrowPlace place,
+            bool isReadonlyRequest,
+            out LambdaExpressionSyntax syntax,
+            out DeferredCaptureBorrow conflict)
+        {
+            foreach (DeferredLambdaCapture capture in _deferredLambdaCaptures)
+            {
+                if (_materializedLambdas.Contains(capture.Syntax) ||
+                    _rolledBackLambdaState.Contains(capture.Syntax))
+                    continue;
+                DeferredCaptureBorrow? candidate = capture.Borrows.FirstOrDefault(borrow =>
+                    BorrowPlacesOverlap(borrow.Place, place) &&
+                    (!isReadonlyRequest || !borrow.IsReadonly));
+                if (candidate is null) continue;
+                syntax = capture.Syntax;
+                conflict = candidate;
+                return true;
+            }
+            syntax = null!;
+            conflict = null!;
+            return false;
+        }
+
+        public bool RecordDeferredBorrowDiagnostic(
+            LambdaExpressionSyntax syntax,
+            Diagnostic diagnostic)
+        {
+            if (_materializedLambdas.Contains(syntax) ||
+                !_deferredLambdaCaptures.Any(capture => ReferenceEquals(capture.Syntax, syntax)))
+                return false;
+            AddDiagnosticDependency(diagnostic, syntax);
+            return true;
+        }
+
+        public ExpressionFlow RollbackUnmaterializedLambdaCaptures(
+            ExpressionFlow flow,
+            DiagnosticBag diagnostics,
+            Action<Diagnostic>? diagnosticRemoved = null)
         {
             for (int index = _deferredLambdaCaptures.Count - 1; index >= 0; index--)
             {
                 var capture = _deferredLambdaCaptures[index];
                 if (_materializedLambdas.Contains(capture.Syntax)) continue;
-                flow = ApplyExpressionFlowDelta(flow, capture.After, capture.Before);
+                if (_rolledBackLambdaState.Add(capture.Syntax))
+                {
+                    ExpressionFlow current = flow;
+                    flow = ApplyExpressionFlowDelta(flow, capture.After, capture.Before);
+                    IReadOnlyDictionary<MovePlace, TextLocation?> superseding =
+                        _preserveDeferredDependentMoves
+                            ? capture.SupersedingMutations
+                            : capture.SupersedingMutations
+                                .Where(entry => !capture.DeferredDependentMutations.Contains(entry.Key))
+                                .ToDictionary();
+                    foreach (MovePlace place in superseding.Keys)
+                        RestoreSupersededPlace(flow, current, place);
+                    capture.RollbackAuxiliaryState(superseding);
+                }
+                if (_lambdaArtifacts.TryGetValue(capture.Syntax, out var artifacts) &&
+                    _rolledBackLambdaArtifacts.Add(capture.Syntax))
+                    artifacts.Rollback();
             }
+            foreach (var entry in _deferredCaptureDiagnostics)
+            {
+                if (entry.Value.Any(_materializedLambdas.Contains)) continue;
+                if (diagnostics.Remove(entry.Key))
+                    diagnosticRemoved?.Invoke(entry.Key);
+            }
+            while (_rolledBackGeneratedArtifactCount < _generatedArtifactRollbacks.Count)
+                _generatedArtifactRollbacks[_rolledBackGeneratedArtifactCount++]();
             return flow;
+        }
+
+        private static void RestoreSupersededPlace(
+            ExpressionFlow target,
+            ExpressionFlow current,
+            MovePlace place)
+        {
+            if (place.RootVariable is { } variable)
+            {
+                if (current.Assigned.Contains(variable)) target.Assigned.Add(variable);
+                else target.Assigned.Remove(variable);
+                if (current.PossiblyAssignedConstructorFields.Contains(variable))
+                    target.PossiblyAssignedConstructorFields.Add(variable);
+                else target.PossiblyAssignedConstructorFields.Remove(variable);
+                if (variable is LocalVariableSymbol local)
+                {
+                    if (current.Arrays.TryGetValue(local, out ArrayState array)) target.Arrays[local] = array;
+                    else target.Arrays.Remove(local);
+                }
+            }
+            RestorePlaceEntries(target.Moved, current.Moved, place);
+            RestorePlaceEntries(target.DefinitelyMoved, current.DefinitelyMoved, place);
+            RestorePlaceEntries(target.Storages, current.Storages, place);
+            RestorePlaceEntries(target.References, current.References, place);
+            RestorePlaceEntries(target.BorrowRoots, current.BorrowRoots, place);
+            target.ConstructorReferences.Clear();
+            foreach (var entry in current.ConstructorReferences)
+                target.ConstructorReferences.Add(entry.Key, entry.Value);
+        }
+
+        private static void RestorePlaceEntries(
+            HashSet<MovePlace> target,
+            HashSet<MovePlace> current,
+            MovePlace place)
+        {
+            target.RemoveWhere(candidate => PlacesOverlap(candidate, place));
+            target.UnionWith(current.Where(candidate => PlacesOverlap(candidate, place)));
+        }
+
+        private static void RestorePlaceEntries<T>(
+            Dictionary<MovePlace, T> target,
+            Dictionary<MovePlace, T> current,
+            MovePlace place)
+        {
+            foreach (MovePlace key in target.Keys.Where(candidate => PlacesOverlap(candidate, place)).ToArray())
+                target.Remove(key);
+            foreach (var entry in current.Where(entry => PlacesOverlap(entry.Key, place)))
+                target[entry.Key] = entry.Value;
+        }
+
+        private void AddDiagnosticDependency(Diagnostic diagnostic, LambdaExpressionSyntax syntax)
+        {
+            if (!_deferredCaptureDiagnostics.TryGetValue(diagnostic,
+                    out HashSet<LambdaExpressionSyntax>? dependencies))
+            {
+                dependencies = new HashSet<LambdaExpressionSyntax>(ReferenceEqualityComparer.Instance);
+                _deferredCaptureDiagnostics.Add(diagnostic, dependencies);
+            }
+            dependencies.Add(syntax);
         }
 
         public bool HasDeferredMoveOverlapping(MovePlace place) =>
@@ -487,6 +733,7 @@ internal sealed partial class FunctionBodyBinder
                 {
                     _diagnostics.Report(constructorSyntax.BaseKeyword.Location,
                         "a constructor cannot chain directly to itself", DiagnosticIds.MissingConstructor);
+                    RollbackUnmaterializedContextualArguments(arguments);
                 }
                 else
                 {
@@ -530,11 +777,15 @@ internal sealed partial class FunctionBodyBinder
                 {
                     _diagnostics.Report(syntax?.BaseKeyword?.Location ?? location, $"constructor '{baseType.Name}' is private",
                         DiagnosticIds.InaccessibleSymbol);
+                    RollbackUnmaterializedContextualArguments(arguments);
                 }
-                arguments = ValidateFunctionArguments(baseConstructor, arguments, baseArguments, location);
-                ApplyChainedConstructorReferenceOrigins(baseType, baseConstructor, arguments);
-                baseConstructorCall = new BoundExpressionStatement(CompleteFullExpression(
-                    new BoundBaseLifecycleCallExpression(baseConstructor, arguments), resultConsumed: false));
+                else
+                {
+                    arguments = ValidateFunctionArguments(baseConstructor, arguments, baseArguments, location);
+                    ApplyChainedConstructorReferenceOrigins(baseType, baseConstructor, arguments);
+                    baseConstructorCall = new BoundExpressionStatement(CompleteFullExpression(
+                        new BoundBaseLifecycleCallExpression(baseConstructor, arguments), resultConsumed: false));
+                }
             }
         }
         else if (_function.FunctionKind == FunctionKind.Constructor &&
@@ -1956,6 +2207,10 @@ internal sealed partial class FunctionBodyBinder
         visited.Remove(type);
         return result;
     }
+    private sealed record CallBorrow(
+        BorrowPlace Place,
+        bool IsReadonly,
+        LambdaExpressionSyntax? DeferredLambda);
 
     private ImmutableArray<ValueReference> GetValueReferenceMetadata(BoundExpression expression, TypeSymbol type)
     {
@@ -2595,7 +2850,7 @@ internal sealed partial class FunctionBodyBinder
                 !_definitelyAssigned.Contains(local))
             {
                 if (_movedPlaces.Contains(new MovePlace(local, [])))
-                    _diagnostics.Report(syntax.IdentifierToken.Location,
+                    ReportTransactionalMoveDiagnostic(new MovePlace(local, []), syntax.IdentifierToken.Location,
                         $"cannot use '{local.Name}' because it has been moved",
                         DiagnosticIds.UseAfterMove);
                 else
@@ -2920,8 +3175,10 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (place.RootVariable is { } rootVariable && !_definitelyAssigned.Contains(rootVariable) ||
-            TryFindMoveConflict(place, out _))
+        bool onlyDeferredMoveConflict = IsOnlyDeferredMoveConflict(place);
+        if (place.RootVariable is { } rootVariable && !_definitelyAssigned.Contains(rootVariable) &&
+            !onlyDeferredMoveConflict ||
+            TryFindMoveConflict(place, out _) && !onlyDeferredMoveConflict)
             return new BoundErrorExpression();
 
         if (!ValidateLifetimeInvalidation(place, GetLocation(syntax), GetReferenceAliasRoot(source),
@@ -2949,6 +3206,9 @@ internal sealed partial class FunctionBodyBinder
         MarkPlaceMoved(place);
         if (_loopMoveContexts.TryPeek(out var context))
             context.Sites.TryAdd(place, syntax.MoveKeyword.Location);
+        foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+            transaction.RecordSubsequentPlaceMutation(
+                place, syntax.MoveKeyword.Location, deferredDependent: onlyDeferredMoveConflict);
         var result = new BoundMoveExpression(source)
         {
             TrackedVariable = place.RootVariable,
@@ -3844,6 +4104,18 @@ internal sealed partial class FunctionBodyBinder
             ? new BorrowPlace(new BorrowRoot(BorrowRootKind.StorageValue, place,
                 storage.ElementType, place.DisplayName), [])
             : null;
+        if (TryGetDeferredBorrowConflict(borrowPlace, isReadonlyRequest: false,
+                out ArgumentFlowTransaction? deferredTransaction,
+                out LambdaExpressionSyntax? deferredLambda, out _) ||
+            storageValue is not null && TryGetDeferredBorrowConflict(storageValue, isReadonlyRequest: false,
+                out deferredTransaction, out deferredLambda, out _))
+        {
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot {operation} '{place.DisplayName}' while it is borrowed by an earlier lambda argument",
+                diagnosticId);
+            if (diagnostic is not null)
+                deferredTransaction!.RecordDeferredBorrowDiagnostic(deferredLambda!, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !IsBorrowInAliasLineage(borrow, throughAlias) &&
             (BorrowPlacesOverlap(borrow.Place, borrowPlace) ||
@@ -3967,6 +4239,18 @@ internal sealed partial class FunctionBodyBinder
         LocalVariableSymbol? throughAlias,
         TextLocation location)
     {
+        if (TryGetDeferredBorrowConflict(place, isReadonly,
+                out ArgumentFlowTransaction deferredTransaction,
+                out LambdaExpressionSyntax deferredLambda, out var deferredBorrow))
+        {
+            string deferredRequested = isReadonly ? "readonly" : "mutable";
+            string deferredExisting = deferredBorrow.IsReadonly ? "readonly" : "mutable";
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot create {deferredRequested} reference to '{place.DisplayName}' while an overlapping {deferredExisting} borrow is held by an earlier lambda argument",
+                DiagnosticIds.BorrowConflict);
+            if (diagnostic is not null)
+                deferredTransaction.RecordDeferredBorrowDiagnostic(deferredLambda, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !IsBorrowInAliasLineage(borrow, throughAlias) &&
             BorrowPlacesOverlap(borrow.Place, place) &&
@@ -3984,6 +4268,16 @@ internal sealed partial class FunctionBodyBinder
         LocalVariableSymbol? throughAlias,
         TextLocation location)
     {
+        if (TryGetDeferredBorrowConflict(place, isReadonlyRequest: true,
+                out ArgumentFlowTransaction deferredTransaction,
+                out LambdaExpressionSyntax deferredLambda, out _))
+        {
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot access '{place.DisplayName}' while it is exclusively borrowed by an earlier lambda argument",
+                DiagnosticIds.BorrowedPlaceAccess);
+            if (diagnostic is not null)
+                deferredTransaction.RecordDeferredBorrowDiagnostic(deferredLambda, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !borrow.IsReadonly && !IsBorrowInAliasLineage(borrow, throughAlias) &&
             BorrowPlacesOverlap(borrow.Place, place));
@@ -3996,6 +4290,16 @@ internal sealed partial class FunctionBodyBinder
     private void ValidateBorrowedPlaceMutation(BoundExpression expression, TextLocation location)
     {
         if (!TryGetBorrowPlace(expression, out BorrowPlace place, out LocalVariableSymbol? throughAlias)) return;
+        if (TryGetDeferredBorrowConflict(place, isReadonlyRequest: false,
+                out ArgumentFlowTransaction deferredTransaction,
+                out LambdaExpressionSyntax deferredLambda, out _))
+        {
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot mutate '{place.DisplayName}' while it is borrowed by an earlier lambda argument",
+                DiagnosticIds.BorrowedPlaceMutation);
+            if (diagnostic is not null)
+                deferredTransaction.RecordDeferredBorrowDiagnostic(deferredLambda, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !IsBorrowInAliasLineage(borrow, throughAlias) && BorrowPlacesOverlap(borrow.Place, place));
         if (conflict is null) return;
@@ -4040,10 +4344,31 @@ internal sealed partial class FunctionBodyBinder
         return false;
     }
 
-    private void ReportBorrowDiagnostic(TextLocation location, string message, string id)
+    private Diagnostic? ReportBorrowDiagnostic(TextLocation location, string message, string id)
     {
-        if (_reportedBorrowDiagnostics.Add((id, location.Span.Start)))
-            _diagnostics.Report(location, message, id);
+        if (!_reportedBorrowDiagnostics.Add((id, location.Span.Start))) return null;
+        return _diagnostics.ReportDiagnostic(location, message, id);
+    }
+
+    private bool TryGetDeferredBorrowConflict(
+        BorrowPlace place,
+        bool isReadonlyRequest,
+        out ArgumentFlowTransaction transaction,
+        out LambdaExpressionSyntax syntax,
+        out ArgumentFlowTransaction.DeferredCaptureBorrow conflict)
+    {
+        foreach (ArgumentFlowTransaction candidate in _argumentFlowTransactions)
+            if (candidate.TryGetDeferredBorrowConflict(place, isReadonlyRequest,
+                    out LambdaExpressionSyntax deferredLambda, out conflict))
+            {
+                transaction = candidate;
+                syntax = deferredLambda;
+                return true;
+            }
+        transaction = null!;
+        syntax = null!;
+        conflict = null!;
+        return false;
     }
 
     private bool IsBorrowInAliasLineage(Borrow borrow, LocalVariableSymbol? alias)
@@ -4112,7 +4437,7 @@ internal sealed partial class FunctionBodyBinder
         {
             // A whole-local move is already diagnosed while binding the root name.
             if (!movedAncestor.Fields.IsEmpty || reportWholeMoved)
-                _diagnostics.Report(location,
+                ReportTransactionalMoveDiagnostic(movedAncestor, location,
                     $"cannot use '{place.DisplayName}' because '{movedAncestor.DisplayName}' has been moved",
                     DiagnosticIds.UseAfterMove);
             return;
@@ -4120,9 +4445,30 @@ internal sealed partial class FunctionBodyBinder
 
         MovePlace? movedDescendant = _movedPlaces.FirstOrDefault(candidate => IsPlacePrefixOf(place, candidate));
         if (movedDescendant is not null)
-            _diagnostics.Report(location,
+            ReportTransactionalMoveDiagnostic(movedDescendant, location,
                 $"cannot use '{place.DisplayName}' as a complete value because field '{movedDescendant.DisplayName}' has been moved",
                 DiagnosticIds.PartiallyMovedUse);
+    }
+
+    private void ReportTransactionalMoveDiagnostic(
+        MovePlace cause,
+        TextLocation location,
+        string message,
+        string id)
+    {
+        Diagnostic diagnostic = _diagnostics.ReportDiagnostic(location, message, id);
+        foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+            if (transaction.RecordDeferredMoveDiagnostic(cause, diagnostic))
+                break;
+    }
+
+    private void OnTransactionalDiagnosticRemoved(Diagnostic diagnostic)
+    {
+        if (diagnostic.Id is DiagnosticIds.BorrowConflict or
+            DiagnosticIds.BorrowedPlaceAccess or
+            DiagnosticIds.BorrowedPlaceMutation or
+            DiagnosticIds.MoveWhileBorrowed)
+            _reportedBorrowDiagnostics.Remove((diagnostic.Id, diagnostic.Location.Span.Start));
     }
 
     private static StructTypeSymbol? FindPartialLifetimeDestructorOwner(MovePlace place)
@@ -4943,6 +5289,17 @@ internal sealed partial class FunctionBodyBinder
     {
         _movedPlaces.RemoveWhere(moved => IsPlacePrefixOf(place, moved));
         _definitelyMovedPlaces.RemoveWhere(moved => IsPlacePrefixOf(place, moved));
+        foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+            transaction.RecordSubsequentPlaceMutation(
+                place, moveLocation: null, deferredDependent: false);
+    }
+
+    private bool IsOnlyDeferredMoveConflict(MovePlace place)
+    {
+        MovePlace[] conflicts = _movedPlaces.Where(candidate => PlacesOverlap(candidate, place)).ToArray();
+        return conflicts.Length != 0 && conflicts.All(conflict =>
+            _argumentFlowTransactions.Any(transaction =>
+                transaction.HasDeferredMoveContribution(conflict)));
     }
 
     private void ValidateLoopMoves(
@@ -5852,15 +6209,21 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (structType.IsAbstract)
-        {
+        bool isAbstract = structType.IsAbstract;
+        if (isAbstract)
             _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
                 DiagnosticIds.AbstractInstantiation);
-        }
 
         ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments,
             (argument, _) => BindDeferredContextualArgument(argument));
+        if (isAbstract)
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
         arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.Type.NameToken.Location);
+        if (arguments.Any(argument => argument is BoundErrorExpression))
+            return new BoundErrorExpression();
         return new BoundStructConstructionExpression(structType, arguments);
     }
 
@@ -5935,7 +6298,7 @@ internal sealed partial class FunctionBodyBinder
                 if (isLifetimeOperation && index == 0)
                     return BindLifetimeInvalidationOperand(argument);
                 if (TryGetLambdaExpression(argument, out LambdaExpressionSyntax lambda))
-                    return BindDeferredLambdaExpression(lambda);
+                    return BindDeferredLambdaExpression(lambda, argument);
                 if (TryGetNamedFunctionExpression(argument, out ExpressionSyntax function))
                     return new BoundUnboundFunctionExpression(function);
                 TypeSymbol? expectedType = (expressionTarget?.Type switch
@@ -6177,9 +6540,11 @@ internal sealed partial class FunctionBodyBinder
                 inferredArguments.Any(ContainsGenericParameter))
                 return BindOpenGenericCall(syntax, function, inferredArguments, arguments,
                     name.IdentifierToken.Location);
-            FunctionSymbol? specialized = _genericSpecializer is null || !inferenceSucceeded
+            GenericFunctionSpecializer? callSpecializer =
+                GetTransactionalGenericSpecializer(arguments, out _);
+            FunctionSymbol? specialized = callSpecializer is null || !inferenceSucceeded
                 ? null
-                : _genericSpecializer.GetOrCreate(function, inferredArguments,
+                : callSpecializer.GetOrCreate(function, inferredArguments,
                     name.IdentifierToken.Location);
             if (specialized is null)
             {
@@ -6187,11 +6552,20 @@ internal sealed partial class FunctionBodyBinder
                     _diagnostics.Report(name.IdentifierToken.Location,
                         $"type arguments for generic function '{function.Name}' could not be inferred",
                         DiagnosticIds.GenericSpecializationNotImplemented);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             RecordCandidates(syntax.Target, specialized, [function], CandidateReason.None);
+            RecordTransactionalGeneratedSymbolRollback(arguments, syntax.Target);
+            ImmutableArray<BoundExpression> deferredArguments = arguments;
             arguments = ValidateFunctionArguments(specialized, arguments, syntax.Arguments,
                 name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
+            if (HasRejectedDeferredContextualArguments(deferredArguments) ||
+                HasFailedDeferredMaterialization(deferredArguments, arguments))
+            {
+                _semanticInfo.RollbackSyntax(syntax.Target);
+                return new BoundErrorExpression();
+            }
             return new BoundCallExpression(specialized, arguments);
         }
 
@@ -6219,7 +6593,10 @@ internal sealed partial class FunctionBodyBinder
                 bound.Add(argument);
                 transaction.AcceptArgument(argument);
             }
-            return bound.ToImmutable();
+            ImmutableArray<BoundExpression> result = bound.ToImmutable();
+            if (result.Any(argument => argument is BoundUnboundLambdaExpression))
+                transaction.EnsureTypeFactorySnapshot(_fileScope.TypeFactory);
+            return result;
         }
         finally
         {
@@ -6391,6 +6768,43 @@ internal sealed partial class FunctionBodyBinder
                 : null;
     }
 
+    private GenericFunctionSpecializer? GetTransactionalGenericSpecializer(
+        ImmutableArray<BoundExpression> arguments,
+        out FileSymbolScope scope)
+    {
+        scope = _fileScope;
+        ArgumentFlowTransaction? transaction = GetDeferredArgumentTransactions(arguments, reverse: false)
+            .FirstOrDefault();
+        if (transaction is null) return _genericSpecializer;
+        transaction.EnsureTypeFactorySnapshot(_fileScope.TypeFactory);
+        (GenericStructSpecializer? structSpecializer,
+            GenericFunctionSpecializer? functionSpecializer) = transaction.GetTransactionalSpecializers(
+                _fileScope.GenericStructSpecializer, _genericSpecializer, _diagnostics);
+        if (structSpecializer is not null)
+            scope = _fileScope.WithGenericStructSpecializer(structSpecializer);
+        return functionSpecializer;
+    }
+
+    private void RecordTransactionalGeneratedSymbolRollback(
+        ImmutableArray<BoundExpression> arguments,
+        SyntaxNode syntax)
+    {
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.RecordGeneratedArtifactRollback(() => _semanticInfo.RollbackSyntax(syntax));
+    }
+
+    private bool HasRejectedDeferredContextualArguments(ImmutableArray<BoundExpression> arguments) =>
+        GetDeferredArgumentTransactions(arguments, reverse: false)
+            .Any(transaction => transaction.HasRolledBackLambdaCaptures);
+
+    private static bool HasFailedDeferredMaterialization(
+        ImmutableArray<BoundExpression> original,
+        ImmutableArray<BoundExpression> converted) =>
+        original.Zip(converted).Any(pair =>
+            pair.First is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression &&
+            pair.Second is BoundErrorExpression);
+
     private BoundExpression BindIndirectCall(
         BoundExpression target,
         FunctionPointerTypeSymbol functionPointer,
@@ -6400,6 +6814,7 @@ internal sealed partial class FunctionBodyBinder
         bool incomplete,
         int completedArgumentCount)
     {
+        PreserveDeferredDependentMoves(arguments);
         if (_function.IsReadonly)
             _diagnostics.Report(location,
                 "readonly code cannot invoke a raw function pointer because it has no readonly effect contract",
@@ -6427,7 +6842,8 @@ internal sealed partial class FunctionBodyBinder
 
         var converted = arguments.ToBuilder();
         int count = Math.Min(suppliedCount, functionPointer.ParameterTypes.Length);
-        var callBorrows = new List<(BorrowPlace Place, bool IsReadonly)>();
+        bool valid = !incomplete && suppliedCount == functionPointer.ParameterTypes.Length;
+        var callBorrows = new List<CallBorrow>();
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = functionPointer.ParameterTypes[index];
@@ -6436,37 +6852,33 @@ internal sealed partial class FunctionBodyBinder
             argument = ContextualizeConversion(argument, parameterType,
                 GetLocation(argumentSyntax[index]));
             converted[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+            {
+                valid = false;
                 _diagnostics.Report(GetLocation(argumentSyntax[index]),
                     "stack array cannot be passed to another function",
                     DiagnosticIds.StackArrayPassedAsArgument);
-            if (!TypeFacts.CanAssign(parameterType, argument.Type))
-                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
-            if (parameterType is ReferenceTypeSymbol parameterReference &&
-                TryGetBorrowPlace(argument, out BorrowPlace argumentPlace, out LocalVariableSymbol? argumentAlias))
-            {
-                TextLocation argumentLocation = GetLocation(argumentSyntax[index]);
-                ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly, argumentAlias, argumentLocation);
-                if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, argumentPlace) &&
-                    (!prior.IsReadonly || !parameterReference.IsReadonly)))
-                    ReportBorrowDiagnostic(argumentLocation,
-                        $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments",
-                        DiagnosticIds.BorrowConflict);
-                callBorrows.Add((argumentPlace, parameterReference.IsReadonly));
-                if (!parameterReference.IsReadonly &&
-                    TryGetStorageType(parameterReference.ElementType, out _) &&
-                    TryGetMovePlace(argument, out MovePlace storageArgumentPlace))
-                    _storageStates[storageArgumentPlace] = StorageState.MaybeInitialized;
             }
+            if (!TypeFacts.CanAssign(parameterType, argument.Type))
+            {
+                valid = false;
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
+            }
+            ValidateCallArgumentBorrows(parameterType, argument, arguments[index],
+                GetLocation(argumentSyntax[index]), callBorrows);
         }
+        CompleteDeferredContextualArguments(arguments, valid);
         return new BoundIndirectCallExpression(target, functionPointer, converted.ToImmutable());
     }
 
     private BoundExpression BindDeferredContextualArgument(ExpressionSyntax syntax)
     {
         if (TryGetLambdaExpression(syntax, out LambdaExpressionSyntax lambda))
-            return BindDeferredLambdaExpression(lambda);
+            return BindDeferredLambdaExpression(lambda, syntax);
         if (TryGetNamedFunctionExpression(syntax, out ExpressionSyntax function))
             return new BoundUnboundFunctionExpression(function);
         return BindExpression(syntax);
@@ -6474,17 +6886,124 @@ internal sealed partial class FunctionBodyBinder
 
     private void RollbackUnmaterializedContextualArguments(ImmutableArray<BoundExpression> arguments)
     {
-        ArgumentFlowTransaction[] transactions = arguments.Reverse()
+        ArgumentFlowTransaction[] transactions = GetDeferredArgumentTransactions(arguments, reverse: true);
+        if (transactions.Length == 0) return;
+        ExpressionFlow flow = CaptureExpressionFlow();
+        foreach (ArgumentFlowTransaction transaction in transactions)
+            flow = transaction.RollbackUnmaterializedLambdaCaptures(
+                flow, _diagnostics, OnTransactionalDiagnosticRemoved);
+        RestoreExpressionFlow(flow);
+    }
+
+    private void CommitDeferredContextualArguments(ImmutableArray<BoundExpression> arguments)
+    {
+        foreach (ArgumentFlowTransaction transaction in GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.CommitDeferredLambdaCaptures();
+    }
+
+    private void PreserveDeferredDependentMoves(ImmutableArray<BoundExpression> arguments)
+    {
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.PreserveDeferredDependentMoves();
+    }
+
+    private void CompleteDeferredContextualArguments(
+        ImmutableArray<BoundExpression> arguments,
+        bool success)
+    {
+        if (success) CommitDeferredContextualArguments(arguments);
+        else RollbackUnmaterializedContextualArguments(arguments);
+    }
+
+    private LambdaExpressionSyntax? GetDeferredBorrowCapture(
+        BoundExpression originalArgument,
+        BorrowPlace place)
+    {
+        if (originalArgument is not BoundUnboundLambdaExpression lambda ||
+            !_deferredLambdaCaptureTransactions.TryGetValue(lambda.Syntax,
+                out ArgumentFlowTransaction? transaction) ||
+            !transaction.HasDeferredBorrowCapture(lambda.Syntax, place))
+            return null;
+        return lambda.Syntax;
+    }
+
+    private void ReportCallBorrowConflict(
+        CallBorrow prior,
+        CallBorrow current,
+        TextLocation location,
+        string message)
+    {
+        Diagnostic? diagnostic = ReportBorrowDiagnostic(
+            location, message, DiagnosticIds.BorrowConflict);
+        if (diagnostic is null) return;
+        foreach (LambdaExpressionSyntax? syntax in new[] { prior.DeferredLambda, current.DeferredLambda })
+        {
+            if (syntax is null) continue;
+            if (_deferredLambdaCaptureTransactions.TryGetValue(syntax,
+                    out ArgumentFlowTransaction? transaction))
+                transaction.RecordDeferredBorrowDiagnostic(syntax, diagnostic);
+        }
+    }
+
+    private void ValidateCallArgumentBorrows(
+        TypeSymbol parameterType,
+        BoundExpression argument,
+        BoundExpression originalArgument,
+        TextLocation argumentLocation,
+        List<CallBorrow> callBorrows)
+    {
+        if (parameterType is ReferenceTypeSymbol parameterReference &&
+            TryGetBorrowPlace(argument, out BorrowPlace argumentPlace,
+                out LocalVariableSymbol? argumentAlias))
+        {
+            ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly,
+                argumentAlias, argumentLocation);
+            var current = new CallBorrow(argumentPlace, parameterReference.IsReadonly,
+                GetDeferredBorrowCapture(originalArgument, argumentPlace));
+            CallBorrow? prior = callBorrows.FirstOrDefault(candidate =>
+                BorrowPlacesOverlap(candidate.Place, argumentPlace) &&
+                (!candidate.IsReadonly || !parameterReference.IsReadonly));
+            if (prior is not null)
+                ReportCallBorrowConflict(prior, current, argumentLocation,
+                    $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments");
+            callBorrows.Add(current);
+            if (!parameterReference.IsReadonly &&
+                TryGetStorageType(parameterReference.ElementType, out _) &&
+                TryGetMovePlace(argument, out MovePlace storageArgumentPlace))
+                _storageStates[storageArgumentPlace] = StorageState.MaybeInitialized;
+            return;
+        }
+
+        if (!ContainsValueReferenceStorage(parameterType)) return;
+        foreach (ValueReference reference in GetValueReferenceMetadata(argument, parameterType))
+        {
+            if (!TryGetReferenceSourcePlace([reference.Source], out MovePlace referencedPlace))
+                continue;
+            BorrowPlace aggregatePlace = DirectBorrowPlace(referencedPlace);
+            var current = new CallBorrow(aggregatePlace, reference.IsReadonly,
+                GetDeferredBorrowCapture(originalArgument, aggregatePlace));
+            CallBorrow? prior = callBorrows.FirstOrDefault(candidate =>
+                BorrowPlacesOverlap(candidate.Place, aggregatePlace) &&
+                (!candidate.IsReadonly || !reference.IsReadonly));
+            if (prior is not null)
+                ReportCallBorrowConflict(prior, current, argumentLocation,
+                    $"cannot pass value borrowing '{aggregatePlace.DisplayName}' alongside an overlapping reference argument");
+            callBorrows.Add(current);
+        }
+    }
+
+    private ArgumentFlowTransaction[] GetDeferredArgumentTransactions(
+        ImmutableArray<BoundExpression> arguments,
+        bool reverse)
+    {
+        IEnumerable<BoundExpression> ordered = reverse ? arguments.Reverse() : arguments;
+        return ordered
             .OfType<BoundUnboundLambdaExpression>()
             .Select(lambda => _deferredLambdaCaptureTransactions.GetValueOrDefault(lambda.Syntax))
             .OfType<ArgumentFlowTransaction>()
             .Distinct()
             .ToArray();
-        if (transactions.Length == 0) return;
-        ExpressionFlow flow = CaptureExpressionFlow();
-        foreach (ArgumentFlowTransaction transaction in transactions)
-            flow = transaction.RollbackUnmaterializedLambdaCaptures(flow);
-        RestoreExpressionFlow(flow);
     }
 
     private BoundExpression BindFunctionValueCall(
@@ -6496,6 +7015,7 @@ internal sealed partial class FunctionBodyBinder
         bool incomplete,
         int completedArgumentCount)
     {
+        PreserveDeferredDependentMoves(arguments);
         if (_function.IsReadonly)
             _diagnostics.Report(location,
                 "readonly code cannot invoke a function value because its closure may mutate captured state",
@@ -6523,7 +7043,8 @@ internal sealed partial class FunctionBodyBinder
 
         var converted = arguments.ToBuilder();
         int count = Math.Min(suppliedCount, functionValue.ParameterTypes.Length);
-        var callBorrows = new List<(BorrowPlace Place, bool IsReadonly)>();
+        bool valid = !incomplete && suppliedCount == functionValue.ParameterTypes.Length;
+        var callBorrows = new List<CallBorrow>();
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = functionValue.ParameterTypes[index];
@@ -6535,26 +7056,26 @@ internal sealed partial class FunctionBodyBinder
                     : ContextualizeConversion(argument, parameterType,
                         GetLocation(argumentSyntax[index]));
             converted[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+            {
+                valid = false;
                 _diagnostics.Report(GetLocation(argumentSyntax[index]),
                     "stack array cannot be passed to another function",
                     DiagnosticIds.StackArrayPassedAsArgument);
-            if (!TypeFacts.CanAssign(parameterType, argument.Type))
-                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
-            if (parameterType is ReferenceTypeSymbol parameterReference &&
-                TryGetBorrowPlace(argument, out BorrowPlace argumentPlace, out LocalVariableSymbol? argumentAlias))
-            {
-                TextLocation argumentLocation = GetLocation(argumentSyntax[index]);
-                ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly, argumentAlias, argumentLocation);
-                if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, argumentPlace) &&
-                    (!prior.IsReadonly || !parameterReference.IsReadonly)))
-                    ReportBorrowDiagnostic(argumentLocation,
-                        $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments",
-                        DiagnosticIds.BorrowConflict);
-                callBorrows.Add((argumentPlace, parameterReference.IsReadonly));
             }
+            if (!TypeFacts.CanAssign(parameterType, argument.Type))
+            {
+                valid = false;
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
+            }
+            ValidateCallArgumentBorrows(parameterType, argument, arguments[index],
+                GetLocation(argumentSyntax[index]), callBorrows);
         }
+        CompleteDeferredContextualArguments(arguments, valid);
         return new BoundFunctionValueCallExpression(target, functionValue, converted.ToImmutable());
     }
 
@@ -6594,8 +7115,12 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
+        _ = GetTransactionalGenericSpecializer(arguments, out FileSymbolScope resolutionScope);
         ImmutableArray<TypeSymbol> resolvedArguments = typeArguments.Arguments
-            .Select(argument => TypeResolver.Resolve(argument, _fileScope, _diagnostics)).ToImmutableArray();
+            .Select(argument => TypeResolver.Resolve(argument, resolutionScope, _diagnostics)).ToImmutableArray();
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.RecordGeneratedArtifactRollback(() => _semanticInfo.RollbackSyntax(typeArguments));
         FunctionSymbol? definition = ResolveExplicitGenericOverload(candidates, resolvedArguments,
             arguments, location, syntax.Target,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
@@ -6610,15 +7135,25 @@ internal sealed partial class FunctionBodyBinder
         }
         if (resolvedArguments.Any(ContainsGenericParameter))
             return BindOpenGenericCall(syntax, definition, resolvedArguments, arguments, location);
-        FunctionSymbol? specialized = _genericSpecializer?.GetOrCreate(definition, resolvedArguments, location);
+        GenericFunctionSpecializer? callSpecializer =
+            GetTransactionalGenericSpecializer(arguments, out _);
+        FunctionSymbol? specialized = callSpecializer?.GetOrCreate(definition, resolvedArguments, location);
         if (specialized is null)
         {
             RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         SetSelectedSymbolPreservingCandidates(syntax.Target, specialized);
+        RecordTransactionalGeneratedSymbolRollback(arguments, syntax.Target);
+        ImmutableArray<BoundExpression> deferredArguments = arguments;
         arguments = ValidateFunctionArguments(specialized, arguments, syntax.Arguments, location,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        if (HasRejectedDeferredContextualArguments(deferredArguments) ||
+            HasFailedDeferredMaterialization(deferredArguments, arguments))
+        {
+            _semanticInfo.RollbackSyntax(syntax.Target);
+            return new BoundErrorExpression();
+        }
         return new BoundCallExpression(specialized, arguments);
     }
 
@@ -6627,13 +7162,17 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<BoundExpression> arguments)
     {
         var typeSyntax = new NamedTypeSyntax([name.IdentifierToken], [], typeArguments);
-        TypeSymbol resolved = TypeResolver.Resolve(typeSyntax, _fileScope, _diagnostics);
+        _ = GetTransactionalGenericSpecializer(arguments, out FileSymbolScope resolutionScope);
+        TypeSymbol resolved = TypeResolver.Resolve(typeSyntax, resolutionScope, _diagnostics);
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.RecordGeneratedArtifactRollback(() => _semanticInfo.RollbackSyntax(typeArguments));
         if (resolved is not StructTypeSymbol structure)
         {
             RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
-        if (_fileScope.GenericStructSpecializer is { } structSpecializer &&
+        if (resolutionScope.GenericStructSpecializer is { } structSpecializer &&
             !structSpecializer.AreConstraintsSatisfied(structure))
         {
             RollbackUnmaterializedContextualArguments(arguments);
@@ -6906,9 +7445,11 @@ internal sealed partial class FunctionBodyBinder
                 if (inferenceSucceeded && inferredArguments.Any(ContainsGenericParameter))
                     return BindOpenGenericCall(callSyntax, function, inferredArguments, arguments,
                         target.MemberToken.Location);
-                FunctionSymbol? specialized = _genericSpecializer is null || !inferenceSucceeded
+                GenericFunctionSpecializer? callSpecializer =
+                    GetTransactionalGenericSpecializer(arguments, out _);
+                FunctionSymbol? specialized = callSpecializer is null || !inferenceSucceeded
                     ? null
-                    : _genericSpecializer.GetOrCreate(function, inferredArguments,
+                    : callSpecializer.GetOrCreate(function, inferredArguments,
                         target.MemberToken.Location);
                 if (specialized is null)
                 {
@@ -6921,9 +7462,18 @@ internal sealed partial class FunctionBodyBinder
                 }
                 function = specialized;
                 SetSelectedSymbolPreservingCandidates(target, specialized);
+                RecordTransactionalGeneratedSymbolRollback(arguments, target);
             }
+            ImmutableArray<BoundExpression> deferredArguments = arguments;
             arguments = ValidateFunctionArguments(function, arguments, argumentSyntax, target.MemberToken.Location,
                 incomplete ? completedArgumentCount : null);
+            if (HasRejectedDeferredContextualArguments(deferredArguments) ||
+                HasFailedDeferredMaterialization(deferredArguments, arguments))
+            {
+                if (function.IsGenericSpecialization)
+                    _semanticInfo.RollbackSyntax(target);
+                return new BoundErrorExpression();
+            }
             return new BoundCallExpression(function, arguments);
         }
 
@@ -7529,14 +8079,18 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (structType.IsAbstract)
-        {
+        bool isAbstract = structType.IsAbstract;
+        if (isAbstract)
             _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
                 DiagnosticIds.AbstractInstantiation);
-        }
 
         ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments,
             (argument, _) => BindDeferredContextualArgument(argument));
+        if (isAbstract)
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
         if (_fileScope.GenericStructSpecializer is { } structSpecializer &&
             !structSpecializer.AreConstraintsSatisfied(structType))
         {
@@ -7557,6 +8111,8 @@ internal sealed partial class FunctionBodyBinder
         if (syntax.IsPositionalInitialization)
         {
             arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
+            if (arguments.Any(argument => argument is BoundErrorExpression))
+                return new BoundErrorExpression();
         }
         else
         {
@@ -7581,6 +8137,8 @@ internal sealed partial class FunctionBodyBinder
                 RecordCandidates(syntax, null, structType.Constructors, CandidateReason.Inaccessible);
                 _diagnostics.Report(syntax.Type.NameToken.Location, $"constructor '{structType.Name}' is private",
                     DiagnosticIds.InaccessibleSymbol);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return new BoundErrorExpression();
             }
 
             arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, syntax.NewKeyword.Location,
@@ -7695,10 +8253,12 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<ExpressionSyntax> argumentSyntax,
         TextLocation location)
     {
+        PreserveDeferredDependentMoves(arguments);
         ImmutableArray<FieldSymbol> fields = structType.AllInstanceFields;
         bool hasMissingRequiredFields = arguments.Length < fields.Length &&
             fields.Skip(arguments.Length).Any(field => field.Initializer is null);
-        if (arguments.Length > fields.Length || hasMissingRequiredFields)
+        bool valid = arguments.Length <= fields.Length && !hasMissingRequiredFields;
+        if (!valid)
         {
             _diagnostics.Report(
                 location,
@@ -7720,10 +8280,14 @@ internal sealed partial class FunctionBodyBinder
             };
             argument = ContextualizeConversion(argument, fieldType, GetLocation(argumentSyntax[index]));
             convertedArguments[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
 
             if (!AccessibilityRules.IsAccessible(field, _function, structType))
             {
+                valid = false;
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
                     $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'",
@@ -7732,6 +8296,7 @@ internal sealed partial class FunctionBodyBinder
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
+                valid = false;
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
                     "stack array cannot be stored inside a positional struct value",
@@ -7740,10 +8305,13 @@ internal sealed partial class FunctionBodyBinder
 
             if (!TypeFacts.CanAssign(fieldType, argument.Type))
             {
+                valid = false;
                 ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, fieldType);
             }
         }
-
+        CompleteDeferredContextualArguments(arguments, valid);
+        if (!valid)
+            return [new BoundErrorExpression()];
         return convertedArguments.ToImmutable();
     }
 
@@ -7814,6 +8382,8 @@ internal sealed partial class FunctionBodyBinder
                     _diagnostics.Report(location,
                         $"no overload of {description} matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
                         reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+                if (reason == CandidateReason.NotInvocable)
+                    PreserveDeferredDependentMoves(arguments);
                 RollbackUnmaterializedContextualArguments(arguments);
                 return null;
             }
@@ -7995,6 +8565,8 @@ internal sealed partial class FunctionBodyBinder
                         _diagnostics.Report(location,
                             $"no generic overload matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
                             failure == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+                    if (failure == CandidateReason.NotInvocable)
+                        PreserveDeferredDependentMoves(arguments);
                     RollbackUnmaterializedContextualArguments(arguments);
                     return null;
                 }
@@ -8056,8 +8628,10 @@ internal sealed partial class FunctionBodyBinder
         TextLocation location,
         int? completedArgumentCount = null)
     {
+        PreserveDeferredDependentMoves(arguments);
         int suppliedCount = completedArgumentCount ?? arguments.Length;
         bool incomplete = completedArgumentCount.HasValue;
+        bool valid = !incomplete && suppliedCount == function.Parameters.Length;
         if ((!incomplete && suppliedCount != function.Parameters.Length) ||
             incomplete && suppliedCount > function.Parameters.Length)
         {
@@ -8069,7 +8643,7 @@ internal sealed partial class FunctionBodyBinder
 
         var convertedArguments = arguments.ToBuilder();
         int count = Math.Min(suppliedCount, function.Parameters.Length);
-        var callBorrows = new List<(BorrowPlace Place, bool IsReadonly)>();
+        var callBorrows = new List<CallBorrow>();
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
@@ -8087,53 +8661,28 @@ internal sealed partial class FunctionBodyBinder
             BoundExpression argument = MaterializeContextualArgument(arguments[index], syntax, parameterType);
             argument = ContextualizeConversion(argument, parameterType, argumentLocation);
             convertedArguments[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             if (!argumentSyntax.IsEmpty) SetConvertedType(argumentSyntax[index], argument.Type);
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
+                valid = false;
                 _diagnostics.Report((argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])), "stack array cannot be passed to another function",
                     DiagnosticIds.StackArrayPassedAsArgument);
             }
 
             if (!TypeFacts.CanAssign(parameterType, argument.Type))
             {
+                valid = false;
                 ReportCannotConvert((argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])), argument.Type, parameterType);
             }
 
-            if (parameterType is ReferenceTypeSymbol parameterReference &&
-                TryGetBorrowPlace(argument, out BorrowPlace argumentPlace,
-                    out LocalVariableSymbol? argumentAlias))
-            {
-                ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly,
-                    argumentAlias, argumentLocation);
-                if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, argumentPlace) &&
-                    (!prior.IsReadonly || !parameterReference.IsReadonly)))
-                    ReportBorrowDiagnostic(argumentLocation,
-                        $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments",
-                        DiagnosticIds.BorrowConflict);
-                callBorrows.Add((argumentPlace, parameterReference.IsReadonly));
-                if (!parameterReference.IsReadonly &&
-                    TryGetStorageType(parameterReference.ElementType, out _) &&
-                    TryGetMovePlace(argument, out MovePlace storageArgumentPlace))
-                    _storageStates[storageArgumentPlace] = StorageState.MaybeInitialized;
-            }
-            else if (ContainsValueReferenceStorage(parameterType))
-            {
-                foreach (ValueReference reference in GetValueReferenceMetadata(argument, parameterType))
-                {
-                    if (!TryGetReferenceSourcePlace([reference.Source], out MovePlace referencedPlace))
-                        continue;
-                    BorrowPlace aggregatePlace = DirectBorrowPlace(referencedPlace);
-                    if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, aggregatePlace) &&
-                        (!prior.IsReadonly || !reference.IsReadonly)))
-                        ReportBorrowDiagnostic(argumentLocation,
-                            $"cannot pass value borrowing '{aggregatePlace.DisplayName}' alongside an overlapping reference argument",
-                            DiagnosticIds.BorrowConflict);
-                    callBorrows.Add((aggregatePlace, reference.IsReadonly));
-                }
-            }
+            ValidateCallArgumentBorrows(parameterType, argument, arguments[index],
+                argumentLocation, callBorrows);
         }
-
+        CompleteDeferredContextualArguments(arguments, valid);
         return convertedArguments.ToImmutable();
     }
 
@@ -9828,14 +10377,17 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<ExpressionSyntax> argumentSyntax, TextLocation location,
         int? completedArgumentCount = null)
     {
+        PreserveDeferredDependentMoves(arguments);
         int suppliedCount = completedArgumentCount ?? arguments.Length;
         bool incomplete = completedArgumentCount.HasValue;
+        bool valid = !incomplete && suppliedCount == parameterTypes.Length;
         if ((!incomplete && suppliedCount != parameterTypes.Length) ||
             incomplete && suppliedCount > parameterTypes.Length)
             _diagnostics.Report(location,
                 $"'{name}' expects {parameterTypes.Length} argument(s), but {suppliedCount} were provided",
                 DiagnosticIds.WrongArity);
         var converted = arguments.ToBuilder();
+        var callBorrows = new List<CallBorrow>();
         for (int index = 0; index < Math.Min(suppliedCount, parameterTypes.Length); index++)
         {
             BoundExpression argument = arguments[index] switch
@@ -9849,10 +10401,19 @@ internal sealed partial class FunctionBodyBinder
             argument = ContextualizeConversion(argument, parameterTypes[index],
                 GetLocation(argumentSyntax[index]));
             converted[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
             if (!TypeFacts.CanAssign(parameterTypes[index], argument.Type))
+            {
+                valid = false;
                 ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterTypes[index]);
+            }
+            ValidateCallArgumentBorrows(parameterTypes[index], argument, arguments[index],
+                GetLocation(argumentSyntax[index]), callBorrows);
         }
+        CompleteDeferredContextualArguments(arguments, valid);
         return converted.ToImmutable();
     }
 
