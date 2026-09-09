@@ -3147,6 +3147,7 @@ public sealed class XenonBuildDriverTests
             namespace ClosureXelibApp;
             struct ConsumerState { public static int Destroyed; }
             struct ConsumerResource { public ~ConsumerResource() { ConsumerState.Destroyed++; } }
+            void Handle(int value) { }
             int Main()
             {
                 function int(int) multiplier = MakeMultiplier(10);
@@ -3169,9 +3170,11 @@ public sealed class XenonBuildDriverTests
                 CallbackHolder<int> holder = CallbackHolder<int>();
                 if (holder.Callback() != 42) return 6;
                 Action<int> action = [](int value) => { };
+                Action<int> namedAction = Handle;
                 int offset = 10;
                 Action<int> capturingAction = [offset](int value) => { int result = value + offset; };
                 action.Invoke(1);
+                namedAction.Invoke(3);
                 capturingAction.Invoke(2);
                 return 42;
             }

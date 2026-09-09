@@ -11,6 +11,803 @@ namespace Xenon.Compiler.Tests;
 public sealed class LambdaTests
 {
     [Fact]
+    public void DirectFunctionValueAndPointerCallsContextualizeDeferredArguments()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            void Accept(function void(int) callback) { }
+            void AcceptPointer(function void(int)* callback) { }
+            void Handle(int value) { }
+            void Test()
+            {
+                function void(function void(int)) viaValue = Accept;
+                function void(function void(int)*)* viaPointer = &AcceptPointer;
+                viaValue((int value) => { });
+                viaValue(Handle);
+                viaPointer((int value) => { });
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Equal(2, compilation.SemanticModel.Functions.Count(function => function.Symbol.IsLambda));
+        _ = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
+    }
+
+    [Fact]
+    public void QualifiedGenericCallsReuseContextualFunctionInference()
+    {
+        Compilation library = Compile("""
+            namespace Library;
+            public void Run<T>(function void(T) callback) { }
+            """);
+        Assert.Empty(library.Diagnostics);
+        Compilation application = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(library)], SourceText.From("""
+                namespace Application;
+                void Handle(int value) { }
+                void Test()
+                {
+                    Library.Run((int value) => { });
+                    Library.Run(Handle);
+                }
+                """, "application.xe"));
+
+        Assert.Empty(application.Diagnostics);
+        Assert.Single(application.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void LaterArgumentsDisambiguateNamedFunctionsDuringGenericInference()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            void Handle(int value) { }
+            void Handle(String value) { }
+            void Use<T>(function void(T) callback, T value) { }
+            void Test() { Use(Handle, 1); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        CallExpressionSyntax call = SyntaxNavigator.DescendantNodesAndSelf(
+                compilation.SyntaxTrees.Single().Root).OfType<CallExpressionSyntax>()
+            .Single(candidate => candidate.Target is NameExpressionSyntax { IdentifierToken.Text: "Use" });
+        FunctionSymbol selected = Assert.IsType<FunctionSymbol>(
+            compilation.SemanticModel.GetSymbolInfo(call.Target).Symbol);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(selected.Parameters[0].Type).ParameterTypes[0]));
+    }
+
+    [Fact]
+    public void NamedFunctionReturnCostRanksOuterLambdaOverloads()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function void() callback) { return Wrapper(); }
+            }
+            void Handle() { }
+            void Run(function function void()() factory) { }
+            void Run(function Wrapper() factory) { }
+            void Test() { Run([]() => { return Handle; }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol outer = Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(compilation).Parameters[0].Type);
+        Assert.IsType<FunctionValueTypeSymbol>(outer.ReturnType);
+    }
+
+    [Fact]
+    public void QualifiedNamespaceAndStaticFunctionsBecomeFunctionValues()
+    {
+        Compilation library = Compile("""
+            namespace Library;
+            public void Handle(int value) { }
+            public void Invoke(function void(int) callback) { }
+            """);
+        Assert.Empty(library.Diagnostics);
+        Compilation application = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(library)], SourceText.From("""
+                namespace Application;
+                static struct Math
+                {
+                    public static int Twice(int value) { return value * 2; }
+                }
+                struct Wrapper
+                {
+                    public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+                }
+                void Use(function void(int) callback) { }
+                void Test()
+                {
+                    function void(int) callback = Library.Handle;
+                    Use(Library.Handle);
+                    function int(int) transform = Math.Twice;
+                    Wrapper wrapped = Library.Handle;
+                }
+                """, "application.xe"));
+
+        Assert.Empty(application.Diagnostics);
+    }
+
+    [Fact]
+    public void InstanceValueMembersShadowNamedFunctionContext()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            void Handle(int value) { }
+            void Use(function void(int) callback) { }
+            struct Container
+            {
+                public function void(String) Handle;
+                public void Test() { Use(Handle); }
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.TypeMismatch);
+    }
+
+    [Fact]
+    public void QualifiedValueMembersShadowNamespaceFunctionContext()
+    {
+        Compilation library = Compile("""
+            namespace Library;
+            public void Handle(int value) { }
+            """);
+        Compilation application = Compilation.Create(new CompilationOptions(),
+            [new SourceCompilationReference(library)], SourceText.From("""
+                namespace Application;
+                struct String { }
+                struct Receiver
+                {
+                    public function void(String) Handle;
+                    public void Invoke(function void(String) callback) { }
+                }
+                void Use(function void(int) callback) { }
+                struct Container
+                {
+                    public Receiver Library { get { return Receiver(); } }
+                    public void Test()
+                    {
+                        Use(Library.Handle);
+                        Library.Invoke((int value) => { });
+                    }
+                }
+                """, "application.xe"));
+
+        Assert.Contains(application.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.TypeMismatch);
+        Assert.Empty(application.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void RejectedCallsRollBackDeferredMoveCaptures()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Resource { public void Use() { } }
+            struct Receiver { }
+            void Run(function void(int) callback) { }
+            void Generic<T>(function void(T) callback) { }
+            void Test()
+            {
+                unique<Resource> first = new Resource();
+                Missing<int>([move first]() => { first->Use(); });
+                first->Use();
+                unique<Resource> second = new Resource();
+                Receiver receiver = Receiver();
+                receiver.Missing([move second]() => { second->Use(); });
+                second->Use();
+                unique<Resource> third = new Resource();
+                Run([move third](String value) => { third->Use(); });
+                third->Use();
+                unique<Resource> fourth = new Resource();
+                Generic<int>([move fourth](String value) => { fourth->Use(); });
+                fourth->Use();
+            }
+            """);
+
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void ReadonlyCallAndIndexerFailuresRollBackDeferredMoveCaptures()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Resource { public void Use() { } }
+            struct Holder
+            {
+                public int this[function void() callback] { get { return 0; } set { } }
+            }
+            struct Container
+            {
+                public void Run(function void() callback) { }
+                public void readonly Test(readonly Holder holder)
+                {
+                    unique<Resource> first = new Resource();
+                    Run([move first]() => { first->Use(); });
+                    first->Use();
+                    unique<Resource> second = new Resource();
+                    holder[[move second]() => { second->Use(); }] = 1;
+                    second->Use();
+                }
+            }
+            """);
+
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void DirectCallableMismatchRollsBackDeferredMoveCapture()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Resource { public void Use() { } }
+            void Accept(function void()* callback) { }
+            void Test()
+            {
+                function void(function void()*)* via = &Accept;
+                unique<Resource> resource = new Resource();
+                via([move resource]() => { resource->Use(); });
+                resource->Use();
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.LambdaCaptureNotSupported);
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void CallableExpressionsCannotLeakIntoArrayIndexCodegen()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            void Handle() { }
+            void Test()
+            {
+                int[] values = int[1];
+                int first = values[() => { return 0; }];
+                int second = values[Handle];
+            }
+            """);
+
+        Assert.Equal(2, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.IndexMustBeInteger));
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void CompoundIndexerRejectsNoncopyableByValueArguments()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Key { }
+            struct Registry
+            {
+                public int this[unique<Key> key] { get { return 1; } set { } }
+            }
+            template RegistryLike
+            {
+                int this[unique<Key> key] { get; set; }
+            }
+            void Update<T>(T registry, unique<Key> key) where T : RegistryLike
+            {
+                registry[move key] += 2;
+            }
+            void Test()
+            {
+                Registry registry = Registry();
+                unique<Key> key = new Key();
+                registry[move key] += 2;
+            }
+            """);
+
+        Assert.Equal(2, compilation.Diagnostics.Count(
+            diagnostic => diagnostic.Id == DiagnosticIds.ValueNotCopyable));
+    }
+
+    [Fact]
+    public void ConstructorsContextualizeLambdaArgumentsAndSelectOverloads()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Handler
+            {
+                public Handler(function void(int) callback) { }
+                public Handler(function void(String) callback) { }
+            }
+            void Test() { Handler* handler = new Handler((int value) => { }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NewExpressionSyntax creation = SyntaxNavigator.DescendantNodesAndSelf(
+            compilation.SyntaxTrees.Single().Root).OfType<NewExpressionSyntax>().Single();
+        FunctionSymbol constructor = Assert.IsType<FunctionSymbol>(
+            compilation.SemanticModel.GetSymbolInfo(creation).Symbol);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(constructor.Parameters[0].Type).ParameterTypes[0]));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void CapturingLambdaEliminatesRawPointerConstructor()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Handler
+            {
+                public Handler(function void(int) callback) { }
+                public Handler(function void(int)* callback) { }
+            }
+            void Test()
+            {
+                int offset = 1;
+                Handler* handler = new Handler([offset](int value) => { int result = value + offset; });
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NewExpressionSyntax creation = SyntaxNavigator.DescendantNodesAndSelf(
+            compilation.SyntaxTrees.Single().Root).OfType<NewExpressionSyntax>().Single();
+        FunctionSymbol constructor = Assert.IsType<FunctionSymbol>(
+            compilation.SemanticModel.GetSymbolInfo(creation).Symbol);
+        Assert.IsType<FunctionValueTypeSymbol>(constructor.Parameters[0].Type);
+    }
+
+    [Fact]
+    public void SpecializedGenericConstructorContextualizesLambda()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Holder<T>
+            {
+                public Holder(function void(T) callback) { }
+            }
+            void Test() { Holder<int>* holder = new Holder<int>((int value) => { }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void ConstructorChainingContextualizesLambdaArguments()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Base
+            {
+                public Base(function void(int) callback) { }
+            }
+            struct Handler : Base
+            {
+                public Handler() : this([](int value) => { }) { }
+                public Handler(function void(int) callback) : base(callback) { }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void BaseConstructorChainingContextualizesLambdaArguments()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Base
+            {
+                public Base(function void(int) callback) { }
+            }
+            struct Derived : Base
+            {
+                public Derived() : base([](int value) => { }) { }
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void IndexersContextualizeLambdaArgumentsAndSelectOverloads()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Registry
+            {
+                public int this[function bool(int) predicate] { get { return 1; } }
+                public int this[function bool(String) predicate] { get { return 2; } }
+            }
+            int Test(Registry registry)
+            {
+                return registry[(int value) => { return value > 0; }];
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        IndexExpressionSyntax access = SyntaxNavigator.DescendantNodesAndSelf(
+            compilation.SyntaxTrees.Single().Root).OfType<IndexExpressionSyntax>().Single();
+        IndexerSymbol indexer = Assert.IsType<IndexerSymbol>(
+            compilation.SemanticModel.GetSymbolInfo(access).Symbol);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(indexer.Parameters[0].Type).ParameterTypes[0]));
+    }
+
+    [Fact]
+    public void CompoundIndexersCopyOwnedFunctionArgumentsForGetterReuse()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            interface IAccessor
+            {
+                int this[function int() callback] { get; set; }
+            }
+            struct Accessor : IAccessor
+            {
+                public int this[function int() callback]
+                {
+                    get { return callback(); }
+                    set { }
+                }
+            }
+            void Test(Accessor concrete, IAccessor abstraction)
+            {
+                int captured = 1;
+                concrete[[captured]() => { return captured; }] += 2;
+                abstraction[[captured]() => { return captured; }] += 3;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
+        Assert.True(ir.Split("function.copy.control", StringSplitOptions.None).Length > 2);
+        Assert.Contains("compound.argument.0.guard", ir);
+    }
+
+    [Fact]
+    public void IndexerSetterContextualizesFunctionValue()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Registry
+            {
+                public function void(int) this[int index]
+                {
+                    get { return Handle; }
+                    set { }
+                }
+            }
+            void Handle(int value) { }
+            void Test(Registry registry) { registry[0] = (int value) => { }; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void NamedFunctionFlowsThroughFunctionValueUserConversion()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Wrapper
+            {
+                public int Marker;
+                public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function void(String) callback) { return Wrapper(); }
+            }
+            void Handle(int value) { }
+            void Test() { Wrapper wrapper = Handle; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NameExpressionSyntax handle = SyntaxNavigator.DescendantNodesAndSelf(
+                compilation.SyntaxTrees.Single().Root).OfType<NameExpressionSyntax>()
+            .Single(name => name.IdentifierToken.Text == "Handle");
+        FunctionSymbol conversion = Assert.IsType<FunctionSymbol>(
+            compilation.SemanticModel.GetConversionSymbolInfo(handle).Symbol);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(conversion.Parameters[0].Type).ParameterTypes[0]));
+    }
+
+    [Fact]
+    public void NamedFunctionPrefersFunctionValueOverRawPointerConversion()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Wrapper
+            {
+                public int Marker;
+                public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function void(int)* callback) { return Wrapper(); }
+            }
+            void Handle(int value) { }
+            void Test() { Wrapper wrapper = Handle; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NameExpressionSyntax handle = SyntaxNavigator.DescendantNodesAndSelf(
+                compilation.SyntaxTrees.Single().Root).OfType<NameExpressionSyntax>()
+            .Single(name => name.IdentifierToken.Text == "Handle");
+        FunctionSymbol conversion = Assert.IsType<FunctionSymbol>(
+            compilation.SemanticModel.GetConversionSymbolInfo(handle).Symbol);
+        Assert.IsType<FunctionValueTypeSymbol>(conversion.Parameters[0].Type);
+    }
+
+    [Fact]
+    public void NamedFunctionCanUseRawPointerConversionOperatorWithoutRelaxingPointerAssignment()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function void(int)* callback) { return Wrapper(); }
+            }
+            void Handle(int value) { }
+            void Test() { Wrapper wrapper = Handle; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NameExpressionSyntax handle = SyntaxNavigator.DescendantNodesAndSelf(
+                compilation.SyntaxTrees.Single().Root).OfType<NameExpressionSyntax>()
+            .Single(name => name.IdentifierToken.Text == "Handle");
+        FunctionSymbol conversion = Assert.IsType<FunctionSymbol>(
+            compilation.SemanticModel.GetConversionSymbolInfo(handle).Symbol);
+        Assert.IsType<FunctionPointerTypeSymbol>(conversion.Parameters[0].Type);
+    }
+
+    [Fact]
+    public void NamedFunctionSelectsOrdinaryCallbackOverload()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            void Run(function void(int) callback) { }
+            void Run(function void(String) callback) { }
+            void Handle(int value) { }
+            void Test() { Run(Handle); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(compilation).Parameters[0].Type).ParameterTypes[0]));
+    }
+
+    [Fact]
+    public void ContextualFunctionValuesWorkInPropertiesAssignmentsAndReturns()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Wrapper
+            {
+                public int Marker;
+                public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+            }
+            struct Container
+            {
+                public function void(int) Callback { get { return Handle; } set { } }
+                public Wrapper Wrapped { get { return Wrapper(); } set { } }
+            }
+            void Handle(int value) { }
+            Wrapper Make() { return Handle; }
+            Container MakeContainer() { return Container(); }
+            void Test(Container container, Container[] items)
+            {
+                function void(int) callback = Handle;
+                callback = Handle;
+                container.Callback = (int value) => { };
+                container.Callback(1);
+                MakeContainer().Callback(2);
+                (container).Callback(3);
+                items[0].Callback(4);
+                container.Wrapped = Handle;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void FailedLambdaResolutionRollsBackMoveCapture()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Resource { public void Use() { } }
+            void Ambiguous(function void(int) callback, int* marker) { }
+            void Ambiguous(function void(int) callback, float* marker) { }
+            void Test()
+            {
+                unique<Resource> resource = new Resource();
+                Ambiguous([move resource](int value) => { resource->Use(); }, null);
+                resource->Use();
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousCall);
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+        LambdaCaptureSyntax capture = SyntaxNavigator.DescendantNodesAndSelf(
+            compilation.SyntaxTrees.Single().Root).OfType<LambdaCaptureSyntax>().Single();
+        Assert.Null(compilation.SemanticModel.GetSymbolInfo(capture).Symbol);
+    }
+
+    [Theory]
+    [InlineData("Box<Bad>([move resource]() => { resource->Use(); });")]
+    [InlineData("new Box<Bad>([move resource]() => { resource->Use(); });")]
+    public void InvalidGenericStructConstraintsRollBackDeferredMoveCapture(string construction)
+    {
+        Compilation compilation = Compile($$"""
+            namespace Example;
+            template Runnable { void Run(); }
+            struct Bad { }
+            struct Resource { public void Use() { } }
+            struct Box<T> where T : Runnable
+            {
+                public Box(function void() callback) { }
+            }
+            void Test()
+            {
+                unique<Resource> resource = new Resource();
+                {{construction}}
+                resource->Use();
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.GenericConstraintNotSatisfied);
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.DoesNotContain(compilation.SemanticModel.Functions,
+            function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void MoveCapturedParameterCannotBeUsedAfterClosureCreation()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Resource { public void Use() { } }
+            void Test(unique<Resource> resource)
+            {
+                function void() callback = [move resource]() => { resource->Use(); };
+                resource->Use();
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+    }
+
+    [Fact]
+    public void InvalidContextualGenericTypeDoesNotMaterializeLambdaConversion()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            template Runnable { void Run(); }
+            struct Bad { }
+            struct Resource { public void Use() { } }
+            struct Box<T> where T : Runnable
+            {
+                public static Box<T> operator implicit(function void() callback) { return Box<T>(); }
+            }
+            void Handle() { }
+            void Test()
+            {
+                unique<Resource> resource = new Resource();
+                Box<Bad> value = [move resource]() => { resource->Use(); };
+                Box<Bad> named = Handle;
+                resource->Use();
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.GenericConstraintNotSatisfied);
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.DoesNotContain(compilation.SemanticModel.Functions,
+            function => function.Symbol.IsLambda);
+        NameExpressionSyntax handle = SyntaxNavigator.DescendantNodesAndSelf(
+                compilation.SyntaxTrees.Single().Root).OfType<NameExpressionSyntax>()
+            .Single(name => name.IdentifierToken.Text == "Handle");
+        Assert.Null(compilation.SemanticModel.GetConversionSymbolInfo(handle).Symbol);
+    }
+
+    [Fact]
+    public void FailedConstructorAndIndexerResolutionRollBackMoveCaptures()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Resource { public void Use() { } }
+            struct Handler
+            {
+                public Handler(function void(int) callback, int* marker) { }
+                public Handler(function void(int) callback, float* marker) { }
+            }
+            struct Registry
+            {
+                public int this[function void(int) callback, int* marker] { get { return 1; } }
+                public int this[function void(int) callback, float* marker] { get { return 2; } }
+            }
+            void Test(Registry registry)
+            {
+                unique<Resource> first = new Resource();
+                Handler* handler = new Handler([move first](int value) => { first->Use(); }, null);
+                first->Use();
+                unique<Resource> second = new Resource();
+                int result = registry[[move second](int value) => { second->Use(); }, null];
+                second->Use();
+            }
+            """);
+
+        Assert.Equal(2, compilation.Diagnostics.Count(
+            diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousCall));
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void MissingCallRollsBackMoveCapture()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Resource { public void Use() { } }
+            void Test()
+            {
+                unique<Resource> resource = new Resource();
+                Missing([move resource](int value) => { resource->Use(); });
+                resource->Use();
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UnknownFunction);
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Theory]
+    [InlineData("&")]
+    [InlineData("readonly &")]
+    public void FailedLambdaResolutionDoesNotLeakBorrowCapture(string capture)
+    {
+        Compilation compilation = Compile($$"""
+            namespace Example;
+            void Ambiguous(function void(int) callback, int* marker) { }
+            void Ambiguous(function void(int) callback, float* marker) { }
+            void Test()
+            {
+                int value = 0;
+                Ambiguous([{{capture}}value](int item) => { int copy = value + item; }, null);
+                value = 1;
+            }
+            """);
+
+        Assert.Single(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousCall);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
     public void LambdaReturnBodySelectsCompatibleOverload()
     {
         Compilation compilation = Compile("""
