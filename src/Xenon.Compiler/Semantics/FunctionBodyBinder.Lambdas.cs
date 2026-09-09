@@ -15,11 +15,32 @@ internal sealed partial class FunctionBodyBinder
         VariableSymbol Source,
         TypeSymbol StorageType,
         BoundExpression Initializer);
+    private sealed record LambdaBodyProbe(
+        bool IsApplicable,
+        int ReturnConversionCost);
 
     private FunctionBodyBinder? _lambdaParent;
+    private bool _isLambdaCompatibilityProbe;
+    private bool _lambdaProbeReturnsCompatible = true;
+    private int _lambdaProbeReturnConversionCost;
     private readonly Dictionary<LambdaExpressionSyntax, ImmutableArray<PreparedLambdaCapture>>
         _preparedLambdaCaptures = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<LambdaExpressionSyntax, Dictionary<TypeSymbol, LambdaBodyProbe>> _lambdaBodyProbes =
+        new(ReferenceEqualityComparer.Instance);
     private FunctionSymbol LexicalAccessContext => _lambdaParent?.LexicalAccessContext ?? _function;
+
+    private static bool TryGetLambdaExpression(ExpressionSyntax syntax, out LambdaExpressionSyntax lambda)
+    {
+        while (syntax is ParenthesizedExpressionSyntax parenthesized)
+            syntax = parenthesized.Expression;
+        if (syntax is LambdaExpressionSyntax result)
+        {
+            lambda = result;
+            return true;
+        }
+        lambda = null!;
+        return false;
+    }
 
     private BoundExpression BindDeferredLambdaExpression(LambdaExpressionSyntax syntax)
     {
@@ -118,7 +139,11 @@ internal sealed partial class FunctionBodyBinder
             _semanticInfo.Declarations[parameter] = symbol;
 
         var binder = new FunctionBodyBinder(function, _fileScope, _diagnostics, _constants,
-            _semanticInfo, _genericSpecializer, _cancellationToken) { _lambdaParent = this };
+            _semanticInfo, _genericSpecializer, _cancellationToken)
+        {
+            _lambdaParent = this,
+            _isLambdaCompatibilityProbe = this._isLambdaCompatibilityProbe,
+        };
         foreach (CaptureVariableSymbol capture in function.LambdaCaptures)
         {
             binder._scope.TryDeclare(capture);
@@ -131,7 +156,8 @@ internal sealed partial class FunctionBodyBinder
         if (pointerTarget is not null)
             return new BoundFunctionAddressExpression(function, pointerTarget);
         functionValue ??= _fileScope.TypeFactory.FunctionValue(returnType, parameterTypes);
-        _fileScope.TypeFactory.EnsureFunctionValueDestructor(functionValue, _fileScope.GlobalNamespace, syntax);
+        if (!_isLambdaCompatibilityProbe)
+            _fileScope.TypeFactory.EnsureFunctionValueDestructor(functionValue, _fileScope.GlobalNamespace, syntax);
         return new BoundFunctionValueExpression(function, functionValue, boundCaptures.ToImmutable());
     }
 
@@ -212,11 +238,11 @@ internal sealed partial class FunctionBodyBinder
     {
         FunctionPointerTypeSymbol? pointerTarget = destination as FunctionPointerTypeSymbol;
         FunctionValueTypeSymbol? valueTarget = destination as FunctionValueTypeSymbol;
-        bool usesUserConversion = false;
         if (pointerTarget is null && valueTarget is null)
         {
-            valueTarget = GetLambdaUserConversionInput(destination);
-            usesUserConversion = valueTarget is not null;
+            return FindLambdaUserConversions(syntax, destination).Length == 0
+                ? null
+                : int.MaxValue - 1;
         }
 
         TypeSymbol? returnType = valueTarget?.ReturnType ?? pointerTarget?.ReturnType;
@@ -245,12 +271,92 @@ internal sealed partial class FunctionBodyBinder
         if (diagnostics.Count != 0)
             return null;
 
-        if (usesUserConversion)
-            return int.MaxValue - 1;
+        int? returnCost = GetLambdaBodyReturnConversionCost(syntax, returnType);
+        if (returnCost is null)
+            return null;
+
         // A first-class function value is the lambda's native representation.
         // Conversion to a raw pointer is viable only for non-capturing lambdas
         // and ranks one standard step after the native contextual conversion.
-        return valueTarget is not null ? 0 : 1;
+        int representationPenalty = valueTarget is not null ? 0 : 1;
+        int rankedReturnCost = Math.Min(returnCost.Value, int.MaxValue - 3);
+        return rankedReturnCost + representationPenalty;
+    }
+
+    private int? GetLambdaBodyReturnConversionCost(LambdaExpressionSyntax syntax, TypeSymbol returnType)
+    {
+        LambdaBodyProbe probe = GetLambdaBodyProbe(syntax, returnType);
+        return probe.IsApplicable ? probe.ReturnConversionCost : null;
+    }
+
+    private LambdaBodyProbe GetLambdaBodyProbe(LambdaExpressionSyntax syntax, TypeSymbol returnType)
+    {
+        if (!_lambdaBodyProbes.TryGetValue(syntax, out Dictionary<TypeSymbol, LambdaBodyProbe>? probes))
+        {
+            probes = new Dictionary<TypeSymbol, LambdaBodyProbe>(ReferenceEqualityComparer.Instance);
+            _lambdaBodyProbes.Add(syntax, probes);
+        }
+        if (probes.TryGetValue(returnType, out LambdaBodyProbe? cached))
+            return cached;
+
+        var diagnostics = new DiagnosticBag();
+        var parameters = ImmutableArray.CreateBuilder<ParameterSymbol>(syntax.Parameters.Length);
+        foreach (ParameterSyntax parameter in syntax.Parameters)
+        {
+            TypeSymbol type = TypeResolver.Resolve(parameter.Type, _fileScope, diagnostics);
+            parameters.Add(new ParameterSymbol(parameter.IdentifierToken.Text, type, parameters.Count,
+                parameter.Type.IsBindingReadonly(), declaration: parameter));
+        }
+
+        string name = CreateLambdaName(syntax) + "#compatibility";
+        TypeSyntax returnSyntax = syntax.ExplicitReturnType ?? new NamedTypeSyntax(
+            [new SyntaxToken(SyntaxKind.VoidKeyword, syntax.IntroducerToken.Location, "void")], []);
+        var declaration = new FunctionDeclarationSyntax(null, null, returnSyntax,
+            new SyntaxToken(SyntaxKind.IdentifierToken, syntax.IntroducerToken.Location, name), null,
+            syntax.OpenParenthesisToken, syntax.Parameters, syntax.CommaTokens,
+            syntax.CloseParenthesisToken, [], syntax.Body, null);
+        var function = new FunctionSymbol(name, _function.ContainingNamespace, returnType,
+            parameters.ToImmutable(), declaration) { IsLambda = true, IsCapturingLambda = !syntax.Captures.IsEmpty };
+
+        var captureSymbols = ImmutableArray.CreateBuilder<CaptureVariableSymbol>();
+        var captureNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (LambdaCaptureSyntax capture in syntax.Captures)
+        {
+            if (!captureNames.Add(capture.IdentifierToken.Text))
+                continue;
+            VariableSymbol? source = _scope.Lookup(capture.IdentifierToken.Text);
+            if (source is null)
+                continue;
+            TypeSymbol storageType = capture.CaptureKind switch
+            {
+                LambdaCaptureKind.MutableBorrow => _fileScope.TypeFactory.ReferenceTo(source.Type),
+                LambdaCaptureKind.ReadonlyBorrow => _fileScope.TypeFactory.ReferenceTo(source.Type, isReadonly: true),
+                _ => source.Type,
+            };
+            captureSymbols.Add(new CaptureVariableSymbol(source, storageType, capture.CaptureKind,
+                captureSymbols.Count, function, capture));
+        }
+        function.LambdaCaptures = captureSymbols.ToImmutable();
+
+        GenericFunctionSpecializer? speculativeSpecializer =
+            _genericSpecializer?.CreateSpeculative(diagnostics);
+        var binder = new FunctionBodyBinder(function, _fileScope, diagnostics, _constants,
+            new SemanticInfoStore(), speculativeSpecializer, _cancellationToken)
+        {
+            _lambdaParent = this,
+            _isLambdaCompatibilityProbe = true,
+        };
+        foreach (CaptureVariableSymbol capture in function.LambdaCaptures)
+        {
+            binder._scope.TryDeclare(capture);
+            binder._definitelyAssigned.Add(capture);
+        }
+        BoundBlockStatement body = binder.BindBody(syntax.Body);
+        bool applicable = binder._lambdaProbeReturnsCompatible &&
+            (TypeIdentity.AreSame(returnType, BuiltinTypes.Void) || AlwaysReturns(body));
+        cached = new LambdaBodyProbe(applicable, binder._lambdaProbeReturnConversionCost);
+        probes.Add(returnType, cached);
+        return cached;
     }
 
     private bool TryInferLambdaGenericTypes(TypeSymbol pattern, LambdaExpressionSyntax syntax,

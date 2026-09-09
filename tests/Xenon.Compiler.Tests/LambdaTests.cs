@@ -11,6 +11,549 @@ namespace Xenon.Compiler.Tests;
 public sealed class LambdaTests
 {
     [Fact]
+    public void LambdaReturnBodySelectsCompatibleOverload()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            void Run(function int(int) callback) { }
+            void Run(function String(int) callback) { }
+            void Test() { Run((int value) => { return value + 1; }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol callback = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedRun(compilation).Parameters[0].Type);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int, callback.ReturnType));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void LambdaReturnBodySelectsVoidOrValueOverload()
+    {
+        Compilation voidCompilation = Compile("""
+            namespace Example;
+            void Run(function void(int) callback) { }
+            void Run(function int(int) callback) { }
+            void Test() { Run((int value) => { int copy = value; }); }
+            """);
+        Compilation valueCompilation = Compile("""
+            namespace Example;
+            void Run(function void(int) callback) { }
+            void Run(function int(int) callback) { }
+            void Test() { Run((int value) => { return value; }); }
+            """);
+
+        Assert.Empty(voidCompilation.Diagnostics);
+        Assert.Empty(valueCompilation.Diagnostics);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Void,
+            Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(voidCompilation).Parameters[0].Type).ReturnType));
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(valueCompilation).Parameters[0].Type).ReturnType));
+    }
+
+    [Fact]
+    public void MultipleFunctionConversionOperatorsUseLambdaParameterType()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function void(String) callback) { return Wrapper(); }
+            }
+            void Test() { Wrapper value = (int item) => { }; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionSymbol selected = SelectedLambdaConversion(compilation);
+        FunctionValueTypeSymbol input = Assert.IsType<FunctionValueTypeSymbol>(selected.Parameters[0].Type);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int, input.ParameterTypes[0]));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void MultipleFunctionConversionOperatorsWorkForCallArguments()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function void(String) callback) { return Wrapper(); }
+            }
+            void Accept(Wrapper callback) { }
+            void Test() { Accept((int item) => { }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol input = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedLambdaConversion(compilation).Parameters[0].Type);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int, input.ParameterTypes[0]));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void MultipleFunctionConversionOperatorsUseLambdaReturnBody()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function int(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function String(int) callback) { return Wrapper(); }
+            }
+            void Test() { Wrapper value = (int item) => { return item + 1; }; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol input = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedLambdaConversion(compilation).Parameters[0].Type);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int, input.ReturnType));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+        _ = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
+    }
+
+    [Theory]
+    [InlineData("[offset]", true)]
+    [InlineData("[]", false)]
+    public void FunctionValueConversionOperatorWinsOverRawPointer(string captures, bool declaresOffset)
+    {
+        Compilation compilation = Compile($$"""
+            namespace Example;
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function void(int)* callback) { return Wrapper(); }
+            }
+            void Test()
+            {
+                {{(declaresOffset ? "int offset = 1;" : string.Empty)}}
+                Wrapper value = {{captures}}(int item) => { };
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.IsType<FunctionValueTypeSymbol>(SelectedLambdaConversion(compilation).Parameters[0].Type);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void AllLambdaReturnPathsParticipateInOverloadApplicability()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            void Run(function int(bool) callback) { }
+            void Run(function String(bool) callback) { }
+            void Test()
+            {
+                Run((bool flag) =>
+                {
+                    if (flag) { return 10; }
+                    return 20;
+                });
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(compilation).Parameters[0].Type).ReturnType));
+    }
+
+    [Fact]
+    public void ExactLambdaReturnConversionWinsOverInterfaceConversion()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            interface IValue { }
+            struct Value : IValue { }
+            void Run(function Value(int) callback) { }
+            void Run(function IValue(int) callback) { }
+            void Test() { Run((int item) => { return Value(); }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol callback = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedRun(compilation).Parameters[0].Type);
+        Assert.IsType<StructTypeSymbol>(callback.ReturnType);
+    }
+
+    [Fact]
+    public void EquallyConvertibleLambdaReturnsRemainAmbiguous()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            interface ILeft { }
+            interface IRight { }
+            struct Value : ILeft, IRight { }
+            void Run(function ILeft(int) callback) { }
+            void Run(function IRight(int) callback) { }
+            void Test() { Run((int item) => { return Value(); }); }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousCall);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void EquallyConvertibleLambdaConversionOperatorsAreAmbiguous()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            interface ILeft { }
+            interface IRight { }
+            struct Value : ILeft, IRight { }
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function ILeft(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function IRight(int) callback) { return Wrapper(); }
+            }
+            void Test() { Wrapper value = (int item) => { return Value(); }; }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousConversion);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void ContextualOverloadProbeMovesCaptureExactlyOnce()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Resource { public void Use() { } }
+            void Run(function void(int) callback) { }
+            void Run(function void(String) callback) { }
+            void Test()
+            {
+                unique<Resource> resource = new Resource();
+                Run([move resource](int item) => { resource.Use(); });
+                resource.Use();
+            }
+            """);
+
+        Assert.Single(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.UseAfterMove);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Theory]
+    [InlineData("&")]
+    [InlineData("readonly &")]
+    public void ContextualOverloadProbeDoesNotLeakBorrowCapture(string modifier)
+    {
+        Compilation compilation = Compile($$"""
+            namespace Example;
+            struct String { }
+            void Run(function void(int) callback) { }
+            void Run(function void(String) callback) { }
+            void Test()
+            {
+                int total = 0;
+                Run([{{modifier}}total](int item) => { int copy = total + item; });
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void MultipleFunctionConversionOperatorsSurviveSourceFreeLibraryRoundTrip()
+    {
+        Compilation library = Compile("""
+            namespace Library;
+            public struct String { }
+            public struct Wrapper
+            {
+                public static Wrapper operator implicit(function int(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function String(int) callback) { return Wrapper(); }
+            }
+            """);
+        Assert.Empty(library.Diagnostics);
+        var reference = XelibReader.Read(XelibWriter.Write(library,
+            new XelibWriteOptions("ContextualConversions")));
+        Compilation application = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Library;
+            namespace Application;
+            void Test() { Wrapper value = (int item) => { return item + 1; }; }
+            """, "application.xe"));
+
+        Assert.Empty(application.Diagnostics);
+        FunctionSymbol selected = SelectedLambdaConversion(application);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(selected.Parameters[0].Type).ReturnType));
+        Assert.Single(application.SemanticModel.Functions, function => function.Symbol.IsLambda);
+        _ = new LlvmIrGenerator().GenerateForTarget(application, LlvmTargetOptions.CreateHost());
+    }
+
+    [Fact]
+    public void AmbiguousLambdaConversionsRemainAmbiguousFromSourceFreeLibrary()
+    {
+        Compilation library = Compile("""
+            namespace Library;
+            public interface ILeft { }
+            public interface IRight { }
+            public struct Value : ILeft, IRight { }
+            public struct Wrapper
+            {
+                public int Marker;
+                public static Wrapper operator implicit(function ILeft() callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function IRight() callback) { return Wrapper(); }
+            }
+            """);
+        Assert.Empty(library.Diagnostics);
+        CompilationReference reference = XelibReader.Read(XelibWriter.Write(library,
+            new XelibWriteOptions("AmbiguousContextualConversions")));
+        Compilation application = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Library;
+            namespace Application;
+            void Test() { Wrapper value = []() => { return Value(); }; }
+            """, "application.xe"));
+
+        Assert.Contains(application.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousConversion);
+        Assert.Empty(application.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void GenericLambdaConversionsResolveFromSourceFreeLibrary()
+    {
+        Compilation library = Compile("""
+            namespace Library;
+            public struct Action<T>
+            {
+                public int Marker;
+                public static Action<T> operator implicit(function void(T) callback) { return Action<T>(); }
+                public static Action<T> operator implicit(function int(T) callback) { return Action<T>(); }
+            }
+            """);
+        Assert.Empty(library.Diagnostics);
+        CompilationReference reference = XelibReader.Read(XelibWriter.Write(library,
+            new XelibWriteOptions("GenericContextualConversions")));
+        Compilation application = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Library;
+            namespace Application;
+            void Test() { Action<int> value = (int item) => { }; }
+            """, "application.xe"));
+
+        Assert.Empty(application.Diagnostics);
+        FunctionValueTypeSymbol input = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedLambdaConversion(application).Parameters[0].Type);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Void, input.ReturnType));
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int, input.ParameterTypes[0]));
+        Assert.Single(application.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void GenericDestinationResolvesMultipleFunctionConversionOperators()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Action<T>
+            {
+                public static Action<T> operator implicit(function void(T) callback) { return Action<T>(); }
+                public static Action<T> operator implicit(function int(T) callback) { return Action<T>(); }
+            }
+            void Test() { Action<int> action = (int item) => { }; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol input = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedLambdaConversion(compilation).Parameters[0].Type);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Void, input.ReturnType));
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int, input.ParameterTypes[0]));
+    }
+
+    [Fact]
+    public void IncompatibleLambdaConversionBodyReportsOneSummaryDiagnostic()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function String(int) callback) { return Wrapper(); }
+            }
+            void Test() { Wrapper value = (int item) => { return item + 1; }; }
+            """);
+
+        Diagnostic diagnostic = Assert.Single(compilation.Diagnostics);
+        Assert.Equal(DiagnosticIds.TypeMismatch, diagnostic.Id);
+        Assert.Contains("no implicit conversion", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Empty(compilation.SemanticModel.Functions.Where(function => function.Symbol.IsLambda));
+    }
+
+    [Fact]
+    public void LambdaBodyConversionIsIndependentFromOuterLambdaConversion()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Result
+            {
+                public int Value;
+                public static Result operator implicit(int value) { return Result(); }
+            }
+            struct Wrapper
+            {
+                public static Wrapper operator implicit(function Result(int) callback) { return Wrapper(); }
+                public static Wrapper operator implicit(function void(int) callback) { return Wrapper(); }
+            }
+            void Test() { Wrapper value = (int item) => { return item; }; }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol input = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedLambdaConversion(compilation).Parameters[0].Type);
+        Assert.Equal("Result", input.ReturnType.Name);
+    }
+
+    [Fact]
+    public void UserConvertedReturnStillPrefersFunctionValueOverRawPointer()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Result
+            {
+                public int Value;
+                public static Result operator implicit(int value) { return Result(); }
+            }
+            void Run(function Result() callback) { }
+            void Run(function Result()* callback) { }
+            void Test() { Run([]() => { return 1; }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(compilation).Parameters[0].Type);
+    }
+
+    [Fact]
+    public void NestedLambdaReturnPreservesFunctionRepresentationCost()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            void Run(function function void()() callback) { }
+            void Run(function function void()*() callback) { }
+            void Test() { Run([]() => { return []() => { }; }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol outer = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedRun(compilation).Parameters[0].Type);
+        Assert.IsType<FunctionValueTypeSymbol>(outer.ReturnType);
+    }
+
+    [Fact]
+    public void NestedLambdaReturnPrefersDirectOverUserConversion()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Wrapper
+            {
+                public int Value;
+                public static Wrapper operator implicit(function void() callback) { return Wrapper(); }
+            }
+            void Run(function function void()() callback) { }
+            void Run(function Wrapper() callback) { }
+            void Test() { Run([]() => { return []() => { }; }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol outer = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedRun(compilation).Parameters[0].Type);
+        Assert.IsType<FunctionValueTypeSymbol>(outer.ReturnType);
+    }
+
+    [Fact]
+    public void ParenthesizedLambdasRemainContextualDuringOverloadResolution()
+    {
+        Compilation callCompilation = Compile("""
+            namespace Example;
+            void Run(function void() callback) { }
+            void Run(function void(int) callback) { }
+            void Test() { Run(([]() => { })); }
+            """);
+        Compilation returnCompilation = Compile("""
+            namespace Example;
+            void Run(function function void()() callback) { }
+            void Run(function function void()*() callback) { }
+            void Test() { Run([]() => { return ([]() => { }); }); }
+            """);
+
+        Assert.Empty(callCompilation.Diagnostics);
+        Assert.Empty(returnCompilation.Diagnostics);
+        Assert.Empty(Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedRun(callCompilation).Parameters[0].Type).ParameterTypes);
+        FunctionValueTypeSymbol outer = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedRun(returnCompilation).Parameters[0].Type);
+        Assert.IsType<FunctionValueTypeSymbol>(outer.ReturnType);
+    }
+
+    [Fact]
+    public void ParenthesizedLambdaUsesUserConversionContext()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Wrapper
+            {
+                public int Value;
+                public static Wrapper operator implicit(function void() callback) { return Wrapper(); }
+            }
+            void Test() { Wrapper value = ([]() => { }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedLambdaConversion(compilation).Parameters[0].Type);
+    }
+
+    [Fact]
+    public void ContextualNamedFunctionReturnSelectsLambdaOverload()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            int Transform(int value) { return value; }
+            void Run(function function int(int)() callback) { }
+            void Run(function function int(String)() callback) { }
+            void Test() { Run([]() => { return Transform; }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionValueTypeSymbol outer = Assert.IsType<FunctionValueTypeSymbol>(
+            SelectedRun(compilation).Parameters[0].Type);
+        FunctionValueTypeSymbol returned = Assert.IsType<FunctionValueTypeSymbol>(outer.ReturnType);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int, returned.ParameterTypes[0]));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+    }
+
+    [Fact]
+    public void GenericCallReturnSelectsLambdaOverloadWithoutMainSpecializerPollution()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct String { }
+            T Identity<T>(T value) { return move value; }
+            void Run(function int() callback) { }
+            void Run(function String() callback) { }
+            void Test() { Run([]() => { return Identity(1); }); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(compilation).Parameters[0].Type).ReturnType));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+        Assert.Single(compilation.SemanticModel.Functions,
+            function => function.Symbol.GenericDefinition?.Name == "Identity");
+    }
+
+    [Fact]
     public void ExplicitLambdaParameterSelectsCompatibleOverload()
     {
         Compilation compilation = Compile("""
@@ -110,7 +653,7 @@ public sealed class LambdaTests
     }
 
     [Fact]
-    public void EquallyCompatibleContextualLambdaOverloadsAreAmbiguous()
+    public void ExactLambdaReturnTypeEliminatesIncompatibleNumericReturn()
     {
         Compilation compilation = Compile("""
             namespace Example;
@@ -119,8 +662,10 @@ public sealed class LambdaTests
             void Test() { Run((int value) => { return value; }); }
             """);
 
-        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.AmbiguousCall);
-        Assert.DoesNotContain(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
+        Assert.Empty(compilation.Diagnostics);
+        Assert.True(TypeIdentity.AreSame(BuiltinTypes.Int,
+            Assert.IsType<FunctionValueTypeSymbol>(SelectedRun(compilation).Parameters[0].Type).ReturnType));
+        Assert.Single(compilation.SemanticModel.Functions, function => function.Symbol.IsLambda);
     }
 
     [Fact]
@@ -730,6 +1275,23 @@ public sealed class LambdaTests
     {
         Compilation compilation = Compile("namespace Example; void Test() { function int(int)* f = " + expression);
         Assert.NotEmpty(compilation.Diagnostics);
+    }
+
+    private static FunctionSymbol SelectedRun(Compilation compilation)
+    {
+        CallExpressionSyntax call = SyntaxNavigator.DescendantNodesAndSelf(
+                compilation.SyntaxTrees.Single().Root)
+            .OfType<CallExpressionSyntax>()
+            .Single(candidate => candidate.Target is NameExpressionSyntax { IdentifierToken.Text: "Run" });
+        return Assert.IsType<FunctionSymbol>(compilation.SemanticModel.GetSymbolInfo(call.Target).Symbol);
+    }
+
+    private static FunctionSymbol SelectedLambdaConversion(Compilation compilation)
+    {
+        LambdaExpressionSyntax lambda = SyntaxNavigator.DescendantNodesAndSelf(
+            compilation.SyntaxTrees.Single().Root).OfType<LambdaExpressionSyntax>().Single();
+        return Assert.IsType<FunctionSymbol>(
+            compilation.SemanticModel.GetConversionSymbolInfo(lambda).Symbol);
     }
 
     private static Compilation Compile(string source) => Compilation.Create(SourceText.From(source, "lambda.xe"));

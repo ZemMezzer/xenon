@@ -1627,8 +1627,38 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundReturnStatement BindReturnStatement(ReturnStatementSyntax syntax)
     {
+        int? contextualLambdaConversionCost = null;
+        bool hasContextualLambdaConversion = false;
+        if (_isLambdaCompatibilityProbe && syntax.Expression is { } returnExpression &&
+            TryGetLambdaExpression(returnExpression, out LambdaExpressionSyntax lambda))
+        {
+            // Binding a nested lambda with an expected return type materializes the
+            // conversion immediately. Preserve its candidate-specific cost before
+            // the resulting bound expression has the exact contextual type.
+            contextualLambdaConversionCost = GetLambdaArgumentConversionCost(_function.ReturnType, lambda);
+            hasContextualLambdaConversion = true;
+        }
         BoundExpression? expression = syntax.Expression is null ? null :
             BindExpressionWithExpectedType(syntax.Expression, _function.ReturnType);
+        if (_isLambdaCompatibilityProbe)
+        {
+            if (TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void))
+                _lambdaProbeReturnsCompatible &= expression is null;
+            else if (expression is null)
+                _lambdaProbeReturnsCompatible = false;
+            else if (expression is BoundErrorExpression)
+                _lambdaProbeReturnsCompatible = false;
+            else
+            {
+                int? conversionCost = hasContextualLambdaConversion
+                    ? contextualLambdaConversionCost
+                    : GetArgumentConversionCost(_function.ReturnType, expression);
+                _lambdaProbeReturnsCompatible &= conversionCost.HasValue;
+                if (conversionCost.HasValue)
+                    _lambdaProbeReturnConversionCost = Math.Max(
+                        _lambdaProbeReturnConversionCost, conversionCost.Value);
+            }
+        }
         if (expression is not null)
         {
             expression = ContextualizeConversion(expression, _function.ReturnType, GetLocation(syntax.Expression!));
@@ -5813,20 +5843,27 @@ internal sealed partial class FunctionBodyBinder
                 ? BindExpression(syntax.Target) : null;
         ImmutableArray<BoundExpression> arguments = BindTransferredArguments(
             syntax.Arguments,
-            (argument, index) => isLifetimeOperation && index == 0
-                ? BindLifetimeInvalidationOperand(argument)
-                : ((expressionTarget?.Type switch
-                   {
-                       FunctionPointerTypeSymbol expressionPointer when index < expressionPointer.ParameterTypes.Length => expressionPointer.ParameterTypes[index],
-                       FunctionValueTypeSymbol expressionValue when index < expressionValue.ParameterTypes.Length => expressionValue.ParameterTypes[index],
-                       _ => null,
-                   }) ?? GetCallArgumentExpectedType(syntax, index)) is { } expectedType
-                    ? argument is LambdaExpressionSyntax genericLambda && ContainsGenericParameter(expectedType)
-                        ? BindDeferredLambdaExpression(genericLambda)
-                        : BindExpressionWithExpectedType(argument, expectedType)
-                    : argument is LambdaExpressionSyntax lambda
-                        ? BindDeferredLambdaExpression(lambda)
-                        : BindExpression(argument));
+            (argument, index) =>
+            {
+                if (isLifetimeOperation && index == 0)
+                    return BindLifetimeInvalidationOperand(argument);
+                TypeSymbol? expectedType = (expressionTarget?.Type switch
+                {
+                    FunctionPointerTypeSymbol expressionPointer when index < expressionPointer.ParameterTypes.Length => expressionPointer.ParameterTypes[index],
+                    FunctionValueTypeSymbol expressionValue when index < expressionValue.ParameterTypes.Length => expressionValue.ParameterTypes[index],
+                    _ => null,
+                }) ?? GetCallArgumentExpectedType(syntax, index);
+                if (expectedType is not null)
+                {
+                    if (TryGetLambdaExpression(argument, out LambdaExpressionSyntax genericLambda) &&
+                        ContainsGenericParameter(expectedType))
+                        return BindDeferredLambdaExpression(genericLambda);
+                    return BindExpressionWithExpectedType(argument, expectedType);
+                }
+                return TryGetLambdaExpression(argument, out LambdaExpressionSyntax lambda)
+                    ? BindDeferredLambdaExpression(lambda)
+                    : BindExpression(argument);
+            });
         if (syntax.TypeArguments is { } typeArguments)
             return BindExplicitGenericCall(syntax, typeArguments, arguments);
         bool incomplete = syntax.CloseParenthesisToken.IsMissing;
@@ -6143,7 +6180,7 @@ internal sealed partial class FunctionBodyBinder
             bool compatible = true;
             for (int index = 0; index < syntax.Arguments.Length; index++)
             {
-                if (syntax.Arguments[index] is not LambdaExpressionSyntax lambda) continue;
+                if (!TryGetLambdaExpression(syntax.Arguments[index], out LambdaExpressionSyntax lambda)) continue;
                 if (TryInferLambdaGenericTypes(candidate.Parameters[index].Type, lambda, inferred)) continue;
                 compatible = false;
                 break;
@@ -6161,13 +6198,12 @@ internal sealed partial class FunctionBodyBinder
         }
 
         viable = viable.Where(candidate => syntax.Arguments.Select((argument, index) => (argument, index))
-            .Where(pair => pair.argument is LambdaExpressionSyntax)
             .All(pair =>
             {
+                if (!TryGetLambdaExpression(pair.argument, out LambdaExpressionSyntax lambda)) return true;
                 TypeSymbol contextual = Expected(candidate, pair.index);
                 return ContainsGenericParameter(contextual) ||
-                       GetLambdaArgumentConversionCost(contextual,
-                           (LambdaExpressionSyntax)pair.argument) is not null;
+                       GetLambdaArgumentConversionCost(contextual, lambda) is not null;
             })).ToArray();
         if (viable.Length == 0) return null;
         TypeSymbol expected = Expected(viable[0], argumentIndex);
@@ -7108,11 +7144,21 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundExpression BindExpressionWithExpectedType(ExpressionSyntax syntax, TypeSymbol expectedType)
     {
+        if (TryGetLambdaExpression(syntax, out LambdaExpressionSyntax lambda) &&
+            expectedType is not (FunctionValueTypeSymbol or FunctionPointerTypeSymbol) &&
+            TryBindLambdaUserConversion(lambda, expectedType, out BoundExpression? convertedLambda))
+        {
+            for (ExpressionSyntax wrapper = syntax;
+                 wrapper is ParenthesizedExpressionSyntax parenthesized;
+                 wrapper = parenthesized.Expression)
+                _semanticInfo.Types[wrapper] = new TypeInfo(convertedLambda!.Type, convertedLambda.Type);
+            return convertedLambda!;
+        }
+
         FunctionPointerTypeSymbol? previous = _expectedFunctionPointerType;
         FunctionValueTypeSymbol? previousValue = _expectedFunctionValueType;
         _expectedFunctionPointerType = expectedType as FunctionPointerTypeSymbol;
-        _expectedFunctionValueType = expectedType as FunctionValueTypeSymbol ??
-            GetLambdaUserConversionInput(expectedType);
+        _expectedFunctionValueType = expectedType as FunctionValueTypeSymbol;
         try { return BindExpression(syntax); }
         finally
         {
