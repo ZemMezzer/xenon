@@ -6602,17 +6602,20 @@ public sealed class LlvmIrGenerator
                 LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
                 LLVMValueRef table = _builder.BuildExtractValue(interfaceValue, 1, "interface.table");
                 LLVMValueRef[] arguments = EmitTransferredArguments(expression.Arguments);
+                LLVMValueRef[] getterArguments = CopyCompoundAccessorArguments(
+                    expression, arguments, out LifecycleValueGuard[] argumentGuards);
                 LLVMValueRef current = EmitInterfaceAccessorCall(
                     interfaceType,
                     expression.Getter,
                     data,
                     table,
-                    arguments,
+                    getterArguments,
                     "interface.get");
                 LLVMValueRef result = expression.UsesUserOperator
                     ? EmitCompoundOperatorValue(expression, current)
                     : EmitArithmetic(expression.OperatorKind, expression.Type, current,
                         EmitExpression(expression.Value), expression.Value.Type);
+                CompleteLifecycleValueGuards(argumentGuards);
                 EmitInterfaceAccessorCall(
                     interfaceType,
                     expression.Setter,
@@ -6632,16 +6635,19 @@ public sealed class LlvmIrGenerator
                 expression.Getter.ContainingStruct!,
                 expression.Getter.Name);
             LLVMValueRef[] instanceArguments = EmitTransferredArguments(expression.Arguments);
+            LLVMValueRef[] instanceGetterArguments = CopyCompoundAccessorArguments(
+                expression, instanceArguments, out LifecycleValueGuard[] instanceArgumentGuards);
             LLVMValueRef instanceCurrent = EmitInstanceAccessorCall(
                 expression.Getter,
                 receiverType,
                 receiver,
-                instanceArguments,
+                instanceGetterArguments,
                 "accessor.get");
             LLVMValueRef instanceResult = expression.UsesUserOperator
                 ? EmitCompoundOperatorValue(expression, instanceCurrent)
                 : EmitArithmetic(expression.OperatorKind, expression.Type, instanceCurrent,
                     EmitExpression(expression.Value), expression.Value.Type);
+            CompleteLifecycleValueGuards(instanceArgumentGuards);
             EmitInstanceAccessorCall(
                 expression.Setter,
                 receiverType,
@@ -6649,6 +6655,34 @@ public sealed class LlvmIrGenerator
                 [.. instanceArguments, instanceResult],
                 string.Empty);
             return instanceResult;
+        }
+
+        private LLVMValueRef[] CopyCompoundAccessorArguments(
+            BoundCompoundAccessorAssignmentExpression expression,
+            LLVMValueRef[] arguments,
+            out LifecycleValueGuard[] guards)
+        {
+            var copies = new LLVMValueRef[arguments.Length];
+            var guardBuilder = new List<LifecycleValueGuard>();
+            for (int index = 0; index < arguments.Length; index++)
+            {
+                TypeSymbol type = expression.Arguments[index].Type;
+                if (type is not ReferenceTypeSymbol && !TypeFacts.CanCopy(type))
+                    throw new LlvmCodeGenerationException(
+                        $"Compound accessor argument '{type.ToDisplayString()}' is not copyable.");
+                if (TypeFacts.GetCompleteDestructor(type) is { } destructor)
+                    guardBuilder.Add(BeginLifecycleValueGuard(arguments[index], type, destructor,
+                        $"compound.argument.{index}"));
+                copies[index] = EmitCopyValue(arguments[index], type);
+            }
+            guards = guardBuilder.ToArray();
+            return copies;
+        }
+
+        private void CompleteLifecycleValueGuards(IEnumerable<LifecycleValueGuard> guards)
+        {
+            foreach (LifecycleValueGuard guard in guards)
+                CompleteLifecycleValueGuard(guard);
         }
 
         private LLVMValueRef EmitCompoundOperatorValue(BoundCompoundAccessorAssignmentExpression expression,

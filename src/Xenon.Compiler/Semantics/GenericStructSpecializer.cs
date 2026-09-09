@@ -35,6 +35,7 @@ internal sealed class GenericStructSpecializer
     private readonly Dictionary<StructTypeSymbol, GenericStructSpecializationState> _states = [];
     private readonly Dictionary<StructTypeSymbol, TextLocation> _originLocations = [];
     private readonly HashSet<StructTypeSymbol> _constantsCompleted = [];
+    private readonly HashSet<StructTypeSymbol> _invalidConstraintSpecializations = [];
     private bool _fieldsReady;
     private bool _membersReady;
     private bool _constantsReady;
@@ -166,6 +167,14 @@ internal sealed class GenericStructSpecializer
         _substitutions[specialization];
 
     public GenericStructSpecializationState GetState(StructTypeSymbol specialization) => _states[specialization];
+
+    public bool AreConstraintsSatisfied(StructTypeSymbol specialization)
+    {
+        if (!_states.ContainsKey(specialization))
+            return true;
+        EnsureConstraintsValidated(specialization);
+        return !_invalidConstraintSpecializations.Contains(specialization);
+    }
 
     public TextLocation GetOriginLocation(StructTypeSymbol specialization) =>
         _originLocations.GetValueOrDefault(specialization, TextLocation.None);
@@ -444,6 +453,8 @@ internal sealed class GenericStructSpecializer
         }
         if (isValid && specialized.IsConcreteType)
             specialized.ContainingNamespace.TryDeclareType(specialized);
+        if (!isValid)
+            _invalidConstraintSpecializations.Add(specialized);
         _states[specialized] = GenericStructSpecializationState.ConstraintsValidated;
     }
 

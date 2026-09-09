@@ -461,6 +461,16 @@ internal sealed record BoundUnboundLambdaExpression(
     public override BoundKind Kind => BoundKind.ErrorExpression;
 }
 
+/// <summary>
+/// A function-name argument whose overload and representation are deferred until
+/// the receiving callable or conversion parameter type is known.
+/// </summary>
+internal sealed record BoundUnboundFunctionExpression(
+    ExpressionSyntax Syntax) : BoundExpression(BuiltinTypes.Error)
+{
+    public override BoundKind Kind => BoundKind.ErrorExpression;
+}
+
 // A nominal enum value whose numeric value must be recomputed once a target is selected.
 // This node is never passed to LLVM emission.
 public sealed record BoundDeferredConstantExpression(TypeSymbol ConstantType) : BoundExpression(ConstantType)

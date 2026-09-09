@@ -42,12 +42,34 @@ internal sealed partial class FunctionBodyBinder
         return false;
     }
 
+    private bool TryGetNamedFunctionExpression(ExpressionSyntax syntax, out ExpressionSyntax function)
+    {
+        while (syntax is ParenthesizedExpressionSyntax parenthesized)
+            syntax = parenthesized.Expression;
+        if (syntax is NameExpressionSyntax or MemberAccessExpressionSyntax &&
+            GetNamedFunctionCandidates(syntax).Length != 0)
+        {
+            function = syntax;
+            return true;
+        }
+        function = null!;
+        return false;
+    }
+
     private BoundExpression BindDeferredLambdaExpression(LambdaExpressionSyntax syntax)
     {
         // Captures are evaluated when the lambda argument is evaluated, even though
         // its signature cannot be contextualized until overload resolution finishes.
         // Preparing them here preserves source-order ownership and borrow effects.
+        ExpressionFlow? before = _argumentFlowTransactions.Count == 0
+            ? null : CaptureExpressionFlow();
         PrepareLambdaCaptures(syntax);
+        if (before is not null)
+        {
+            ArgumentFlowTransaction transaction = _argumentFlowTransactions.Peek();
+            transaction.RecordDeferredLambdaCapture(syntax, before, CaptureExpressionFlow());
+            _deferredLambdaCaptureTransactions[syntax] = transaction;
+        }
         return new BoundUnboundLambdaExpression(syntax);
     }
 
@@ -96,9 +118,13 @@ internal sealed partial class FunctionBodyBinder
             if (!TypeIdentity.AreSame(returnType, contextualReturn) ||
                 contextualParameters.Length != parameterTypes.Length ||
                 !contextualParameters.Zip(parameterTypes).All(pair => TypeIdentity.AreSame(pair.First, pair.Second)))
+            {
                 _diagnostics.Report(syntax.IntroducerToken.Location,
                     $"lambda signature does not match contextual type '{contextual.ToDisplayString()}'",
                     DiagnosticIds.TypeMismatch);
+                RollbackRejectedDeferredLambda(syntax);
+                return new BoundErrorExpression();
+            }
         }
 
         FunctionValueTypeSymbol? functionValue = valueTarget;
@@ -109,8 +135,12 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(syntax.OpenBracketToken!.Location,
                 "capturing lambda cannot convert to raw function pointer",
                 DiagnosticIds.LambdaCaptureNotSupported);
+            RollbackRejectedDeferredLambda(syntax);
             return new BoundErrorExpression();
         }
+        if (_deferredLambdaCaptureTransactions.TryGetValue(syntax,
+                out ArgumentFlowTransaction? captureTransaction))
+            captureTransaction.CommitDeferredLambdaCapture(syntax);
 
         string name = CreateLambdaName(syntax);
         TypeSyntax returnSyntax = syntax.ExplicitReturnType ?? new NamedTypeSyntax(
@@ -128,6 +158,7 @@ internal sealed partial class FunctionBodyBinder
         foreach (PreparedLambdaCapture prepared in preparedCaptures)
         {
             LambdaCaptureSyntax capture = prepared.Syntax;
+            _semanticInfo.Symbols[capture] = SymbolInfo.FromSymbol(prepared.Source);
             var captured = new CaptureVariableSymbol(prepared.Source, prepared.StorageType,
                 capture.CaptureKind, captureSymbols.Count, function, capture);
             captureSymbols.Add(captured);
@@ -159,6 +190,15 @@ internal sealed partial class FunctionBodyBinder
         if (!_isLambdaCompatibilityProbe)
             _fileScope.TypeFactory.EnsureFunctionValueDestructor(functionValue, _fileScope.GlobalNamespace, syntax);
         return new BoundFunctionValueExpression(function, functionValue, boundCaptures.ToImmutable());
+    }
+
+    private void RollbackRejectedDeferredLambda(LambdaExpressionSyntax syntax)
+    {
+        if (!_deferredLambdaCaptureTransactions.TryGetValue(syntax,
+                out ArgumentFlowTransaction? transaction))
+            return;
+        ExpressionFlow flow = transaction.RollbackUnmaterializedLambdaCaptures(CaptureExpressionFlow());
+        RestoreExpressionFlow(flow);
     }
 
     private ImmutableArray<PreparedLambdaCapture> PrepareLambdaCaptures(LambdaExpressionSyntax syntax)
@@ -195,7 +235,6 @@ internal sealed partial class FunctionBodyBinder
                 continue;
             }
 
-            _semanticInfo.Symbols[capture] = SymbolInfo.FromSymbol(source);
             TypeSymbol storageType = capture.CaptureKind switch
             {
                 LambdaCaptureKind.MutableBorrow => _fileScope.TypeFactory.ReferenceTo(source.Type),
@@ -400,33 +439,135 @@ internal sealed partial class FunctionBodyBinder
         return diagnostics.Count == 0;
     }
 
+    private FunctionSymbol[] GetNamedFunctionCandidates(ExpressionSyntax syntax)
+    {
+        while (syntax is ParenthesizedExpressionSyntax parenthesized)
+            syntax = parenthesized.Expression;
+        IEnumerable<FunctionSymbol> candidates;
+        if (syntax is NameExpressionSyntax name)
+        {
+            if (HasValueSymbol(name.IdentifierToken.Text, name.IdentifierToken.Location))
+                return [];
+            FunctionSymbol[] containingCandidates = _function.ContainingType is { } containing
+                ? containing.LookupMethods(name.IdentifierToken.Text).ToArray()
+                : [];
+            candidates = containingCandidates.Length != 0
+                ? containingCandidates
+                : _fileScope.ResolveFunctions(name.IdentifierToken.Text);
+        }
+        else if (syntax is MemberAccessExpressionSyntax member &&
+                 TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts) && parts.Length >= 2)
+        {
+            string firstName = parts[0].Text;
+            if (HasValueSymbol(firstName, parts[0].Location))
+                return [];
+            string[] receiverParts = parts.Take(parts.Length - 1).Select(part => part.Text).ToArray();
+            TypeSymbol? receiverType = receiverParts.Length == 1
+                ? _fileScope.ResolveType(receiverParts[0], parts[0].Location, new DiagnosticBag())
+                : _fileScope.ResolveQualifiedType(receiverParts);
+            candidates = receiverType is DeclaredTypeSymbol declaredType
+                ? declaredType.LookupMethods(parts[^1].Text)
+                : _fileScope.ResolveQualifiedFunctions(parts.Select(part => part.Text).ToArray());
+        }
+        else
+        {
+            return [];
+        }
+        return candidates.Where(candidate => !candidate.HasImplicitThis && !candidate.IsGenericDefinition)
+            .Distinct().ToArray();
+    }
+
+    private static SyntaxToken GetNamedFunctionToken(ExpressionSyntax syntax) => syntax switch
+    {
+        NameExpressionSyntax name => name.IdentifierToken,
+        MemberAccessExpressionSyntax member => member.MemberToken,
+        ParenthesizedExpressionSyntax parenthesized => GetNamedFunctionToken(parenthesized.Expression),
+        _ => throw new InvalidOperationException("Expected a named function expression."),
+    };
+
+    private FunctionSymbol[] GetNamedFunctionMatches(
+        ExpressionSyntax syntax,
+        TypeSymbol returnType,
+        ImmutableArray<TypeSymbol> parameterTypes) =>
+        GetNamedFunctionCandidates(syntax).Where(candidate =>
+            TypeIdentity.AreSame(candidate.ReturnType, returnType) &&
+            candidate.Parameters.Length == parameterTypes.Length &&
+            candidate.Parameters.Zip(parameterTypes).All(pair =>
+                TypeIdentity.AreSame(pair.First.Type, pair.Second))).ToArray();
+
+    private int? GetNamedFunctionArgumentConversionCost(TypeSymbol destination, ExpressionSyntax syntax) =>
+        destination switch
+        {
+            FunctionValueTypeSymbol value when
+                GetNamedFunctionMatches(syntax, value.ReturnType, value.ParameterTypes).Length == 1 => 0,
+            FunctionValueTypeSymbol or FunctionPointerTypeSymbol => null,
+            _ => FindNamedFunctionUserConversions(syntax, destination).Length == 0
+                ? null
+                : int.MaxValue - 1,
+        };
+
+    private int? GetNamedFunctionUserConversionInputCost(TypeSymbol destination, ExpressionSyntax syntax) =>
+        destination switch
+        {
+            FunctionValueTypeSymbol value when
+                GetNamedFunctionMatches(syntax, value.ReturnType, value.ParameterTypes).Length == 1 => 0,
+            FunctionPointerTypeSymbol pointer when
+                GetNamedFunctionMatches(syntax, pointer.ReturnType, pointer.ParameterTypes).Length == 1 => 1,
+            _ => null,
+        };
+
+    private bool TryInferNamedFunctionGenericTypes(TypeSymbol pattern, ExpressionSyntax syntax,
+        IDictionary<GenericParameterSymbol, TypeSymbol> inferred)
+    {
+        TypeSymbol returnPattern;
+        ImmutableArray<TypeSymbol> parameterPatterns;
+        switch (pattern)
+        {
+            case FunctionValueTypeSymbol value:
+                returnPattern = value.ReturnType;
+                parameterPatterns = value.ParameterTypes;
+                break;
+            case FunctionPointerTypeSymbol pointer:
+                returnPattern = pointer.ReturnType;
+                parameterPatterns = pointer.ParameterTypes;
+                break;
+            default:
+                return true;
+        }
+
+        var successful = new List<Dictionary<GenericParameterSymbol, TypeSymbol>>();
+        foreach (FunctionSymbol candidate in GetNamedFunctionCandidates(syntax).Where(candidate =>
+                     candidate.Parameters.Length == parameterPatterns.Length))
+        {
+            var candidateInference = new Dictionary<GenericParameterSymbol, TypeSymbol>(inferred);
+            if (!TryInferGenericType(returnPattern, candidate.ReturnType, candidateInference)) continue;
+            bool compatible = parameterPatterns.Zip(candidate.Parameters).All(pair =>
+                TryInferGenericType(pair.First, pair.Second.Type, candidateInference));
+            if (compatible) successful.Add(candidateInference);
+        }
+        if (successful.Count != 1) return false;
+        foreach (var pair in successful[0]) inferred[pair.Key] = pair.Value;
+        return true;
+    }
+
     private bool TryBindNamedFunctionValue(
-        NameExpressionSyntax syntax,
+        ExpressionSyntax syntax,
         FunctionValueTypeSymbol expected,
         out BoundExpression? value)
     {
         value = null;
-        FunctionSymbol[] candidates = (_function.ContainingType is { } containing
-                ? containing.LookupMethods(syntax.IdentifierToken.Text)
-                : [])
-            .Concat(_fileScope.ResolveFunctions(syntax.IdentifierToken.Text))
-            .Distinct()
-            .ToArray();
+        SyntaxToken nameToken = GetNamedFunctionToken(syntax);
+        FunctionSymbol[] candidates = GetNamedFunctionCandidates(syntax);
         if (candidates.Length == 0) return false;
-        FunctionSymbol[] matches = candidates.Where(candidate =>
-            !candidate.HasImplicitThis && !candidate.IsGenericDefinition &&
-            TypeIdentity.AreSame(candidate.ReturnType, expected.ReturnType) &&
-            candidate.Parameters.Length == expected.ParameterTypes.Length &&
-            candidate.Parameters.Zip(expected.ParameterTypes).All(pair =>
-                TypeIdentity.AreSame(pair.First.Type, pair.Second))).ToArray();
+        FunctionSymbol[] matches = GetNamedFunctionMatches(syntax, expected.ReturnType, expected.ParameterTypes);
         if (matches.Length != 1)
         {
             RecordCandidates(syntax, null, candidates,
                 matches.Length > 1 ? CandidateReason.Ambiguous : CandidateReason.NotInvocable);
-            _diagnostics.Report(syntax.IdentifierToken.Location,
+            _diagnostics.Report(nameToken.Location,
                 matches.Length > 1
-                    ? $"function value '{syntax.IdentifierToken.Text}' is ambiguous between: {FormatCallableCandidates(matches)}"
-                    : $"no overload of '{syntax.IdentifierToken.Text}' matches '{expected.ToDisplayString()}'",
+                    ? $"function value '{nameToken.Text}' is ambiguous between: {FormatCallableCandidates(matches)}"
+                    : $"no overload of '{nameToken.Text}' matches '{expected.ToDisplayString()}'",
                 matches.Length > 1 ? DiagnosticIds.AmbiguousCall : DiagnosticIds.NoMatchingCandidate);
             value = new BoundErrorExpression();
             return true;
@@ -434,7 +575,7 @@ internal sealed partial class FunctionBodyBinder
         FunctionSymbol function = matches[0];
         if (!IsAccessible(function))
         {
-            _diagnostics.Report(syntax.IdentifierToken.Location,
+            _diagnostics.Report(nameToken.Location,
                 $"function '{function.Name}' is inaccessible from this context",
                 DiagnosticIds.InaccessibleSymbol);
             value = new BoundErrorExpression();
@@ -443,6 +584,42 @@ internal sealed partial class FunctionBodyBinder
         RecordCandidates(syntax, function, candidates, CandidateReason.None);
         _fileScope.TypeFactory.EnsureFunctionValueDestructor(expected, _fileScope.GlobalNamespace, syntax);
         value = new BoundFunctionValueExpression(function, expected, []);
+        return true;
+    }
+
+    private bool TryBindNamedFunctionPointerForUserConversion(
+        ExpressionSyntax syntax,
+        FunctionPointerTypeSymbol expected,
+        out BoundExpression? value)
+    {
+        value = null;
+        SyntaxToken nameToken = GetNamedFunctionToken(syntax);
+        FunctionSymbol[] candidates = GetNamedFunctionCandidates(syntax);
+        if (candidates.Length == 0) return false;
+        FunctionSymbol[] matches = GetNamedFunctionMatches(syntax, expected.ReturnType, expected.ParameterTypes);
+        if (matches.Length != 1)
+        {
+            RecordCandidates(syntax, null, candidates,
+                matches.Length > 1 ? CandidateReason.Ambiguous : CandidateReason.NotInvocable);
+            _diagnostics.Report(nameToken.Location,
+                matches.Length > 1
+                    ? $"function address '{nameToken.Text}' is ambiguous between: {FormatCallableCandidates(matches)}"
+                    : $"no overload of '{nameToken.Text}' matches '{expected.ToDisplayString()}'",
+                matches.Length > 1 ? DiagnosticIds.AmbiguousCall : DiagnosticIds.NoMatchingCandidate);
+            value = new BoundErrorExpression();
+            return true;
+        }
+        FunctionSymbol function = matches[0];
+        if (!IsAccessible(function))
+        {
+            _diagnostics.Report(nameToken.Location,
+                $"function '{function.Name}' is inaccessible from this context",
+                DiagnosticIds.InaccessibleSymbol);
+            value = new BoundErrorExpression();
+            return true;
+        }
+        RecordCandidates(syntax, function, candidates, CandidateReason.None);
+        value = new BoundFunctionAddressExpression(function, expected);
         return true;
     }
 

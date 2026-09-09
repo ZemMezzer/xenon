@@ -175,6 +175,55 @@ public sealed class LambdaIntelligenceTests
         Assert.Contains("int value", valueHover.GetProperty("contents").GetProperty("value").GetString());
     }
 
+    [Fact]
+    public async Task ConstructorAndIndexerLambdasExposeSelectedParameterIdentity()
+    {
+        const string source = """
+            namespace App;
+            struct Handler {
+                public Handler(function void(int) callback) { }
+                public Handler(function void(float) callback) { }
+            }
+            struct Registry {
+                public int this[function bool(int) predicate] { get { return 1; } }
+                public int this[function bool(float) predicate] { get { return 2; } }
+            }
+            void Test(Registry registry) {
+                Handler* handler = new Handler((int constructorValue) => { int copy = constructorValue; });
+                int result = registry[(int indexValue) => { return indexValue > 0; }];
+            }
+            """;
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("main.xe", source)).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        SourceText text = SourceText.From(source);
+        foreach ((string marker, string expected, int declarationLine) in new[]
+                 {
+                     ("copy = constructorValue", "int constructorValue", 10),
+                     ("return indexValue", "int indexValue", 11),
+                 })
+        {
+            int offset = source.IndexOf(marker, StringComparison.Ordinal) + marker.LastIndexOf(' ') + 1;
+            LspPosition position = LspTextCoordinates.ToPosition(text, offset);
+            var parameters = new { textDocument = new { uri }, position };
+            JsonElement hover = Result(await session.HandleRequestAsync("textDocument/hover",
+                LspTestProtocol.Json(parameters), default));
+            Assert.Contains(expected, hover.GetProperty("contents").GetProperty("value").GetString());
+            JsonElement definition = Result(await session.HandleRequestAsync("textDocument/definition",
+                LspTestProtocol.Json(parameters), default));
+            Assert.Single(definition.EnumerateArray());
+            Assert.Equal(declarationLine,
+                definition[0].GetProperty("range").GetProperty("start").GetProperty("line").GetInt32());
+        }
+    }
+
     private static JsonElement Result(object? value) => JsonSerializer.SerializeToElement(value,
         new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 }
