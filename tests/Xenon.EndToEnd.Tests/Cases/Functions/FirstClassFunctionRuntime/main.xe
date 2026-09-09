@@ -1,0 +1,132 @@
+namespace FirstClassFunctionRuntime;
+
+struct State
+{
+    public static int Result;
+    public static int Cleanups;
+    public static function int() Callback;
+}
+
+struct Resource
+{
+    public int Value;
+    public Resource(int value) { Value = value; }
+    public void Use() { State.Result = Value; }
+    public ~Resource() { State.Cleanups++; }
+}
+
+struct TailCapture { public ~TailCapture() { State.Cleanups++; } }
+struct ThrowingCapture
+{
+    public ~ThrowingCapture()
+    {
+        State.Cleanups += 10;
+        throw 123;
+    }
+}
+
+struct EmptyState { public static int Cleanups; }
+struct EmptyResource { public ~EmptyResource() { EmptyState.Cleanups++; } }
+struct EmptyHolder { public function void() Callback; }
+
+struct Action<T>
+{
+    private function void(T) _callback;
+    public Action(function void(T) callback) { _callback = callback; }
+    public static Action<T> operator implicit(function void(T) callback)
+    {
+        return Action<T>(callback);
+    }
+    public void Invoke(T value) { _callback(value); }
+}
+
+void Print(int value) { State.Result = value; }
+int Select(function int(int) callback) { return callback(2); }
+int Select(function int(int)* callback) { return -1; }
+
+void ThrowFromClosure()
+{
+    shared<Resource> resource = new Resource(99);
+    function void() callback = [resource]() => { throw 99; };
+    callback();
+}
+
+void DropThrowingClosure()
+{
+    unique<TailCapture> tail = new TailCapture();
+    unique<ThrowingCapture> failing = new ThrowingCapture();
+    function void() callback = [move tail, move failing]() => { };
+}
+
+int Main()
+{
+    Action<int> first = [](int value) => { Print(value); };
+    first.Invoke(7);
+    if (State.Result != 7) return 1;
+
+    int offset = 10;
+    Action<int> second = [offset](int value) => { Print(value + offset); };
+    second.Invoke(5);
+    if (State.Result != 15) return 2;
+
+    {
+        function int() callback;
+        {
+            shared<Resource> resource = new Resource(40);
+            callback = [resource]() => { resource->Use(); return resource->Value; };
+        }
+        if (State.Cleanups != 0 || callback() != 40 || State.Result != 40) return 3;
+
+        function int() moved = move callback;
+        if (moved() != 40) return 4;
+    }
+    if (State.Cleanups != 1) return 5;
+
+    {
+        Resource original = Resource(1);
+        function void() captured = [original]() => { };
+        function void() capturedCopy = captured;
+    }
+    if (State.Cleanups != 3) return 6;
+
+    {
+        function int()[] callbacks = new function int()[2];
+        int firstValue = 20;
+        int secondValue = 22;
+        callbacks[0] = [firstValue]() => { return firstValue; };
+        callbacks[1] = [secondValue]() => { return secondValue; };
+        if (callbacks[0]() + callbacks[1]() != 42) return 7;
+    }
+    try { ThrowFromClosure(); }
+    catch (readonly int& error) { if (error != 99) return 8; }
+    if (State.Cleanups != 4) return 9;
+    {
+        shared<Resource> resource = new Resource(77);
+        State.Callback = [resource]() => {
+            State.Callback = []() => { return 0; };
+            return resource->Value;
+        };
+        if (State.Callback() != 77) return 10;
+    }
+    if (State.Cleanups != 5) return 11;
+    try { DropThrowingClosure(); }
+    catch (readonly int& error) { if (error != 123) return 12; }
+    if (State.Cleanups != 16) return 13;
+    {
+        EmptyHolder empty = EmptyHolder();
+        EmptyHolder emptyCopy = empty;
+        unique<EmptyResource> firstOwner = new EmptyResource();
+        function void() callback = [move firstOwner]() => { };
+        callback = empty.Callback;
+        if (EmptyState.Cleanups != 1) return 14;
+        unique<EmptyResource> secondOwner = new EmptyResource();
+        callback = [move secondOwner]() => { };
+        callback = emptyCopy.Callback;
+        if (EmptyState.Cleanups != 2) return 15;
+        function void()[] untouched = new function void()[4];
+    }
+    int overloadOffset = 40;
+    if (Select([overloadOffset](int value) => { return overloadOffset + value; }) != 42) return 16;
+    if (Select([](int value) => { return value + 40; }) != 42) return 17;
+    return 0;
+}

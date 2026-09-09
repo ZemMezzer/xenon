@@ -41,6 +41,31 @@ internal sealed class GenericFunctionSpecializer
     internal GenericStructSpecializer StructSpecializer => _structSpecializer;
     internal TypeFactory Types => _types;
 
+    internal GenericFunctionSpecializer CreateSpeculative(
+        DiagnosticBag diagnostics,
+        GenericStructSpecializer? structSpecializer = null)
+    {
+        var result = new GenericFunctionSpecializer(
+            _implementations, _types, diagnostics, _constants, structSpecializer ?? _structSpecializer,
+            _resolveNamespace, _cancellationToken);
+        foreach (var entry in _symbols) result._symbols.Add(entry.Key, entry.Value);
+        return result;
+    }
+
+    internal void MergeFrom(GenericFunctionSpecializer speculative)
+    {
+        foreach (var entry in speculative._symbols)
+            _symbols.TryAdd(entry.Key, entry.Value);
+        AddGeneratedFunctions(speculative._functions);
+    }
+
+    internal void AddGeneratedFunctions(IEnumerable<BoundFunction> functions)
+    {
+        foreach (BoundFunction function in functions)
+            if (!_functions.Any(existing => ReferenceEquals(existing.Symbol, function.Symbol)))
+                _functions.Add(function);
+    }
+
     public FunctionSymbol? GetOrCreate(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments,
         TextLocation location)
     {
@@ -238,6 +263,16 @@ internal sealed class GenericFunctionSpecializer
         {
             (PointerTypeSymbol left, PointerTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
+            (FunctionPointerTypeSymbol left, FunctionPointerTypeSymbol right)
+                when left.ParameterTypes.Length == right.ParameterTypes.Length =>
+                TryInfer(left.ReturnType, right.ReturnType, inferred) &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TryInfer(pair.First, pair.Second, inferred)),
+            (FunctionValueTypeSymbol left, FunctionValueTypeSymbol right)
+                when left.ParameterTypes.Length == right.ParameterTypes.Length =>
+                TryInfer(left.ReturnType, right.ReturnType, inferred) &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TryInfer(pair.First, pair.Second, inferred)),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
             (ReferenceTypeSymbol left, _) =>

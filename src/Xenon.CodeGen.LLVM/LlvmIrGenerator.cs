@@ -23,6 +23,7 @@ public sealed class LlvmIrGenerator
     private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
     private readonly Dictionary<FunctionSymbol, LlvmCAbiFunction> _cAbiFunctions = [];
+    private readonly Dictionary<FunctionSymbol, LlvmFunction> _functionValueAdapters = [];
     private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
     private readonly Dictionary<StorageTypeSymbol, LLVMTypeRef> _storageTypes = [];
     private readonly Dictionary<AtomicTypeSymbol, LLVMTypeRef> _atomicTypes = [];
@@ -35,6 +36,7 @@ public sealed class LlvmIrGenerator
     private readonly Dictionary<FieldSymbol, LlvmFunction> _threadLocalEnsures = [];
     private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables = [];
     private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps = [];
+    private readonly Dictionary<FunctionSymbol, LlvmFunction> _closureEnvironmentDestructors = [];
     private LLVMContextRef _context;
     private LLVMModuleRef _module;
     private NativeTargetMachine? _targetMachine;
@@ -309,6 +311,7 @@ public sealed class LlvmIrGenerator
                     DeclareFunction(function);
             foreach (BoundFunction implementation in implementationFunctions)
                 XelibBodyCodec.Collect(implementation.Body, _ => { }, DeclareReferencedSymbol);
+            DeclareClosureEnvironmentDestructors(implementationFunctions);
             DeclareInterfaceTables(compilation.SemanticModel.GlobalNamespace);
             foreach (CompilationReference reference in compilation.References)
                 DeclareInterfaceTables(reference.GlobalNamespace);
@@ -320,6 +323,7 @@ public sealed class LlvmIrGenerator
                 DeclareStaticFields(reference.GlobalNamespace);
             foreach (FieldSymbol field in _referencedStaticFields) DeclareStaticField(field);
             DeclareThreadLocalHelpers(compilation.SemanticModel.GlobalNamespace);
+            EmitClosureEnvironmentDestructors();
             EmitFunctionBodies(implementationFunctions);
             EmitCAbiThunks();
             if (compilation.Options.OutputKind == CompilationOutputKind.Executable)
@@ -351,6 +355,7 @@ public sealed class LlvmIrGenerator
             _functions.Clear();
             _nativeFunctions.Clear();
             _cAbiFunctions.Clear();
+            _functionValueAdapters.Clear();
             _structTypes.Clear();
             _storageTypes.Clear();
             _interfaceTypes.Clear();
@@ -1414,8 +1419,144 @@ public sealed class LlvmIrGenerator
         var parameterTypes = new List<LLVMTypeRef>();
         if (function.HasImplicitThis)
             parameterTypes.Add(LLVMTypeRef.CreatePointer(MapType(function.ContainingType!), 0));
+        if (function.IsCapturingLambda)
+            parameterTypes.Add(LLVMTypeRef.CreatePointer(_context.Int8Type, 0));
         parameterTypes.AddRange(function.Parameters.Select(parameter => MapType(parameter.Type)));
         return LLVMTypeRef.CreateFunction(MapType(function.ReturnType), [.. parameterTypes], false);
+    }
+
+    private LLVMTypeRef GetClosureEnvironmentType(FunctionSymbol function) =>
+        _context.GetStructType([.. function.LambdaCaptures.Select(capture => MapType(capture.StorageType))], false);
+
+    private void DeclareClosureEnvironmentDestructors(ImmutableArray<BoundFunction> functions)
+    {
+        LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+        LLVMTypeRef signature = LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false);
+        foreach (FunctionSymbol function in functions.Select(item => item.Symbol)
+                     .Where(item => item.IsCapturingLambda))
+        {
+            string name = MangleManagedName(_moduleIdentity, "closure_env_destructor", function.FullName);
+            LLVMValueRef value = _module.AddFunction(name, signature);
+            value.Linkage = LLVMLinkage.LLVMInternalLinkage;
+            _closureEnvironmentDestructors.Add(function, new LlvmFunction(value, signature));
+        }
+    }
+
+    private void EmitClosureEnvironmentDestructors()
+    {
+        foreach ((FunctionSymbol function, LlvmFunction destructor) in _closureEnvironmentDestructors)
+        {
+            using LLVMBuilderRef builder = _context.CreateBuilder();
+            builder.PositionAtEnd(destructor.Value.AppendBasicBlock("entry"));
+            LLVMValueRef environment = destructor.Value.GetParam(0);
+            LLVMTypeRef environmentType = GetClosureEnvironmentType(function);
+            CaptureVariableSymbol[] captures = function.LambdaCaptures.Reverse()
+                .Where(capture => !capture.IsBorrow &&
+                    TypeFacts.GetCompleteDestructor(capture.Type) is not null)
+                .ToArray();
+            for (int index = 0; index < captures.Length; index++)
+            {
+                CaptureVariableSymbol capture = captures[index];
+                FunctionSymbol captureDestructor = TypeFacts.GetCompleteDestructor(capture.Type)!;
+                LLVMValueRef address = builder.BuildStructGEP2(environmentType, environment,
+                    checked((uint)capture.Ordinal), $"{capture.Name}.destroy.address");
+                LlvmFunction target = _functions[captureDestructor];
+                if (_exceptionsEnabled)
+                {
+                    LLVMBasicBlockRef normal = destructor.Value.AppendBasicBlock(
+                        $"{capture.Name}.destroy.continue");
+                    LLVMBasicBlockRef unwind = destructor.Value.AppendBasicBlock(
+                        $"{capture.Name}.destroy.unwind");
+                    builder.BuildInvoke2(target.Type, target.Value, new[] { address }, normal, unwind,
+                        string.Empty);
+                    EmitClosureEnvironmentFailureCleanup(builder, destructor.Value, unwind,
+                        environment, environmentType, captures[(index + 1)..]);
+                    builder.PositionAtEnd(normal);
+                }
+                else
+                {
+                    builder.BuildCall2(target.Type, target.Value, new[] { address }, string.Empty);
+                }
+            }
+            LlvmMemoryRuntime memory = GetOrDeclareMemoryRuntime();
+            builder.BuildCall2(memory.FreeType, memory.Free, new[] { environment }, string.Empty);
+            builder.BuildRetVoid();
+        }
+    }
+
+    private unsafe void EmitClosureEnvironmentFailureCleanup(
+        LLVMBuilderRef builder,
+        LLVMValueRef helper,
+        LLVMBasicBlockRef unwind,
+        LLVMValueRef environment,
+        LLVMTypeRef environmentType,
+        IReadOnlyList<CaptureVariableSymbol> remaining)
+    {
+        LLVMBasicBlockRef continuation = helper.AppendBasicBlock("capture.destroy.exception.cleanup");
+        builder.PositionAtEnd(unwind);
+        if (IsWindowsTarget())
+        {
+            LLVMValueRef personality = GetOrDeclarePersonality(helper.GlobalParent, "__CxxFrameHandler3");
+            helper.PersonalityFn = personality;
+            LLVMTypeRef tokenType = new((nint)LLVMApi.TokenTypeInContext(_context));
+            LLVMValueRef parentPad = LLVMValueRef.CreateConstNull(tokenType);
+            sbyte* emptyName = stackalloc sbyte[1];
+            emptyName[0] = 0;
+            LLVMValueRef catchSwitch = new((nint)LLVMApi.BuildCatchSwitch(
+                builder, parentPad, default, 1, emptyName));
+            LLVMBasicBlockRef handler = helper.AppendBasicBlock("capture.destroy.exception.catchpad");
+            LLVMApi.AddHandler(catchSwitch, handler);
+            builder.PositionAtEnd(handler);
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef[] catchArguments =
+            {
+                LLVMValueRef.CreateConstPointerNull(pointer),
+                LLVMValueRef.CreateConstInt(_context.Int32Type, 64),
+                LLVMValueRef.CreateConstPointerNull(pointer),
+            };
+            fixed (LLVMValueRef* argumentPointer = catchArguments)
+            {
+                LLVMValueRef catchPad = new((nint)LLVMApi.BuildCatchPad(
+                    builder, catchSwitch, (LLVMOpaqueValue**)argumentPointer,
+                    (uint)catchArguments.Length, emptyName));
+                LLVMApi.BuildCatchRet(builder, catchPad, continuation);
+            }
+        }
+        else
+        {
+            LLVMValueRef personality = GetOrDeclarePersonality(helper.GlobalParent, "__gxx_personality_v0");
+            helper.PersonalityFn = personality;
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMTypeRef landingType = _context.GetStructType([pointer, _context.Int32Type], false);
+            LLVMValueRef landing = builder.BuildLandingPad(landingType, personality, 1,
+                "capture.destroy.exception.landingpad");
+            landing.AddClause(LLVMValueRef.CreateConstPointerNull(pointer));
+            LLVMValueRef nativeException = builder.BuildExtractValue(landing, 0,
+                "capture.destroy.native.exception");
+            LLVMTypeRef beginType = LLVMTypeRef.CreateFunction(pointer, [pointer], false);
+            LLVMValueRef begin = GetOrAddFunction(helper.GlobalParent, "__cxa_begin_catch", beginType);
+            LLVMTypeRef endType = LLVMTypeRef.CreateFunction(_context.VoidType, [], false);
+            LLVMValueRef end = GetOrAddFunction(helper.GlobalParent, "__cxa_end_catch", endType);
+            builder.BuildCall2(beginType, begin, new[] { nativeException }, string.Empty);
+            builder.BuildCall2(endType, end, Array.Empty<LLVMValueRef>(), string.Empty);
+            builder.BuildBr(continuation);
+        }
+
+        builder.PositionAtEnd(continuation);
+        LlvmFunction cleanup = GetOrDeclareExceptionRuntime().Cleanup;
+        foreach (CaptureVariableSymbol capture in remaining)
+        {
+            FunctionSymbol captureDestructor = TypeFacts.GetCompleteDestructor(capture.Type)!;
+            LLVMValueRef address = builder.BuildStructGEP2(environmentType, environment,
+                checked((uint)capture.Ordinal), $"{capture.Name}.unwind.destroy.address");
+            builder.BuildCall2(cleanup.Type, cleanup.Value,
+                new[] { _functions[captureDestructor].Value, address }, string.Empty);
+        }
+        LlvmMemoryRuntime memory = GetOrDeclareMemoryRuntime();
+        builder.BuildCall2(memory.FreeType, memory.Free, new[] { environment }, string.Empty);
+        LlvmFunction rethrow = GetOrDeclareExceptionRuntime().Rethrow;
+        builder.BuildCall2(rethrow.Type, rethrow.Value, Array.Empty<LLVMValueRef>(), string.Empty);
+        builder.BuildUnreachable();
     }
 
     private IEnumerable<TypeSymbol> GetCAbiParameterTypes(FunctionSymbol function)
@@ -1551,6 +1692,43 @@ public sealed class LlvmIrGenerator
         return existing.Handle != IntPtr.Zero ? existing : module.AddFunction(name, type);
     }
 
+    private LLVMValueRef GetFunctionValueInvokeAddress(FunctionSymbol function)
+    {
+        if (!function.IsExtern) return _functions[function].Value;
+        if (!LlvmCAbi.RequiresLowering(
+                function.ReturnType, function.Parameters.Select(parameter => parameter.Type)))
+            return _cAbiFunctions.TryGetValue(function, out LlvmCAbiFunction directAbi)
+                ? directAbi.Value
+                : _functions[function].Value;
+        if (_functionValueAdapters.TryGetValue(function, out LlvmFunction existing))
+            return existing.Value;
+        if (!_cAbiFunctions.TryGetValue(function, out LlvmCAbiFunction abi))
+            throw new LlvmCodeGenerationException(
+                $"Missing C ABI declaration for extern function '{function.FullName}'.");
+
+        LLVMTypeRef signature = CreateDirectFunctionType(function);
+        LLVMValueRef adapterValue = _module.AddFunction(
+            MangleManagedName(_moduleIdentity, "function_value_adapter", function.FullName), signature);
+        adapterValue.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        var adapter = new LlvmFunction(adapterValue, signature);
+        _functionValueAdapters.Add(function, adapter);
+
+        using LLVMBuilderRef builder = _context.CreateBuilder();
+        builder.PositionAtEnd(adapterValue.AppendBasicBlock("entry"));
+        var marshaller = new LlvmCAbiMarshaller(_context, builder);
+        LLVMValueRef result = marshaller.EmitCall(abi.Value, abi.Plan,
+            Enumerable.Range(0, function.Parameters.Length)
+                .Select(index => adapterValue.GetParam(checked((uint)index))).ToArray(),
+            TypeIdentity.AreSame(function.ReturnType, BuiltinTypes.Void)
+                ? string.Empty
+                : "function.value.extern.result");
+        if (TypeIdentity.AreSame(function.ReturnType, BuiltinTypes.Void))
+            builder.BuildRetVoid();
+        else
+            builder.BuildRet(result);
+        return adapterValue;
+    }
+
     private void EmitFunctionBodies(ImmutableArray<BoundFunction> functions)
     {
         foreach (BoundFunction function in functions)
@@ -1573,6 +1751,8 @@ public sealed class LlvmIrGenerator
                 _virtualTables,
                 _interfaceMaps,
                 _interfaceKeys,
+                _closureEnvironmentDestructors,
+                GetFunctionValueInvokeAddress,
                 _interfaceMapEntryType,
                 MapType,
                 GetOrDeclareMemoryRuntime,
@@ -1754,6 +1934,12 @@ public sealed class LlvmIrGenerator
                 [.. functionPointer.ParameterTypes.Select(MapType)],
                 false);
             return LLVMTypeRef.CreatePointer(signature, 0);
+        }
+
+        if (type is FunctionValueTypeSymbol)
+        {
+            LLVMTypeRef functionValuePointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            return _context.GetStructType([functionValuePointer, functionValuePointer], false);
         }
 
         if (type is ReferenceTypeSymbol reference)
@@ -2056,6 +2242,8 @@ public sealed class LlvmIrGenerator
         private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables;
         private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps;
         private readonly Dictionary<InterfaceTypeSymbol, LLVMValueRef> _interfaceKeys;
+        private readonly Dictionary<FunctionSymbol, LlvmFunction> _closureEnvironmentDestructors;
+        private readonly Func<FunctionSymbol, LLVMValueRef> _getFunctionValueInvokeAddress;
         private readonly LLVMTypeRef _interfaceMapEntryType;
         private readonly Func<TypeSymbol, LLVMTypeRef> _mapType;
         private readonly Func<LlvmMemoryRuntime> _getMemoryRuntime;
@@ -2072,6 +2260,7 @@ public sealed class LlvmIrGenerator
         private readonly bool _isWindowsTarget;
         private readonly bool _exceptionsEnabled;
         private readonly LLVMValueRef _thisValue;
+        private readonly LLVMValueRef _closureEnvironment;
         private readonly Dictionary<VariableSymbol, LLVMValueRef> _addresses = [];
         private readonly Dictionary<FieldSymbol, LLVMValueRef> _constructorFieldInitializationFlags = [];
         private LLVMValueRef _baseConstructorInitialized;
@@ -2121,6 +2310,8 @@ public sealed class LlvmIrGenerator
             Dictionary<StructTypeSymbol, LlvmVTable> virtualTables,
             Dictionary<StructTypeSymbol, LlvmVTable> interfaceMaps,
             Dictionary<InterfaceTypeSymbol, LLVMValueRef> interfaceKeys,
+            Dictionary<FunctionSymbol, LlvmFunction> closureEnvironmentDestructors,
+            Func<FunctionSymbol, LLVMValueRef> getFunctionValueInvokeAddress,
             LLVMTypeRef interfaceMapEntryType,
             Func<TypeSymbol, LLVMTypeRef> mapType,
             Func<LlvmMemoryRuntime> getMemoryRuntime,
@@ -2150,6 +2341,8 @@ public sealed class LlvmIrGenerator
             _virtualTables = virtualTables;
             _interfaceMaps = interfaceMaps;
             _interfaceKeys = interfaceKeys;
+            _closureEnvironmentDestructors = closureEnvironmentDestructors;
+            _getFunctionValueInvokeAddress = getFunctionValueInvokeAddress;
             _interfaceMapEntryType = interfaceMapEntryType;
             _mapType = mapType;
             _getMemoryRuntime = getMemoryRuntime;
@@ -2166,8 +2359,12 @@ public sealed class LlvmIrGenerator
             _isWindowsTarget = isWindowsTarget;
             _exceptionsEnabled = exceptionsEnabled;
             _thisValue = function.HasImplicitThis ? llvmFunction.GetParam(0) : default;
+            _closureEnvironment = function.IsCapturingLambda
+                ? llvmFunction.GetParam(function.HasImplicitThis ? 1u : 0u)
+                : default;
 
-            uint parameterOffset = function.HasImplicitThis ? 1u : 0u;
+            uint parameterOffset = (function.HasImplicitThis ? 1u : 0u) +
+                (function.IsCapturingLambda ? 1u : 0u);
             for (int index = 0; index < function.Parameters.Length; index++)
             {
                 ParameterSymbol parameter = function.Parameters[index];
@@ -2258,6 +2455,11 @@ public sealed class LlvmIrGenerator
                 if (current is OwnershipTypeSymbol { CompleteDestructor: { } ownershipDestructor })
                 {
                     units.Add((path, current, ownershipDestructor));
+                    return;
+                }
+                if (current is FunctionValueTypeSymbol { CompleteDestructor: { } functionValueDestructor })
+                {
+                    units.Add((path, current, functionValueDestructor));
                     return;
                 }
                 if (current is not StructTypeSymbol structure) return;
@@ -3616,6 +3818,8 @@ public sealed class LlvmIrGenerator
             BoundCallExpression call => EmitCall(call),
             BoundIndirectCallExpression call => EmitIndirectCall(call),
             BoundFunctionAddressExpression address => GetFunctionAddress(address.Function),
+            BoundFunctionValueExpression value => EmitFunctionValue(value),
+            BoundFunctionValueCallExpression call => EmitFunctionValueCall(call),
             BoundMethodCallExpression methodCall when methodCall.Method.VTableSlot is not null => EmitVirtualMethodCall(methodCall),
             BoundMethodCallExpression methodCall => EmitMethodCall(methodCall),
             BoundPropertySetExpression propertySet => EmitPropertySet(propertySet),
@@ -3645,6 +3849,7 @@ public sealed class LlvmIrGenerator
             BoundDestroyFieldsExpression destruction => EmitDestroyFields(destruction),
             BoundOwnershipDestructionExpression destruction => EmitOwnershipDestruction(destruction),
             BoundStorageDestructionExpression destruction => EmitStorageDestruction(destruction),
+            BoundFunctionValueDestructionExpression destruction => EmitFunctionValueDestruction(destruction),
             BoundArrayCreationExpression array => EmitArrayCreation(array),
             BoundArrayMetadataExpression metadata => EmitArrayMetadata(metadata),
             BoundNewExpression @new => EmitNew(@new),
@@ -3812,7 +4017,9 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitVariable(BoundVariableExpression expression)
         {
-            LLVMValueRef address = GetAddress(expression.Variable);
+            LLVMValueRef address = expression.Variable is CaptureVariableSymbol capture
+                ? EmitCaptureAddress(capture)
+                : GetAddress(expression.Variable);
             return EmitLoad(expression.Type, address, expression.Variable.Name);
         }
 
@@ -4354,6 +4561,12 @@ public sealed class LlvmIrGenerator
                 return EmitOwnershipRetain(source, counterIndex: 0, "shared.retain");
             if (type is WeakTypeSymbol)
                 return EmitOwnershipRetain(source, counterIndex: 1, "weak.retain");
+            if (type is FunctionValueTypeSymbol)
+            {
+                LLVMValueRef control = _builder.BuildExtractValue(source, 1, "function.copy.control");
+                EmitFunctionControlRetain(control);
+                return source;
+            }
             if (type is not StructTypeSymbol structure) return source;
 
             LLVMValueRef result = _mapType(structure).Poison;
@@ -4388,6 +4601,101 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef OwnershipControlField(LLVMValueRef control, uint index, string name) =>
             _builder.BuildStructGEP2(OwnershipControlBlockType, control, index, name);
+
+        private LLVMTypeRef FunctionControlBlockType
+        {
+            get
+            {
+                LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+                return _context.GetStructType([_mapType(BuiltinTypes.NUInt), pointer, pointer], false);
+            }
+        }
+
+        private LLVMValueRef FunctionControlField(LLVMValueRef control, uint index, string name) =>
+            _builder.BuildStructGEP2(FunctionControlBlockType, control, index, name);
+
+        private void EmitFunctionControlRetain(LLVMValueRef control)
+        {
+            LLVMBasicBlockRef retain = _llvmFunction.AppendBasicBlock("function.retain.body");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("function.retain.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, control,
+                LLVMValueRef.CreateConstPointerNull(control.TypeOf), "function.retain.valid"), retain, end);
+            _builder.PositionAtEnd(retain);
+            _atomics.FetchAdd(FunctionControlField(control, 0, "function.retain.count.address"),
+                SizeConstant(1), LLVMAtomicOrdering.LLVMAtomicOrderingMonotonic, "function.retain");
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+        }
+
+        private LLVMTypeRef ClosureEnvironmentType(FunctionSymbol function) =>
+            _context.GetStructType([.. function.LambdaCaptures.Select(capture => _mapType(capture.StorageType))], false);
+
+        private LLVMValueRef EmitCaptureAddress(CaptureVariableSymbol capture)
+        {
+            LLVMTypeRef environmentType = ClosureEnvironmentType(_function);
+            LLVMValueRef field = _builder.BuildStructGEP2(environmentType, _closureEnvironment,
+                checked((uint)capture.Ordinal), $"{capture.Name}.capture.address");
+            return capture.IsBorrow
+                ? _builder.BuildLoad2(_mapType(capture.StorageType), field, $"{capture.Name}.borrow")
+                : field;
+        }
+
+        private LLVMValueRef EmitFunctionValue(BoundFunctionValueExpression expression)
+        {
+            LLVMTypeRef valueType = _mapType(expression.FunctionValueType);
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef control = LLVMValueRef.CreateConstPointerNull(pointer);
+            if (!expression.Captures.IsEmpty)
+            {
+                var captures = new LLVMValueRef[expression.Captures.Length];
+                var captureGuards = new LifecycleValueGuard?[expression.Captures.Length];
+                for (int index = 0; index < expression.Captures.Length; index++)
+                {
+                    BoundFunctionValueCapture capture = expression.Captures[index];
+                    LLVMValueRef capturedValue = EmitExpression(capture.Initializer);
+                    captures[index] = capturedValue;
+                    if (!capture.Variable.IsBorrow &&
+                        TypeFacts.GetCompleteDestructor(capture.Variable.Type) is { } destructor)
+                        captureGuards[index] = BeginLifecycleValueGuard(capturedValue, capture.Variable.Type,
+                            destructor, $"{capture.Variable.Name}.capture");
+                }
+                ulong offset = 0;
+                foreach (BoundFunctionValueCapture capture in expression.Captures)
+                {
+                    uint alignment = Math.Max(1u, _getAbiAlignment(capture.Variable.StorageType));
+                    offset = (offset + alignment - 1) / alignment * alignment;
+                    offset += Math.Max(1UL, _getAbiSize(capture.Variable.StorageType));
+                }
+                LLVMValueRef environment = EmitAllocation(SizeConstant(Math.Max(1UL, offset)), "closure.environment");
+                AllocationGuard environmentGuard = BeginAllocationGuard(environment);
+                LLVMTypeRef environmentType = ClosureEnvironmentType(expression.InvokeFunction);
+                for (int index = 0; index < captures.Length; index++)
+                {
+                    LLVMValueRef field = _builder.BuildStructGEP2(environmentType, environment,
+                        checked((uint)index), $"{expression.Captures[index].Variable.Name}.capture.init");
+                    _builder.BuildStore(captures[index], field);
+                }
+
+                ulong pointerBytes = checked((ulong)_getIntegerBitWidth(BuiltinTypes.NUInt) / 8);
+                control = EmitAllocation(SizeConstant(checked(pointerBytes * 3)), "closure.control");
+                AllocationGuard controlGuard = BeginAllocationGuard(control);
+                _builder.BuildStore(SizeConstant(1), FunctionControlField(control, 0, "closure.strong.address"));
+                _builder.BuildStore(environment, FunctionControlField(control, 1, "closure.environment.address"));
+                _builder.BuildStore(_closureEnvironmentDestructors[expression.InvokeFunction].Value,
+                    FunctionControlField(control, 2, "closure.destructor.address"));
+                CompleteAllocationGuard(environmentGuard);
+                CompleteAllocationGuard(controlGuard);
+                foreach (LifecycleValueGuard? guard in captureGuards)
+                    if (guard is not null) CompleteLifecycleValueGuard(guard);
+            }
+
+            LLVMValueRef value = valueType.Poison;
+            LLVMValueRef invoke = expression.InvokeFunction.IsLambda
+                ? _functions[expression.InvokeFunction].Value
+                : _getFunctionValueInvokeAddress(expression.InvokeFunction);
+            value = _builder.BuildInsertValue(value, invoke, 0, "function.invoke.init");
+            return _builder.BuildInsertValue(value, control, 1, "function.control.init");
+        }
 
         private LLVMValueRef EmitSharedAdoption(BoundSharedAdoptionExpression expression)
         {
@@ -5665,6 +5973,43 @@ public sealed class LlvmIrGenerator
             };
         }
 
+        private LLVMValueRef EmitFunctionValueDestruction(BoundFunctionValueDestructionExpression expression)
+        {
+            LLVMValueRef storageAddress = _llvmFunction.GetParam(0);
+            LLVMValueRef value = _builder.BuildLoad2(_mapType(expression.FunctionValueType),
+                storageAddress, "function.value");
+            LLVMValueRef control = _builder.BuildExtractValue(value, 1, "function.control");
+            LLVMBasicBlockRef release = _llvmFunction.AppendBasicBlock("function.release.body");
+            LLVMBasicBlockRef destroy = _llvmFunction.AppendBasicBlock("function.release.destroy");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("function.release.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, control,
+                LLVMValueRef.CreateConstPointerNull(control.TypeOf), "function.release.valid"), release, end);
+            _builder.PositionAtEnd(release);
+            LLVMValueRef previous = _atomics.FetchSub(
+                FunctionControlField(control, 0, "function.release.count.address"),
+                SizeConstant(1), LLVMAtomicOrdering.LLVMAtomicOrderingRelease, "function.release");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, previous, SizeConstant(1),
+                "function.release.final"), destroy, end);
+            _builder.PositionAtEnd(destroy);
+            _atomics.AcquireFence();
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef environment = _builder.BuildLoad2(pointer,
+                FunctionControlField(control, 1, "function.release.environment.address"),
+                "function.release.environment");
+            LLVMValueRef destructor = _builder.BuildLoad2(pointer,
+                FunctionControlField(control, 2, "function.release.destructor.address"),
+                "function.release.destructor");
+            AllocationGuard controlGuard = BeginAllocationGuard(control);
+            LLVMTypeRef signature = LLVMTypeRef.CreateFunction(_context.VoidType, [pointer], false);
+            EmitPotentiallyThrowingCall(signature, destructor, [environment], string.Empty);
+            CompleteAllocationGuard(controlGuard);
+            LlvmMemoryRuntime memory = _getMemoryRuntime();
+            _builder.BuildCall2(memory.FreeType, memory.Free, new[] { control }, string.Empty);
+            _builder.BuildBr(end);
+            _builder.PositionAtEnd(end);
+            return default;
+        }
+
         private LLVMValueRef EmitSharedRelease(
             LLVMValueRef control,
             SharedTypeSymbol shared,
@@ -5992,6 +6337,7 @@ public sealed class LlvmIrGenerator
 
         private LLVMValueRef EmitAddressCore(BoundExpression expression) => expression switch
         {
+            BoundVariableExpression { Variable: CaptureVariableSymbol capture } => EmitCaptureAddress(capture),
             BoundVariableExpression variable => GetAddress(variable.Variable),
             BoundStaticFieldExpression field => GetStaticFieldAddress(field.Field),
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } dereference =>
@@ -6256,17 +6602,20 @@ public sealed class LlvmIrGenerator
                 LLVMValueRef data = _builder.BuildExtractValue(interfaceValue, 0, "interface.data");
                 LLVMValueRef table = _builder.BuildExtractValue(interfaceValue, 1, "interface.table");
                 LLVMValueRef[] arguments = EmitTransferredArguments(expression.Arguments);
+                LLVMValueRef[] getterArguments = CopyCompoundAccessorArguments(
+                    expression, arguments, out LifecycleValueGuard[] argumentGuards);
                 LLVMValueRef current = EmitInterfaceAccessorCall(
                     interfaceType,
                     expression.Getter,
                     data,
                     table,
-                    arguments,
+                    getterArguments,
                     "interface.get");
                 LLVMValueRef result = expression.UsesUserOperator
                     ? EmitCompoundOperatorValue(expression, current)
                     : EmitArithmetic(expression.OperatorKind, expression.Type, current,
                         EmitExpression(expression.Value), expression.Value.Type);
+                CompleteLifecycleValueGuards(argumentGuards);
                 EmitInterfaceAccessorCall(
                     interfaceType,
                     expression.Setter,
@@ -6286,16 +6635,19 @@ public sealed class LlvmIrGenerator
                 expression.Getter.ContainingStruct!,
                 expression.Getter.Name);
             LLVMValueRef[] instanceArguments = EmitTransferredArguments(expression.Arguments);
+            LLVMValueRef[] instanceGetterArguments = CopyCompoundAccessorArguments(
+                expression, instanceArguments, out LifecycleValueGuard[] instanceArgumentGuards);
             LLVMValueRef instanceCurrent = EmitInstanceAccessorCall(
                 expression.Getter,
                 receiverType,
                 receiver,
-                instanceArguments,
+                instanceGetterArguments,
                 "accessor.get");
             LLVMValueRef instanceResult = expression.UsesUserOperator
                 ? EmitCompoundOperatorValue(expression, instanceCurrent)
                 : EmitArithmetic(expression.OperatorKind, expression.Type, instanceCurrent,
                     EmitExpression(expression.Value), expression.Value.Type);
+            CompleteLifecycleValueGuards(instanceArgumentGuards);
             EmitInstanceAccessorCall(
                 expression.Setter,
                 receiverType,
@@ -6303,6 +6655,34 @@ public sealed class LlvmIrGenerator
                 [.. instanceArguments, instanceResult],
                 string.Empty);
             return instanceResult;
+        }
+
+        private LLVMValueRef[] CopyCompoundAccessorArguments(
+            BoundCompoundAccessorAssignmentExpression expression,
+            LLVMValueRef[] arguments,
+            out LifecycleValueGuard[] guards)
+        {
+            var copies = new LLVMValueRef[arguments.Length];
+            var guardBuilder = new List<LifecycleValueGuard>();
+            for (int index = 0; index < arguments.Length; index++)
+            {
+                TypeSymbol type = expression.Arguments[index].Type;
+                if (type is not ReferenceTypeSymbol && !TypeFacts.CanCopy(type))
+                    throw new LlvmCodeGenerationException(
+                        $"Compound accessor argument '{type.ToDisplayString()}' is not copyable.");
+                if (TypeFacts.GetCompleteDestructor(type) is { } destructor)
+                    guardBuilder.Add(BeginLifecycleValueGuard(arguments[index], type, destructor,
+                        $"compound.argument.{index}"));
+                copies[index] = EmitCopyValue(arguments[index], type);
+            }
+            guards = guardBuilder.ToArray();
+            return copies;
+        }
+
+        private void CompleteLifecycleValueGuards(IEnumerable<LifecycleValueGuard> guards)
+        {
+            foreach (LifecycleValueGuard guard in guards)
+                CompleteLifecycleValueGuard(guard);
         }
 
         private LLVMValueRef EmitCompoundOperatorValue(BoundCompoundAccessorAssignmentExpression expression,
@@ -6774,6 +7154,65 @@ public sealed class LlvmIrGenerator
                 false);
             string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "indirect.call";
             return EmitPotentiallyThrowingCall(signature, target, arguments, name);
+        }
+
+        private LLVMValueRef EmitFunctionValueCall(BoundFunctionValueCallExpression expression)
+        {
+            LLVMValueRef value = EmitExpression(expression.Target);
+            LLVMValueRef invoke = _builder.BuildExtractValue(value, 0, "function.invoke");
+            LLVMValueRef control = _builder.BuildExtractValue(value, 1, "function.control");
+            if (_enableRuntimeChecks)
+                EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, invoke,
+                    LLVMValueRef.CreateConstPointerNull(invoke.TypeOf), "function.invoke.valid"));
+            EmitFunctionControlRetain(control);
+            FunctionSymbol valueDestructor = expression.FunctionValueType.CompleteDestructor ??
+                throw new LlvmCodeGenerationException(
+                    $"Function value type '{expression.FunctionValueType.ToDisplayString()}' has no destructor.");
+            LifecycleValueGuard callGuard = BeginLifecycleValueGuard(
+                value, expression.FunctionValueType, valueDestructor, "function.call");
+            LLVMValueRef[] arguments = EmitTransferredArguments(expression.Arguments);
+            bool returnsVoid = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void);
+            LLVMValueRef resultAddress = returnsVoid
+                ? default
+                : _builder.BuildAlloca(_mapType(expression.Type), "function.result");
+            LLVMBasicBlockRef direct = _llvmFunction.AppendBasicBlock("function.call.direct");
+            LLVMBasicBlockRef closure = _llvmFunction.AppendBasicBlock("function.call.closure");
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("function.call.end");
+            _builder.BuildCondBr(_builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, control,
+                LLVMValueRef.CreateConstPointerNull(control.TypeOf), "function.call.has.no.environment"),
+                direct, closure);
+
+            _builder.PositionAtEnd(direct);
+            LLVMTypeRef directSignature = LLVMTypeRef.CreateFunction(
+                _mapType(expression.FunctionValueType.ReturnType),
+                [.. expression.FunctionValueType.ParameterTypes.Select(_mapType)], false);
+            LLVMValueRef directResult = EmitPotentiallyThrowingCall(
+                directSignature, invoke, arguments, returnsVoid ? string.Empty : "function.direct.result");
+            if (!returnsVoid) _builder.BuildStore(directResult, resultAddress);
+            _builder.BuildBr(end);
+
+            _builder.PositionAtEnd(closure);
+            LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
+            LLVMValueRef environment = _builder.BuildLoad2(pointer,
+                FunctionControlField(control, 1, "function.call.environment.address"),
+                "function.call.environment");
+            LLVMTypeRef closureSignature = LLVMTypeRef.CreateFunction(
+                _mapType(expression.FunctionValueType.ReturnType),
+                [pointer, .. expression.FunctionValueType.ParameterTypes.Select(_mapType)], false);
+            var closureArguments = new LLVMValueRef[arguments.Length + 1];
+            closureArguments[0] = environment;
+            arguments.CopyTo(closureArguments, 1);
+            LLVMValueRef closureResult = EmitPotentiallyThrowingCall(
+                closureSignature, invoke, closureArguments, returnsVoid ? string.Empty : "function.closure.result");
+            if (!returnsVoid) _builder.BuildStore(closureResult, resultAddress);
+            _builder.BuildBr(end);
+
+            _builder.PositionAtEnd(end);
+            LLVMValueRef result = returnsVoid
+                ? default
+                : _builder.BuildLoad2(_mapType(expression.Type), resultAddress, "function.result.value");
+            DestroyAndCompleteLifecycleValueGuard(callGuard);
+            return result;
         }
 
         private LLVMValueRef GetFunctionAddress(FunctionSymbol function) =>

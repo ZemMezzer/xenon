@@ -125,6 +125,57 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_ChecksEmptyFirstClassFunctionInvocationOnlyWhenRuntimeChecksAreEnabled()
+    {
+        const string Source = """
+            namespace Example;
+            struct Holder { public function void() Callback; }
+            void Invoke(Holder holder) { holder.Callback(); }
+            """;
+        Compilation checkedCompilation = CreateCompilation(Source);
+        Compilation uncheckedCompilation = checkedCompilation.WithOptions(
+            new CompilationOptions(CompilationOutputKind.Library, EnableRuntimeChecks: false));
+
+        Assert.Empty(checkedCompilation.Diagnostics);
+        string checkedIr = new LlvmIrGenerator().GenerateForTarget(checkedCompilation,
+            LlvmTargetOptions.CreateHost(), "checked-empty-function");
+        string uncheckedIr = new LlvmIrGenerator().GenerateForTarget(uncheckedCompilation,
+            LlvmTargetOptions.CreateHost(), "unchecked-empty-function");
+
+        Assert.Contains("function.invoke.valid", checkedIr, StringComparison.Ordinal);
+        Assert.Contains("call void @llvm.trap()", checkedIr, StringComparison.Ordinal);
+        Assert.Contains("unreachable", checkedIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("function.invoke.valid", uncheckedIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("call void @llvm.trap()", uncheckedIr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_CopiesReplacesAndDestroysEmptyFunctionValues()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Holder { public function void() Callback; }
+            void Exercise()
+            {
+                Holder empty = Holder();
+                Holder copy = empty;
+                function void() callback = []() => { };
+                callback = empty.Callback;
+                callback = []() => { };
+                callback = copy.Callback;
+                function void()[] callbacks = new function void()[4];
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation,
+            LlvmTargetOptions.CreateHost(), "empty-function-lifecycle");
+        Assert.Contains("function.retain.valid", ir, StringComparison.Ordinal);
+        Assert.Contains("function.release.valid", ir, StringComparison.Ordinal);
+        Assert.Contains("@calloc", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_RunsRequestedDefaultOptimizationPipeline()
     {
         Compilation compilation = CreateCompilation(
@@ -256,6 +307,28 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains(fParameter, ir, StringComparison.Ordinal);
         Assert.Contains("@Native", ir, StringComparison.Ordinal);
         Assert.Contains("abi.result", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_AdaptsCAbiLoweredExternsStoredInFunctionValues()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Large { public long A; public long B; public long C; }
+            extern Large Native(Large value);
+            Large Call(Large value)
+            {
+                function Large(Large) callback = Native;
+                return callback(value);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation,
+            new LlvmTargetOptions("x86_64-pc-windows-msvc"), "function-value-c-abi");
+
+        Assert.Contains("function_value_adapter", ir, StringComparison.Ordinal);
+        Assert.Contains("call void @Native(ptr sret(%Example.Large)", ir, StringComparison.Ordinal);
     }
 
     [Theory]

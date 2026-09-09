@@ -1161,15 +1161,11 @@ internal sealed class Parser
                 commaTokens.Add(NextToken());
             }
             SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
-            SyntaxToken star = MatchToken(SyntaxKind.StarToken);
-            TypeSyntax functionPointer = new FunctionPointerTypeSyntax(
-                functionKeyword,
-                returnType,
-                openParenthesis,
-                parameterTypes.ToImmutable(),
-                commaTokens.ToImmutable(),
-                closeParenthesis,
-                star);
+            TypeSyntax functionPointer = Current.Kind == SyntaxKind.StarToken
+                ? new FunctionPointerTypeSyntax(functionKeyword, returnType, openParenthesis,
+                    parameterTypes.ToImmutable(), commaTokens.ToImmutable(), closeParenthesis, NextToken())
+                : new FunctionValueTypeSyntax(functionKeyword, returnType, openParenthesis,
+                    parameterTypes.ToImmutable(), commaTokens.ToImmutable(), closeParenthesis);
             if (allowArraySuffix)
                 functionPointer = ParseArrayTypeSuffixes(functionPointer, allocation: false);
             if (constKeyword is not null) functionPointer = new QualifiedTypeSyntax(functionPointer, constKeyword);
@@ -1839,6 +1835,19 @@ internal sealed class Parser
 
     private ExpressionSyntax ParsePrimaryExpression()
     {
+        if (Current.Kind == SyntaxKind.FunctionKeyword)
+        {
+            SyntaxToken keyword = NextToken();
+            TypeSyntax returnType = ParseType();
+            SyntaxToken open = MatchToken(SyntaxKind.OpenParenthesisToken);
+            var (parameters, commas) = ParseParameterList();
+            SyntaxToken close = MatchToken(SyntaxKind.CloseParenthesisToken);
+            return new LambdaExpressionSyntax(null, [], [], null, keyword, returnType, open,
+                parameters, commas, close, null, ParseBlockStatement());
+        }
+
+        if (IsArrowLambdaStart()) return ParseArrowLambdaExpression();
+
         if (Current.Kind is SyntaxKind.EndOfFileToken or SyntaxKind.SemicolonToken or
             SyntaxKind.CloseParenthesisToken or SyntaxKind.CloseBracketToken or SyntaxKind.CloseBraceToken or
             SyntaxKind.CommaToken)
@@ -1998,6 +2007,61 @@ internal sealed class Parser
         return new MissingExpressionSyntax(missing);
     }
 
+    private bool IsArrowLambdaStart()
+    {
+        int offset = 0;
+        if (Peek(offset).Kind == SyntaxKind.OpenBracketToken)
+        {
+            int depth = 0;
+            do
+            {
+                SyntaxKind kind = Peek(offset++).Kind;
+                if (kind == SyntaxKind.OpenBracketToken) depth++;
+                else if (kind == SyntaxKind.CloseBracketToken) depth--;
+                else if (kind == SyntaxKind.EndOfFileToken) return false;
+            } while (depth > 0);
+        }
+        if (Peek(offset).Kind != SyntaxKind.OpenParenthesisToken) return false;
+        int parentheses = 0;
+        do
+        {
+            SyntaxKind kind = Peek(offset++).Kind;
+            if (kind == SyntaxKind.OpenParenthesisToken) parentheses++;
+            else if (kind == SyntaxKind.CloseParenthesisToken) parentheses--;
+            else if (kind == SyntaxKind.EndOfFileToken) return false;
+        } while (parentheses > 0);
+        return Peek(offset).Kind == SyntaxKind.FatArrowToken;
+    }
+
+    private LambdaExpressionSyntax ParseArrowLambdaExpression()
+    {
+        SyntaxToken? openBracket = null;
+        SyntaxToken? closeBracket = null;
+        var captures = ImmutableArray.CreateBuilder<LambdaCaptureSyntax>();
+        var captureCommas = ImmutableArray.CreateBuilder<SyntaxToken>();
+        if (Current.Kind == SyntaxKind.OpenBracketToken)
+        {
+            openBracket = NextToken();
+            while (Current.Kind is not (SyntaxKind.CloseBracketToken or SyntaxKind.EndOfFileToken))
+            {
+                SyntaxToken? readonlyKeyword = Current.Kind == SyntaxKind.ReadonlyKeyword ? NextToken() : null;
+                SyntaxToken? moveKeyword = Current.Kind == SyntaxKind.MoveKeyword ? NextToken() : null;
+                SyntaxToken? ampersand = Current.Kind == SyntaxKind.AmpersandToken ? NextToken() : null;
+                captures.Add(new LambdaCaptureSyntax(readonlyKeyword, ampersand, moveKeyword,
+                    MatchToken(SyntaxKind.IdentifierToken)));
+                if (Current.Kind != SyntaxKind.CommaToken) break;
+                captureCommas.Add(NextToken());
+            }
+            closeBracket = MatchToken(SyntaxKind.CloseBracketToken);
+        }
+        SyntaxToken open = MatchToken(SyntaxKind.OpenParenthesisToken);
+        var (parameters, commas) = ParseParameterList();
+        SyntaxToken close = MatchToken(SyntaxKind.CloseParenthesisToken);
+        SyntaxToken arrow = MatchToken(SyntaxKind.FatArrowToken);
+        return new LambdaExpressionSyntax(openBracket, captures.ToImmutable(), captureCommas.ToImmutable(),
+            closeBracket, null, null, open, parameters, commas, close, arrow, ParseBlockStatement());
+    }
+
     private TypeSyntax ParseAllocationElementSuffixes(TypeSyntax type) =>
         ParseArrayTypeSuffixes(type, allocation: true);
 
@@ -2026,8 +2090,14 @@ internal sealed class Parser
                 else if (kind is SyntaxKind.EndOfFileToken or SyntaxKind.SemicolonToken or
                          SyntaxKind.OpenBraceToken or SyntaxKind.CloseBraceToken) return false;
             } while (depth > 0);
-            if (Peek(offset).Kind != SyntaxKind.StarToken) return false;
-            offset++;
+            if (Peek(offset).Kind == SyntaxKind.StarToken) offset++;
+            while (Peek(offset).Kind == SyntaxKind.OpenBracketToken)
+            {
+                offset++;
+                while (Peek(offset).Kind == SyntaxKind.CommaToken) offset++;
+                if (Peek(offset).Kind != SyntaxKind.CloseBracketToken) return false;
+                offset++;
+            }
             return Peek(offset).Kind == SyntaxKind.IdentifierToken;
         }
         if (firstKind == SyntaxKind.IdentifierToken)

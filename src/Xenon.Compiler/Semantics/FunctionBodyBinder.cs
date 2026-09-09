@@ -62,6 +62,7 @@ internal sealed partial class FunctionBodyBinder
     private ExpressionSyntax? _fieldReceiverSyntax;
     private ExpressionSyntax? _unconsumedOwnershipExpression;
     private FunctionPointerTypeSymbol? _expectedFunctionPointerType;
+    private FunctionValueTypeSymbol? _expectedFunctionValueType;
     private int _memberAccessBindingDepth;
     private sealed class MovePlace(
         object root,
@@ -171,6 +172,8 @@ internal sealed partial class FunctionBodyBinder
     private readonly Dictionary<BoundExpression, ArgumentFlowTransaction> _argumentFlowCandidates =
         new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<ArgumentFlowTransaction> _completedArgumentFlowTransactions = [];
+    private readonly Dictionary<LambdaExpressionSyntax, ArgumentFlowTransaction>
+        _deferredLambdaCaptureTransactions = new(ReferenceEqualityComparer.Instance);
     private readonly Stack<TryFinalizerFlowContext> _tryFinalizerFlows = [];
     private sealed record TryFinalizerFlowContext(
         int LoopDepth,
@@ -178,6 +181,17 @@ internal sealed partial class FunctionBodyBinder
         List<ExpressionFlow> Exits);
     private sealed class ArgumentFlowTransaction
     {
+        public sealed record DeferredCaptureBorrow(BorrowPlace Place, bool IsReadonly);
+        private sealed record DeferredLambdaCapture(
+            LambdaExpressionSyntax Syntax,
+            ExpressionFlow Before,
+            ExpressionFlow After,
+            ImmutableArray<DeferredCaptureBorrow> Borrows,
+            Action<IReadOnlyDictionary<MovePlace, TextLocation?>> RollbackAuxiliaryState)
+        {
+            public Dictionary<MovePlace, TextLocation?> SupersedingMutations { get; } = [];
+            public HashSet<MovePlace> DeferredDependentMutations { get; } = [];
+        }
         private sealed record AppliedRollback(
             BoundExpression Expression,
             ExpressionFlow Before,
@@ -189,6 +203,27 @@ internal sealed partial class FunctionBodyBinder
         private readonly Dictionary<BoundExpression, MovePlace> _candidatePlaces =
             new(ReferenceEqualityComparer.Instance);
         private readonly HashSet<BoundExpression> _materialized = new(ReferenceEqualityComparer.Instance);
+        private readonly List<DeferredLambdaCapture> _deferredLambdaCaptures = [];
+        private readonly HashSet<LambdaExpressionSyntax> _materializedLambdas =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<LambdaExpressionSyntax, (Action Commit, Action Rollback)> _lambdaArtifacts =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<LambdaExpressionSyntax> _rolledBackLambdaArtifacts =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<LambdaExpressionSyntax> _rolledBackLambdaState =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<Diagnostic, HashSet<LambdaExpressionSyntax>> _deferredCaptureDiagnostics =
+            new(ReferenceEqualityComparer.Instance);
+        private readonly List<Action> _generatedArtifactRollbacks = [];
+        private int _rolledBackGeneratedArtifactCount;
+        private TypeFactory.Snapshot? _typeFactorySnapshot;
+        private GenericStructSpecializer? _transactionalStructSpecializer;
+        private GenericFunctionSpecializer? _transactionalFunctionSpecializer;
+        private GenericStructSpecializer? _parentStructSpecializer;
+        private GenericFunctionSpecializer? _parentFunctionSpecializer;
+        private bool _transactionalSpecializersInitialized;
+        private bool _generatedArtifactsCommitted;
+        private bool _preserveDeferredDependentMoves;
         private readonly List<(List<ExceptionalFlow> Sink, int Index,
             ImmutableArray<AppliedRollback> Rollbacks)> _recordedRollbacks = [];
         private readonly List<(TextLocation Location, string DisplayName,
@@ -210,6 +245,244 @@ internal sealed partial class FunctionBodyBinder
             expression = UnwrapDirectTransferredExpression(expression);
             if (_candidates.TryGetValue(expression, out var move))
                 _moves.Add((expression, _candidatePlaces[expression], move.Before, move.After));
+        }
+
+        public void RecordDeferredLambdaCapture(
+            LambdaExpressionSyntax syntax,
+            ExpressionFlow before,
+            ExpressionFlow after,
+            ImmutableArray<DeferredCaptureBorrow> borrows,
+            Action<IReadOnlyDictionary<MovePlace, TextLocation?>> rollbackAuxiliaryState) =>
+            _deferredLambdaCaptures.Add(new DeferredLambdaCapture(
+                syntax, before, after, borrows, rollbackAuxiliaryState));
+
+        public (GenericStructSpecializer? Struct, GenericFunctionSpecializer? Function)
+            GetTransactionalSpecializers(
+                GenericStructSpecializer? structSpecializer,
+                GenericFunctionSpecializer? functionSpecializer,
+                DiagnosticBag diagnostics)
+        {
+            if (!_transactionalSpecializersInitialized)
+            {
+                _parentStructSpecializer = structSpecializer;
+                _parentFunctionSpecializer = functionSpecializer;
+                _transactionalStructSpecializer = structSpecializer?.CreateSpeculative(diagnostics);
+                _transactionalFunctionSpecializer = functionSpecializer?.CreateSpeculative(
+                    diagnostics, _transactionalStructSpecializer);
+                _transactionalSpecializersInitialized = true;
+            }
+            return (_transactionalStructSpecializer, _transactionalFunctionSpecializer);
+        }
+
+        public void RecordSubsequentPlaceMutation(
+            MovePlace place,
+            TextLocation? moveLocation,
+            bool deferredDependent)
+        {
+            foreach (DeferredLambdaCapture capture in _deferredLambdaCaptures)
+            {
+                if (_rolledBackLambdaState.Contains(capture.Syntax) ||
+                    !capture.After.Moved.Except(capture.Before.Moved)
+                        .Any(moved => PlacesOverlap(moved, place)))
+                    continue;
+                capture.SupersedingMutations.Remove(place);
+                capture.SupersedingMutations[place] = moveLocation;
+                if (deferredDependent) capture.DeferredDependentMutations.Add(place);
+                else capture.DeferredDependentMutations.Remove(place);
+            }
+        }
+
+        public void RecordMaterializedLambda(
+            LambdaExpressionSyntax syntax,
+            Action commitArtifacts,
+            Action rollbackArtifacts) =>
+            _lambdaArtifacts.TryAdd(syntax, (commitArtifacts, rollbackArtifacts));
+
+        public void RecordGeneratedArtifactRollback(Action rollback) =>
+            _generatedArtifactRollbacks.Add(rollback);
+
+        public void EnsureTypeFactorySnapshot(TypeFactory typeFactory)
+        {
+            if (_typeFactorySnapshot is not null) return;
+            _typeFactorySnapshot = typeFactory.CaptureSnapshot();
+            RecordGeneratedArtifactRollback(() => typeFactory.Rollback(_typeFactorySnapshot));
+        }
+
+        public void CommitDeferredLambdaCaptures()
+        {
+            if (!_generatedArtifactsCommitted)
+            {
+                if (_transactionalStructSpecializer is not null)
+                    _parentStructSpecializer?.MergeFrom(_transactionalStructSpecializer);
+                if (_transactionalFunctionSpecializer is not null)
+                    _parentFunctionSpecializer?.MergeFrom(_transactionalFunctionSpecializer);
+                _generatedArtifactsCommitted = true;
+            }
+            foreach (var entry in _lambdaArtifacts)
+                if (_materializedLambdas.Add(entry.Key))
+                    entry.Value.Commit();
+        }
+
+        public void PreserveDeferredDependentMoves() =>
+            _preserveDeferredDependentMoves = true;
+
+        public bool HasDeferredMoveContribution(MovePlace place) =>
+            _deferredLambdaCaptures.Any(capture =>
+                !_materializedLambdas.Contains(capture.Syntax) &&
+                !_rolledBackLambdaState.Contains(capture.Syntax) &&
+                capture.After.Moved.Except(capture.Before.Moved)
+                    .Any(moved => PlacesOverlap(moved, place)));
+
+        public bool HasRolledBackLambdaCaptures => _rolledBackLambdaState.Count != 0;
+
+        public bool RecordDeferredMoveDiagnostic(MovePlace place, Diagnostic diagnostic)
+        {
+            LambdaExpressionSyntax[] contributors = _deferredLambdaCaptures
+                .Where(capture => !_materializedLambdas.Contains(capture.Syntax) &&
+                    capture.After.Moved.Except(capture.Before.Moved)
+                        .Any(moved => PlacesOverlap(moved, place)))
+                .Select(capture => capture.Syntax)
+                .ToArray();
+            foreach (LambdaExpressionSyntax contributor in contributors)
+                AddDiagnosticDependency(diagnostic, contributor);
+            return contributors.Length != 0;
+        }
+
+        public bool HasDeferredBorrowCapture(LambdaExpressionSyntax syntax, BorrowPlace place) =>
+            !_materializedLambdas.Contains(syntax) &&
+            _deferredLambdaCaptures.Any(capture => ReferenceEquals(capture.Syntax, syntax) &&
+                capture.Borrows.Any(borrow => BorrowPlacesOverlap(borrow.Place, place)));
+
+        public bool TryGetDeferredBorrowConflict(
+            BorrowPlace place,
+            bool isReadonlyRequest,
+            out LambdaExpressionSyntax syntax,
+            out DeferredCaptureBorrow conflict)
+        {
+            foreach (DeferredLambdaCapture capture in _deferredLambdaCaptures)
+            {
+                if (_materializedLambdas.Contains(capture.Syntax) ||
+                    _rolledBackLambdaState.Contains(capture.Syntax))
+                    continue;
+                DeferredCaptureBorrow? candidate = capture.Borrows.FirstOrDefault(borrow =>
+                    BorrowPlacesOverlap(borrow.Place, place) &&
+                    (!isReadonlyRequest || !borrow.IsReadonly));
+                if (candidate is null) continue;
+                syntax = capture.Syntax;
+                conflict = candidate;
+                return true;
+            }
+            syntax = null!;
+            conflict = null!;
+            return false;
+        }
+
+        public bool RecordDeferredBorrowDiagnostic(
+            LambdaExpressionSyntax syntax,
+            Diagnostic diagnostic)
+        {
+            if (_materializedLambdas.Contains(syntax) ||
+                !_deferredLambdaCaptures.Any(capture => ReferenceEquals(capture.Syntax, syntax)))
+                return false;
+            AddDiagnosticDependency(diagnostic, syntax);
+            return true;
+        }
+
+        public ExpressionFlow RollbackUnmaterializedLambdaCaptures(
+            ExpressionFlow flow,
+            DiagnosticBag diagnostics,
+            Action<Diagnostic>? diagnosticRemoved = null)
+        {
+            for (int index = _deferredLambdaCaptures.Count - 1; index >= 0; index--)
+            {
+                var capture = _deferredLambdaCaptures[index];
+                if (_materializedLambdas.Contains(capture.Syntax)) continue;
+                if (_rolledBackLambdaState.Add(capture.Syntax))
+                {
+                    ExpressionFlow current = flow;
+                    flow = ApplyExpressionFlowDelta(flow, capture.After, capture.Before);
+                    IReadOnlyDictionary<MovePlace, TextLocation?> superseding =
+                        _preserveDeferredDependentMoves
+                            ? capture.SupersedingMutations
+                            : capture.SupersedingMutations
+                                .Where(entry => !capture.DeferredDependentMutations.Contains(entry.Key))
+                                .ToDictionary();
+                    foreach (MovePlace place in superseding.Keys)
+                        RestoreSupersededPlace(flow, current, place);
+                    capture.RollbackAuxiliaryState(superseding);
+                }
+                if (_lambdaArtifacts.TryGetValue(capture.Syntax, out var artifacts) &&
+                    _rolledBackLambdaArtifacts.Add(capture.Syntax))
+                    artifacts.Rollback();
+            }
+            foreach (var entry in _deferredCaptureDiagnostics)
+            {
+                if (entry.Value.Any(_materializedLambdas.Contains)) continue;
+                if (diagnostics.Remove(entry.Key))
+                    diagnosticRemoved?.Invoke(entry.Key);
+            }
+            while (_rolledBackGeneratedArtifactCount < _generatedArtifactRollbacks.Count)
+                _generatedArtifactRollbacks[_rolledBackGeneratedArtifactCount++]();
+            return flow;
+        }
+
+        private static void RestoreSupersededPlace(
+            ExpressionFlow target,
+            ExpressionFlow current,
+            MovePlace place)
+        {
+            if (place.RootVariable is { } variable)
+            {
+                if (current.Assigned.Contains(variable)) target.Assigned.Add(variable);
+                else target.Assigned.Remove(variable);
+                if (current.PossiblyAssignedConstructorFields.Contains(variable))
+                    target.PossiblyAssignedConstructorFields.Add(variable);
+                else target.PossiblyAssignedConstructorFields.Remove(variable);
+                if (variable is LocalVariableSymbol local)
+                {
+                    if (current.Arrays.TryGetValue(local, out ArrayState array)) target.Arrays[local] = array;
+                    else target.Arrays.Remove(local);
+                }
+            }
+            RestorePlaceEntries(target.Moved, current.Moved, place);
+            RestorePlaceEntries(target.DefinitelyMoved, current.DefinitelyMoved, place);
+            RestorePlaceEntries(target.Storages, current.Storages, place);
+            RestorePlaceEntries(target.References, current.References, place);
+            RestorePlaceEntries(target.BorrowRoots, current.BorrowRoots, place);
+            target.ConstructorReferences.Clear();
+            foreach (var entry in current.ConstructorReferences)
+                target.ConstructorReferences.Add(entry.Key, entry.Value);
+        }
+
+        private static void RestorePlaceEntries(
+            HashSet<MovePlace> target,
+            HashSet<MovePlace> current,
+            MovePlace place)
+        {
+            target.RemoveWhere(candidate => PlacesOverlap(candidate, place));
+            target.UnionWith(current.Where(candidate => PlacesOverlap(candidate, place)));
+        }
+
+        private static void RestorePlaceEntries<T>(
+            Dictionary<MovePlace, T> target,
+            Dictionary<MovePlace, T> current,
+            MovePlace place)
+        {
+            foreach (MovePlace key in target.Keys.Where(candidate => PlacesOverlap(candidate, place)).ToArray())
+                target.Remove(key);
+            foreach (var entry in current.Where(entry => PlacesOverlap(entry.Key, place)))
+                target[entry.Key] = entry.Value;
+        }
+
+        private void AddDiagnosticDependency(Diagnostic diagnostic, LambdaExpressionSyntax syntax)
+        {
+            if (!_deferredCaptureDiagnostics.TryGetValue(diagnostic,
+                    out HashSet<LambdaExpressionSyntax>? dependencies))
+            {
+                dependencies = new HashSet<LambdaExpressionSyntax>(ReferenceEqualityComparer.Instance);
+                _deferredCaptureDiagnostics.Add(diagnostic, dependencies);
+            }
+            dependencies.Add(syntax);
         }
 
         public bool HasDeferredMoveOverlapping(MovePlace place) =>
@@ -443,7 +716,8 @@ internal sealed partial class FunctionBodyBinder
             ImmutableArray<BoundExpression> arguments;
             try
             {
-                arguments = BindTransferredArguments(initializerArguments);
+                arguments = BindTransferredArguments(initializerArguments,
+                    (argument, _) => BindDeferredContextualArgument(argument));
             }
             finally
             {
@@ -459,6 +733,7 @@ internal sealed partial class FunctionBodyBinder
                 {
                     _diagnostics.Report(constructorSyntax.BaseKeyword.Location,
                         "a constructor cannot chain directly to itself", DiagnosticIds.MissingConstructor);
+                    RollbackUnmaterializedContextualArguments(arguments);
                 }
                 else
                 {
@@ -485,7 +760,8 @@ internal sealed partial class FunctionBodyBinder
             ImmutableArray<BoundExpression> arguments;
             try
             {
-                arguments = BindTransferredArguments(baseArguments);
+                arguments = BindTransferredArguments(baseArguments,
+                    (argument, _) => BindDeferredContextualArgument(argument));
             }
             finally
             {
@@ -501,11 +777,15 @@ internal sealed partial class FunctionBodyBinder
                 {
                     _diagnostics.Report(syntax?.BaseKeyword?.Location ?? location, $"constructor '{baseType.Name}' is private",
                         DiagnosticIds.InaccessibleSymbol);
+                    RollbackUnmaterializedContextualArguments(arguments);
                 }
-                arguments = ValidateFunctionArguments(baseConstructor, arguments, baseArguments, location);
-                ApplyChainedConstructorReferenceOrigins(baseType, baseConstructor, arguments);
-                baseConstructorCall = new BoundExpressionStatement(CompleteFullExpression(
-                    new BoundBaseLifecycleCallExpression(baseConstructor, arguments), resultConsumed: false));
+                else
+                {
+                    arguments = ValidateFunctionArguments(baseConstructor, arguments, baseArguments, location);
+                    ApplyChainedConstructorReferenceOrigins(baseType, baseConstructor, arguments);
+                    baseConstructorCall = new BoundExpressionStatement(CompleteFullExpression(
+                        new BoundBaseLifecycleCallExpression(baseConstructor, arguments), resultConsumed: false));
+                }
             }
         }
         else if (_function.FunctionKind == FunctionKind.Constructor &&
@@ -597,7 +877,8 @@ internal sealed partial class FunctionBodyBinder
         {
             _diagnostics.Report(
                 body.CloseBraceToken.Location,
-                $"not all code paths in function '{_function.Name}' return a value",
+                _function.IsLambda ? "not all code paths in lambda return a value" :
+                    $"not all code paths in function '{_function.Name}' return a value",
                 DiagnosticIds.MissingReturn);
         }
 
@@ -730,7 +1011,7 @@ internal sealed partial class FunctionBodyBinder
             EndValueReferenceMetadata(place, syntax.CloseBraceToken.Location.Span.Start - 1);
         }
         foreach (LocalVariableSymbol local in boundScope.Variables.OfType<LocalVariableSymbol>()
-                     .Where(local => TypeFacts.ContainsReferenceStorage(local.Type)))
+                     .Where(local => ContainsValueReferenceStorage(local.Type)))
             EndValueReferenceMetadata(new MovePlace(local, []), syntax.CloseBraceToken.Location.Span.Start - 1);
 
         RecordScope(syntax, _scope);
@@ -1551,7 +1832,7 @@ internal sealed partial class FunctionBodyBinder
                 if (TryGetPointerLifetimeRoot(initializer, out MovePlace pointerRoot, out _))
                     _referencePointerRoots[variable] = pointerRoot;
             }
-            else if (TypeFacts.ContainsReferenceStorage(type))
+            else if (ContainsValueReferenceStorage(type))
             {
                 TypeSymbol metadataType = isStorageDeclaration ? storageType.ElementType :
                     isDirectPinDeclaration && type is PinTypeSymbol metadataPin ? metadataPin.ElementType : type;
@@ -1625,8 +1906,46 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundReturnStatement BindReturnStatement(ReturnStatementSyntax syntax)
     {
+        int? contextualCallableConversionCost = null;
+        bool hasContextualCallableConversion = false;
+        if (_isLambdaCompatibilityProbe && syntax.Expression is { } returnExpression)
+        {
+            if (TryGetLambdaExpression(returnExpression, out LambdaExpressionSyntax lambda))
+            {
+                // Binding a nested callable with an expected return type materializes the
+                // conversion immediately. Preserve its candidate-specific cost before
+                // the resulting bound expression has the exact contextual type.
+                contextualCallableConversionCost = GetLambdaArgumentConversionCost(_function.ReturnType, lambda);
+                hasContextualCallableConversion = true;
+            }
+            else if (TryGetNamedFunctionExpression(returnExpression, out ExpressionSyntax namedFunction))
+            {
+                contextualCallableConversionCost = GetNamedFunctionArgumentConversionCost(
+                    _function.ReturnType, namedFunction);
+                hasContextualCallableConversion = true;
+            }
+        }
         BoundExpression? expression = syntax.Expression is null ? null :
             BindExpressionWithExpectedType(syntax.Expression, _function.ReturnType);
+        if (_isLambdaCompatibilityProbe)
+        {
+            if (TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void))
+                _lambdaProbeReturnsCompatible &= expression is null;
+            else if (expression is null)
+                _lambdaProbeReturnsCompatible = false;
+            else if (expression is BoundErrorExpression)
+                _lambdaProbeReturnsCompatible = false;
+            else
+            {
+                int? conversionCost = hasContextualCallableConversion
+                    ? contextualCallableConversionCost
+                    : GetArgumentConversionCost(_function.ReturnType, expression);
+                _lambdaProbeReturnsCompatible &= conversionCost.HasValue;
+                if (conversionCost.HasValue)
+                    _lambdaProbeReturnConversionCost = Math.Max(
+                        _lambdaProbeReturnConversionCost, conversionCost.Value);
+            }
+        }
         if (expression is not null)
         {
             expression = ContextualizeConversion(expression, _function.ReturnType, GetLocation(syntax.Expression!));
@@ -1643,7 +1962,8 @@ internal sealed partial class FunctionBodyBinder
         }
         else if (expression is null)
         {
-            _diagnostics.Report(syntax.ReturnKeyword.Location, $"function '{_function.Name}' must return a value of type '{_function.ReturnType.ToDisplayString()}'",
+            _diagnostics.Report(syntax.ReturnKeyword.Location,
+                $"{(_function.IsLambda ? "lambda" : $"function '{_function.Name}'")} must return a value of type '{_function.ReturnType.ToDisplayString()}'",
                 DiagnosticIds.MissingReturnValue);
         }
         else if (!TypeFacts.CanAssign(_function.ReturnType, expression.Type))
@@ -1653,7 +1973,7 @@ internal sealed partial class FunctionBodyBinder
 
         if (_function.ReturnType is ReferenceTypeSymbol && expression is not null)
             ValidateReturnedReference(expression, GetLocation(syntax.Expression!));
-        else if (expression is not null && TypeFacts.ContainsReferenceStorage(_function.ReturnType))
+        else if (expression is not null && ContainsValueReferenceStorage(_function.ReturnType))
             ValidateReturnedAggregateReferences(expression, GetLocation(syntax.Expression!));
         if (_function.ReturnType is SharedTypeSymbol && expression is not null)
             _sharedReturnOrigins.Add(GetSharedReturnOrigin(expression));
@@ -1767,7 +2087,8 @@ internal sealed partial class FunctionBodyBinder
 
     private static bool IsSafeReferenceReturnSource(ReferenceSource source) => source.Kind switch
     {
-        ReferenceSourceKind.Parameter => source.Variable is ParameterSymbol { Type: ReferenceTypeSymbol },
+        ReferenceSourceKind.Parameter => source.Variable is ParameterSymbol parameter &&
+            (parameter.Type is ReferenceTypeSymbol || ContainsValueReferenceStorage(parameter.Type)),
         ReferenceSourceKind.Receiver or ReferenceSourceKind.Static => true,
         _ => false,
     };
@@ -1818,31 +2139,48 @@ internal sealed partial class FunctionBodyBinder
                     : [new ReferenceSource(ReferenceSourceKind.Local, local, [])];
             case BoundVariableExpression { Variable: ParameterSymbol parameter }:
                 return [new ReferenceSource(ReferenceSourceKind.Parameter, parameter, [])];
-            case BoundCallExpression call when call.Function.ReturnType is ReferenceTypeSymbol:
+            case BoundFunctionValueExpression functionValue:
+                return functionValue.Captures
+                    .Where(capture => ContainsValueReferenceStorage(capture.Variable.StorageType))
+                    .SelectMany(capture => GetValueReferenceMetadata(
+                            capture.Initializer, capture.Variable.StorageType)
+                        .Select(reference => reference.Source))
+                    .ToImmutableArray();
+            case BoundCallExpression call when call.Function.ReturnType is ReferenceTypeSymbol ||
+                                               ContainsValueReferenceStorage(call.Function.ReturnType):
                 return ComposeReferenceReturnOrigins(call.Function, call.Arguments, receiver: null,
                     conservativeDispatch: false);
             case BoundStructConstructionExpression construction:
-                return TypeFacts.ContainsReferenceStorage(construction.Type)
+                return ContainsValueReferenceStorage(construction.Type)
                     ? construction.StructType.AllInstanceFields.Zip(construction.Arguments)
-                        .Where(pair => TypeFacts.ContainsReferenceStorage(pair.First.Type))
+                        .Where(pair => ContainsValueReferenceStorage(pair.First.Type))
                         .SelectMany(pair => GetReferenceSources(pair.Second)).ToImmutableArray()
                     : [new ReferenceSource(ReferenceSourceKind.Temporary, null, [])];
             case BoundConstructorCallExpression construction:
-                return TypeFacts.ContainsReferenceStorage(construction.Type)
+                return ContainsValueReferenceStorage(construction.Type)
                     ? ComposeConstructorReferenceMetadata(construction.Type,
                             construction.Constructor, construction.Arguments)
                         .Select(reference => reference.Source).ToImmutableArray()
                     : [new ReferenceSource(ReferenceSourceKind.Temporary, null, [])];
+            case BoundDeferredGenericOperationExpression
+                { Operation: BoundDeferredGenericOperationKind.Construction } construction:
+                return construction.Arguments
+                    .Where(argument => ContainsValueReferenceStorage(argument.Type))
+                    .SelectMany(argument => GetReferenceSources(argument))
+                    .ToImmutableArray();
             case BoundStorageMoveExpression move when
                 _expressionReferenceMetadata.TryGetValue(move, out ImmutableArray<ValueReference> movedStorage):
                 return movedStorage.Select(reference => reference.Source).ToImmutableArray();
             case BoundMoveExpression move when
                 _expressionReferenceMetadata.TryGetValue(move, out ImmutableArray<ValueReference> movedValue):
                 return movedValue.Select(reference => reference.Source).ToImmutableArray();
-            case BoundMethodCallExpression call when call.Method.ReturnType is ReferenceTypeSymbol:
+            case BoundMethodCallExpression call when call.Method.ReturnType is ReferenceTypeSymbol ||
+                                                     ContainsValueReferenceStorage(call.Method.ReturnType):
                 return ComposeReferenceReturnOrigins(call.Method, call.Arguments, call.Receiver,
                     conservativeDispatch: call.Method.IsVirtual || call.Method.IsOverride);
-            case BoundInterfaceMethodCallExpression { Method.ReturnType: ReferenceTypeSymbol }:
+            case BoundInterfaceMethodCallExpression call when
+                call.Method.ReturnType is ReferenceTypeSymbol ||
+                ContainsValueReferenceStorage(call.Method.ReturnType):
                 return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
             case BoundErrorExpression:
                 return [];
@@ -1850,6 +2188,29 @@ internal sealed partial class FunctionBodyBinder
                 return [new ReferenceSource(ReferenceSourceKind.Temporary, null, [])];
         }
     }
+
+    private static bool ContainsValueReferenceStorage(TypeSymbol type) =>
+        ContainsValueReferenceStorage(type, []);
+
+    private static bool ContainsValueReferenceStorage(TypeSymbol type, HashSet<TypeSymbol> visited)
+    {
+        if (type is ReferenceTypeSymbol or FunctionValueTypeSymbol) return true;
+        if (type is StorageTypeSymbol storage)
+            return ContainsValueReferenceStorage(storage.ElementType, visited);
+        if (type is PinTypeSymbol pin)
+            return ContainsValueReferenceStorage(pin.ElementType, visited);
+        if (type is ArrayTypeSymbol array)
+            return ContainsValueReferenceStorage(array.ElementType, visited);
+        if (type is not IFieldStorageTypeSymbol aggregate || !visited.Add(type)) return false;
+        bool result = aggregate.AllInstanceFields.Any(field =>
+            ContainsValueReferenceStorage(field.Type, visited));
+        visited.Remove(type);
+        return result;
+    }
+    private sealed record CallBorrow(
+        BorrowPlace Place,
+        bool IsReadonly,
+        LambdaExpressionSyntax? DeferredLambda);
 
     private ImmutableArray<ValueReference> GetValueReferenceMetadata(BoundExpression expression, TypeSymbol type)
     {
@@ -1863,16 +2224,43 @@ internal sealed partial class FunctionBodyBinder
                 return GetValueReferenceMetadata(move.Source, type);
             case BoundLifetimeValueExpression value:
                 return GetValueReferenceMetadata(value.Source, type);
-            case BoundVariableExpression { Variable: LocalVariableSymbol local }
-                when _valueReferenceMetadata.TryGetValue(new MovePlace(local, []), out ImmutableArray<ValueReference> localMetadata):
-                return localMetadata;
+            case BoundFunctionValueExpression functionValue:
+                return functionValue.Captures
+                    .Where(capture => ContainsValueReferenceStorage(capture.Variable.StorageType))
+                    .SelectMany(capture => GetValueReferenceMetadata(
+                            capture.Initializer, capture.Variable.StorageType)
+                        .Select(reference => new ValueReference([], reference.Source,
+                            reference.IsReadonly || capture.Variable.CaptureKind ==
+                            LambdaCaptureKind.ReadonlyBorrow)))
+                    .ToImmutableArray();
+            case BoundVariableExpression or BoundMemberAccessExpression
+                when TryGetValueCarrierPlace(expression, out MovePlace carrier):
+            {
+                if (_valueReferenceMetadata.TryGetValue(carrier,
+                        out ImmutableArray<ValueReference> exactMetadata))
+                    return exactMetadata;
+                if (carrier.RootVariable is LocalVariableSymbol root &&
+                    _valueReferenceMetadata.TryGetValue(new MovePlace(root, []),
+                        out ImmutableArray<ValueReference> rootMetadata))
+                {
+                    return rootMetadata
+                        .Where(reference => carrier.Fields.Length <= reference.CarrierPath.Length &&
+                            carrier.Fields.SequenceEqual(reference.CarrierPath.Take(carrier.Fields.Length)))
+                        .Select(reference => reference with
+                        {
+                            CarrierPath = reference.CarrierPath.RemoveRange(0, carrier.Fields.Length),
+                        })
+                        .ToImmutableArray();
+                }
+                break;
+            }
             case BoundStructConstructionExpression construction:
             {
                 var result = ImmutableArray.CreateBuilder<ValueReference>();
                 foreach ((FieldSymbol field, BoundExpression argument) in
                          construction.StructType.AllInstanceFields.Zip(construction.Arguments))
                 {
-                    if (!TypeFacts.ContainsReferenceStorage(field.Type)) continue;
+                    if (!ContainsValueReferenceStorage(field.Type)) continue;
                     result.AddRange(GetValueReferenceMetadata(argument, field.Type)
                         .Select(reference => reference with
                         {
@@ -1926,8 +2314,14 @@ internal sealed partial class FunctionBodyBinder
         if (summary.IsEmpty && constructor.GenericDefinition is { } definition)
             summary = definition.ReferenceFieldOrigins;
         if (summary.IsEmpty)
+        {
+            // Generic members can be specialized before the constructor body that supplies
+            // this summary has been rebound.  As with ordinary callable return summaries,
+            // source definitions are revisited during stabilization once every body is known.
+            if (constructor.IsDefinition) return [];
             return AttachReferenceLeaves(constructedType,
                 [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])]);
+        }
 
         var result = ImmutableArray.CreateBuilder<ValueReference>();
         foreach (ReferenceFieldOrigin entry in summary)
@@ -2053,6 +2447,11 @@ internal sealed partial class FunctionBodyBinder
             result.Add((path, reference.IsReadonly));
             return;
         }
+        if (type is FunctionValueTypeSymbol)
+        {
+            result.Add((path, false));
+            return;
+        }
         if (type is LifetimeModifierTypeSymbol modifier)
         {
             CollectReferenceLeaves(modifier.ElementType, path, result, visited);
@@ -2072,8 +2471,8 @@ internal sealed partial class FunctionBodyBinder
         int lastUsePosition)
     {
         EndValueReferenceMetadata(carrier, location.Span.Start - 1);
-        if (metadata.IsEmpty) return;
         _valueReferenceMetadata[carrier] = metadata;
+        if (metadata.IsEmpty) return;
         foreach (ValueReference reference in metadata)
         {
             if (!TryGetReferenceSourcePlace([reference.Source], out MovePlace referencedPlace)) continue;
@@ -2082,6 +2481,31 @@ internal sealed partial class FunctionBodyBinder
             _borrows.Add(new Borrow(alias, borrowPlace, reference.IsReadonly,
                 ParentAlias: null, lastUsePosition));
         }
+    }
+
+    private void SetAssignedValueReferenceMetadata(
+        MovePlace carrier,
+        LocalVariableSymbol alias,
+        ImmutableArray<ValueReference> metadata,
+        TextLocation location,
+        int lastUsePosition)
+    {
+        if (carrier.Fields.IsEmpty)
+        {
+            SetValueReferenceMetadata(carrier, alias, metadata, location, lastUsePosition);
+            return;
+        }
+
+        var root = new MovePlace(alias, []);
+        ImmutableArray<ValueReference> current = _valueReferenceMetadata.GetValueOrDefault(root, []);
+        ImmutableArray<ValueReference> retained = current.Where(reference =>
+            !carrier.Fields.SequenceEqual(reference.CarrierPath.Take(carrier.Fields.Length)))
+            .ToImmutableArray();
+        ImmutableArray<ValueReference> projected = metadata.Select(reference => reference with
+        {
+            CarrierPath = carrier.Fields.AddRange(reference.CarrierPath),
+        }).ToImmutableArray();
+        SetValueReferenceMetadata(root, alias, retained.AddRange(projected), location, lastUsePosition);
     }
 
     private void EndValueReferenceMetadata(MovePlace carrier, int endPosition)
@@ -2247,6 +2671,7 @@ internal sealed partial class FunctionBodyBinder
             expression = syntax switch
             {
                 MissingExpressionSyntax => new BoundErrorExpression(),
+                LambdaExpressionSyntax lambda => BindLambdaExpression(lambda),
                 LiteralExpressionSyntax literal => BindLiteralExpression(literal),
                 NameExpressionSyntax name => BindNameExpression(name),
                 ThisExpressionSyntax @this => BindThisExpression(@this),
@@ -2306,7 +2731,8 @@ internal sealed partial class FunctionBodyBinder
             !IsInitializationTargetSyntax(syntax) && TryGetMovePlace(expression, out MovePlace place))
         {
             LocalVariableSymbol? reference = GetReferenceAliasRoot(expression);
-            ValidateMovedPlaceUse(place, GetLocation(syntax), reportWholeMoved: reference is not null);
+            ValidateMovedPlaceUse(place, GetLocation(syntax),
+                reportWholeMoved: reference is not null || place.RootVariable is not LocalVariableSymbol);
         }
         bool validateBorrowPlaceUse = validatePlaceUse || syntax is UnaryExpressionSyntax or IndexExpressionSyntax;
         if (_suppressBorrowedPlaceReadValidation == 0 && validateBorrowPlaceUse &&
@@ -2370,6 +2796,7 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundExpression BindThisExpression(ThisExpressionSyntax syntax)
     {
+        if (ReportUnsupportedLambdaCapture(syntax.ThisKeyword)) return new BoundErrorExpression();
         if (_function.ContainingType is not { } containingType || _function.IsStatic)
         {
             _diagnostics.Report(syntax.ThisKeyword.Location, "'this' is available only in instance members",
@@ -2410,16 +2837,20 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundExpression BindNameExpression(NameExpressionSyntax syntax, bool requireDefinitelyAssigned = true)
     {
+        if (ReportUnsupportedLambdaCapture(syntax.IdentifierToken)) return new BoundErrorExpression();
         VariableSymbol? variable = _scope.Lookup(syntax.IdentifierToken.Text);
         if (variable is not null)
         {
-            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(variable);
+            // A capture is a distinct storage slot for lowering, but editor identity remains
+            // the source variable so capture-list and body occurrences navigate and rename together.
+            _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(
+                variable is CaptureVariableSymbol capture ? capture.CapturedVariable ?? capture : variable);
             if (variable is LocalVariableSymbol { ConstantValue: not null } localConstant) return localConstant.ConstantValue;
             if (requireDefinitelyAssigned && variable is LocalVariableSymbol local &&
                 !_definitelyAssigned.Contains(local))
             {
                 if (_movedPlaces.Contains(new MovePlace(local, [])))
-                    _diagnostics.Report(syntax.IdentifierToken.Location,
+                    ReportTransactionalMoveDiagnostic(new MovePlace(local, []), syntax.IdentifierToken.Location,
                         $"cannot use '{local.Name}' because it has been moved",
                         DiagnosticIds.UseAfterMove);
                 else
@@ -2430,6 +2861,10 @@ internal sealed partial class FunctionBodyBinder
 
             return new BoundVariableExpression(variable);
         }
+
+        if (_expectedFunctionValueType is { } expectedFunctionValue &&
+            TryBindNamedFunctionValue(syntax, expectedFunctionValue, out BoundExpression? functionValue))
+            return functionValue!;
 
         if (_function.ContainingType is { } containingType)
         {
@@ -2538,6 +2973,11 @@ internal sealed partial class FunctionBodyBinder
     private bool TryBindFunctionAddress(ExpressionSyntax syntax, out BoundExpression? address)
     {
         address = null;
+        if (syntax is NameExpressionSyntax capturedName && ReportUnsupportedLambdaCapture(capturedName.IdentifierToken))
+        {
+            address = new BoundErrorExpression();
+            return true;
+        }
         var lookupDiagnostics = new DiagnosticBag();
         FunctionSymbol[] candidates;
         SyntaxToken nameToken;
@@ -2735,8 +3175,10 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (place.RootVariable is { } rootVariable && !_definitelyAssigned.Contains(rootVariable) ||
-            TryFindMoveConflict(place, out _))
+        bool onlyDeferredMoveConflict = IsOnlyDeferredMoveConflict(place);
+        if (place.RootVariable is { } rootVariable && !_definitelyAssigned.Contains(rootVariable) &&
+            !onlyDeferredMoveConflict ||
+            TryFindMoveConflict(place, out _) && !onlyDeferredMoveConflict)
             return new BoundErrorExpression();
 
         if (!ValidateLifetimeInvalidation(place, GetLocation(syntax), GetReferenceAliasRoot(source),
@@ -2764,12 +3206,15 @@ internal sealed partial class FunctionBodyBinder
         MarkPlaceMoved(place);
         if (_loopMoveContexts.TryPeek(out var context))
             context.Sites.TryAdd(place, syntax.MoveKeyword.Location);
+        foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+            transaction.RecordSubsequentPlaceMutation(
+                place, syntax.MoveKeyword.Location, deferredDependent: onlyDeferredMoveConflict);
         var result = new BoundMoveExpression(source)
         {
             TrackedVariable = place.RootVariable,
             TrackedPath = place.Fields,
         };
-        if (TypeFacts.ContainsReferenceStorage(source.Type) &&
+        if (ContainsValueReferenceStorage(source.Type) &&
             TryGetValueCarrierPlace(source, out MovePlace carrier))
             TransferValueReferenceMetadata(carrier, result, syntax.MoveKeyword.Location.Span.Start);
         if (beforeArgumentMove is not null)
@@ -3659,6 +4104,18 @@ internal sealed partial class FunctionBodyBinder
             ? new BorrowPlace(new BorrowRoot(BorrowRootKind.StorageValue, place,
                 storage.ElementType, place.DisplayName), [])
             : null;
+        if (TryGetDeferredBorrowConflict(borrowPlace, isReadonlyRequest: false,
+                out ArgumentFlowTransaction? deferredTransaction,
+                out LambdaExpressionSyntax? deferredLambda, out _) ||
+            storageValue is not null && TryGetDeferredBorrowConflict(storageValue, isReadonlyRequest: false,
+                out deferredTransaction, out deferredLambda, out _))
+        {
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot {operation} '{place.DisplayName}' while it is borrowed by an earlier lambda argument",
+                diagnosticId);
+            if (diagnostic is not null)
+                deferredTransaction!.RecordDeferredBorrowDiagnostic(deferredLambda!, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !IsBorrowInAliasLineage(borrow, throughAlias) &&
             (BorrowPlacesOverlap(borrow.Place, borrowPlace) ||
@@ -3782,6 +4239,18 @@ internal sealed partial class FunctionBodyBinder
         LocalVariableSymbol? throughAlias,
         TextLocation location)
     {
+        if (TryGetDeferredBorrowConflict(place, isReadonly,
+                out ArgumentFlowTransaction deferredTransaction,
+                out LambdaExpressionSyntax deferredLambda, out var deferredBorrow))
+        {
+            string deferredRequested = isReadonly ? "readonly" : "mutable";
+            string deferredExisting = deferredBorrow.IsReadonly ? "readonly" : "mutable";
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot create {deferredRequested} reference to '{place.DisplayName}' while an overlapping {deferredExisting} borrow is held by an earlier lambda argument",
+                DiagnosticIds.BorrowConflict);
+            if (diagnostic is not null)
+                deferredTransaction.RecordDeferredBorrowDiagnostic(deferredLambda, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !IsBorrowInAliasLineage(borrow, throughAlias) &&
             BorrowPlacesOverlap(borrow.Place, place) &&
@@ -3799,6 +4268,16 @@ internal sealed partial class FunctionBodyBinder
         LocalVariableSymbol? throughAlias,
         TextLocation location)
     {
+        if (TryGetDeferredBorrowConflict(place, isReadonlyRequest: true,
+                out ArgumentFlowTransaction deferredTransaction,
+                out LambdaExpressionSyntax deferredLambda, out _))
+        {
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot access '{place.DisplayName}' while it is exclusively borrowed by an earlier lambda argument",
+                DiagnosticIds.BorrowedPlaceAccess);
+            if (diagnostic is not null)
+                deferredTransaction.RecordDeferredBorrowDiagnostic(deferredLambda, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !borrow.IsReadonly && !IsBorrowInAliasLineage(borrow, throughAlias) &&
             BorrowPlacesOverlap(borrow.Place, place));
@@ -3811,6 +4290,16 @@ internal sealed partial class FunctionBodyBinder
     private void ValidateBorrowedPlaceMutation(BoundExpression expression, TextLocation location)
     {
         if (!TryGetBorrowPlace(expression, out BorrowPlace place, out LocalVariableSymbol? throughAlias)) return;
+        if (TryGetDeferredBorrowConflict(place, isReadonlyRequest: false,
+                out ArgumentFlowTransaction deferredTransaction,
+                out LambdaExpressionSyntax deferredLambda, out _))
+        {
+            Diagnostic? diagnostic = ReportBorrowDiagnostic(location,
+                $"cannot mutate '{place.DisplayName}' while it is borrowed by an earlier lambda argument",
+                DiagnosticIds.BorrowedPlaceMutation);
+            if (diagnostic is not null)
+                deferredTransaction.RecordDeferredBorrowDiagnostic(deferredLambda, diagnostic);
+        }
         Borrow? conflict = ActiveBorrows(location).FirstOrDefault(borrow =>
             !IsBorrowInAliasLineage(borrow, throughAlias) && BorrowPlacesOverlap(borrow.Place, place));
         if (conflict is null) return;
@@ -3855,10 +4344,31 @@ internal sealed partial class FunctionBodyBinder
         return false;
     }
 
-    private void ReportBorrowDiagnostic(TextLocation location, string message, string id)
+    private Diagnostic? ReportBorrowDiagnostic(TextLocation location, string message, string id)
     {
-        if (_reportedBorrowDiagnostics.Add((id, location.Span.Start)))
-            _diagnostics.Report(location, message, id);
+        if (!_reportedBorrowDiagnostics.Add((id, location.Span.Start))) return null;
+        return _diagnostics.ReportDiagnostic(location, message, id);
+    }
+
+    private bool TryGetDeferredBorrowConflict(
+        BorrowPlace place,
+        bool isReadonlyRequest,
+        out ArgumentFlowTransaction transaction,
+        out LambdaExpressionSyntax syntax,
+        out ArgumentFlowTransaction.DeferredCaptureBorrow conflict)
+    {
+        foreach (ArgumentFlowTransaction candidate in _argumentFlowTransactions)
+            if (candidate.TryGetDeferredBorrowConflict(place, isReadonlyRequest,
+                    out LambdaExpressionSyntax deferredLambda, out conflict))
+            {
+                transaction = candidate;
+                syntax = deferredLambda;
+                return true;
+            }
+        transaction = null!;
+        syntax = null!;
+        conflict = null!;
+        return false;
     }
 
     private bool IsBorrowInAliasLineage(Borrow borrow, LocalVariableSymbol? alias)
@@ -3927,7 +4437,7 @@ internal sealed partial class FunctionBodyBinder
         {
             // A whole-local move is already diagnosed while binding the root name.
             if (!movedAncestor.Fields.IsEmpty || reportWholeMoved)
-                _diagnostics.Report(location,
+                ReportTransactionalMoveDiagnostic(movedAncestor, location,
                     $"cannot use '{place.DisplayName}' because '{movedAncestor.DisplayName}' has been moved",
                     DiagnosticIds.UseAfterMove);
             return;
@@ -3935,9 +4445,30 @@ internal sealed partial class FunctionBodyBinder
 
         MovePlace? movedDescendant = _movedPlaces.FirstOrDefault(candidate => IsPlacePrefixOf(place, candidate));
         if (movedDescendant is not null)
-            _diagnostics.Report(location,
+            ReportTransactionalMoveDiagnostic(movedDescendant, location,
                 $"cannot use '{place.DisplayName}' as a complete value because field '{movedDescendant.DisplayName}' has been moved",
                 DiagnosticIds.PartiallyMovedUse);
+    }
+
+    private void ReportTransactionalMoveDiagnostic(
+        MovePlace cause,
+        TextLocation location,
+        string message,
+        string id)
+    {
+        Diagnostic diagnostic = _diagnostics.ReportDiagnostic(location, message, id);
+        foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+            if (transaction.RecordDeferredMoveDiagnostic(cause, diagnostic))
+                break;
+    }
+
+    private void OnTransactionalDiagnosticRemoved(Diagnostic diagnostic)
+    {
+        if (diagnostic.Id is DiagnosticIds.BorrowConflict or
+            DiagnosticIds.BorrowedPlaceAccess or
+            DiagnosticIds.BorrowedPlaceMutation or
+            DiagnosticIds.MoveWhileBorrowed)
+            _reportedBorrowDiagnostics.Remove((diagnostic.Id, diagnostic.Location.Span.Start));
     }
 
     private static StructTypeSymbol? FindPartialLifetimeDestructorOwner(MovePlace place)
@@ -4191,7 +4722,7 @@ internal sealed partial class FunctionBodyBinder
         }
         if (isSimpleAssignment &&
             rawTarget is BoundMemberAccessExpression { Receiver: BoundThisExpression } referenceFieldTarget &&
-            TypeFacts.ContainsReferenceStorage(referenceFieldTarget.Field.Type) &&
+            ContainsValueReferenceStorage(referenceFieldTarget.Field.Type) &&
             _function.FunctionKind == FunctionKind.Method)
         {
             _diagnostics.Report(GetLocation(syntax.Target),
@@ -4300,7 +4831,7 @@ internal sealed partial class FunctionBodyBinder
             }
             if (_function.FunctionKind == FunctionKind.Constructor && assignedPlace is not null &&
                 ReferenceEquals(assignedPlace.Root, _function) &&
-                TypeFacts.ContainsReferenceStorage(target.Type))
+                ContainsValueReferenceStorage(target.Type))
                 UpdateConstructorReferenceOrigins(assignedPlace, expression, target.Type,
                     syntax.OperatorToken.Location);
         }
@@ -4349,6 +4880,17 @@ internal sealed partial class FunctionBodyBinder
                 DiagnosticIds.StackArrayEscape);
         }
 
+        if (isSimpleAssignment &&
+            ContainsValueReferenceStorage(target.Type) &&
+            assignedPlace?.RootVariable is not LocalVariableSymbol && assignedPlace?.Root is not FunctionSymbol)
+        {
+            ImmutableArray<ValueReference> escaping = GetValueReferenceMetadata(expression, target.Type);
+            if (escaping.Any(reference => reference.Source.Kind != ReferenceSourceKind.Static))
+                _diagnostics.Report(GetLocation(syntax.Expression),
+                    "cannot store a value containing a borrowed reference in storage whose lifetime is not bounded by the referenced value",
+                    DiagnosticIds.AggregateReferenceEscape);
+        }
+
         if (isSimpleAssignment && assignedPlace is not null)
         {
             if (TryGetHandleBorrowRootKind(target.Type, out _) &&
@@ -4388,11 +4930,11 @@ internal sealed partial class FunctionBodyBinder
                 movedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved &&
                 replacementCanThrow)
                 RecordExceptionalFlow();
-            if (assignedPlace.Fields.IsEmpty && assignedPlace.RootVariable is LocalVariableSymbol assignedLocal &&
-                TypeFacts.ContainsReferenceStorage(target.Type))
+            if (assignedPlace.RootVariable is LocalVariableSymbol assignedLocal &&
+                ContainsValueReferenceStorage(target.Type))
             {
                 ImmutableArray<ValueReference> metadata = GetValueReferenceMetadata(expression, target.Type);
-                SetValueReferenceMetadata(assignedPlace, assignedLocal, metadata,
+                SetAssignedValueReferenceMetadata(assignedPlace, assignedLocal, metadata,
                     syntax.OperatorToken.Location, HasDeferredReferenceUse(target.Type)
                         ? int.MaxValue
                         : FindLastValueUse(assignedLocal, syntax.OperatorToken.Location.Span.End));
@@ -4747,6 +5289,17 @@ internal sealed partial class FunctionBodyBinder
     {
         _movedPlaces.RemoveWhere(moved => IsPlacePrefixOf(place, moved));
         _definitelyMovedPlaces.RemoveWhere(moved => IsPlacePrefixOf(place, moved));
+        foreach (ArgumentFlowTransaction transaction in _argumentFlowTransactions)
+            transaction.RecordSubsequentPlaceMutation(
+                place, moveLocation: null, deferredDependent: false);
+    }
+
+    private bool IsOnlyDeferredMoveConflict(MovePlace place)
+    {
+        MovePlace[] conflicts = _movedPlaces.Where(candidate => PlacesOverlap(candidate, place)).ToArray();
+        return conflicts.Length != 0 && conflicts.All(conflict =>
+            _argumentFlowTransactions.Any(transaction =>
+                transaction.HasDeferredMoveContribution(conflict)));
     }
 
     private void ValidateLoopMoves(
@@ -4846,7 +5399,13 @@ internal sealed partial class FunctionBodyBinder
             }
         }
 
-        BoundExpression receiver = BindFieldReceiver(syntax.Receiver);
+        return BindMemberAccessExpression(syntax, BindFieldReceiver(syntax.Receiver));
+    }
+
+    private BoundExpression BindMemberAccessExpression(
+        MemberAccessExpressionSyntax syntax,
+        BoundExpression receiver)
+    {
         ArrayTypeSymbol? receiverArray = receiver.Type as ArrayTypeSymbol ??
             (receiver.Type as OwnershipTypeSymbol)?.ElementType as ArrayTypeSymbol;
         if (receiver.Type is WeakTypeSymbol)
@@ -5039,7 +5598,8 @@ internal sealed partial class FunctionBodyBinder
                         interfaceType);
                 }
 
-                BoundExpression interfaceValue = BindExpression(syntax.Expression);
+                BoundExpression interfaceValue = BindExpressionWithExpectedType(
+                    syntax.Expression, interfaceSetter.Parameters[0].Type);
                 ImmutableArray<BoundExpression> interfaceArguments = ValidateFunctionArguments(
                     interfaceSetter,
                     [interfaceValue],
@@ -5144,7 +5704,8 @@ internal sealed partial class FunctionBodyBinder
                 interfaceType: null);
         }
 
-        BoundExpression value = BindExpression(syntax.Expression);
+        BoundExpression value = BindExpressionWithExpectedType(
+            syntax.Expression, setter.Parameters[0].Type);
         ImmutableArray<BoundExpression> arguments = ValidateFunctionArguments(
             setter,
             [value],
@@ -5283,7 +5844,8 @@ internal sealed partial class FunctionBodyBinder
         }
 
         BoundExpression receiver = BindExpression(syntax.Receiver);
-        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments,
+            (argument, _) => BindDeferredContextualArgument(argument));
 
         if (GetGenericReceiver(receiver.Type, pointerAccess: false) is GenericParameterSymbol genericParameter)
             return BindGenericIndexerGet(syntax, receiver, genericParameter, arguments);
@@ -5307,11 +5869,14 @@ internal sealed partial class FunctionBodyBinder
                 RecordCandidates(syntax, null, [indexer], CandidateReason.Inaccessible);
                 _diagnostics.Report(syntax.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'",
                     DiagnosticIds.InaccessibleSymbol);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return new BoundErrorExpression();
             }
             if (indexer.Getter is not FunctionSymbol getter)
             {
                 _diagnostics.Report(syntax.OpenBracketToken.Location, "indexer does not declare a getter",
                     DiagnosticIds.MissingAccessor);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             arguments = ValidateFunctionArguments(getter, arguments, syntax.Arguments, syntax.OpenBracketToken.Location);
@@ -5345,6 +5910,18 @@ internal sealed partial class FunctionBodyBinder
         {
             _diagnostics.Report(syntax.OpenBracketToken.Location, $"array or pointer indexing requires {requiredRank} index value(s)",
                 DiagnosticIds.IndexArityMismatch);
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
+
+        if (arguments.Any(argument => argument is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression))
+        {
+            foreach (int argumentIndex in Enumerable.Range(0, arguments.Length).Where(index =>
+                         arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression))
+                _diagnostics.Report(GetLocation(syntax.Arguments[argumentIndex]),
+                    "array or pointer index requires an integer expression; callable expressions require an indexer parameter context",
+                    DiagnosticIds.IndexMustBeInteger);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         BoundExpression index = arguments[0];
@@ -5373,6 +5950,7 @@ internal sealed partial class FunctionBodyBinder
                     DiagnosticIds.TypeNotIndexable);
             }
 
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
@@ -5380,6 +5958,7 @@ internal sealed partial class FunctionBodyBinder
         {
             _diagnostics.Report(syntax.OpenBracketToken.Location, "cannot index a void pointer",
                 DiagnosticIds.VoidPointerIndex);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         return new BoundIndexExpression(receiver, index, elementType) { Indices = arguments };
@@ -5395,7 +5974,8 @@ internal sealed partial class FunctionBodyBinder
             return BindGenericIndexerAssignment(syntax, target, receiver, genericParameter, isSimpleAssignment);
         if (receiver.Type is not DeclaredTypeSymbol)
             return null;
-        ImmutableArray<BoundExpression> indices = target.Arguments.Select(BindExpression).ToImmutableArray();
+        ImmutableArray<BoundExpression> indices = BindTransferredArguments(target.Arguments,
+            (argument, _) => BindDeferredContextualArgument(argument));
         if (receiver.Type is DeclaredTypeSymbol structType && structType is not InterfaceTypeSymbol)
         {
             IndexerSymbol? indexer = ResolveIndexer(
@@ -5414,11 +5994,14 @@ internal sealed partial class FunctionBodyBinder
                 RecordCandidates(target, null, [indexer], CandidateReason.Inaccessible);
                 _diagnostics.Report(target.OpenBracketToken.Location, $"indexer is private in struct '{indexer.ContainingType.Name}'",
                     DiagnosticIds.InaccessibleSymbol);
+                RollbackUnmaterializedContextualArguments(indices);
+                return new BoundErrorExpression();
             }
             if (!IsAddressable(receiver) || !IsWritable(receiver))
             {
                 _diagnostics.Report(target.OpenBracketToken.Location, "indexer cannot be assigned through a readonly receiver",
                     DiagnosticIds.WriteThroughReadonlyReceiver);
+                RollbackUnmaterializedContextualArguments(indices);
                 return new BoundErrorExpression();
             }
             FunctionSymbol setter = indexer.Setter!;
@@ -5435,7 +6018,7 @@ internal sealed partial class FunctionBodyBinder
                     interfaceType: null);
             }
 
-            BoundExpression value = BindExpression(syntax.Expression);
+            BoundExpression value = BindExpressionWithExpectedType(syntax.Expression, setter.Parameters[^1].Type);
             ImmutableArray<ExpressionSyntax> argumentSyntax = [.. target.Arguments, syntax.Expression];
             ImmutableArray<BoundExpression> arguments = ValidateFunctionArguments(
                 setter,
@@ -5461,6 +6044,7 @@ internal sealed partial class FunctionBodyBinder
         {
             _diagnostics.Report(target.OpenBracketToken.Location, "indexer cannot be assigned through a readonly receiver",
                 DiagnosticIds.WriteThroughReadonlyReceiver);
+            RollbackUnmaterializedContextualArguments(indices);
             return new BoundErrorExpression();
         }
         FunctionSymbol interfaceSetter = interfaceIndexer.Setter!;
@@ -5477,7 +6061,8 @@ internal sealed partial class FunctionBodyBinder
                 interfaceType);
         }
 
-        BoundExpression interfaceValue = BindExpression(syntax.Expression);
+        BoundExpression interfaceValue = BindExpressionWithExpectedType(
+            syntax.Expression, interfaceSetter.Parameters[^1].Type);
         ImmutableArray<ExpressionSyntax> interfaceArgumentSyntax = [.. target.Arguments, syntax.Expression];
         ImmutableArray<BoundExpression> interfaceArguments = ValidateFunctionArguments(
             interfaceSetter,
@@ -5504,6 +6089,23 @@ internal sealed partial class FunctionBodyBinder
     {
         if (isPointerAccess)
             ValidateBorrowedPointeeMutation(receiver, GetLocation(syntax.Target));
+        bool hasNoncopyableArgument = false;
+        for (int index = 0; index < Math.Min(arguments.Length, getter.Parameters.Length); index++)
+        {
+            TypeSymbol parameterType = getter.Parameters[index].Type;
+            if (parameterType is ReferenceTypeSymbol || TypeFacts.GetCopyabilityFailure(parameterType) is null)
+                continue;
+            hasNoncopyableArgument = true;
+            _diagnostics.Report(GetLocation(argumentSyntax[index]),
+                $"compound indexer assignment cannot reuse noncopyable argument type '{parameterType.ToDisplayString()}' for both getter and setter",
+                DiagnosticIds.ValueNotCopyable);
+        }
+        if (hasNoncopyableArgument)
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            _ = BindExpression(syntax.Expression);
+            return new BoundErrorExpression();
+        }
         arguments = ValidateFunctionArguments(
             getter,
             arguments,
@@ -5607,14 +6209,21 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (structType.IsAbstract)
-        {
+        bool isAbstract = structType.IsAbstract;
+        if (isAbstract)
             _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
                 DiagnosticIds.AbstractInstantiation);
-        }
 
-        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments,
+            (argument, _) => BindDeferredContextualArgument(argument));
+        if (isAbstract)
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
         arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.Type.NameToken.Location);
+        if (arguments.Any(argument => argument is BoundErrorExpression))
+            return new BoundErrorExpression();
         return new BoundStructConstructionExpression(structType, arguments);
     }
 
@@ -5675,15 +6284,33 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundExpression BindCallExpression(CallExpressionSyntax syntax)
     {
+        if (syntax.Target is NameExpressionSyntax capturedName &&
+            ReportUnsupportedLambdaCapture(capturedName.IdentifierToken)) return new BoundErrorExpression();
         bool isLifetimeOperation = syntax.TypeArguments is null &&
             syntax.Target is NameExpressionSyntax { IdentifierToken.Text: "destruct" };
+        BoundExpression? expressionTarget = syntax.TypeArguments is null &&
+            syntax.Target is not (NameExpressionSyntax or MemberAccessExpressionSyntax)
+                ? BindExpression(syntax.Target) : null;
         ImmutableArray<BoundExpression> arguments = BindTransferredArguments(
             syntax.Arguments,
-            (argument, index) => isLifetimeOperation && index == 0
-                ? BindLifetimeInvalidationOperand(argument)
-                : GetCallArgumentExpectedType(syntax, index) is { } expectedType
-                    ? BindExpressionWithExpectedType(argument, expectedType)
-                    : BindExpression(argument));
+            (argument, index) =>
+            {
+                if (isLifetimeOperation && index == 0)
+                    return BindLifetimeInvalidationOperand(argument);
+                if (TryGetLambdaExpression(argument, out LambdaExpressionSyntax lambda))
+                    return BindDeferredLambdaExpression(lambda, argument);
+                if (TryGetNamedFunctionExpression(argument, out ExpressionSyntax function))
+                    return new BoundUnboundFunctionExpression(function);
+                TypeSymbol? expectedType = (expressionTarget?.Type switch
+                {
+                    FunctionPointerTypeSymbol expressionPointer when index < expressionPointer.ParameterTypes.Length => expressionPointer.ParameterTypes[index],
+                    FunctionValueTypeSymbol expressionValue when index < expressionValue.ParameterTypes.Length => expressionValue.ParameterTypes[index],
+                    _ => null,
+                }) ?? GetCallArgumentExpectedType(syntax, index);
+                if (expectedType is not null)
+                    return BindExpressionWithExpectedType(argument, expectedType);
+                return BindExpression(argument);
+            });
         if (syntax.TypeArguments is { } typeArguments)
             return BindExplicitGenericCall(syntax, typeArguments, arguments);
         bool incomplete = syntax.CloseParenthesisToken.IsMissing;
@@ -5699,31 +6326,59 @@ internal sealed partial class FunctionBodyBinder
                 syntax.Arguments,
                 syntax);
             if (qualifiedCall is not null) return qualifiedCall;
-            if (IsFunctionPointerMemberTarget(memberTarget))
+            if (IsStaticFunctionMemberTarget(memberTarget))
             {
                 BoundExpression member = BindExpression(memberTarget);
-                FunctionPointerTypeSymbol memberPointer = (FunctionPointerTypeSymbol)member.Type;
-                return BindIndirectCall(member, memberPointer, arguments, syntax.Arguments,
-                    memberTarget.MemberToken.Location, incomplete, completedArgumentCount);
+                if (member.Type is FunctionPointerTypeSymbol memberPointer)
+                    return BindIndirectCall(member, memberPointer, arguments, syntax.Arguments,
+                        memberTarget.MemberToken.Location, incomplete, completedArgumentCount);
+                return BindFunctionValueCall(member, (FunctionValueTypeSymbol)member.Type, arguments,
+                    syntax.Arguments, memberTarget.MemberToken.Location, incomplete, completedArgumentCount);
             }
-            return BindMethodCallExpression(memberTarget, arguments, syntax.Arguments, syntax);
+            BoundExpression receiver = BindFieldReceiver(memberTarget.Receiver);
+            if (IsFunctionMemberTarget(receiver, memberTarget))
+            {
+                BoundExpression member = BindMemberAccessExpression(memberTarget, receiver);
+                if (member.Type is FunctionPointerTypeSymbol memberPointer)
+                    return BindIndirectCall(member, memberPointer, arguments, syntax.Arguments,
+                        memberTarget.MemberToken.Location, incomplete, completedArgumentCount);
+                return BindFunctionValueCall(member, (FunctionValueTypeSymbol)member.Type, arguments,
+                    syntax.Arguments, memberTarget.MemberToken.Location, incomplete, completedArgumentCount);
+            }
+            return BindMethodCallExpression(memberTarget, arguments, syntax.Arguments, syntax, receiver);
         }
 
         if (syntax.Target is NameExpressionSyntax variableName &&
-            (_scope.Lookup(variableName.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol ||
-             _function.ContainingType?.FindInstanceField(variableName.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol))
+            (_scope.Lookup(variableName.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol or FunctionValueTypeSymbol ||
+             _function.ContainingType?.FindInstanceField(variableName.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol or FunctionValueTypeSymbol))
         {
             BoundExpression target = BindNameExpression(variableName);
-            return BindIndirectCall(target, (FunctionPointerTypeSymbol)target.Type, arguments, syntax.Arguments,
-                variableName.IdentifierToken.Location, incomplete, completedArgumentCount);
+            return target.Type is FunctionPointerTypeSymbol pointer
+                ? BindIndirectCall(target, pointer, arguments, syntax.Arguments,
+                    variableName.IdentifierToken.Location, incomplete, completedArgumentCount)
+                : BindFunctionValueCall(target, (FunctionValueTypeSymbol)target.Type, arguments,
+                    syntax.Arguments, variableName.IdentifierToken.Location, incomplete, completedArgumentCount);
         }
 
         if (syntax.Target is not NameExpressionSyntax name)
         {
+            BoundExpression target = expressionTarget!;
+            if (target.Type is FunctionPointerTypeSymbol pointer)
+                return BindIndirectCall(target, pointer, arguments, syntax.Arguments,
+                    GetLocation(syntax.Target), incomplete, completedArgumentCount);
+            if (target.Type is FunctionValueTypeSymbol functionValueType)
+                return BindFunctionValueCall(target, functionValueType, arguments, syntax.Arguments,
+                    GetLocation(syntax.Target), incomplete, completedArgumentCount);
+            if (target is BoundErrorExpression)
+            {
+                RollbackUnmaterializedContextualArguments(arguments);
+                return target;
+            }
             RecordCandidates(syntax, null, [], CandidateReason.NotInvocable);
             RecordCandidates(syntax.Target, null, [], CandidateReason.NotInvocable);
             _diagnostics.Report(GetLocation(syntax.Target), "call target must be a function, method, or struct name",
                 DiagnosticIds.InvalidCallTarget);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
@@ -5743,12 +6398,14 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(name.IdentifierToken.Location,
                     $"static struct '{structType.Name}' cannot be instantiated",
                     DiagnosticIds.AbstractInstantiation);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             if (structType.IsAbstract)
             {
                 _diagnostics.Report(name.IdentifierToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
                     DiagnosticIds.AbstractInstantiation);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             if (structType.Constructors.IsEmpty && completedArgumentCount == 0)
@@ -5778,6 +6435,8 @@ internal sealed partial class FunctionBodyBinder
                 RecordCandidates(syntax.Target, null, structType.Constructors, CandidateReason.Inaccessible);
                 _diagnostics.Report(name.IdentifierToken.Location, $"constructor '{structType.Name}' is private",
                     DiagnosticIds.InaccessibleSymbol);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return new BoundErrorExpression();
             }
 
             arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, name.IdentifierToken.Location,
@@ -5801,12 +6460,14 @@ internal sealed partial class FunctionBodyBinder
                     _diagnostics.Report(name.IdentifierToken.Location,
                         $"readonly method '{_function.Name}' cannot call mutable method '{method.Name}' through 'this'",
                         DiagnosticIds.MutableMethodOnReadonlyReceiver);
+                    RollbackUnmaterializedContextualArguments(arguments);
                     return new BoundErrorExpression();
                 }
                 if (_bindingBaseConstructorArguments)
                 {
                     _diagnostics.Report(name.IdentifierToken.Location, "the derived object cannot be used in base constructor arguments",
                         DiagnosticIds.DerivedInstanceInBaseConstructorArguments);
+                    RollbackUnmaterializedContextualArguments(arguments);
                     return new BoundErrorExpression();
                 }
                 if (!IsAccessible(method))
@@ -5814,18 +6475,21 @@ internal sealed partial class FunctionBodyBinder
                     RecordCandidates(syntax.Target, null, methodCandidates, CandidateReason.Inaccessible);
                     _diagnostics.Report(name.IdentifierToken.Location, $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
                         DiagnosticIds.InaccessibleSymbol);
+                    RollbackUnmaterializedContextualArguments(arguments);
                     return new BoundErrorExpression();
                 }
                 if (_function.IsStatic)
                 {
                     _diagnostics.Report(name.IdentifierToken.Location, $"static method '{_function.Name}' cannot call instance method '{method.Name}' without an explicit instance",
                         DiagnosticIds.StaticContextInstanceMethodCall);
+                    RollbackUnmaterializedContextualArguments(arguments);
                     return new BoundErrorExpression();
                 }
                 if (method.IsStatic)
                 {
                     _diagnostics.Report(name.IdentifierToken.Location, $"static method '{method.Name}' must be accessed through type '{containingType.Name}'",
                         DiagnosticIds.StaticMethodRequiresTypeReceiver);
+                    RollbackUnmaterializedContextualArguments(arguments);
                     return new BoundErrorExpression();
                 }
                 arguments = ValidateFunctionArguments(method, arguments, syntax.Arguments, name.IdentifierToken.Location,
@@ -5854,7 +6518,7 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(name.IdentifierToken.Location, $"unknown function '{name.IdentifierToken.Text}'",
                     DiagnosticIds.UnknownFunction);
             }
-
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
@@ -5864,30 +6528,44 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(name.IdentifierToken.Location,
                 $"function '{function.Name}' is private in namespace '{function.ContainingNamespace.FullName}'",
                 DiagnosticIds.InaccessibleSymbol);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
         if (function.IsGenericDefinition)
         {
-            if (TryInferGenericTypeArguments(function, arguments, out ImmutableArray<TypeSymbol> inferredArguments) &&
+            bool inferenceSucceeded = TryInferGenericTypeArguments(function, arguments,
+                out ImmutableArray<TypeSymbol> inferredArguments);
+            if (inferenceSucceeded &&
                 inferredArguments.Any(ContainsGenericParameter))
                 return BindOpenGenericCall(syntax, function, inferredArguments, arguments,
                     name.IdentifierToken.Location);
-            bool inferenceSucceeded = false;
-            FunctionSymbol? specialized = _genericSpecializer is null ? null :
-                _genericSpecializer.InferAndCreate(function, arguments,
-                    name.IdentifierToken.Location, out inferenceSucceeded);
+            GenericFunctionSpecializer? callSpecializer =
+                GetTransactionalGenericSpecializer(arguments, out _);
+            FunctionSymbol? specialized = callSpecializer is null || !inferenceSucceeded
+                ? null
+                : callSpecializer.GetOrCreate(function, inferredArguments,
+                    name.IdentifierToken.Location);
             if (specialized is null)
             {
                 if (!inferenceSucceeded)
                     _diagnostics.Report(name.IdentifierToken.Location,
                         $"type arguments for generic function '{function.Name}' could not be inferred",
                         DiagnosticIds.GenericSpecializationNotImplemented);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             RecordCandidates(syntax.Target, specialized, [function], CandidateReason.None);
+            RecordTransactionalGeneratedSymbolRollback(arguments, syntax.Target);
+            ImmutableArray<BoundExpression> deferredArguments = arguments;
             arguments = ValidateFunctionArguments(specialized, arguments, syntax.Arguments,
                 name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
+            if (HasRejectedDeferredContextualArguments(deferredArguments) ||
+                HasFailedDeferredMaterialization(deferredArguments, arguments))
+            {
+                _semanticInfo.RollbackSyntax(syntax.Target);
+                return new BoundErrorExpression();
+            }
             return new BoundCallExpression(specialized, arguments);
         }
 
@@ -5915,7 +6593,10 @@ internal sealed partial class FunctionBodyBinder
                 bound.Add(argument);
                 transaction.AcceptArgument(argument);
             }
-            return bound.ToImmutable();
+            ImmutableArray<BoundExpression> result = bound.ToImmutable();
+            if (result.Any(argument => argument is BoundUnboundLambdaExpression))
+                transaction.EnsureTypeFactorySnapshot(_fileScope.TypeFactory);
+            return result;
         }
         finally
         {
@@ -5930,9 +6611,9 @@ internal sealed partial class FunctionBodyBinder
         if (syntax.Target is NameExpressionSyntax name)
         {
             if (_scope.Lookup(name.IdentifierToken.Text)?.Type is FunctionPointerTypeSymbol indirect)
-                return argumentIndex < indirect.ParameterTypes.Length
-                    ? indirect.ParameterTypes[argumentIndex]
-                    : null;
+                return argumentIndex < indirect.ParameterTypes.Length ? indirect.ParameterTypes[argumentIndex] : null;
+            if (_scope.Lookup(name.IdentifierToken.Text)?.Type is FunctionValueTypeSymbol functionValue)
+                return argumentIndex < functionValue.ParameterTypes.Length ? functionValue.ParameterTypes[argumentIndex] : null;
 
             var lookupDiagnostics = new DiagnosticBag();
             TypeSymbol? targetType = _fileScope.ResolveType(name.IdentifierToken.Text,
@@ -5967,9 +6648,53 @@ internal sealed partial class FunctionBodyBinder
         FunctionSymbol[] viable = candidates.Where(candidate =>
             candidate.Parameters.Length == suppliedCount && argumentIndex < candidate.Parameters.Length).ToArray();
         if (viable.Length == 0) return null;
-        TypeSymbol expected = viable[0].Parameters[argumentIndex].Type;
+        ImmutableArray<TypeSymbol> explicitArguments = syntax.TypeArguments is { } typeArguments
+            ? typeArguments.Arguments.Select(argument =>
+                TypeResolver.Resolve(argument, _fileScope, new DiagnosticBag())).ToImmutableArray()
+            : [];
+        Dictionary<FunctionSymbol, IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol>> substitutionsByCandidate = [];
+        foreach (FunctionSymbol candidate in viable)
+        {
+            if (!explicitArguments.IsEmpty && candidate.TypeParameters.Length == explicitArguments.Length)
+            {
+                substitutionsByCandidate[candidate] = candidate.TypeParameters.Zip(explicitArguments)
+                    .ToDictionary(pair => pair.First, pair => pair.Second);
+                continue;
+            }
+            if (candidate.TypeParameters.IsEmpty) continue;
+            var inferred = new Dictionary<GenericParameterSymbol, TypeSymbol>();
+            bool compatible = true;
+            for (int index = 0; index < syntax.Arguments.Length; index++)
+            {
+                if (!TryGetLambdaExpression(syntax.Arguments[index], out LambdaExpressionSyntax lambda)) continue;
+                if (TryInferLambdaGenericTypes(candidate.Parameters[index].Type, lambda, inferred)) continue;
+                compatible = false;
+                break;
+            }
+            if (compatible && candidate.TypeParameters.All(inferred.ContainsKey))
+                substitutionsByCandidate[candidate] = inferred;
+        }
+
+        TypeSymbol Expected(FunctionSymbol candidate, int index)
+        {
+            TypeSymbol parameter = candidate.Parameters[index].Type;
+            return substitutionsByCandidate.TryGetValue(candidate, out var substitutions)
+                ? SubstituteGenericType(parameter, substitutions)
+                : parameter;
+        }
+
+        viable = viable.Where(candidate => syntax.Arguments.Select((argument, index) => (argument, index))
+            .All(pair =>
+            {
+                if (!TryGetLambdaExpression(pair.argument, out LambdaExpressionSyntax lambda)) return true;
+                TypeSymbol contextual = Expected(candidate, pair.index);
+                return ContainsGenericParameter(contextual) ||
+                       GetLambdaArgumentConversionCost(contextual, lambda) is not null;
+            })).ToArray();
+        if (viable.Length == 0) return null;
+        TypeSymbol expected = Expected(viable[0], argumentIndex);
         return viable.Skip(1).All(candidate =>
-            TypeIdentity.AreSame(candidate.Parameters[argumentIndex].Type, expected))
+            TypeIdentity.AreSame(Expected(candidate, argumentIndex), expected))
                 ? expected
                 : null;
     }
@@ -5999,40 +6724,86 @@ internal sealed partial class FunctionBodyBinder
             _ => null,
         } : type as DeclaredTypeSymbol;
 
-    private bool IsFunctionPointerMemberTarget(MemberAccessExpressionSyntax member)
+    private bool IsStaticFunctionMemberTarget(MemberAccessExpressionSyntax member) =>
+        TryResolveStaticTypeReceiver(member, out TypeSymbol? type) &&
+        type is DeclaredTypeSymbol declaredType &&
+        declaredType.FindStaticField(member.MemberToken.Text)?.Type
+            is FunctionPointerTypeSymbol or FunctionValueTypeSymbol;
+
+    private bool IsFunctionMemberTarget(
+        BoundExpression receiver,
+        MemberAccessExpressionSyntax member)
     {
-        if (TryResolveStaticTypeReceiver(member, out TypeSymbol? type) &&
-            type is DeclaredTypeSymbol declaredType &&
-            declaredType.FindStaticField(member.MemberToken.Text)?.Type is FunctionPointerTypeSymbol)
-            return true;
-
-        return TryGetExpressionType(member.Receiver, out TypeSymbol? receiverType) &&
-            GetMemberContainer(receiverType!, member.OperatorToken.Kind)?.FindInstanceField(member.MemberToken.Text)?.Type
-                is FunctionPointerTypeSymbol;
-
-        bool TryGetExpressionType(ExpressionSyntax syntax, out TypeSymbol? type)
+        bool pointerAccess = member.OperatorToken.Kind == SyntaxKind.ArrowToken || receiver is BoundThisExpression;
+        if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
         {
-            type = syntax switch
-            {
-                NameExpressionSyntax name => _scope.Lookup(name.IdentifierToken.Text)?.Type ??
-                    _function.ContainingType?.FindInstanceField(name.IdentifierToken.Text)?.Type,
-                ThisExpressionSyntax => _function.ContainingType,
-                MemberAccessExpressionSyntax nested when TryGetExpressionType(nested.Receiver, out TypeSymbol? nestedReceiver) =>
-                    GetMemberContainer(nestedReceiver!, nested.OperatorToken.Kind)?.FindInstanceField(nested.MemberToken.Text)?.Type,
-                _ => null,
-            };
-            return type is not null;
+            return GenericConstraintMemberLookup.GetFields(genericParameter, member.MemberToken.Text)
+                    .Any(field => !field.IsStatic &&
+                        field.Type is FunctionPointerTypeSymbol or FunctionValueTypeSymbol) ||
+                GenericConstraintMemberLookup.GetProperties(genericParameter, member.MemberToken.Text,
+                        _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
+                    .Any(property => !property.IsStatic && property.HasGetter &&
+                        property.Type is FunctionPointerTypeSymbol or FunctionValueTypeSymbol);
         }
 
-        static DeclaredTypeSymbol? GetMemberContainer(TypeSymbol type, SyntaxKind operatorKind) =>
-            operatorKind == SyntaxKind.ArrowToken ? type switch
-            {
-                PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
-                UniqueTypeSymbol unique => unique.ElementType as DeclaredTypeSymbol,
-                SharedTypeSymbol shared => shared.ElementType as DeclaredTypeSymbol,
-                _ => null,
-            } : type as DeclaredTypeSymbol;
+        DeclaredTypeSymbol? container = pointerAccess ? receiver.Type switch
+        {
+            PointerTypeSymbol pointer => pointer.ElementType as DeclaredTypeSymbol,
+            UniqueTypeSymbol unique => unique.ElementType as DeclaredTypeSymbol,
+            SharedTypeSymbol shared => shared.ElementType as DeclaredTypeSymbol,
+            _ => receiver.Type as DeclaredTypeSymbol,
+        } : receiver.Type as DeclaredTypeSymbol;
+        TypeSymbol? memberType = container switch
+        {
+            InterfaceTypeSymbol interfaceType => interfaceType.FindProperty(member.MemberToken.Text)?.Type,
+            null => null,
+            _ => container.FindInstanceField(member.MemberToken.Text)?.Type ??
+                GetInstancePropertyType(container, member.MemberToken.Text),
+        };
+        return memberType is FunctionPointerTypeSymbol or FunctionValueTypeSymbol;
+
+        static TypeSymbol? GetInstancePropertyType(DeclaredTypeSymbol type, string name) =>
+            type.FindMember<PropertySymbol>(name) is { IsStatic: false, Getter: not null } property
+                ? property.Type
+                : null;
     }
+
+    private GenericFunctionSpecializer? GetTransactionalGenericSpecializer(
+        ImmutableArray<BoundExpression> arguments,
+        out FileSymbolScope scope)
+    {
+        scope = _fileScope;
+        ArgumentFlowTransaction? transaction = GetDeferredArgumentTransactions(arguments, reverse: false)
+            .FirstOrDefault();
+        if (transaction is null) return _genericSpecializer;
+        transaction.EnsureTypeFactorySnapshot(_fileScope.TypeFactory);
+        (GenericStructSpecializer? structSpecializer,
+            GenericFunctionSpecializer? functionSpecializer) = transaction.GetTransactionalSpecializers(
+                _fileScope.GenericStructSpecializer, _genericSpecializer, _diagnostics);
+        if (structSpecializer is not null)
+            scope = _fileScope.WithGenericStructSpecializer(structSpecializer);
+        return functionSpecializer;
+    }
+
+    private void RecordTransactionalGeneratedSymbolRollback(
+        ImmutableArray<BoundExpression> arguments,
+        SyntaxNode syntax)
+    {
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.RecordGeneratedArtifactRollback(() => _semanticInfo.RollbackSyntax(syntax));
+    }
+
+    private bool HasRejectedDeferredContextualArguments(ImmutableArray<BoundExpression> arguments) =>
+        GetDeferredArgumentTransactions(arguments, reverse: false)
+            .Any(transaction => transaction.HasRolledBackLambdaCaptures);
+
+    private static bool HasFailedDeferredMaterialization(
+        ImmutableArray<BoundExpression> original,
+        ImmutableArray<BoundExpression> converted) =>
+        original.Zip(converted).Any(pair =>
+            pair.First is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression &&
+            pair.Second is BoundErrorExpression);
 
     private BoundExpression BindIndirectCall(
         BoundExpression target,
@@ -6043,51 +6814,269 @@ internal sealed partial class FunctionBodyBinder
         bool incomplete,
         int completedArgumentCount)
     {
+        PreserveDeferredDependentMoves(arguments);
         if (_function.IsReadonly)
             _diagnostics.Report(location,
                 "readonly code cannot invoke a raw function pointer because it has no readonly effect contract",
                 DiagnosticIds.NonReadonlyCallFromReadonlyFunction);
         int suppliedCount = incomplete ? completedArgumentCount : arguments.Length;
-        if ((!incomplete && suppliedCount != functionPointer.ParameterTypes.Length) ||
-            incomplete && suppliedCount > functionPointer.ParameterTypes.Length)
+        bool wrongArity = (!incomplete && suppliedCount != functionPointer.ParameterTypes.Length) ||
+            incomplete && suppliedCount > functionPointer.ParameterTypes.Length;
+        if (wrongArity)
+        {
             _diagnostics.Report(location,
                 $"function pointer expects {functionPointer.ParameterTypes.Length} argument(s), but {suppliedCount} were provided",
                 DiagnosticIds.WrongArity);
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
+
+        for (int index = 0; index < suppliedCount; index++)
+            if (arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression &&
+                GetArgumentConversionCost(functionPointer.ParameterTypes[index], arguments[index]) is null)
+            {
+                ReportDeferredContextualMismatch(arguments[index], functionPointer.ParameterTypes[index]);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return new BoundErrorExpression();
+            }
 
         var converted = arguments.ToBuilder();
         int count = Math.Min(suppliedCount, functionPointer.ParameterTypes.Length);
-        var callBorrows = new List<(BorrowPlace Place, bool IsReadonly)>();
+        bool valid = !incomplete && suppliedCount == functionPointer.ParameterTypes.Length;
+        var callBorrows = new List<CallBorrow>();
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = functionPointer.ParameterTypes[index];
-            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType,
+            BoundExpression argument = MaterializeContextualArgument(
+                arguments[index], argumentSyntax[index], parameterType);
+            argument = ContextualizeConversion(argument, parameterType,
                 GetLocation(argumentSyntax[index]));
             converted[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+            {
+                valid = false;
                 _diagnostics.Report(GetLocation(argumentSyntax[index]),
                     "stack array cannot be passed to another function",
                     DiagnosticIds.StackArrayPassedAsArgument);
-            if (!TypeFacts.CanAssign(parameterType, argument.Type))
-                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
-            if (parameterType is ReferenceTypeSymbol parameterReference &&
-                TryGetBorrowPlace(argument, out BorrowPlace argumentPlace, out LocalVariableSymbol? argumentAlias))
-            {
-                TextLocation argumentLocation = GetLocation(argumentSyntax[index]);
-                ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly, argumentAlias, argumentLocation);
-                if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, argumentPlace) &&
-                    (!prior.IsReadonly || !parameterReference.IsReadonly)))
-                    ReportBorrowDiagnostic(argumentLocation,
-                        $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments",
-                        DiagnosticIds.BorrowConflict);
-                callBorrows.Add((argumentPlace, parameterReference.IsReadonly));
-                if (!parameterReference.IsReadonly &&
-                    TryGetStorageType(parameterReference.ElementType, out _) &&
-                    TryGetMovePlace(argument, out MovePlace storageArgumentPlace))
-                    _storageStates[storageArgumentPlace] = StorageState.MaybeInitialized;
             }
+            if (!TypeFacts.CanAssign(parameterType, argument.Type))
+            {
+                valid = false;
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
+            }
+            ValidateCallArgumentBorrows(parameterType, argument, arguments[index],
+                GetLocation(argumentSyntax[index]), callBorrows);
         }
+        CompleteDeferredContextualArguments(arguments, valid);
         return new BoundIndirectCallExpression(target, functionPointer, converted.ToImmutable());
+    }
+
+    private BoundExpression BindDeferredContextualArgument(ExpressionSyntax syntax)
+    {
+        if (TryGetLambdaExpression(syntax, out LambdaExpressionSyntax lambda))
+            return BindDeferredLambdaExpression(lambda, syntax);
+        if (TryGetNamedFunctionExpression(syntax, out ExpressionSyntax function))
+            return new BoundUnboundFunctionExpression(function);
+        return BindExpression(syntax);
+    }
+
+    private void RollbackUnmaterializedContextualArguments(ImmutableArray<BoundExpression> arguments)
+    {
+        ArgumentFlowTransaction[] transactions = GetDeferredArgumentTransactions(arguments, reverse: true);
+        if (transactions.Length == 0) return;
+        ExpressionFlow flow = CaptureExpressionFlow();
+        foreach (ArgumentFlowTransaction transaction in transactions)
+            flow = transaction.RollbackUnmaterializedLambdaCaptures(
+                flow, _diagnostics, OnTransactionalDiagnosticRemoved);
+        RestoreExpressionFlow(flow);
+    }
+
+    private void CommitDeferredContextualArguments(ImmutableArray<BoundExpression> arguments)
+    {
+        foreach (ArgumentFlowTransaction transaction in GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.CommitDeferredLambdaCaptures();
+    }
+
+    private void PreserveDeferredDependentMoves(ImmutableArray<BoundExpression> arguments)
+    {
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.PreserveDeferredDependentMoves();
+    }
+
+    private void CompleteDeferredContextualArguments(
+        ImmutableArray<BoundExpression> arguments,
+        bool success)
+    {
+        if (success) CommitDeferredContextualArguments(arguments);
+        else RollbackUnmaterializedContextualArguments(arguments);
+    }
+
+    private LambdaExpressionSyntax? GetDeferredBorrowCapture(
+        BoundExpression originalArgument,
+        BorrowPlace place)
+    {
+        if (originalArgument is not BoundUnboundLambdaExpression lambda ||
+            !_deferredLambdaCaptureTransactions.TryGetValue(lambda.Syntax,
+                out ArgumentFlowTransaction? transaction) ||
+            !transaction.HasDeferredBorrowCapture(lambda.Syntax, place))
+            return null;
+        return lambda.Syntax;
+    }
+
+    private void ReportCallBorrowConflict(
+        CallBorrow prior,
+        CallBorrow current,
+        TextLocation location,
+        string message)
+    {
+        Diagnostic? diagnostic = ReportBorrowDiagnostic(
+            location, message, DiagnosticIds.BorrowConflict);
+        if (diagnostic is null) return;
+        foreach (LambdaExpressionSyntax? syntax in new[] { prior.DeferredLambda, current.DeferredLambda })
+        {
+            if (syntax is null) continue;
+            if (_deferredLambdaCaptureTransactions.TryGetValue(syntax,
+                    out ArgumentFlowTransaction? transaction))
+                transaction.RecordDeferredBorrowDiagnostic(syntax, diagnostic);
+        }
+    }
+
+    private void ValidateCallArgumentBorrows(
+        TypeSymbol parameterType,
+        BoundExpression argument,
+        BoundExpression originalArgument,
+        TextLocation argumentLocation,
+        List<CallBorrow> callBorrows)
+    {
+        if (parameterType is ReferenceTypeSymbol parameterReference &&
+            TryGetBorrowPlace(argument, out BorrowPlace argumentPlace,
+                out LocalVariableSymbol? argumentAlias))
+        {
+            ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly,
+                argumentAlias, argumentLocation);
+            var current = new CallBorrow(argumentPlace, parameterReference.IsReadonly,
+                GetDeferredBorrowCapture(originalArgument, argumentPlace));
+            CallBorrow? prior = callBorrows.FirstOrDefault(candidate =>
+                BorrowPlacesOverlap(candidate.Place, argumentPlace) &&
+                (!candidate.IsReadonly || !parameterReference.IsReadonly));
+            if (prior is not null)
+                ReportCallBorrowConflict(prior, current, argumentLocation,
+                    $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments");
+            callBorrows.Add(current);
+            if (!parameterReference.IsReadonly &&
+                TryGetStorageType(parameterReference.ElementType, out _) &&
+                TryGetMovePlace(argument, out MovePlace storageArgumentPlace))
+                _storageStates[storageArgumentPlace] = StorageState.MaybeInitialized;
+            return;
+        }
+
+        if (!ContainsValueReferenceStorage(parameterType)) return;
+        foreach (ValueReference reference in GetValueReferenceMetadata(argument, parameterType))
+        {
+            if (!TryGetReferenceSourcePlace([reference.Source], out MovePlace referencedPlace))
+                continue;
+            BorrowPlace aggregatePlace = DirectBorrowPlace(referencedPlace);
+            var current = new CallBorrow(aggregatePlace, reference.IsReadonly,
+                GetDeferredBorrowCapture(originalArgument, aggregatePlace));
+            CallBorrow? prior = callBorrows.FirstOrDefault(candidate =>
+                BorrowPlacesOverlap(candidate.Place, aggregatePlace) &&
+                (!candidate.IsReadonly || !reference.IsReadonly));
+            if (prior is not null)
+                ReportCallBorrowConflict(prior, current, argumentLocation,
+                    $"cannot pass value borrowing '{aggregatePlace.DisplayName}' alongside an overlapping reference argument");
+            callBorrows.Add(current);
+        }
+    }
+
+    private ArgumentFlowTransaction[] GetDeferredArgumentTransactions(
+        ImmutableArray<BoundExpression> arguments,
+        bool reverse)
+    {
+        IEnumerable<BoundExpression> ordered = reverse ? arguments.Reverse() : arguments;
+        return ordered
+            .OfType<BoundUnboundLambdaExpression>()
+            .Select(lambda => _deferredLambdaCaptureTransactions.GetValueOrDefault(lambda.Syntax))
+            .OfType<ArgumentFlowTransaction>()
+            .Distinct()
+            .ToArray();
+    }
+
+    private BoundExpression BindFunctionValueCall(
+        BoundExpression target,
+        FunctionValueTypeSymbol functionValue,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        TextLocation location,
+        bool incomplete,
+        int completedArgumentCount)
+    {
+        PreserveDeferredDependentMoves(arguments);
+        if (_function.IsReadonly)
+            _diagnostics.Report(location,
+                "readonly code cannot invoke a function value because its closure may mutate captured state",
+                DiagnosticIds.NonReadonlyCallFromReadonlyFunction);
+        int suppliedCount = incomplete ? completedArgumentCount : arguments.Length;
+        bool wrongArity = (!incomplete && suppliedCount != functionValue.ParameterTypes.Length) ||
+            incomplete && suppliedCount > functionValue.ParameterTypes.Length;
+        if (wrongArity)
+        {
+            _diagnostics.Report(location,
+                $"function value expects {functionValue.ParameterTypes.Length} argument(s), but {suppliedCount} were provided",
+                DiagnosticIds.WrongArity);
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
+
+        for (int index = 0; index < suppliedCount; index++)
+            if (arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression &&
+                GetArgumentConversionCost(functionValue.ParameterTypes[index], arguments[index]) is null)
+            {
+                ReportDeferredContextualMismatch(arguments[index], functionValue.ParameterTypes[index]);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return new BoundErrorExpression();
+            }
+
+        var converted = arguments.ToBuilder();
+        int count = Math.Min(suppliedCount, functionValue.ParameterTypes.Length);
+        bool valid = !incomplete && suppliedCount == functionValue.ParameterTypes.Length;
+        var callBorrows = new List<CallBorrow>();
+        for (int index = 0; index < count; index++)
+        {
+            TypeSymbol parameterType = functionValue.ParameterTypes[index];
+            BoundExpression argument = MaterializeContextualArgument(
+                arguments[index], argumentSyntax[index], parameterType);
+            argument = _function.IsGenericDefinition &&
+                parameterType is GenericParameterSymbol && TypeIdentity.AreSame(parameterType, arguments[index].Type)
+                    ? argument
+                    : ContextualizeConversion(argument, parameterType,
+                        GetLocation(argumentSyntax[index]));
+            converted[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
+            SetConvertedType(argumentSyntax[index], argument.Type);
+            if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+            {
+                valid = false;
+                _diagnostics.Report(GetLocation(argumentSyntax[index]),
+                    "stack array cannot be passed to another function",
+                    DiagnosticIds.StackArrayPassedAsArgument);
+            }
+            if (!TypeFacts.CanAssign(parameterType, argument.Type))
+            {
+                valid = false;
+                ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterType);
+            }
+            ValidateCallArgumentBorrows(parameterType, argument, arguments[index],
+                GetLocation(argumentSyntax[index]), callBorrows);
+        }
+        CompleteDeferredContextualArguments(arguments, valid);
+        return new BoundFunctionValueCallExpression(target, functionValue, converted.ToImmutable());
     }
 
     private BoundExpression BindLifetimeInvalidationOperand(ExpressionSyntax syntax)
@@ -6115,17 +7104,23 @@ internal sealed partial class FunctionBodyBinder
                  TryGetDottedName(member, out ImmutableArray<SyntaxToken> parts))
         {
             location = member.MemberToken.Location;
-            candidates = _fileScope.ResolveQualifiedFunctions(parts.Select(part => part.Text).ToArray()).ToArray();
+            if (!HasValueSymbol(parts[0].Text, parts[0].Location))
+                candidates = _fileScope.ResolveQualifiedFunctions(parts.Select(part => part.Text).ToArray()).ToArray();
         }
         if (candidates.Length == 0)
         {
             _diagnostics.Report(location, "generic call target must name a function",
                 DiagnosticIds.InvalidCallTarget);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
+        _ = GetTransactionalGenericSpecializer(arguments, out FileSymbolScope resolutionScope);
         ImmutableArray<TypeSymbol> resolvedArguments = typeArguments.Arguments
-            .Select(argument => TypeResolver.Resolve(argument, _fileScope, _diagnostics)).ToImmutableArray();
+            .Select(argument => TypeResolver.Resolve(argument, resolutionScope, _diagnostics)).ToImmutableArray();
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.RecordGeneratedArtifactRollback(() => _semanticInfo.RollbackSyntax(typeArguments));
         FunctionSymbol? definition = ResolveExplicitGenericOverload(candidates, resolvedArguments,
             arguments, location, syntax.Target,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
@@ -6135,15 +7130,30 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(location,
                 $"function '{definition.Name}' is private in namespace '{definition.ContainingNamespace.FullName}'",
                 DiagnosticIds.InaccessibleSymbol);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         if (resolvedArguments.Any(ContainsGenericParameter))
             return BindOpenGenericCall(syntax, definition, resolvedArguments, arguments, location);
-        FunctionSymbol? specialized = _genericSpecializer?.GetOrCreate(definition, resolvedArguments, location);
-        if (specialized is null) return new BoundErrorExpression();
+        GenericFunctionSpecializer? callSpecializer =
+            GetTransactionalGenericSpecializer(arguments, out _);
+        FunctionSymbol? specialized = callSpecializer?.GetOrCreate(definition, resolvedArguments, location);
+        if (specialized is null)
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
         SetSelectedSymbolPreservingCandidates(syntax.Target, specialized);
+        RecordTransactionalGeneratedSymbolRollback(arguments, syntax.Target);
+        ImmutableArray<BoundExpression> deferredArguments = arguments;
         arguments = ValidateFunctionArguments(specialized, arguments, syntax.Arguments, location,
             syntax.CloseParenthesisToken.IsMissing ? GetCompletedArgumentCount(syntax.Arguments, true) : null);
+        if (HasRejectedDeferredContextualArguments(deferredArguments) ||
+            HasFailedDeferredMaterialization(deferredArguments, arguments))
+        {
+            _semanticInfo.RollbackSyntax(syntax.Target);
+            return new BoundErrorExpression();
+        }
         return new BoundCallExpression(specialized, arguments);
     }
 
@@ -6152,13 +7162,28 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<BoundExpression> arguments)
     {
         var typeSyntax = new NamedTypeSyntax([name.IdentifierToken], [], typeArguments);
-        TypeSymbol resolved = TypeResolver.Resolve(typeSyntax, _fileScope, _diagnostics);
-        if (resolved is not StructTypeSymbol structure) return new BoundErrorExpression();
+        _ = GetTransactionalGenericSpecializer(arguments, out FileSymbolScope resolutionScope);
+        TypeSymbol resolved = TypeResolver.Resolve(typeSyntax, resolutionScope, _diagnostics);
+        foreach (ArgumentFlowTransaction transaction in
+                 GetDeferredArgumentTransactions(arguments, reverse: false))
+            transaction.RecordGeneratedArtifactRollback(() => _semanticInfo.RollbackSyntax(typeArguments));
+        if (resolved is not StructTypeSymbol structure)
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
+        if (resolutionScope.GenericStructSpecializer is { } structSpecializer &&
+            !structSpecializer.AreConstraintsSatisfied(structure))
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
         if (structure.IsStatic)
         {
             _diagnostics.Report(name.IdentifierToken.Location,
                 $"static struct '{structure.Name}' cannot be instantiated",
                 DiagnosticIds.AbstractInstantiation);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         if (structure.IsAbstract)
@@ -6166,6 +7191,7 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(name.IdentifierToken.Location,
                 $"abstract struct '{structure.Name}' cannot be instantiated",
                 DiagnosticIds.AbstractInstantiation);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         bool incomplete = syntax.CloseParenthesisToken.IsMissing;
@@ -6189,8 +7215,12 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         if (!IsAccessible(constructor))
+        {
             _diagnostics.Report(name.IdentifierToken.Location,
                 $"constructor '{structure.Name}' is private", DiagnosticIds.InaccessibleSymbol);
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
         arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments,
             name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
         if (structure is { IsOpenGenericType: true, GenericDefinition: { } genericDefinition })
@@ -6207,6 +7237,7 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(location,
                 $"generic function '{definition.Name}' expects {definition.TypeParameters.Length} type argument(s), but {typeArguments.Length} were provided",
                 DiagnosticIds.GenericArityMismatch);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         for (int index = 0; index < typeArguments.Length; index++)
@@ -6219,6 +7250,7 @@ internal sealed partial class FunctionBodyBinder
                     $"constraints for '{argumentParameter.Name}' do not guarantee '{required.Target.Name}' required by '{definition.Name}'" +
                     GenericConstraintGuarantees.GetFailureDetail(argumentParameter, required),
                     DiagnosticIds.GenericConstraintNotSatisfied);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
         }
@@ -6241,7 +7273,10 @@ internal sealed partial class FunctionBodyBinder
         if (!TryResolveStaticTypeReceiver(target, out TypeSymbol? resolved))
             return null;
         if (TypeIdentity.AreSame(resolved!, BuiltinTypes.Error))
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
+        }
         if (resolved is not DeclaredTypeSymbol structType)
             return null;
         FunctionSymbol[] candidates = GetMethodOverloads(structType, target.MemberToken.Text, isStatic: true);
@@ -6259,6 +7294,7 @@ internal sealed partial class FunctionBodyBinder
             RecordCandidates(target, null, candidates, CandidateReason.Inaccessible);
             _diagnostics.Report(target.MemberToken.Location, $"static method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
                 DiagnosticIds.InaccessibleSymbol);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, target.MemberToken.Location,
@@ -6277,8 +7313,7 @@ internal sealed partial class FunctionBodyBinder
             return false;
 
         string firstName = parts[0].Text;
-        if (_scope.Lookup(firstName) is not null ||
-            _function.ContainingType?.FindInstanceField(firstName) is not null)
+        if (HasValueSymbol(firstName, parts[0].Location))
             return false;
 
         if (syntax.ReceiverTypeArguments is { } typeArguments)
@@ -6302,6 +7337,13 @@ internal sealed partial class FunctionBodyBinder
         return type is not null;
     }
 
+    private bool HasValueSymbol(string name, TextLocation location) =>
+        _scope.Lookup(name) is not null ||
+        _function.ContainingType?.FindMember<ConstantSymbol>(name) is not null ||
+        _function.ContainingType?.FindInstanceField(name) is not null ||
+        _function.ContainingType?.FindMember<PropertySymbol>(name) is not null ||
+        _fileScope.ResolveConstant(name, location, new DiagnosticBag()) is not null;
+
     private BoundExpression? TryBindQualifiedCallExpression(
         MemberAccessExpressionSyntax target,
         ImmutableArray<BoundExpression> arguments,
@@ -6314,12 +7356,7 @@ internal sealed partial class FunctionBodyBinder
         }
 
         string firstName = nameParts[0].Text;
-        if (_scope.Lookup(firstName) is not null)
-        {
-            return null;
-        }
-
-        if (_function.ContainingType?.FindInstanceField(firstName) is not null)
+        if (HasValueSymbol(firstName, nameParts[0].Location))
         {
             return null;
         }
@@ -6340,12 +7377,14 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(target.MemberToken.Location,
                     $"static struct '{structType.Name}' cannot be instantiated",
                     DiagnosticIds.AbstractInstantiation);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             if (structType.IsAbstract)
             {
                 _diagnostics.Report(target.MemberToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
                     DiagnosticIds.AbstractInstantiation);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             if (structType.Constructors.IsEmpty && completedArgumentCount == 0)
@@ -6374,6 +7413,8 @@ internal sealed partial class FunctionBodyBinder
                 RecordCandidates(target, null, structType.Constructors, CandidateReason.Inaccessible);
                 _diagnostics.Report(target.MemberToken.Location, $"constructor '{structType.Name}' is private",
                     DiagnosticIds.InaccessibleSymbol);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return new BoundErrorExpression();
             }
 
             arguments = ValidateFunctionArguments(constructor, arguments, argumentSyntax, target.MemberToken.Location,
@@ -6394,19 +7435,45 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(target.MemberToken.Location,
                     $"function '{function.Name}' is private in namespace '{function.ContainingNamespace.FullName}'",
                     DiagnosticIds.InaccessibleSymbol);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             if (function.IsGenericDefinition)
             {
-                bool inferenceSucceeded = false;
-                FunctionSymbol? specialized = _genericSpecializer?.InferAndCreate(function, arguments,
-                    target.MemberToken.Location, out inferenceSucceeded);
-                if (specialized is null) return new BoundErrorExpression();
+                bool inferenceSucceeded = TryInferGenericTypeArguments(function, arguments,
+                    out ImmutableArray<TypeSymbol> inferredArguments);
+                if (inferenceSucceeded && inferredArguments.Any(ContainsGenericParameter))
+                    return BindOpenGenericCall(callSyntax, function, inferredArguments, arguments,
+                        target.MemberToken.Location);
+                GenericFunctionSpecializer? callSpecializer =
+                    GetTransactionalGenericSpecializer(arguments, out _);
+                FunctionSymbol? specialized = callSpecializer is null || !inferenceSucceeded
+                    ? null
+                    : callSpecializer.GetOrCreate(function, inferredArguments,
+                        target.MemberToken.Location);
+                if (specialized is null)
+                {
+                    if (!inferenceSucceeded)
+                        _diagnostics.Report(target.MemberToken.Location,
+                            $"type arguments for generic function '{function.Name}' could not be inferred",
+                            DiagnosticIds.GenericSpecializationNotImplemented);
+                    RollbackUnmaterializedContextualArguments(arguments);
+                    return new BoundErrorExpression();
+                }
                 function = specialized;
                 SetSelectedSymbolPreservingCandidates(target, specialized);
+                RecordTransactionalGeneratedSymbolRollback(arguments, target);
             }
+            ImmutableArray<BoundExpression> deferredArguments = arguments;
             arguments = ValidateFunctionArguments(function, arguments, argumentSyntax, target.MemberToken.Location,
                 incomplete ? completedArgumentCount : null);
+            if (HasRejectedDeferredContextualArguments(deferredArguments) ||
+                HasFailedDeferredMaterialization(deferredArguments, arguments))
+            {
+                if (function.IsGenericSpecialization)
+                    _semanticInfo.RollbackSyntax(target);
+                return new BoundErrorExpression();
+            }
             return new BoundCallExpression(function, arguments);
         }
 
@@ -6417,6 +7484,8 @@ internal sealed partial class FunctionBodyBinder
                 $"unknown function or struct '{string.Join('.', parts)}'",
                 DiagnosticIds.UnknownQualifiedCallable);
         }
+
+        RollbackUnmaterializedContextualArguments(arguments);
 
         return new BoundErrorExpression();
     }
@@ -6465,6 +7534,16 @@ internal sealed partial class FunctionBodyBinder
         CallExpressionSyntax callSyntax)
     {
         BoundExpression receiver = ExposeLifetimeValue(BindExpression(target.Receiver), target.Receiver);
+        return BindMethodCallExpression(target, arguments, argumentSyntax, callSyntax, receiver);
+    }
+
+    private BoundExpression BindMethodCallExpression(
+        MemberAccessExpressionSyntax target,
+        ImmutableArray<BoundExpression> arguments,
+        ImmutableArray<ExpressionSyntax> argumentSyntax,
+        CallExpressionSyntax callSyntax,
+        BoundExpression receiver)
+    {
         bool incomplete = callSyntax.CloseParenthesisToken.IsMissing;
         int completedArgumentCount = GetCompletedArgumentCount(argumentSyntax, incomplete);
         ArrayTypeSymbol? receiverArray = receiver.Type as ArrayTypeSymbol ??
@@ -6487,6 +7566,7 @@ internal sealed partial class FunctionBodyBinder
             {
                 _diagnostics.Report(target.MemberToken.Location, "GetLength requires one int dimension argument",
                     DiagnosticIds.InvalidGetLengthArguments);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             if (completedArgumentCount == 1 && _constants.TryFold(arguments[0], out object? dimension) &&
@@ -6501,6 +7581,7 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(target.MemberToken.Location,
                 $"cannot access a value through '{receiver.Type.ToDisplayString()}' directly; use 'lock value' and check the returned shared owner first",
                 DiagnosticIds.WeakDirectAccess);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         if (GetGenericReceiver(receiver.Type, pointerAccess) is GenericParameterSymbol genericParameter)
@@ -6516,12 +7597,14 @@ internal sealed partial class FunctionBodyBinder
                 incomplete ? completedArgumentCount : null);
             if (interfaceMethod is null)
             {
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             if (IsReadonlyReceiver(receiver, pointerAccess) && !interfaceMethod.IsReadonly)
             {
                 _diagnostics.Report(target.MemberToken.Location, $"mutable interface method '{interfaceMethod.Name}' cannot be called on a readonly '{interfaceType.Name}' receiver",
                     DiagnosticIds.MutableMethodOnReadonlyReceiver);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             arguments = ValidateFunctionArguments(interfaceMethod, arguments, argumentSyntax, target.MemberToken.Location,
@@ -6559,6 +7642,7 @@ internal sealed partial class FunctionBodyBinder
                     DiagnosticIds.InvalidMemberReceiver);
             }
 
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
@@ -6583,11 +7667,15 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(target.MemberToken.Location,
                     $"mutable method '{methodCandidates[0].Name}' cannot be called on a readonly '{structType.Name}' receiver",
                     DiagnosticIds.MutableMethodOnReadonlyReceiver);
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
             FunctionSymbol? namedMethod = structType.FindMember<FunctionSymbol>(target.MemberToken.Text);
             if (methodCandidates.Length != 0)
+            {
+                RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
+            }
             RecordCandidates(target, null, methodCandidates,
                 namedMethod is not null && (hasReadonlyReceiver || !IsAccessible(namedMethod, receiver, pointerAccess))
                     ? CandidateReason.Inaccessible
@@ -6611,6 +7699,7 @@ internal sealed partial class FunctionBodyBinder
                     $"struct '{structType.Name}' does not contain method '{target.MemberToken.Text}'",
                     DiagnosticIds.MissingStructMethod);
             }
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
@@ -6620,6 +7709,7 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(target.MemberToken.Location,
                 $"mutable method '{method.Name}' cannot be called on a readonly '{structType.Name}' receiver",
                 DiagnosticIds.MutableMethodOnReadonlyReceiver);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
 
@@ -6630,6 +7720,8 @@ internal sealed partial class FunctionBodyBinder
                 target.MemberToken.Location,
                 $"method '{method.Name}' is private in struct '{method.ContainingType!.Name}'",
                 DiagnosticIds.InaccessibleSymbol);
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
         }
 
         arguments = ValidateFunctionArguments(method, arguments, argumentSyntax, target.MemberToken.Location,
@@ -6737,7 +7829,7 @@ internal sealed partial class FunctionBodyBinder
             valueType = target.Type;
             if (trackedPlace is not null) MarkPlaceMoved(trackedPlace);
         }
-        if (trackedPlace is not null && TypeFacts.ContainsReferenceStorage(target.Type))
+        if (trackedPlace is not null && ContainsValueReferenceStorage(target.Type))
             EndValueReferenceMetadata(trackedPlace, targetLocation.Span.Start - 1);
         ValidateDestructorAccessibility(valueType, targetLocation);
         return new BoundExplicitDestructExpression(target, valueType, TypeFacts.GetCompleteDestructor(valueType))
@@ -6850,11 +7942,73 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundExpression BindExpressionWithExpectedType(ExpressionSyntax syntax, TypeSymbol expectedType)
     {
+        bool hasLambda = TryGetLambdaExpression(syntax, out LambdaExpressionSyntax lambda);
+        bool hasNamedFunction = TryGetNamedFunctionExpression(syntax, out ExpressionSyntax function);
+        if ((hasLambda || hasNamedFunction) && !AreContextualTypeConstraintsSatisfied(expectedType))
+        {
+            if (hasLambda)
+                RollbackRejectedDeferredLambda(lambda);
+            return new BoundErrorExpression();
+        }
+        if (hasLambda &&
+            expectedType is not (FunctionValueTypeSymbol or FunctionPointerTypeSymbol) &&
+            TryBindLambdaUserConversion(lambda, expectedType, out BoundExpression? convertedLambda))
+        {
+            for (ExpressionSyntax wrapper = syntax;
+                 wrapper is ParenthesizedExpressionSyntax parenthesized;
+                 wrapper = parenthesized.Expression)
+                _semanticInfo.Types[wrapper] = new TypeInfo(convertedLambda!.Type, convertedLambda.Type);
+            return convertedLambda!;
+        }
+        if (hasNamedFunction &&
+            expectedType is FunctionValueTypeSymbol expectedFunctionValue &&
+            TryBindNamedFunctionValue(function, expectedFunctionValue, out BoundExpression? namedFunctionValue))
+            return namedFunctionValue!;
+        if (hasNamedFunction &&
+            expectedType is not (FunctionValueTypeSymbol or FunctionPointerTypeSymbol) &&
+            TryBindNamedFunctionUserConversion(function, expectedType, out BoundExpression? convertedFunction))
+        {
+            for (ExpressionSyntax wrapper = syntax;
+                 wrapper is ParenthesizedExpressionSyntax parenthesized;
+                 wrapper = parenthesized.Expression)
+                _semanticInfo.Types[wrapper] = new TypeInfo(convertedFunction!.Type, convertedFunction.Type);
+            return convertedFunction!;
+        }
+
         FunctionPointerTypeSymbol? previous = _expectedFunctionPointerType;
+        FunctionValueTypeSymbol? previousValue = _expectedFunctionValueType;
         _expectedFunctionPointerType = expectedType as FunctionPointerTypeSymbol;
+        _expectedFunctionValueType = expectedType as FunctionValueTypeSymbol;
         try { return BindExpression(syntax); }
-        finally { _expectedFunctionPointerType = previous; }
+        finally
+        {
+            _expectedFunctionPointerType = previous;
+            _expectedFunctionValueType = previousValue;
+        }
     }
+
+    private bool AreContextualTypeConstraintsSatisfied(TypeSymbol type) => type switch
+    {
+        StructTypeSymbol { GenericDefinition: not null } structure =>
+            (_fileScope.GenericStructSpecializer?.AreConstraintsSatisfied(structure) ?? true) &&
+            structure.TypeArguments.All(AreContextualTypeConstraintsSatisfied),
+        FunctionPointerTypeSymbol function =>
+            AreContextualTypeConstraintsSatisfied(function.ReturnType) &&
+            function.ParameterTypes.All(AreContextualTypeConstraintsSatisfied),
+        FunctionValueTypeSymbol function =>
+            AreContextualTypeConstraintsSatisfied(function.ReturnType) &&
+            function.ParameterTypes.All(AreContextualTypeConstraintsSatisfied),
+        PointerTypeSymbol pointer => AreContextualTypeConstraintsSatisfied(pointer.ElementType),
+        ReferenceTypeSymbol reference => AreContextualTypeConstraintsSatisfied(reference.ElementType),
+        ArrayTypeSymbol array => AreContextualTypeConstraintsSatisfied(array.ElementType),
+        AtomicTypeSymbol atomic => AreContextualTypeConstraintsSatisfied(atomic.ElementType),
+        UniqueTypeSymbol unique => AreContextualTypeConstraintsSatisfied(unique.ElementType),
+        SharedTypeSymbol shared => AreContextualTypeConstraintsSatisfied(shared.ElementType),
+        WeakTypeSymbol weak => AreContextualTypeConstraintsSatisfied(weak.ElementType),
+        StorageTypeSymbol storage => AreContextualTypeConstraintsSatisfied(storage.ElementType),
+        PinTypeSymbol pin => AreContextualTypeConstraintsSatisfied(pin.ElementType),
+        _ => true,
+    };
 
     private BoundExpression BindNewExpression(NewExpressionSyntax syntax)
     {
@@ -6925,13 +8079,24 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (structType.IsAbstract)
-        {
+        bool isAbstract = structType.IsAbstract;
+        if (isAbstract)
             _diagnostics.Report(syntax.Type.NameToken.Location, $"abstract struct '{structType.Name}' cannot be instantiated",
                 DiagnosticIds.AbstractInstantiation);
-        }
 
-        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments,
+            (argument, _) => BindDeferredContextualArgument(argument));
+        if (isAbstract)
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
+        if (_fileScope.GenericStructSpecializer is { } structSpecializer &&
+            !structSpecializer.AreConstraintsSatisfied(structType))
+        {
+            RollbackUnmaterializedContextualArguments(arguments);
+            return new BoundErrorExpression();
+        }
         bool incomplete = syntax.CloseDelimiterToken.IsMissing;
         int completedArgumentCount = GetCompletedArgumentCount(syntax.Arguments, incomplete);
         FunctionSymbol? constructor = null;
@@ -6946,6 +8111,8 @@ internal sealed partial class FunctionBodyBinder
         if (syntax.IsPositionalInitialization)
         {
             arguments = ValidatePositionalArguments(structType, arguments, syntax.Arguments, syntax.NewKeyword.Location);
+            if (arguments.Any(argument => argument is BoundErrorExpression))
+                return new BoundErrorExpression();
         }
         else
         {
@@ -6970,6 +8137,8 @@ internal sealed partial class FunctionBodyBinder
                 RecordCandidates(syntax, null, structType.Constructors, CandidateReason.Inaccessible);
                 _diagnostics.Report(syntax.Type.NameToken.Location, $"constructor '{structType.Name}' is private",
                     DiagnosticIds.InaccessibleSymbol);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return new BoundErrorExpression();
             }
 
             arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments, syntax.NewKeyword.Location,
@@ -7084,10 +8253,12 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<ExpressionSyntax> argumentSyntax,
         TextLocation location)
     {
+        PreserveDeferredDependentMoves(arguments);
         ImmutableArray<FieldSymbol> fields = structType.AllInstanceFields;
         bool hasMissingRequiredFields = arguments.Length < fields.Length &&
             fields.Skip(arguments.Length).Any(field => field.Initializer is null);
-        if (arguments.Length > fields.Length || hasMissingRequiredFields)
+        bool valid = arguments.Length <= fields.Length && !hasMissingRequiredFields;
+        if (!valid)
         {
             _diagnostics.Report(
                 location,
@@ -7101,12 +8272,22 @@ internal sealed partial class FunctionBodyBinder
         {
             FieldSymbol field = fields[index];
             TypeSymbol fieldType = field.Type;
-            BoundExpression argument = ContextualizeConversion(arguments[index], fieldType, GetLocation(argumentSyntax[index]));
+            BoundExpression argument = arguments[index] switch
+            {
+                BoundUnboundLambdaExpression or BoundUnboundFunctionExpression =>
+                    BindExpressionWithExpectedType(argumentSyntax[index], fieldType),
+                _ => arguments[index],
+            };
+            argument = ContextualizeConversion(argument, fieldType, GetLocation(argumentSyntax[index]));
             convertedArguments[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
 
             if (!AccessibilityRules.IsAccessible(field, _function, structType))
             {
+                valid = false;
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
                     $"field '{field.Name}' is private in struct '{field.ContainingType.Name}'",
@@ -7115,6 +8296,7 @@ internal sealed partial class FunctionBodyBinder
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
+                valid = false;
                 _diagnostics.Report(
                     GetLocation(argumentSyntax[index]),
                     "stack array cannot be stored inside a positional struct value",
@@ -7123,10 +8305,13 @@ internal sealed partial class FunctionBodyBinder
 
             if (!TypeFacts.CanAssign(fieldType, argument.Type))
             {
+                valid = false;
                 ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, fieldType);
             }
         }
-
+        CompleteDeferredContextualArguments(arguments, valid);
+        if (!valid)
+            return [new BoundErrorExpression()];
         return convertedArguments.ToImmutable();
     }
 
@@ -7180,6 +8365,28 @@ internal sealed partial class FunctionBodyBinder
             reason = receiverIsReadonly == true && !single.IsReadonly
                 ? CandidateReason.Inaccessible
                 : GetCallCandidateReason(single, arguments, incomplete, suppliedCount);
+            bool hasDeferredArgument = arguments.Take(suppliedCount).Any(argument =>
+                argument is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression);
+            if (hasDeferredArgument && reason is CandidateReason.None or CandidateReason.Incomplete &&
+                single.Parameters.Take(suppliedCount).Zip(arguments.Take(suppliedCount)).Any(pair =>
+                    GetArgumentConversionCost(pair.First.Type, pair.Second) is null))
+                reason = CandidateReason.NotInvocable;
+            if (hasDeferredArgument && reason is CandidateReason.NotInvocable or CandidateReason.WrongArity)
+            {
+                if (reason == CandidateReason.NotInvocable)
+                    for (int index = 0; index < suppliedCount; index++)
+                        if (GetArgumentConversionCost(single.Parameters[index].Type, arguments[index]) is null)
+                            ReportDeferredContextualMismatch(arguments[index], single.Parameters[index].Type);
+                RecordCandidates(syntax, null, candidates, reason);
+                if (!incomplete)
+                    _diagnostics.Report(location,
+                        $"no overload of {description} matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
+                        reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+                if (reason == CandidateReason.NotInvocable)
+                    PreserveDeferredDependentMoves(arguments);
+                RollbackUnmaterializedContextualArguments(arguments);
+                return null;
+            }
             RecordCandidates(syntax, reason == CandidateReason.Inaccessible ? null : single,
                 candidates, reason);
             return single;
@@ -7253,6 +8460,7 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(location,
                     $"no overload of {description} matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
                     reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+            RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
 
@@ -7293,6 +8501,7 @@ internal sealed partial class FunctionBodyBinder
                     : $"call to {description} is ambiguous between: {FormatCallableCandidates(best.Select(item => item.Function))}",
                 duplicateIdentity ? DiagnosticIds.AmbiguousName : DiagnosticIds.AmbiguousCall);
         }
+        RollbackUnmaterializedContextualArguments(arguments);
         return null;
     }
 
@@ -7317,6 +8526,7 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(location,
                 $"no generic overload accepts {typeArguments.Length} type argument(s); candidates: {FormatCallableCandidates(named)}",
                 DiagnosticIds.GenericArityMismatch);
+            RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
 
@@ -7325,6 +8535,42 @@ internal sealed partial class FunctionBodyBinder
         // the ordinary argument diagnostics for a bad call.
         if (candidates.Length == 1)
         {
+            int singleSuppliedCount = completedArgumentCount ?? arguments.Length;
+            bool singleIncomplete = completedArgumentCount.HasValue;
+            bool hasDeferredArgument = arguments.Take(singleSuppliedCount).Any(argument =>
+                argument is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression);
+            if (hasDeferredArgument)
+            {
+                FunctionSymbol candidate = candidates[0];
+                var substitutions = candidate.TypeParameters.Zip(typeArguments)
+                    .ToDictionary(pair => pair.First, pair => pair.Second);
+                ImmutableArray<TypeSymbol> parameterTypes = candidate.Parameters.Select(parameter =>
+                    SubstituteGenericType(parameter.Type, substitutions)).ToImmutableArray();
+                CandidateReason failure = singleIncomplete
+                    ? parameterTypes.Length < singleSuppliedCount ? CandidateReason.WrongArity : CandidateReason.None
+                    : parameterTypes.Length != singleSuppliedCount ? CandidateReason.WrongArity : CandidateReason.None;
+                if (failure == CandidateReason.None && parameterTypes.Take(singleSuppliedCount)
+                        .Zip(arguments.Take(singleSuppliedCount)).Any(pair =>
+                            GetArgumentConversionCost(pair.First, pair.Second) is null))
+                    failure = CandidateReason.NotInvocable;
+                if (failure != CandidateReason.None)
+                {
+                    if (failure == CandidateReason.NotInvocable)
+                        for (int index = 0; index < singleSuppliedCount; index++)
+                            if (GetArgumentConversionCost(parameterTypes[index], arguments[index]) is null)
+                                ReportDeferredContextualMismatch(arguments[index], parameterTypes[index]);
+                    RecordCandidates(syntax, null, candidates,
+                        singleIncomplete ? CandidateReason.Incomplete : failure);
+                    if (!singleIncomplete)
+                        _diagnostics.Report(location,
+                            $"no generic overload matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
+                            failure == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+                    if (failure == CandidateReason.NotInvocable)
+                        PreserveDeferredDependentMoves(arguments);
+                    RollbackUnmaterializedContextualArguments(arguments);
+                    return null;
+                }
+            }
             RecordCandidates(syntax, candidates[0], candidates,
                 completedArgumentCount.HasValue ? CandidateReason.Incomplete : CandidateReason.None);
             return candidates[0];
@@ -7371,6 +8617,7 @@ internal sealed partial class FunctionBodyBinder
                     ? $"generic call is ambiguous between: {FormatCallableCandidates(best.Select(item => item.Function))}"
                     : $"no generic overload matches the provided arguments; candidates: {FormatCallableCandidates(candidates)}",
                 best.Length > 1 ? DiagnosticIds.AmbiguousCall : DiagnosticIds.NoMatchingCandidate);
+        RollbackUnmaterializedContextualArguments(arguments);
         return null;
     }
 
@@ -7381,8 +8628,10 @@ internal sealed partial class FunctionBodyBinder
         TextLocation location,
         int? completedArgumentCount = null)
     {
+        PreserveDeferredDependentMoves(arguments);
         int suppliedCount = completedArgumentCount ?? arguments.Length;
         bool incomplete = completedArgumentCount.HasValue;
+        bool valid = !incomplete && suppliedCount == function.Parameters.Length;
         if ((!incomplete && suppliedCount != function.Parameters.Length) ||
             incomplete && suppliedCount > function.Parameters.Length)
         {
@@ -7394,46 +8643,79 @@ internal sealed partial class FunctionBodyBinder
 
         var convertedArguments = arguments.ToBuilder();
         int count = Math.Min(suppliedCount, function.Parameters.Length);
-        var callBorrows = new List<(BorrowPlace Place, bool IsReadonly)>();
+        var callBorrows = new List<CallBorrow>();
         for (int index = 0; index < count; index++)
         {
             TypeSymbol parameterType = function.Parameters[index].Type;
-            BoundExpression argument = ContextualizeConversion(arguments[index], parameterType, (argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])));
+            TextLocation argumentLocation = argumentSyntax.IsEmpty
+                ? location
+                : GetLocation(argumentSyntax[index]);
+            ExpressionSyntax syntax = argumentSyntax.IsEmpty
+                ? arguments[index] switch
+                {
+                    BoundUnboundLambdaExpression lambda => lambda.Syntax,
+                    BoundUnboundFunctionExpression deferredFunction => deferredFunction.Syntax,
+                    _ => null!,
+                }
+                : argumentSyntax[index];
+            BoundExpression argument = MaterializeContextualArgument(arguments[index], syntax, parameterType);
+            argument = ContextualizeConversion(argument, parameterType, argumentLocation);
             convertedArguments[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             if (!argumentSyntax.IsEmpty) SetConvertedType(argumentSyntax[index], argument.Type);
 
             if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
             {
+                valid = false;
                 _diagnostics.Report((argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])), "stack array cannot be passed to another function",
                     DiagnosticIds.StackArrayPassedAsArgument);
             }
 
             if (!TypeFacts.CanAssign(parameterType, argument.Type))
             {
+                valid = false;
                 ReportCannotConvert((argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])), argument.Type, parameterType);
             }
 
-            if (parameterType is ReferenceTypeSymbol parameterReference &&
-                TryGetBorrowPlace(argument, out BorrowPlace argumentPlace,
-                    out LocalVariableSymbol? argumentAlias))
-            {
-                TextLocation argumentLocation = (argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index]));
-                ValidateBorrowCreation(argumentPlace, parameterReference.IsReadonly,
-                    argumentAlias, argumentLocation);
-                if (callBorrows.Any(prior => BorrowPlacesOverlap(prior.Place, argumentPlace) &&
-                    (!prior.IsReadonly || !parameterReference.IsReadonly)))
-                    ReportBorrowDiagnostic(argumentLocation,
-                        $"cannot pass overlapping place '{argumentPlace.DisplayName}' as conflicting reference arguments",
-                        DiagnosticIds.BorrowConflict);
-                callBorrows.Add((argumentPlace, parameterReference.IsReadonly));
-                if (!parameterReference.IsReadonly &&
-                    TryGetStorageType(parameterReference.ElementType, out _) &&
-                    TryGetMovePlace(argument, out MovePlace storageArgumentPlace))
-                    _storageStates[storageArgumentPlace] = StorageState.MaybeInitialized;
-            }
+            ValidateCallArgumentBorrows(parameterType, argument, arguments[index],
+                argumentLocation, callBorrows);
         }
-
+        CompleteDeferredContextualArguments(arguments, valid);
         return convertedArguments.ToImmutable();
+    }
+
+    private BoundExpression MaterializeContextualArgument(
+        BoundExpression argument,
+        ExpressionSyntax syntax,
+        TypeSymbol expectedType) => argument switch
+    {
+        BoundUnboundLambdaExpression or BoundUnboundFunctionExpression =>
+            BindExpressionWithExpectedType(syntax, expectedType),
+        _ => argument,
+    };
+
+    private void ReportDeferredContextualMismatch(BoundExpression argument, TypeSymbol expectedType)
+    {
+        if (argument is BoundUnboundLambdaExpression lambda)
+        {
+            bool rawCapture = expectedType is FunctionPointerTypeSymbol && !lambda.Syntax.Captures.IsEmpty;
+            _diagnostics.Report(rawCapture ? lambda.Syntax.OpenBracketToken!.Location : lambda.Syntax.IntroducerToken.Location,
+                rawCapture
+                    ? "capturing lambda cannot convert to raw function pointer"
+                    : $"lambda is not compatible with contextual type '{expectedType.ToDisplayString()}'",
+                rawCapture ? DiagnosticIds.LambdaCaptureNotSupported : DiagnosticIds.TypeMismatch);
+        }
+        else if (argument is BoundUnboundFunctionExpression function)
+        {
+            SyntaxToken token = GetNamedFunctionToken(function.Syntax);
+            _diagnostics.Report(token.Location,
+                expectedType is FunctionPointerTypeSymbol
+                    ? $"function '{token.Text}' requires explicit address-of '&{token.Text}' in a raw function-pointer context"
+                    : $"function '{token.Text}' is not compatible with contextual type '{expectedType.ToDisplayString()}'",
+                DiagnosticIds.TypeMismatch);
+        }
     }
 
     private FunctionSymbol? ResolveInterfaceMethod(InterfaceTypeSymbol type, string name,
@@ -7470,6 +8752,7 @@ internal sealed partial class FunctionBodyBinder
         if (type.Constructors.IsEmpty)
         {
             reason = CandidateReason.NotFound;
+            RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
 
@@ -7506,6 +8789,7 @@ internal sealed partial class FunctionBodyBinder
                 ? CandidateReason.NotInvocable : CandidateReason.WrongArity;
             _diagnostics.Report(location, $"no constructor of struct '{type.Name}' matches the provided arguments",
                 reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+            RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
 
@@ -7524,12 +8808,14 @@ internal sealed partial class FunctionBodyBinder
         if (incomplete)
         {
             reason = CandidateReason.Incomplete;
+            RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
 
         reason = CandidateReason.Ambiguous;
         _diagnostics.Report(location, $"constructor call for struct '{type.Name}' is ambiguous",
             DiagnosticIds.AmbiguousCall);
+        RollbackUnmaterializedContextualArguments(arguments);
         return null;
     }
 
@@ -7588,6 +8874,7 @@ internal sealed partial class FunctionBodyBinder
             RecordCandidates(syntax, null, candidateArray, reason);
             _diagnostics.Report(location, $"no indexer of type '{ownerName}' matches the provided arguments",
                 reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+            RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
 
@@ -7606,6 +8893,7 @@ internal sealed partial class FunctionBodyBinder
         RecordCandidates(syntax, null, candidateArray, CandidateReason.Ambiguous);
         _diagnostics.Report(location, $"indexer access on type '{ownerName}' is ambiguous",
             DiagnosticIds.AmbiguousCall);
+        RollbackUnmaterializedContextualArguments(arguments);
         return null;
     }
 
@@ -7623,6 +8911,10 @@ internal sealed partial class FunctionBodyBinder
 
     private int? GetArgumentConversionCost(TypeSymbol parameterType, BoundExpression argument)
     {
+        if (argument is BoundUnboundLambdaExpression lambda)
+            return GetLambdaArgumentConversionCost(parameterType, lambda.Syntax);
+        if (argument is BoundUnboundFunctionExpression function)
+            return GetNamedFunctionArgumentConversionCost(parameterType, function.Syntax);
         int? standard = GetStandardArgumentConversionCost(parameterType, argument);
         if (standard is not null || _userConversionDepth != 0) return standard;
         return FindUserConversions(argument, parameterType, explicitContext: false).Length != 0 ? int.MaxValue - 1 : null;
@@ -7826,7 +9118,7 @@ internal sealed partial class FunctionBodyBinder
             return expression;
         }
 
-        return expression.Type is StructTypeSymbol or SharedTypeSymbol or WeakTypeSymbol
+        return expression.Type is StructTypeSymbol or SharedTypeSymbol or WeakTypeSymbol or FunctionValueTypeSymbol
             ? new BoundCopyExpression(expression)
             : expression;
     }
@@ -8585,6 +9877,7 @@ internal sealed partial class FunctionBodyBinder
     private static TextLocation GetLocation(ExpressionSyntax syntax) => syntax switch
     {
         MissingExpressionSyntax missing => missing.MissingToken.Location,
+        LambdaExpressionSyntax lambda => lambda.IntroducerToken.Location,
         LiteralExpressionSyntax literal => literal.LiteralToken.Location,
         NameExpressionSyntax name => name.IdentifierToken.Location,
         ThisExpressionSyntax @this => @this.ThisKeyword.Location,
@@ -8711,7 +10004,9 @@ internal sealed partial class FunctionBodyBinder
                     DiagnosticIds.WriteThroughReadonlyReceiver);
                 return new BoundErrorExpression();
             }
-            BoundExpression fieldValue = BindExpression(syntax.Expression);
+            BoundExpression fieldValue = isSimpleAssignment
+                ? BindExpressionWithExpectedType(syntax.Expression, field.Type)
+                : BindExpression(syntax.Expression);
             if (isSimpleAssignment)
                 _ = ValidateGenericArguments(field.Symbol.Name, [field.Type], [fieldValue], [syntax.Expression],
                     target.MemberToken.Location);
@@ -8753,7 +10048,9 @@ internal sealed partial class FunctionBodyBinder
                 DiagnosticIds.WriteThroughReadonlyReceiver);
             return new BoundErrorExpression();
         }
-        BoundExpression value = BindExpression(syntax.Expression);
+        BoundExpression value = isSimpleAssignment
+            ? BindExpressionWithExpectedType(syntax.Expression, property.Type)
+            : BindExpression(syntax.Expression);
         if (isSimpleAssignment)
         {
             _ = ValidateGenericArguments(property.Symbol.Name, [property.Type], [value], [syntax.Expression],
@@ -8780,7 +10077,8 @@ internal sealed partial class FunctionBodyBinder
         IndexExpressionSyntax target, BoundExpression receiver, GenericParameterSymbol parameter,
         bool isSimpleAssignment)
     {
-        ImmutableArray<BoundExpression> indices = target.Arguments.Select(BindExpression).ToImmutableArray();
+        ImmutableArray<BoundExpression> indices = BindTransferredArguments(target.Arguments,
+            (argument, _) => BindDeferredContextualArgument(argument));
         GenericIndexerMember[] candidates = GenericConstraintMemberLookup.GetIndexers(parameter,
                 _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
             .Where(indexer => indexer.HasSetter && (isSimpleAssignment || indexer.HasGetter))
@@ -8801,11 +10099,34 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(target.OpenBracketToken.Location,
                 "indexer cannot be assigned through a readonly receiver",
                 DiagnosticIds.WriteThroughReadonlyReceiver);
+            RollbackUnmaterializedContextualArguments(indices);
             return new BoundErrorExpression();
+        }
+        if (!isSimpleAssignment)
+        {
+            bool hasNoncopyableIndex = false;
+            for (int index = 0; index < Math.Min(indices.Length, indexer.ParameterTypes.Length); index++)
+            {
+                TypeSymbol parameterType = indexer.ParameterTypes[index];
+                if (parameterType is ReferenceTypeSymbol || TypeFacts.GetCopyabilityFailure(parameterType) is null)
+                    continue;
+                hasNoncopyableIndex = true;
+                _diagnostics.Report(GetLocation(target.Arguments[index]),
+                    $"compound indexer assignment cannot reuse noncopyable argument type '{parameterType.ToDisplayString()}' for both getter and setter",
+                    DiagnosticIds.ValueNotCopyable);
+            }
+            if (hasNoncopyableIndex)
+            {
+                RollbackUnmaterializedContextualArguments(indices);
+                _ = BindExpression(syntax.Expression);
+                return new BoundErrorExpression();
+            }
         }
         indices = ValidateGenericArguments("this", indexer.ParameterTypes, indices, target.Arguments,
             target.OpenBracketToken.Location);
-        BoundExpression value = BindExpression(syntax.Expression);
+        BoundExpression value = isSimpleAssignment
+            ? BindExpressionWithExpectedType(syntax.Expression, indexer.Type)
+            : BindExpression(syntax.Expression);
         if (isSimpleAssignment)
             value = ValidateGenericArguments("this", [indexer.Type], [value], [syntax.Expression],
                 target.OpenBracketToken.Location)[0];
@@ -8903,6 +10224,7 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(target.MemberToken.Location,
                 $"method '{method.Symbol.Name}' is not guaranteed readonly for '{parameter.Name}'",
                 DiagnosticIds.MutableMethodOnReadonlyReceiver);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         arguments = ValidateGenericArguments(method.Symbol.Name, method.ParameterTypes, arguments, argumentSyntax,
@@ -8942,7 +10264,8 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundExpression BindGenericNewExpression(NewExpressionSyntax syntax, GenericParameterSymbol parameter)
     {
-        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments);
+        ImmutableArray<BoundExpression> arguments = BindTransferredArguments(syntax.Arguments,
+            (argument, _) => BindDeferredContextualArgument(argument));
         GenericConstructorMember[] candidates = GenericConstraintMemberLookup
             .GetConstructors(parameter, _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
             .DistinctBy(constructor => string.Join(",", constructor.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified))))
@@ -8957,6 +10280,7 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(syntax.NewKeyword.Location,
                     $"constraints for '{parameter.Name}' do not guarantee this construction",
                     DiagnosticIds.GenericConstructorNotGuaranteed);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         arguments = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
@@ -8987,6 +10311,7 @@ internal sealed partial class FunctionBodyBinder
                 _diagnostics.Report(GetLocation(syntax.Target),
                     $"constraints for '{parameter.Name}' do not guarantee this construction",
                     DiagnosticIds.GenericConstructorNotGuaranteed);
+            RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
         arguments = ValidateGenericArguments(parameter.Name, constructor.ParameterTypes, arguments, syntax.Arguments,
@@ -9043,6 +10368,7 @@ internal sealed partial class FunctionBodyBinder
                 $"no {description} matches the provided arguments",
                 bestMatches.Length > 1 ? DiagnosticIds.AmbiguousCall :
                 reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+        RollbackUnmaterializedContextualArguments(arguments);
         return null;
     }
 
@@ -9051,22 +10377,43 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<ExpressionSyntax> argumentSyntax, TextLocation location,
         int? completedArgumentCount = null)
     {
+        PreserveDeferredDependentMoves(arguments);
         int suppliedCount = completedArgumentCount ?? arguments.Length;
         bool incomplete = completedArgumentCount.HasValue;
+        bool valid = !incomplete && suppliedCount == parameterTypes.Length;
         if ((!incomplete && suppliedCount != parameterTypes.Length) ||
             incomplete && suppliedCount > parameterTypes.Length)
             _diagnostics.Report(location,
                 $"'{name}' expects {parameterTypes.Length} argument(s), but {suppliedCount} were provided",
                 DiagnosticIds.WrongArity);
         var converted = arguments.ToBuilder();
+        var callBorrows = new List<CallBorrow>();
         for (int index = 0; index < Math.Min(suppliedCount, parameterTypes.Length); index++)
         {
-            BoundExpression argument = ContextualizeConversion(arguments[index], parameterTypes[index], GetLocation(argumentSyntax[index]));
+            BoundExpression argument = arguments[index] switch
+            {
+                BoundUnboundLambdaExpression lambda => BindExpressionWithExpectedType(
+                    argumentSyntax[index], parameterTypes[index]),
+                BoundUnboundFunctionExpression deferredFunction => BindExpressionWithExpectedType(
+                    argumentSyntax[index], parameterTypes[index]),
+                _ => arguments[index],
+            };
+            argument = ContextualizeConversion(argument, parameterTypes[index],
+                GetLocation(argumentSyntax[index]));
             converted[index] = argument;
+            if (argument is BoundErrorExpression &&
+                arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+                valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
             if (!TypeFacts.CanAssign(parameterTypes[index], argument.Type))
+            {
+                valid = false;
                 ReportCannotConvert(GetLocation(argumentSyntax[index]), argument.Type, parameterTypes[index]);
+            }
+            ValidateCallArgumentBorrows(parameterTypes[index], argument, arguments[index],
+                GetLocation(argumentSyntax[index]), callBorrows);
         }
+        CompleteDeferredContextualArguments(arguments, valid);
         return converted.ToImmutable();
     }
 
@@ -9093,6 +10440,9 @@ internal sealed partial class FunctionBodyBinder
             ReferenceTypeSymbol reference => _fileScope.TypeFactory.ReferenceTo(
                 SubstituteGenericType(reference.ElementType, substitutions), reference.IsReadonly),
             FunctionPointerTypeSymbol function => _fileScope.TypeFactory.FunctionPointer(
+                SubstituteGenericType(function.ReturnType, substitutions),
+                function.ParameterTypes.Select(parameter => SubstituteGenericType(parameter, substitutions))),
+            FunctionValueTypeSymbol function => _fileScope.TypeFactory.FunctionValue(
                 SubstituteGenericType(function.ReturnType, substitutions),
                 function.ParameterTypes.Select(parameter => SubstituteGenericType(parameter, substitutions))),
             ArrayTypeSymbol array => _fileScope.TypeFactory.ArrayOf(
@@ -9122,12 +10472,47 @@ internal sealed partial class FunctionBodyBinder
             typeArguments = [];
             return false;
         }
+        var deferred = new List<(TypeSymbol Pattern, BoundExpression Argument)>();
         for (int index = 0; index < arguments.Length; index++)
+        {
+            if (arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
+            {
+                deferred.Add((definition.Parameters[index].Type, arguments[index]));
+                continue;
+            }
             if (!TryInferGenericType(definition.Parameters[index].Type, arguments[index].Type, inferred))
             {
                 typeArguments = [];
                 return false;
             }
+        }
+
+        while (deferred.Count != 0)
+        {
+            bool resolvedAny = false;
+            for (int index = deferred.Count - 1; index >= 0; index--)
+            {
+                (TypeSymbol pattern, BoundExpression argument) = deferred[index];
+                var candidateInference = new Dictionary<GenericParameterSymbol, TypeSymbol>(inferred);
+                bool succeeded = argument switch
+                {
+                    BoundUnboundLambdaExpression lambda =>
+                        TryInferLambdaGenericTypes(pattern, lambda.Syntax, candidateInference),
+                    BoundUnboundFunctionExpression function =>
+                        TryInferNamedFunctionGenericTypes(pattern, function.Syntax, candidateInference),
+                    _ => false,
+                };
+                if (!succeeded) continue;
+                inferred = candidateInference;
+                deferred.RemoveAt(index);
+                resolvedAny = true;
+            }
+            if (!resolvedAny)
+            {
+                typeArguments = [];
+                return false;
+            }
+        }
         if (definition.TypeParameters.Any(parameter => !inferred.ContainsKey(parameter)))
         {
             typeArguments = [];
@@ -9155,6 +10540,11 @@ internal sealed partial class FunctionBodyBinder
             (PointerTypeSymbol left, PointerTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
             (FunctionPointerTypeSymbol left, FunctionPointerTypeSymbol right)
+                when left.ParameterTypes.Length == right.ParameterTypes.Length =>
+                TryInferGenericType(left.ReturnType, right.ReturnType, inferred) &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TryInferGenericType(pair.First, pair.Second, inferred)),
+            (FunctionValueTypeSymbol left, FunctionValueTypeSymbol right)
                 when left.ParameterTypes.Length == right.ParameterTypes.Length =>
                 TryInferGenericType(left.ReturnType, right.ReturnType, inferred) &&
                 left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
@@ -9230,7 +10620,7 @@ internal sealed partial class FunctionBodyBinder
         };
     }
 
-    private bool IsAccessible(Symbol symbol) => AccessibilityRules.IsAccessible(symbol, _function);
+    private bool IsAccessible(Symbol symbol) => AccessibilityRules.IsAccessible(symbol, LexicalAccessContext);
 
     private static bool ContainsStaticStruct(TypeSymbol type) => type switch
     {
@@ -9245,6 +10635,8 @@ internal sealed partial class FunctionBodyBinder
         LifetimeModifierTypeSymbol modifier => ContainsStaticStruct(modifier.ElementType),
         FunctionPointerTypeSymbol function => ContainsStaticStruct(function.ReturnType) ||
             function.ParameterTypes.Any(ContainsStaticStruct),
+        FunctionValueTypeSymbol function => ContainsStaticStruct(function.ReturnType) ||
+            function.ParameterTypes.Any(ContainsStaticStruct),
         _ => false,
     };
 
@@ -9257,7 +10649,7 @@ internal sealed partial class FunctionBodyBinder
             ReferenceTypeSymbol { ElementType: DeclaredTypeSymbol type } => type,
             _ => receiver is BoundThisExpression @this ? @this.ContainingType : null,
         } : receiver.Type as DeclaredTypeSymbol;
-        return AccessibilityRules.IsAccessible(symbol, _function, receiverType);
+        return AccessibilityRules.IsAccessible(symbol, LexicalAccessContext, receiverType);
     }
 
     private bool IsReadonlyReceiver(BoundExpression receiver, bool pointerAccess) =>

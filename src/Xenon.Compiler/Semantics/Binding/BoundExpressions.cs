@@ -411,6 +411,33 @@ public sealed record BoundFunctionAddressExpression(
     public override BoundKind Kind => BoundKind.FunctionAddressExpression;
 }
 
+public sealed record BoundFunctionValueCapture(
+    CaptureVariableSymbol Variable,
+    BoundExpression Initializer);
+
+/// <summary>A first-class callable. Captures are stored in a shared, erased environment.</summary>
+public sealed record BoundFunctionValueExpression(
+    FunctionSymbol InvokeFunction,
+    FunctionValueTypeSymbol FunctionValueType,
+    ImmutableArray<BoundFunctionValueCapture> Captures) : BoundExpression(FunctionValueType)
+{
+    public override BoundKind Kind => BoundKind.FunctionValueExpression;
+}
+
+public sealed record BoundFunctionValueCallExpression(
+    BoundExpression Target,
+    FunctionValueTypeSymbol FunctionValueType,
+    ImmutableArray<BoundExpression> Arguments) : BoundExpression(FunctionValueType.ReturnType)
+{
+    public override BoundKind Kind => BoundKind.FunctionValueCallExpression;
+}
+
+public sealed record BoundFunctionValueDestructionExpression(
+    FunctionValueTypeSymbol FunctionValueType) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.FunctionValueDestructionExpression;
+}
+
 public sealed record BoundIndirectCallExpression(
     BoundExpression Target,
     FunctionPointerTypeSymbol FunctionPointerType,
@@ -420,6 +447,26 @@ public sealed record BoundIndirectCallExpression(
 }
 
 public sealed record BoundErrorExpression() : BoundExpression(BuiltinTypes.Error)
+{
+    public override BoundKind Kind => BoundKind.ErrorExpression;
+}
+
+/// <summary>
+/// A call argument lambda whose target type is intentionally deferred until
+/// overload applicability has been evaluated for each candidate.
+/// </summary>
+internal sealed record BoundUnboundLambdaExpression(
+    LambdaExpressionSyntax Syntax) : BoundExpression(BuiltinTypes.Error)
+{
+    public override BoundKind Kind => BoundKind.ErrorExpression;
+}
+
+/// <summary>
+/// A function-name argument whose overload and representation are deferred until
+/// the receiving callable or conversion parameter type is known.
+/// </summary>
+internal sealed record BoundUnboundFunctionExpression(
+    ExpressionSyntax Syntax) : BoundExpression(BuiltinTypes.Error)
 {
     public override BoundKind Kind => BoundKind.ErrorExpression;
 }

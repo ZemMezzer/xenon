@@ -318,7 +318,7 @@ public sealed class SemanticModel
             }
         }
         FunctionSymbol? function = scopes.FirstOrDefault()?.Function;
-        DeclaredTypeSymbol? containingType = function?.ContainingType ?? _semanticInfo.TypeRegions
+        DeclaredTypeSymbol? containingType = function is not null ? function.ContainingType : _semanticInfo.TypeRegions
             .Where(region => ReferenceEquals(region.Source, source) && Contains(region.Span, position, region.IncludeEnd))
             .OrderBy(region => region.Span.Length).Select(region => region.Type).FirstOrDefault();
         if (containingType is not null)
@@ -634,9 +634,16 @@ public sealed class SemanticModel
         throw new InvalidOperationException("Use Compilation.GetSemanticModel(tree) or LookupSymbols(tree, position) for a multi-file compilation.");
     }
 
-    private PositionScope[] GetScopes(SourceText source, int position) => _semanticInfo.Scopes
-        .Where(scope => ReferenceEquals(scope.Source, source) && Contains(scope.Span, position, scope.IncludeEnd))
-        .OrderBy(scope => scope.Span.Length).ToArray();
+    private PositionScope[] GetScopes(SourceText source, int position)
+    {
+        PositionScope[] scopes = _semanticInfo.Scopes
+            .Where(scope => ReferenceEquals(scope.Source, source) && Contains(scope.Span, position, scope.IncludeEnd))
+            .OrderBy(scope => scope.Span.Length).ToArray();
+        // Nested blocks share locals; anonymous functions have a separate lexical scope.
+        return scopes.FirstOrDefault()?.Function is { } function
+            ? scopes.Where(scope => ReferenceEquals(scope.Function, function)).ToArray()
+            : scopes;
+    }
 
     private void EnsureTree(SyntaxTree tree)
     {
@@ -669,6 +676,7 @@ public sealed class SemanticModel
         SyntaxToken? token = syntax switch
         {
             NameExpressionSyntax value => value.IdentifierToken,
+            LambdaCaptureSyntax value => value.IdentifierToken,
             MemberAccessExpressionSyntax value => value.MemberToken,
             NamedTypeSyntax value => value.NameToken,
             UnaryTypeSyntax value => value.NameToken,

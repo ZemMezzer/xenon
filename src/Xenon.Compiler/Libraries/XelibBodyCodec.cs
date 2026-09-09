@@ -33,12 +33,12 @@ public static class XelibBodyCodec
                     value.Variable.Destructor is { } localDestructor)
                     addSymbol(localDestructor);
                 break;
-            case BoundVariableExpression value when value.Variable is not LocalVariableSymbol:
+            case BoundVariableExpression value when value.Variable is not (LocalVariableSymbol or CaptureVariableSymbol):
                 addSymbol(value.Variable);
                 break;
             case BoundThisExpression value: addType(value.ContainingType); break;
             case BoundMoveExpression value:
-                if (value.TrackedVariable is not null && value.TrackedVariable is not LocalVariableSymbol)
+                if (value.TrackedVariable is not null && value.TrackedVariable is not (LocalVariableSymbol or CaptureVariableSymbol))
                     addSymbol(value.TrackedVariable);
                 foreach (FieldSymbol trackedField in value.TrackedPath) addSymbol(trackedField);
                 break;
@@ -92,7 +92,7 @@ public static class XelibBodyCodec
             case BoundExplicitDestructExpression value:
                 addType(value.ValueType);
                 if (value.Destructor is { } explicitDestructor) addSymbol(explicitDestructor);
-                if (value.TrackedVariable is not null && value.TrackedVariable is not LocalVariableSymbol)
+                if (value.TrackedVariable is not null && value.TrackedVariable is not (LocalVariableSymbol or CaptureVariableSymbol))
                     addSymbol(value.TrackedVariable);
                 foreach (FieldSymbol trackedField in value.TrackedPath) addSymbol(trackedField);
                 break;
@@ -115,6 +115,16 @@ public static class XelibBodyCodec
             case BoundFunctionAddressExpression value:
                 addSymbol(value.Function); addType(value.FunctionPointerType); break;
             case BoundIndirectCallExpression value: addType(value.FunctionPointerType); break;
+            case BoundFunctionValueExpression value:
+                addSymbol(value.InvokeFunction); addType(value.FunctionValueType);
+                foreach (BoundFunctionValueCapture capture in value.Captures)
+                {
+                    addType(capture.Variable.Type);
+                    addType(capture.Variable.StorageType);
+                }
+                break;
+            case BoundFunctionValueCallExpression value: addType(value.FunctionValueType); break;
+            case BoundFunctionValueDestructionExpression value: addType(value.FunctionValueType); break;
         }
         foreach (BoundNode child in Children(node)) Collect(child, addType, addSymbol, visitNode);
     }
@@ -160,14 +170,14 @@ public static class XelibBodyCodec
             };
             locals.Add(record.Id, local);
         }
-        return DecodeNode(root, locals, type, symbol, deferredGenericMethod,
+        return DecodeNode(root, function, locals, type, symbol, deferredGenericMethod,
             deferredGenericOperation) as BoundBlockStatement ??
             throw Invalid("function root is not a block");
     }
 
     public static BoundExpression DecodeExpression(XelibBodyNode root,
         Func<int, TypeSymbol> type, Func<XelibSymbolReference, Symbol> symbol) =>
-        DecodeNode(root, new Dictionary<int, LocalVariableSymbol>(), type, symbol, null, null)
+        DecodeNode(root, null, new Dictionary<int, LocalVariableSymbol>(), type, symbol, null, null)
             as BoundExpression ?? throw Invalid("generic constant payload is not an expression");
 
     private static void CollectLocals(BoundNode node, Dictionary<LocalVariableSymbol, int> locals)
@@ -264,6 +274,9 @@ public static class XelibBodyCodec
                         XelibIrBuilder.Constant(value.Value, value.Type) };
             case BoundVariableExpression value:
             {
+                if (value.Variable is CaptureVariableSymbol capture)
+                    return new XelibBodyNode { Opcode = XelibBodyOpcode.Variable,
+                        TypeId = typeId(value.Type), Flag3 = true, Integer = capture.Ordinal };
                 var reference = Variable(value.Variable);
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Variable, TypeId = typeId(value.Type),
                     LocalId = reference.Local, Symbol = reference.Symbol };
@@ -461,6 +474,17 @@ public static class XelibBodyCodec
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.IndirectCall,
                     TypeId = typeId(value.Type), AuxTypeId = typeId(value.FunctionPointerType),
                     Children = [E(value.Target), .. value.Arguments.Select(E)] };
+            case BoundFunctionValueExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.FunctionValue,
+                    TypeId = typeId(value.FunctionValueType), Symbol = symbol(value.InvokeFunction),
+                    Children = value.Captures.Select(capture => E(capture.Initializer)).ToImmutableArray() };
+            case BoundFunctionValueCallExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.FunctionValueCall,
+                    TypeId = typeId(value.Type), AuxTypeId = typeId(value.FunctionValueType),
+                    Children = [E(value.Target), .. value.Arguments.Select(E)] };
+            case BoundFunctionValueDestructionExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.FunctionValueDestruction,
+                    TypeId = typeId(value.FunctionValueType) };
             case BoundDeferredConstantExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.DeferredConstant, TypeId = typeId(value.Type) };
             case BoundErrorExpression:
@@ -471,6 +495,7 @@ public static class XelibBodyCodec
     }
 
     private static BoundNode DecodeNode(XelibBodyNode node,
+        FunctionSymbol? currentFunction,
         IReadOnlyDictionary<int, LocalVariableSymbol> locals, Func<int, TypeSymbol> type,
         Func<XelibSymbolReference, Symbol> symbol,
         Func<BoundExpression, Symbol, ImmutableArray<BoundExpression>, bool, BoundExpression>?
@@ -479,7 +504,7 @@ public static class XelibBodyCodec
             ImmutableArray<BoundExpression>, BoundExpression?, SyntaxKind, bool, TypeSymbol,
             ImmutableArray<TypeSymbol>, BoundExpression>? deferredGenericOperation)
     {
-        BoundNode D(int index) => DecodeNode(node.Children[index], locals, type, symbol,
+        BoundNode D(int index) => DecodeNode(node.Children[index], currentFunction, locals, type, symbol,
             deferredGenericMethod, deferredGenericOperation);
         BoundExpression E(int index) => D(index) as BoundExpression ?? throw Invalid("expected expression child");
         BoundStatement S(int index) => D(index) as BoundStatement ?? throw Invalid("expected statement child");
@@ -522,11 +547,11 @@ public static class XelibBodyCodec
                 {
                     if (section.Opcode != XelibBodyOpcode.SwitchSection) throw Invalid("expected switch section");
                     BoundExpression? value = section.Flag1
-                        ? DecodeNode(section.Children[0], locals, type, symbol,
+                        ? DecodeNode(section.Children[0], currentFunction, locals, type, symbol,
                             deferredGenericMethod, deferredGenericOperation) as BoundExpression
                         : null;
                     int bodyIndex = section.Flag1 ? 1 : 0;
-                    BoundBlockStatement body = DecodeNode(section.Children[bodyIndex], locals, type, symbol,
+                    BoundBlockStatement body = DecodeNode(section.Children[bodyIndex], currentFunction, locals, type, symbol,
                         deferredGenericMethod, deferredGenericOperation)
                         as BoundBlockStatement ?? throw Invalid("switch section body is not a block");
                     return new BoundSwitchSection(value, body);
@@ -545,7 +570,7 @@ public static class XelibBodyCodec
                     XelibBodyNode encoded = node.Children[index + 1];
                     if (encoded.Opcode != XelibBodyOpcode.Catch || encoded.Children.Length != 1)
                         throw Invalid("invalid catch node");
-                    BoundBlockStatement handlerBody = DecodeNode(encoded.Children[0], locals, type, symbol,
+                    BoundBlockStatement handlerBody = DecodeNode(encoded.Children[0], currentFunction, locals, type, symbol,
                         deferredGenericMethod, deferredGenericOperation) as BoundBlockStatement ??
                         throw Invalid("catch body is not a block");
                     handlers.Add(new BoundCatchClause(
@@ -565,7 +590,11 @@ public static class XelibBodyCodec
                 return new BoundThrowStatement(node.Flag1 ? E(0) : null);
             case XelibBodyOpcode.Literal: return new BoundLiteralExpression(
                 ParseConstant(node.Constant, type(node.TypeId)), type(node.TypeId));
-            case XelibBodyOpcode.Variable: return new BoundVariableExpression(Variable(node.LocalId, node.Symbol));
+            case XelibBodyOpcode.Variable:
+                return new BoundVariableExpression(node.Flag3
+                    ? currentFunction?.LambdaCaptures.FirstOrDefault(capture => capture.Ordinal == node.Integer) ??
+                      throw Invalid($"unknown capture ordinal {node.Integer}")
+                    : Variable(node.LocalId, node.Symbol));
             case XelibBodyOpcode.This: return new BoundThisExpression(
                 (DeclaredTypeSymbol)type(node.AuxTypeId), (PointerTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.Unary: return new BoundUnaryExpression(Map(node.Operator), E(0),
@@ -590,7 +619,7 @@ public static class XelibBodyCodec
                 return new BoundFullExpression(expression, node.Temporaries.Select(item =>
                     new BoundFullExpressionTemporary(item.Path is { } path
                         ? ResolveTemporaryPath(expression, path)
-                        : (BoundExpression)DecodeNode(item.Value, locals, type, symbol, deferredGenericMethod, deferredGenericOperation),
+                        : (BoundExpression)DecodeNode(item.Value, currentFunction, locals, type, symbol, deferredGenericMethod, deferredGenericOperation),
                         (FunctionSymbol)symbol(item.Destructor))).ToImmutableArray());
             }
             case XelibBodyOpcode.Binary: return new BoundBinaryExpression(E(0), Map(node.Operator), E(1), type(node.TypeId));
@@ -723,6 +752,21 @@ public static class XelibBodyCodec
             case XelibBodyOpcode.IndirectCall: return new BoundIndirectCallExpression(E(0),
                 (FunctionPointerTypeSymbol)type(node.AuxTypeId),
                 node.Children.Skip(1).Select((_, i) => E(i + 1)).ToImmutableArray());
+            case XelibBodyOpcode.FunctionValue:
+            {
+                FunctionSymbol invoke = F(node.Symbol);
+                if (invoke.LambdaCaptures.Length != node.Children.Length)
+                    throw Invalid("function value capture count does not match invoke metadata");
+                return new BoundFunctionValueExpression(invoke,
+                    (FunctionValueTypeSymbol)type(node.TypeId),
+                    invoke.LambdaCaptures.Select((capture, index) =>
+                        new BoundFunctionValueCapture(capture, E(index))).ToImmutableArray());
+            }
+            case XelibBodyOpcode.FunctionValueCall: return new BoundFunctionValueCallExpression(E(0),
+                (FunctionValueTypeSymbol)type(node.AuxTypeId),
+                node.Children.Skip(1).Select((_, i) => E(i + 1)).ToImmutableArray());
+            case XelibBodyOpcode.FunctionValueDestruction: return new BoundFunctionValueDestructionExpression(
+                (FunctionValueTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.DeferredConstant: return new BoundDeferredConstantExpression(type(node.TypeId));
             default: throw Invalid($"unknown body opcode {(ushort)node.Opcode}");
         }
@@ -813,6 +857,8 @@ public static class XelibBodyCodec
         BoundFreeExpression value => [value.Pointer],
         BoundCallExpression value => value.Arguments,
         BoundIndirectCallExpression value => new[] { value.Target }.Concat(value.Arguments),
+        BoundFunctionValueExpression value => value.Captures.Select(capture => (BoundNode)capture.Initializer),
+        BoundFunctionValueCallExpression value => new[] { value.Target }.Concat(value.Arguments),
         _ => [],
     };
 
@@ -834,7 +880,7 @@ public static class XelibBodyCodec
             XelibBodyOpcode.CompareExchange => 3,
             XelibBodyOpcode.Switch or XelibBodyOpcode.MethodCall or XelibBodyOpcode.DeferredGenericMethodCall or
             XelibBodyOpcode.InterfaceMethodCall or
-            XelibBodyOpcode.IndirectCall => 1,
+            XelibBodyOpcode.IndirectCall or XelibBodyOpcode.FunctionValueCall => 1,
             _ => 0,
         };
         if (node.Children.Length < minimum) throw Invalid($"opcode '{node.Opcode}' has too few children");

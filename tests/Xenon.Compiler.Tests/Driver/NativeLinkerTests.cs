@@ -6048,6 +6048,24 @@ public sealed class NativeLinkerTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void Linker_TrapsEmptyFunctionValues(int optimization)
+    {
+        int exitCode = RunIterationFourProgram("""
+            struct Holder { public function void() Callback; }
+            int Main()
+            {
+                Holder holder = Holder();
+                holder.Callback();
+                return 42;
+            }
+            """, optimization);
+        Assert.NotEqual(42, exitCode);
+        Assert.NotEqual(0, exitCode);
+    }
+
+    [Theory]
     [InlineData("IA, IB", 0)]
     [InlineData("IB, IA", 3)]
     public void Linker_ResolvesInheritedInterfaceOverloads(string bases, int optimization)

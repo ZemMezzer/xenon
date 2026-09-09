@@ -2,6 +2,44 @@ using System.Collections.Immutable;
 
 namespace Xenon.Compiler.Syntax;
 
+public enum LambdaCaptureKind
+{
+    Value,
+    MutableBorrow,
+    ReadonlyBorrow,
+    Move,
+}
+
+public sealed record LambdaCaptureSyntax(
+    SyntaxToken? ReadonlyKeyword,
+    SyntaxToken? AmpersandToken,
+    SyntaxToken? MoveKeyword,
+    SyntaxToken IdentifierToken) : SyntaxNode
+{
+    public override SyntaxKind Kind => SyntaxKind.LambdaCapture;
+    public LambdaCaptureKind CaptureKind => MoveKeyword is not null ? LambdaCaptureKind.Move :
+        AmpersandToken is not null && ReadonlyKeyword is not null ? LambdaCaptureKind.ReadonlyBorrow :
+        AmpersandToken is not null ? LambdaCaptureKind.MutableBorrow : LambdaCaptureKind.Value;
+}
+
+public sealed record LambdaExpressionSyntax(
+    SyntaxToken? OpenBracketToken,
+    ImmutableArray<LambdaCaptureSyntax> Captures,
+    ImmutableArray<SyntaxToken> CaptureCommaTokens,
+    SyntaxToken? CloseBracketToken,
+    SyntaxToken? FunctionKeyword,
+    TypeSyntax? ExplicitReturnType,
+    SyntaxToken OpenParenthesisToken,
+    ImmutableArray<ParameterSyntax> Parameters,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken CloseParenthesisToken,
+    SyntaxToken? FatArrowToken,
+    BlockStatementSyntax Body) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.LambdaExpression;
+    public SyntaxToken IntroducerToken => FunctionKeyword ?? OpenBracketToken ?? OpenParenthesisToken;
+}
+
 public sealed record MissingExpressionSyntax(SyntaxToken MissingToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.MissingExpression;

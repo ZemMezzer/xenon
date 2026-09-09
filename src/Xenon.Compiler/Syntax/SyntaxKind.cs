@@ -22,6 +22,7 @@ public enum SyntaxKind
     ColonToken,
     DotToken,
     ArrowToken,
+    FatArrowToken,
     CompareExchangeArrowToken,
     SwapToken,
 
@@ -165,6 +166,7 @@ public enum SyntaxKind
     NamedType,
     PointerType,
     FunctionPointerType,
+    FunctionValueType,
     ReferenceType,
     ArrayType,
     QualifiedType,
@@ -203,4 +205,6 @@ public enum SyntaxKind
     TypeLayoutExpression,
     CastExpression,
     MissingExpression,
+    LambdaExpression,
+    LambdaCapture,
 }

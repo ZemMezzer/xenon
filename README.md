@@ -19,6 +19,7 @@ The repository contains the compiler, LLVM code generator, build driver, project
 - multi-project builds through `.xeproj` files and project references;
 - debug and release profiles, target triples, LLVM IR emission, and object-file emission;
 - editor tooling through the built-in Language Server Protocol implementation.
+- first-class function values, explicit capture lists, ownership-aware closures, and raw function pointers for native callbacks.
 
 ## Quick start
 

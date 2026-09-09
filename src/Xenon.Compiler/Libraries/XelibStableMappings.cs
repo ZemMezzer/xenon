@@ -1,5 +1,6 @@
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Libraries;
 
@@ -37,6 +38,7 @@ public static class XelibStableMappings
         FunctionKind.DestructorGlue => XelibFunctionKind.DestructorGlue,
         FunctionKind.OwnershipDestructor => XelibFunctionKind.OwnershipDestructor,
         FunctionKind.StorageDestructor => XelibFunctionKind.StorageDestructor,
+        FunctionKind.FunctionValueDestructor => XelibFunctionKind.FunctionValueDestructor,
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 
@@ -51,6 +53,25 @@ public static class XelibStableMappings
         XelibFunctionKind.DestructorGlue => FunctionKind.DestructorGlue,
         XelibFunctionKind.OwnershipDestructor => FunctionKind.OwnershipDestructor,
         XelibFunctionKind.StorageDestructor => FunctionKind.StorageDestructor,
+        XelibFunctionKind.FunctionValueDestructor => FunctionKind.FunctionValueDestructor,
+        _ => throw Invalid(nameof(value), value),
+    };
+
+    public static XelibCaptureKind ToXelib(LambdaCaptureKind value) => value switch
+    {
+        LambdaCaptureKind.Value => XelibCaptureKind.Value,
+        LambdaCaptureKind.MutableBorrow => XelibCaptureKind.MutableBorrow,
+        LambdaCaptureKind.ReadonlyBorrow => XelibCaptureKind.ReadonlyBorrow,
+        LambdaCaptureKind.Move => XelibCaptureKind.Move,
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    public static LambdaCaptureKind FromXelib(XelibCaptureKind value) => value switch
+    {
+        XelibCaptureKind.Value => LambdaCaptureKind.Value,
+        XelibCaptureKind.MutableBorrow => LambdaCaptureKind.MutableBorrow,
+        XelibCaptureKind.ReadonlyBorrow => LambdaCaptureKind.ReadonlyBorrow,
+        XelibCaptureKind.Move => LambdaCaptureKind.Move,
         _ => throw Invalid(nameof(value), value),
     };
 

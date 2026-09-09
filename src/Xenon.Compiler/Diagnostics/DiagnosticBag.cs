@@ -18,11 +18,27 @@ public sealed class DiagnosticBag : IReadOnlyCollection<Diagnostic>
 
     public void Report(TextLocation location, string message, string id,
         IEnumerable<RelatedDiagnosticLocation>? relatedLocations = null) =>
-        _diagnostics.Add(new Diagnostic(DiagnosticSeverity.Error, message, location)
+        _ = ReportDiagnostic(location, message, id, relatedLocations);
+
+    internal Diagnostic ReportDiagnostic(TextLocation location, string message, string id,
+        IEnumerable<RelatedDiagnosticLocation>? relatedLocations = null)
+    {
+        var diagnostic = new Diagnostic(DiagnosticSeverity.Error, message, location)
         {
             Id = id,
             RelatedLocations = relatedLocations?.ToImmutableArray() ?? [],
-        });
+        };
+        _diagnostics.Add(diagnostic);
+        return diagnostic;
+    }
+
+    internal bool Remove(Diagnostic diagnostic)
+    {
+        int index = _diagnostics.FindIndex(candidate => ReferenceEquals(candidate, diagnostic));
+        if (index < 0) return false;
+        _diagnostics.RemoveAt(index);
+        return true;
+    }
 
     public void ReportInvalidCharacter(TextLocation location, char character) =>
         Report(location, $"invalid character '{character}'", DiagnosticIds.InvalidCharacter);

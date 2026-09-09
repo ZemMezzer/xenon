@@ -164,6 +164,7 @@ internal sealed class SemanticAnalyzer
         ValidateCallableMoveEffects();
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
+        functions.AddRange(_semanticInfo.LambdaFunctions);
         AddGeneratedDestructorFunctions(functions);
         ValidateRawFunctionPointerSignatures();
 
@@ -404,6 +405,19 @@ internal sealed class SemanticAnalyzer
             functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
                 new BoundExpressionStatement(new BoundStorageDestructionExpression(
                     storage, TypeFacts.GetCompleteDestructor(storage.ElementType))),
+            ])));
+        }
+
+        foreach (FunctionValueTypeSymbol functionValue in _typeFactory.FunctionValueTypes)
+        {
+            _typeFactory.EnsureFunctionValueDestructor(functionValue, _globalNamespace,
+                SymbolOrigin.CompilerGenerated);
+            if (GenericTypeFacts.ContainsGenericParameter(functionValue) ||
+                functionValue.CompleteDestructor is not { } destructor ||
+                !existing.Add(destructor))
+                continue;
+            functions.Add(new BoundFunction(destructor, new BoundBlockStatement([
+                new BoundExpressionStatement(new BoundFunctionValueDestructionExpression(functionValue)),
             ])));
         }
     }
@@ -3183,6 +3197,13 @@ internal sealed class SemanticAnalyzer
                 $"external ABI does not support ownership type '{returnOwnership.OwnershipKind}'; use a raw pointer instead",
                 DiagnosticIds.UnsupportedNativeOwnershipType);
         }
+        else if (function.ReturnType is FunctionValueTypeSymbol)
+        {
+            _diagnostics.Report(
+                declaration.ReturnType.NameToken.Location,
+                $"external ABI does not support Xenon function value '{function.ReturnType.ToDisplayString()}'; use a raw function pointer instead",
+                DiagnosticIds.UnsupportedNativeFunctionValue);
+        }
 
         if (TypeFacts.ExposesAtomicStorageToNativeAbi(function.ReturnType))
         {
@@ -3226,6 +3247,13 @@ internal sealed class SemanticAnalyzer
                     declaration.Parameters[index].Type.NameToken.Location,
                     $"external ABI does not support ownership type '{parameterOwnership.OwnershipKind}'; use a raw pointer instead",
                     DiagnosticIds.UnsupportedNativeOwnershipType);
+            }
+            else if (parameterType is FunctionValueTypeSymbol)
+            {
+                _diagnostics.Report(
+                    declaration.Parameters[index].Type.NameToken.Location,
+                    $"external ABI does not support Xenon function value '{parameterType.ToDisplayString()}'; use a raw function pointer instead",
+                    DiagnosticIds.UnsupportedNativeFunctionValue);
             }
             else if (TypeFacts.ExposesAtomicStorageToNativeAbi(parameterType))
             {
