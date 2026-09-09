@@ -234,4 +234,8 @@ public static class DiagnosticIds
     public const string InvalidOperatorDeclaration = "XE2272";
     public const string InvalidConversionDeclaration = "XE2273";
     public const string AmbiguousConversion = "XE2274";
+    public const string UnsupportedLambdaContext = "XE2275";
+    public const string LambdaCaptureNotSupported = "XE2276";
+    public const string UnsupportedNativeFunctionValue = "XE2277";
+    public const string InvalidLambdaCapture = "XE2278";
 }

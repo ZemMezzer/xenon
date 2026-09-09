@@ -20,6 +20,7 @@ internal static class TypeSignature
         DeclaredTypeSymbol declared => $"{declared.DeclarationKind}({declared.FullName})",
         PointerTypeSymbol pointer => $"ptr{(pointer.IsReadonly ? "readonly" : "")}({Get(pointer.ElementType, genericPositions)})",
         FunctionPointerTypeSymbol function => $"fn({Get(function.ReturnType, genericPositions)};{string.Join(",", function.ParameterTypes.Select(parameter => Get(parameter, genericPositions)))})",
+        FunctionValueTypeSymbol function => $"function({Get(function.ReturnType, genericPositions)};{string.Join(",", function.ParameterTypes.Select(parameter => Get(parameter, genericPositions)))})",
         ReferenceTypeSymbol reference => $"ref{(reference.IsReadonly ? "readonly" : "")}({Get(reference.ElementType, genericPositions)})",
         ArrayTypeSymbol array => $"array{array.Rank}({Get(array.ElementType, genericPositions)})",
         AtomicTypeSymbol atomic => $"atomic({Get(atomic.ElementType, genericPositions)})",

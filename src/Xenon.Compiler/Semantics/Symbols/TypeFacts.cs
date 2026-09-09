@@ -89,7 +89,7 @@ public static class TypeFacts
             failure = new CopyabilityFailure(type, [], Copyability.NonCopyable);
             return Copyability.NonCopyable;
         }
-        if (type is SharedTypeSymbol or WeakTypeSymbol)
+        if (type is SharedTypeSymbol or WeakTypeSymbol or FunctionValueTypeSymbol)
             return Copyability.Copyable;
         if (type is StorageTypeSymbol or PinTypeSymbol)
         {
@@ -282,7 +282,7 @@ public static class TypeFacts
         if (type is AtomicTypeSymbol atomic) return RequiresDestruction(atomic.ElementType, visited);
         if (type is StorageTypeSymbol storage) return RequiresDestruction(storage.ElementType, visited);
         if (type is PinTypeSymbol pin) return RequiresDestruction(pin.ElementType, visited);
-        if (type is OwnershipTypeSymbol) return true;
+        if (type is OwnershipTypeSymbol or FunctionValueTypeSymbol) return true;
         if (type is not StructTypeSymbol structure || !visited.Add(type)) return false;
         return structure.Destructor is not null ||
             structure.BaseType is not null && RequiresDestruction(structure.BaseType, visited) ||
@@ -296,6 +296,7 @@ public static class TypeFacts
         SharedTypeSymbol shared => shared.CompleteDestructor,
         WeakTypeSymbol weak => weak.CompleteDestructor,
         StorageTypeSymbol storage => storage.CompleteDestructor,
+        FunctionValueTypeSymbol function => function.CompleteDestructor,
         PinTypeSymbol pin => GetCompleteDestructor(pin.ElementType),
         StructTypeSymbol structure => structure.CompleteDestructor,
         _ => null,

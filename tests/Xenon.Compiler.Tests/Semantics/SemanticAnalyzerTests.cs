@@ -5035,6 +5035,20 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
+    public void Analyzer_RejectsFirstClassFunctionValuesAcrossTheCAbi()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            extern function int(int) GetHandler();
+            extern void Register(function void(int) callback);
+            export function int(int) Echo(function int(int) callback) { return callback; }
+            """);
+
+        Assert.Equal(4, compilation.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.UnsupportedNativeFunctionValue));
+    }
+
+    [Fact]
     public void Analyzer_RejectsNonCAbiTypesInRawFunctionPointerSignaturesEverywhere()
     {
         Compilation compilation = CreateCompilation("""

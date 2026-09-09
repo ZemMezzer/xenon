@@ -38,6 +38,13 @@ internal sealed class FileSymbolScope
     internal void SetGenericStructSpecializer(GenericStructSpecializer specializer) =>
         GenericStructSpecializer = specializer;
 
+    internal FileSymbolScope WithGenericStructSpecializer(GenericStructSpecializer specializer)
+    {
+        FileSymbolScope scope = WithTypeParameters([]);
+        scope.GenericStructSpecializer = specializer;
+        return scope;
+    }
+
     internal IEnumerable<NamespaceSymbol> ImportedNamespaces => _importedNamespaces;
 
     internal IEnumerable<Symbol> GetFileSymbols() =>

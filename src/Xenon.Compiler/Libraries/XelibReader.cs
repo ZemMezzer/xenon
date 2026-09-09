@@ -72,7 +72,7 @@ public static class XelibReader
             if (!metadataOnly || !generics.IsEmpty)
             {
                 ImmutableArray<XelibBodyRecord> bodies = metadataOnly
-                    ? ReadGenericBodies(container, generics, path)
+                    ? ReadGenericBodies(container, generics, symbols, path)
                     : ReadSection<ImmutableArray<XelibBodyRecord>>(container, XelibSectionKind.Bodies, path);
                 reconstruction.ReconstructBodies(bodies, generics, includeOrdinaryBodies: !metadataOnly);
             }
@@ -91,7 +91,8 @@ public static class XelibReader
         XelibJson.Deserialize<T>(container.GetRequiredSection(kind).AsSpan(), path);
 
     private static ImmutableArray<XelibBodyRecord> ReadGenericBodies(XelibContainer container,
-        ImmutableArray<XelibGenericImplementation> generics, string? path)
+        ImmutableArray<XelibGenericImplementation> generics,
+        ImmutableArray<XelibSymbolRecord> symbols, string? path)
     {
         var requiredIds = generics.SelectMany(item =>
             (item.BodyId == 0 ? Enumerable.Empty<int>() : [item.BodyId])
@@ -113,8 +114,12 @@ public static class XelibReader
                 int id = ReadBodyId(ref header, path);
                 reader.Skip();
                 int length = checked((int)reader.BytesConsumed) - start;
-                if (requiredIds.Contains(id))
-                    result.Add(XelibJson.Deserialize<XelibBodyRecord>(bytes.Slice(start, length), path));
+                XelibBodyRecord record = XelibJson.Deserialize<XelibBodyRecord>(
+                    bytes.Slice(start, length), path);
+                if (requiredIds.Contains(id) || symbols.Any(symbol =>
+                        symbol.Id == record.FunctionSymbolId && symbol.Kind == XelibSymbolKind.Function &&
+                        (symbol.Flags & XelibSymbolFlags.Lambda) != 0))
+                    result.Add(record);
             }
             if (reader.TokenType != JsonTokenType.EndArray)
                 throw Invalid("unterminated body section", path);
@@ -241,6 +246,10 @@ internal sealed class XelibSemanticReconstruction
                 .GroupBy(id => id).Any(group => group.Key <= 0 || group.Count() != 1))
             throw XelibReader.Invalid("generic implementation records are invalid or unsupported", _path);
         var bodiesById = bodies.ToDictionary(item => item.Id);
+        var lambdaBodies = new Dictionary<FunctionSymbol, XelibBodyNode>(ReferenceEqualityComparer.Instance);
+        foreach (XelibBodyRecord item in bodies)
+            if (Symbol(item.FunctionSymbolId) is FunctionSymbol { IsLambda: true } lambda)
+                lambdaBodies.Add(lambda, item.Root);
         var genericBodyIds = generics.SelectMany(item =>
                 (item.BodyId == 0 ? Enumerable.Empty<int>() : [item.BodyId])
                 .Concat(StaticInitializers(item).Select(value => value.BodyId))).ToHashSet();
@@ -307,7 +316,7 @@ internal sealed class XelibSemanticReconstruction
                 }
                 implementations.AddStruct(structure, new LibraryGenericStructImplementation(
                     initializer, body?.Root, staticInitializers.ToImmutable(),
-                    constants.ToImmutable(), ResolveType, Resolve));
+                    constants.ToImmutable(), ResolveType, Resolve, lambdaBodies));
             }
             else
             {
@@ -316,7 +325,7 @@ internal sealed class XelibSemanticReconstruction
                     !definition.IsGenericDefinition || body.FunctionSymbolId != generic.DefinitionSymbolId)
                     throw XelibReader.Invalid("generic function implementation references an invalid definition", _path);
                 implementations.AddFunction(definition, new LibraryGenericFunctionImplementation(
-                    definition, body.Root, ResolveType, Resolve));
+                    definition, body.Root, ResolveType, Resolve, lambdaBodies));
             }
         }
         _genericImplementations = implementations.ToImmutable();
@@ -510,6 +519,13 @@ internal sealed class XelibSemanticReconstruction
             }
             created.HasStackArrays = Has(record, XelibSymbolFlags.HasStackArrays);
             created.HasScalarCleanup = Has(record, XelibSymbolFlags.HasScalarCleanup);
+            created.IsLambda = Has(record, XelibSymbolFlags.Lambda);
+            created.IsCapturingLambda = Has(record, XelibSymbolFlags.CapturingLambda);
+            created.LambdaCaptures = record.Captures.OrderBy(capture => capture.Ordinal)
+                .Select(capture => new CaptureVariableSymbol(capture.Name,
+                    ResolveType(capture.TypeId), ResolveType(capture.StorageTypeId),
+                    XelibStableMappings.FromXelib(capture.Kind), capture.Ordinal, created,
+                    Origin(record.Id))).ToImmutableArray();
             if (record.VTableSlot is { } slot) created.SetVTableSlot(slot);
             created.SetConstructorOverload(record.ConstructorOverload, record.ConstructorOverloadCount);
             created.SetReceiverMoveEffects(record.ReceiverMoveEffects.Select(item =>
@@ -614,8 +630,30 @@ internal sealed class XelibSemanticReconstruction
             else if (function.FunctionKind == FunctionKind.StorageDestructor &&
                      pointer.ElementType is StorageTypeSymbol storage)
                 storage.CompleteDestructor = function;
+            else if (function.FunctionKind == FunctionKind.FunctionValueDestructor &&
+                     pointer.ElementType is FunctionValueTypeSymbol functionValue)
+                functionValue.CompleteDestructor = function;
         }
+
+        // Open generic ownership/storage/function-value destructors have no portable body and
+        // are intentionally omitted from the library function table.  Keep their semantic
+        // destructor association nevertheless: specialization in a consuming compilation uses
+        // it to synthesize the concrete destructor that owns a substituted closure capture.
+        // Without this association a source-less shared<T> capture becomes shared<Resource>
+        // with no destructor and its final strong reference is leaked.
+        foreach (OwnershipTypeSymbol ownership in _typeFactory.OwnershipTypes)
+            _typeFactory.EnsureOwnershipDestructor(ownership, _globalNamespace,
+                GeneratedDestructorOrigin(ownership));
+        foreach (StorageTypeSymbol storage in _typeFactory.StorageTypes)
+            _typeFactory.EnsureStorageDestructor(storage, _globalNamespace,
+                GeneratedDestructorOrigin(storage));
+        foreach (FunctionValueTypeSymbol functionValue in _typeFactory.FunctionValueTypes)
+            _typeFactory.EnsureFunctionValueDestructor(functionValue, _globalNamespace,
+                GeneratedDestructorOrigin(functionValue));
     }
+
+    private SymbolOrigin GeneratedDestructorOrigin(TypeSymbol type) => SymbolOrigin.FromLibrary(
+        _manifest.ContentIdentity, $"generated-destructor:{TypeSignature.Get(type)}");
 
     private void CompleteConstraints()
     {
@@ -647,6 +685,8 @@ internal sealed class XelibSemanticReconstruction
             XelibTypeKind.Pointer => _typeFactory.PointerTo(ResolveType(record.ElementTypeId), record.IsReadonly),
             XelibTypeKind.Reference => _typeFactory.ReferenceTo(ResolveType(record.ElementTypeId), record.IsReadonly),
             XelibTypeKind.FunctionPointer => _typeFactory.FunctionPointer(ResolveType(record.ReturnTypeId),
+                record.ParameterTypeIds.Select(ResolveType)),
+            XelibTypeKind.FunctionValue => _typeFactory.FunctionValue(ResolveType(record.ReturnTypeId),
                 record.ParameterTypeIds.Select(ResolveType)),
             XelibTypeKind.Array => _typeFactory.ArrayOf(ResolveType(record.ElementTypeId), record.Rank),
             XelibTypeKind.Atomic => _typeFactory.AtomicOf(ResolveType(record.ElementTypeId)),

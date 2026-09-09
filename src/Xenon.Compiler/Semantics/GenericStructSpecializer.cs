@@ -35,18 +35,22 @@ internal sealed class GenericStructSpecializer
     private readonly Dictionary<StructTypeSymbol, GenericStructSpecializationState> _states = [];
     private readonly Dictionary<StructTypeSymbol, TextLocation> _originLocations = [];
     private readonly HashSet<StructTypeSymbol> _constantsCompleted = [];
+    private readonly HashSet<StructTypeSymbol> _invalidConstraintSpecializations = [];
+    private readonly bool _publishSpecializations;
     private bool _fieldsReady;
     private bool _membersReady;
     private bool _constantsReady;
 
     public GenericStructSpecializer(TypeFactory types, DiagnosticBag diagnostics,
         Action<StructTypeSymbol>? constantsCompletedCallback = null,
-        Func<NamespaceSymbol, NamespaceSymbol>? resolveNamespace = null)
+        Func<NamespaceSymbol, NamespaceSymbol>? resolveNamespace = null,
+        bool publishSpecializations = true)
     {
         _types = types;
         _diagnostics = diagnostics;
         _constantsCompletedCallback = constantsCompletedCallback;
         _resolveNamespace = resolveNamespace ?? (value => value);
+        _publishSpecializations = publishSpecializations;
     }
 
     public IEnumerable<StructTypeSymbol> Specializations => _cache.Values;
@@ -54,6 +58,52 @@ internal sealed class GenericStructSpecializer
     public int SpecializationCount => _cache.Count;
     public IEnumerable<SpecializedStructFunction> SpecializedFunctions => _specializedFunctions.Select(entry =>
         new SpecializedStructFunction(entry.Key.Definition, entry.Key.Owner, entry.Value));
+
+    internal GenericStructSpecializer CreateSpeculative(DiagnosticBag diagnostics)
+    {
+        var result = new GenericStructSpecializer(
+            _types, diagnostics, resolveNamespace: _resolveNamespace, publishSpecializations: false)
+        {
+            _fieldsReady = _fieldsReady,
+            _membersReady = _membersReady,
+            _constantsReady = _constantsReady,
+        };
+        foreach (var entry in _cache) result._cache.Add(entry.Key, entry.Value);
+        foreach (var entry in _substitutions) result._substitutions.Add(entry.Key, entry.Value);
+        foreach (var entry in _specializedFunctions) result._specializedFunctions.Add(entry.Key, entry.Value);
+        foreach (var entry in _states) result._states.Add(entry.Key, entry.Value);
+        foreach (var entry in _originLocations) result._originLocations.Add(entry.Key, entry.Value);
+        result._constantsCompleted.UnionWith(_constantsCompleted);
+        result._invalidConstraintSpecializations.UnionWith(_invalidConstraintSpecializations);
+        return result;
+    }
+
+    internal void MergeFrom(GenericStructSpecializer speculative)
+    {
+        GenericInstantiationKey[] newKeys = speculative._cache.Keys
+            .Where(key => !_cache.ContainsKey(key)).ToArray();
+        foreach (GenericInstantiationKey key in newKeys)
+        {
+            StructTypeSymbol specialization = speculative._cache[key];
+            _cache.Add(key, specialization);
+            _substitutions.Add(specialization, speculative._substitutions[specialization]);
+            _states.Add(specialization, speculative._states[specialization]);
+            _originLocations.Add(specialization, speculative._originLocations[specialization]);
+            if (speculative._constantsCompleted.Contains(specialization))
+            {
+                _constantsCompleted.Add(specialization);
+                _constantsCompletedCallback?.Invoke(specialization);
+            }
+            if (speculative._invalidConstraintSpecializations.Contains(specialization))
+                _invalidConstraintSpecializations.Add(specialization);
+            if (specialization.IsConcreteType &&
+                !speculative._invalidConstraintSpecializations.Contains(specialization))
+                specialization.ContainingNamespace.TryDeclareType(specialization);
+        }
+        foreach (var entry in speculative._specializedFunctions.Where(entry =>
+                     newKeys.Any(key => ReferenceEquals(speculative._cache[key], entry.Key.Owner))))
+            _specializedFunctions.TryAdd(entry.Key, entry.Value);
+    }
 
     internal FunctionSymbol GetFunctionDefinition(FunctionSymbol function)
     {
@@ -166,6 +216,14 @@ internal sealed class GenericStructSpecializer
         _substitutions[specialization];
 
     public GenericStructSpecializationState GetState(StructTypeSymbol specialization) => _states[specialization];
+
+    public bool AreConstraintsSatisfied(StructTypeSymbol specialization)
+    {
+        if (!_states.ContainsKey(specialization))
+            return true;
+        EnsureConstraintsValidated(specialization);
+        return !_invalidConstraintSpecializations.Contains(specialization);
+    }
 
     public TextLocation GetOriginLocation(StructTypeSymbol specialization) =>
         _originLocations.GetValueOrDefault(specialization, TextLocation.None);
@@ -442,8 +500,10 @@ internal sealed class GenericStructSpecializer
                     specialized.TypeArguments[index], validation),
                 DiagnosticIds.GenericConstraintNotSatisfied);
         }
-        if (isValid && specialized.IsConcreteType)
+        if (isValid && specialized.IsConcreteType && _publishSpecializations)
             specialized.ContainingNamespace.TryDeclareType(specialized);
+        if (!isValid)
+            _invalidConstraintSpecializations.Add(specialized);
         _states[specialized] = GenericStructSpecializationState.ConstraintsValidated;
     }
 
@@ -475,6 +535,9 @@ internal sealed class GenericStructSpecializer
         StructTypeSymbol { GenericDefinition: not null } constructed => SubstituteConstructed(constructed, substitutions, origin),
         PointerTypeSymbol pointer => _types.PointerTo(Substitute(pointer.ElementType, substitutions, origin), pointer.IsReadonly),
         FunctionPointerTypeSymbol function => _types.FunctionPointer(
+            Substitute(function.ReturnType, substitutions, origin),
+            function.ParameterTypes.Select(parameter => Substitute(parameter, substitutions, origin))),
+        FunctionValueTypeSymbol function => _types.FunctionValue(
             Substitute(function.ReturnType, substitutions, origin),
             function.ParameterTypes.Select(parameter => Substitute(parameter, substitutions, origin))),
         ReferenceTypeSymbol reference => _types.ReferenceTo(Substitute(reference.ElementType, substitutions, origin), reference.IsReadonly),

@@ -3091,6 +3091,99 @@ public sealed class XenonBuildDriverTests
         Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) + Environment.NewLine + app.Failure);
     }
 
+    [Fact]
+    public async Task SourceFreeXelibPreservesOwnedClosuresAndGenericFunctionValues()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("ClosureXelib", "xenon-library", """
+            namespace ClosureXelib;
+            struct State { public static int Destroyed; }
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; }
+                public void Use() { }
+                public ~Resource() { State.Destroyed++; }
+            }
+            public function int(int) MakeMultiplier(int factor)
+            {
+                return [factor](int value) => { return factor * value; };
+            }
+            public function void() MakeOwner(int value)
+            {
+                unique<Resource> resource = new Resource(value);
+                return [move resource]() => { resource->Use(); };
+            }
+            public int Destroyed() { return State.Destroyed; }
+            public T Apply<T>(T value, function T(T) callback) { return callback(value); }
+            public function int() Capture<T>(T ignored)
+            {
+                int value = 42;
+                return [value]() => { return value; };
+            }
+            public function void() Keep<T>(shared<T> value)
+            {
+                return [value]() => { };
+            }
+            public struct CallbackHolder<T>
+            {
+                public function int() Callback = []() => { return 42; };
+            }
+            public struct Action<T>
+            {
+                private function void(T) _callback;
+                public Action(function void(T) callback) { _callback = callback; }
+                public static Action<T> operator implicit(function void(T) callback)
+                {
+                    return Action<T>(callback);
+                }
+                public void Invoke(T value) { _callback(value); }
+            }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "ClosureXelibApp", """
+            using ClosureXelib;
+            namespace ClosureXelibApp;
+            struct ConsumerState { public static int Destroyed; }
+            struct ConsumerResource { public ~ConsumerResource() { ConsumerState.Destroyed++; } }
+            void Handle(int value) { }
+            int Main()
+            {
+                function int(int) multiplier = MakeMultiplier(10);
+                if (multiplier(5) != 50) return 1;
+                {
+                    function void() owner = MakeOwner(1);
+                    function void() copy = owner;
+                    owner();
+                    copy();
+                }
+                if (Destroyed() != 1) return 2;
+                if (Apply<int>(41, [](int value) => { return value + 1; }) != 42) return 3;
+                function int() captured = Capture<int>(42);
+                if (captured() != 42) return 4;
+                {
+                    function void() kept = Keep<ConsumerResource>(new ConsumerResource());
+                    kept();
+                }
+                if (ConsumerState.Destroyed != 1) return 5;
+                CallbackHolder<int> holder = CallbackHolder<int>();
+                if (holder.Callback() != 42) return 6;
+                Action<int> action = [](int value) => { };
+                Action<int> namedAction = Handle;
+                int offset = 10;
+                Action<int> capturingAction = [offset](int value) => { int result = value + offset; };
+                action.Invoke(1);
+                namedAction.Invoke(3);
+                capturingAction.Invoke(2);
+                return 42;
+            }
+            """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+    }
+
     private static async Task<XenonBuildResult> BuildXelibConsumerAsync(
         TemporaryProject directory, string libraryProject, string applicationName, string applicationSource)
     {

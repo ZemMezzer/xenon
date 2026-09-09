@@ -88,7 +88,9 @@ internal sealed class SourceGenericFunctionImplementation(
         specializedScope.SetGenericStructSpecializer(specializer.StructSpecializer);
         var binder = new FunctionBodyBinder(specialization, specializedScope, diagnostics, constants,
             semanticInfo, specializer, cancellationToken);
-        return binder.BindBody(body);
+        BoundBlockStatement result = binder.BindBody(body);
+        specializer.AddGeneratedFunctions(semanticInfo.LambdaFunctions);
+        return result;
     }
 }
 
@@ -131,6 +133,7 @@ internal sealed class SourceGenericStructImplementation(FileSymbolScope sourceSc
         }
         PortableInstanceInitializer = new BoundFunction(initializer,
             new BoundBlockStatement(binder.CreateInstanceFieldInitializerStatements(definition)));
+        functionSpecializer.AddGeneratedFunctions(semanticInfo.LambdaFunctions);
     }
 
     internal void CapturePortableStaticInitializers(StructTypeSymbol definition,
@@ -167,6 +170,7 @@ internal sealed class SourceGenericStructImplementation(FileSymbolScope sourceSc
                     new BoundBlockStatement([binder.CreateThreadLocalFieldInitializerStatement(field)])));
             }
         PortableStaticFieldInitializers = functions.ToImmutable();
+        functionSpecializer.AddGeneratedFunctions(semanticInfo.LambdaFunctions);
     }
 
     public BoundFunction? BindInstanceFieldInitializers(
@@ -271,7 +275,8 @@ internal sealed class LibraryGenericFunctionImplementation(
     FunctionSymbol definition,
     XelibBodyNode body,
     Func<int, TypeSymbol> resolveType,
-    Func<XelibSymbolReference, Symbol> resolveSymbol) : IGenericFunctionImplementation
+    Func<XelibSymbolReference, Symbol> resolveSymbol,
+    IReadOnlyDictionary<FunctionSymbol, XelibBodyNode> lambdaBodies) : IGenericFunctionImplementation
 {
     public BoundBlockStatement? PortableBody => null;
 
@@ -283,7 +288,9 @@ internal sealed class LibraryGenericFunctionImplementation(
         cancellationToken.ThrowIfCancellationRequested();
         TypeSymbol Type(int id) => specializer.StructSpecializer.Substitute(
             resolveType(id), substitutions);
-        Symbol Symbol(XelibSymbolReference reference) => MapSymbol(resolveSymbol(reference), specialization, specializer.StructSpecializer, substitutions);
+        var specializedLambdas = new Dictionary<FunctionSymbol, FunctionSymbol>(ReferenceEqualityComparer.Instance);
+        Symbol Symbol(XelibSymbolReference reference) => MapSymbol(resolveSymbol(reference), specialization,
+            specializer.StructSpecializer, substitutions, SpecializeLambda);
         return XelibBodyCodec.Decode(body, specialization, Type, Symbol,
             (receiver, requirement, arguments, isPointerAccess) =>
                 ResolveGenericMethod(receiver, requirement, arguments, isPointerAccess, specializer),
@@ -291,6 +298,46 @@ internal sealed class LibraryGenericFunctionImplementation(
                 resultType, typeArguments) => ResolveGenericOperation(operation, receiver,
                 requirement, arguments, value, operatorKind, isPointerAccess, resultType,
                 typeArguments, specializer));
+
+        FunctionSymbol SpecializeLambda(FunctionSymbol source)
+        {
+            if (specializedLambdas.TryGetValue(source, out FunctionSymbol? existing)) return existing;
+            ImmutableArray<ParameterSymbol> parameters = source.Parameters.Select(parameter =>
+                new ParameterSymbol(parameter.Name,
+                    specializer.StructSpecializer.Substitute(parameter.Type, substitutions),
+                    parameter.Ordinal, parameter.IsReadonly)).ToImmutableArray();
+            var created = new FunctionSymbol(
+                $"{source.Name}.{specialization.Name}", source.ContainingNamespace,
+                FunctionKind.Ordinary,
+                specializer.StructSpecializer.Substitute(source.ReturnType, substitutions),
+                parameters, Accessibility.Private, isDefinition: true,
+                origin: SymbolOrigin.CompilerGenerated)
+            {
+                IsLambda = true,
+                IsCapturingLambda = source.IsCapturingLambda,
+                HasStackArrays = source.HasStackArrays,
+                HasScalarCleanup = source.HasScalarCleanup,
+            };
+            specializedLambdas.Add(source, created);
+            created.LambdaCaptures = source.LambdaCaptures.Select(capture =>
+                new CaptureVariableSymbol(capture.Name,
+                    specializer.StructSpecializer.Substitute(capture.Type, substitutions),
+                    specializer.StructSpecializer.Substitute(capture.StorageType, substitutions),
+                    capture.CaptureKind, capture.Ordinal, created,
+                    SymbolOrigin.CompilerGenerated)).ToImmutableArray();
+            if (!lambdaBodies.TryGetValue(source, out XelibBodyNode? lambdaBody))
+                throw new XelibFormatException(XelibErrorCode.InvalidReference,
+                    $"generic closure invoke body '{source.Name}' is unavailable");
+            BoundBlockStatement boundBody = XelibBodyCodec.Decode(lambdaBody, created, Type, Symbol,
+                (receiver, requirement, arguments, isPointerAccess) =>
+                    ResolveGenericMethod(receiver, requirement, arguments, isPointerAccess, specializer),
+                (operation, receiver, requirement, arguments, value, operatorKind, isPointerAccess,
+                    resultType, typeArguments) => ResolveGenericOperation(operation, receiver,
+                    requirement, arguments, value, operatorKind, isPointerAccess, resultType,
+                    typeArguments, specializer));
+            specializer.AddGeneratedFunctions([new BoundFunction(created, boundBody)]);
+            return created;
+        }
     }
 
     private BoundExpression ResolveGenericOperation(BoundDeferredGenericOperationKind operation,
@@ -560,6 +607,10 @@ internal sealed class LibraryGenericFunctionImplementation(
             SubstituteTemplateSelf(function.ReturnType, template, receiverType, specializer),
             function.ParameterTypes.Select(parameter =>
                 SubstituteTemplateSelf(parameter, template, receiverType, specializer))),
+        FunctionValueTypeSymbol function => specializer.Types.FunctionValue(
+            SubstituteTemplateSelf(function.ReturnType, template, receiverType, specializer),
+            function.ParameterTypes.Select(parameter =>
+                SubstituteTemplateSelf(parameter, template, receiverType, specializer))),
         ArrayTypeSymbol array => specializer.Types.ArrayOf(
             SubstituteTemplateSelf(array.ElementType, template, receiverType, specializer), array.Rank),
         AtomicTypeSymbol atomic => specializer.Types.AtomicOf(
@@ -583,18 +634,21 @@ internal sealed class LibraryGenericFunctionImplementation(
     };
 
     private Symbol MapSymbol(Symbol source, FunctionSymbol specialization, GenericStructSpecializer structSpecializer,
-        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions)
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        Func<FunctionSymbol, FunctionSymbol> specializeLambda)
     {
         if (ReferenceEquals(source, definition)) return specialization;
         if (source is ParameterSymbol parameter && parameter.ContainingSymbol is FunctionSymbol owner)
         {
-            if (MapFunction(owner, specialization, structSpecializer, substitutions) is { } mapped &&
+            if (MapFunction(owner, specialization, structSpecializer, substitutions,
+                    specializeLambda) is { } mapped &&
                 parameter.Ordinal >= 0 && parameter.Ordinal < mapped.Parameters.Length)
                 return mapped.Parameters[parameter.Ordinal];
         }
 
         if (source is FunctionSymbol callable)
-            return MapFunction(callable, specialization, structSpecializer, substitutions) ?? source;
+            return MapFunction(callable, specialization, structSpecializer, substitutions,
+                specializeLambda) ?? source;
         StructTypeSymbol? definitionOwner = definition.ContainingStruct;
         StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
         if (ContainingStruct(source) is not { } sourceOwner) return source;
@@ -619,9 +673,11 @@ internal sealed class LibraryGenericFunctionImplementation(
     }
 
     private FunctionSymbol? MapFunction(FunctionSymbol source, FunctionSymbol specialization, GenericStructSpecializer structSpecializer,
-        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions)
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions,
+        Func<FunctionSymbol, FunctionSymbol> specializeLambda)
     {
         if (ReferenceEquals(source, definition)) return specialization;
+        if (source.IsLambda) return specializeLambda(source);
         StructTypeSymbol? definitionOwner = definition.ContainingStruct;
         StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
         if (source.ContainingStruct is not { } sourceOwner) return null;
@@ -659,7 +715,8 @@ internal sealed class LibraryGenericStructImplementation(
     ImmutableArray<(FieldSymbol Field, FunctionSymbol Definition, XelibBodyNode Body)> staticInitializers,
     ImmutableArray<(ConstantSymbol Constant, XelibBodyNode Expression)> constantExpressions,
     Func<int, TypeSymbol> resolveType,
-    Func<XelibSymbolReference, Symbol> resolveSymbol) : IGenericStructImplementation
+    Func<XelibSymbolReference, Symbol> resolveSymbol,
+    IReadOnlyDictionary<FunctionSymbol, XelibBodyNode> lambdaBodies) : IGenericStructImplementation
 {
     public BoundFunction? PortableInstanceInitializer => null;
     public ImmutableArray<BoundFunction> PortableStaticFieldInitializers => [];
@@ -675,7 +732,7 @@ internal sealed class LibraryGenericStructImplementation(
             SymbolOrigin.CompilerGenerated, Accessibility.Private);
         specialization.SetInstanceInitializer(initializer);
         var implementation = new LibraryGenericFunctionImplementation(initializerDefinition,
-            initializerBody, resolveType, resolveSymbol);
+            initializerBody, resolveType, resolveSymbol, lambdaBodies);
         return new BoundFunction(initializer, implementation.Bind(initializer, substitutions,
             diagnostics, constants, functionSpecializer, cancellationToken));
     }
@@ -695,7 +752,7 @@ internal sealed class LibraryGenericStructImplementation(
             if (field is null) continue;
             var initializer = new FunctionSymbol(field);
             var implementation = new LibraryGenericFunctionImplementation(entry.Definition,
-                entry.Body, resolveType, resolveSymbol);
+                entry.Body, resolveType, resolveSymbol, lambdaBodies);
             functions.Add(new BoundFunction(initializer, implementation.Bind(initializer,
                 substitutions, diagnostics, constants, functionSpecializer, cancellationToken)));
         }
