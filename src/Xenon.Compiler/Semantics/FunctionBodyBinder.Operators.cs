@@ -149,17 +149,70 @@ internal sealed partial class FunctionBodyBinder
         finally { _userConversionDepth--; }
     }
 
-    private FunctionValueTypeSymbol? GetLambdaUserConversionInput(TypeSymbol destination)
+    private (FunctionSymbol Function, int[] Costs)[] FindLambdaUserConversions(
+        LambdaExpressionSyntax syntax, TypeSymbol destination)
     {
-        if (_userConversionDepth != 0) return null;
+        if (_userConversionDepth != 0 || destination is ReferenceTypeSymbol { IsReadonly: false }) return [];
         TypeSymbol valueDestination = OperatorFacts.ValueType(destination);
-        FunctionValueTypeSymbol[] inputs = DiscoverOperators([valueDestination], OperatorKind.ImplicitConversion)
-            .Where(candidate => candidate.Parameters.Length == 1 &&
-                candidate.Parameters[0].Type is FunctionValueTypeSymbol &&
-                TypeFacts.GetImplicitConversionCost(valueDestination, candidate.ReturnType) is not null)
-            .Select(candidate => (FunctionValueTypeSymbol)candidate.Parameters[0].Type)
-            .DistinctBy(TypeSignature.Get)
+        var matches = GetLambdaUserConversionCandidates(valueDestination)
+            .Select(candidate => new
+            {
+                Function = candidate,
+                Input = GetLambdaArgumentConversionCost(candidate.Parameters[0].Type, syntax),
+                Output = TypeFacts.GetImplicitConversionCost(valueDestination, candidate.ReturnType),
+            })
+            .Where(candidate => candidate.Input.HasValue && candidate.Output.HasValue)
+            .Select(candidate => (candidate.Function,
+                Costs: new[] { candidate.Input!.Value, candidate.Output!.Value }))
             .ToArray();
-        return inputs.Length == 1 ? inputs[0] : null;
+        return matches.Where(candidate => !matches.Any(other =>
+            !ReferenceEquals(other.Function, candidate.Function) &&
+            IsBetterConversionSequence(other.Costs, candidate.Costs))).ToArray();
+    }
+
+    private FunctionSymbol[] GetLambdaUserConversionCandidates(TypeSymbol destination) =>
+        DiscoverOperators([destination], OperatorKind.ImplicitConversion)
+            .Distinct()
+            .Where(candidate => candidate.Parameters.Length == 1 &&
+                candidate.Parameters[0].Type is FunctionValueTypeSymbol or FunctionPointerTypeSymbol &&
+                TypeFacts.GetImplicitConversionCost(destination, candidate.ReturnType) is not null)
+            .ToArray();
+
+    private bool TryBindLambdaUserConversion(LambdaExpressionSyntax syntax, TypeSymbol destination,
+        out BoundExpression? result)
+    {
+        result = null;
+        (FunctionSymbol Function, int[] Costs)[] best = FindLambdaUserConversions(syntax, destination);
+        if (best.Length == 0)
+        {
+            TypeSymbol valueDestination = OperatorFacts.ValueType(destination);
+            if (GetLambdaUserConversionCandidates(valueDestination).Length == 0)
+                return false;
+            _diagnostics.Report(syntax.IntroducerToken.Location,
+                $"no implicit conversion to '{destination.ToDisplayString()}' accepts this lambda signature and body",
+                DiagnosticIds.TypeMismatch);
+            result = new BoundErrorExpression();
+            return true;
+        }
+        if (best.Length != 1)
+        {
+            _diagnostics.Report(syntax.IntroducerToken.Location,
+                $"conversion from lambda to '{destination.ToDisplayString()}' is ambiguous between: {FormatCallableCandidates(best.Select(match => match.Function))}",
+                DiagnosticIds.AmbiguousConversion);
+            result = new BoundErrorExpression();
+            return true;
+        }
+
+        FunctionSymbol selected = best[0].Function;
+        BoundExpression lambda = BindExpressionWithExpectedType(syntax, selected.Parameters[0].Type);
+        BoundExpression call = CreateOperatorCall(selected,
+            ValidateFunctionArguments(selected, [lambda], [syntax], syntax.IntroducerToken.Location));
+        _expressionLocations[call] = syntax.IntroducerToken.Location;
+        _semanticInfo.Conversions[syntax] = SymbolInfo.FromSymbol(selected);
+        _semanticInfo.ExplicitReferences.Add(new ResolvedSymbolReference(
+            selected, syntax.IntroducerToken.Location, ResolvedReferenceKind.Call));
+        RecordExceptionalFlow();
+        result = ContextualizeConversion(call, destination, syntax.IntroducerToken.Location);
+        return true;
     }
 }

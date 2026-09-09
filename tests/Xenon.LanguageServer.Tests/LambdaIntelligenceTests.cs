@@ -134,6 +134,47 @@ public sealed class LambdaIntelligenceTests
         Assert.Equal(4, definition[0].GetProperty("range").GetProperty("start").GetProperty("line").GetInt32());
     }
 
+    [Fact]
+    public async Task LambdaReturnBodySelectsOverloadWithoutPollutingEditorState()
+    {
+        const string source = """
+            namespace App;
+            struct String { }
+            void Run(function int(int) callback) { }
+            void Run(function String(int) callback) { }
+            void Test() {
+                Run((int value) => { return value + 1; });
+            }
+            """;
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("main.xe", source)).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        SourceText text = SourceText.From(source);
+        int runOffset = source.LastIndexOf("Run", StringComparison.Ordinal);
+        LspPosition runPosition = LspTextCoordinates.ToPosition(text, runOffset);
+        JsonElement hover = Result(await session.HandleRequestAsync("textDocument/hover",
+            LspTestProtocol.Json(new { textDocument = new { uri }, position = runPosition }), default));
+        Assert.Contains("Run(function int(int) callback)",
+            hover.GetProperty("contents").GetProperty("value").GetString());
+        JsonElement definition = Result(await session.HandleRequestAsync("textDocument/definition",
+            LspTestProtocol.Json(new { textDocument = new { uri }, position = runPosition }), default));
+        Assert.Single(definition.EnumerateArray());
+        Assert.Equal(2, definition[0].GetProperty("range").GetProperty("start").GetProperty("line").GetInt32());
+
+        int valueOffset = source.LastIndexOf("value", StringComparison.Ordinal);
+        LspPosition valuePosition = LspTextCoordinates.ToPosition(text, valueOffset);
+        JsonElement valueHover = Result(await session.HandleRequestAsync("textDocument/hover",
+            LspTestProtocol.Json(new { textDocument = new { uri }, position = valuePosition }), default));
+        Assert.Contains("int value", valueHover.GetProperty("contents").GetProperty("value").GetString());
+    }
+
     private static JsonElement Result(object? value) => JsonSerializer.SerializeToElement(value,
         new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 }

@@ -396,6 +396,13 @@ public sealed class Compilation
                     MarkType(functionPointer.ReturnType);
                     foreach (TypeSymbol parameter in functionPointer.ParameterTypes) MarkType(parameter);
                     break;
+                case FunctionValueTypeSymbol functionValue:
+                    MarkType(functionValue.ReturnType);
+                    foreach (TypeSymbol parameter in functionValue.ParameterTypes) MarkType(parameter);
+                    if ((added & TypeReachabilityReason.Destruct) != 0 &&
+                        functionValue.CompleteDestructor is { } functionValueDestructor)
+                        Select(functionValueDestructor);
+                    break;
             }
         }
 
