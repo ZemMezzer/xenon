@@ -78,6 +78,24 @@ public sealed class FunctionPointerTypeSymbol : TypeSymbol
         $"function {ReturnType.ToDisplayString(format)}({string.Join(", ", ParameterTypes.Select(type => type.ToDisplayString(format)))})*";
 }
 
+/// <summary>A Xenon-owned callable consisting of an invoke identity and optional shared environment.</summary>
+public sealed class FunctionValueTypeSymbol : TypeSymbol
+{
+    internal FunctionValueTypeSymbol(TypeSymbol returnType, ImmutableArray<TypeSymbol> parameterTypes)
+        : base(string.Empty)
+    {
+        ReturnType = returnType;
+        ParameterTypes = parameterTypes;
+    }
+
+    public TypeSymbol ReturnType { get; }
+    public ImmutableArray<TypeSymbol> ParameterTypes { get; }
+    public FunctionSymbol? CompleteDestructor { get; internal set; }
+    public override string Name => ToDisplayString();
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
+        $"function {ReturnType.ToDisplayString(format)}({string.Join(", ", ParameterTypes.Select(type => type.ToDisplayString(format)))})";
+}
+
 public sealed class ReferenceTypeSymbol : TypeSymbol
 {
     public override string Name => ToDisplayString();

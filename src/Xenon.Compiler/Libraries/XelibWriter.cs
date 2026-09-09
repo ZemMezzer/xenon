@@ -289,6 +289,8 @@ internal static class XelibExportKey
         ReferenceTypeSymbol value => $"ref:{value.IsReadonly}:{TypeKey(value.ElementType)}",
         FunctionPointerTypeSymbol value => $"fn:{TypeKey(value.ReturnType)}:" +
             string.Join(',', value.ParameterTypes.Select(TypeKey)),
+        FunctionValueTypeSymbol value => $"function:{TypeKey(value.ReturnType)}:" +
+            string.Join(',', value.ParameterTypes.Select(TypeKey)),
         ArrayTypeSymbol value => $"array:{value.Rank}:{TypeKey(value.ElementType)}",
         AtomicTypeSymbol value => $"atomic:{TypeKey(value.ElementType)}",
         UniqueTypeSymbol value => $"unique:{TypeKey(value.ElementType)}",
@@ -541,6 +543,11 @@ internal sealed class XelibIrBuilder
             case FunctionSymbol function:
                 AddType(function.ReturnType);
                 foreach (ParameterSymbol parameter in function.Parameters) AddType(parameter.Type);
+                foreach (CaptureVariableSymbol capture in function.LambdaCaptures)
+                {
+                    AddType(capture.Type);
+                    AddType(capture.StorageType);
+                }
                 break;
             case FieldSymbol field: AddType(field.Type); break;
             case VariableSymbol variable: AddType(variable.Type); break;
@@ -600,6 +607,10 @@ internal sealed class XelibIrBuilder
                 AddType(function.ReturnType);
                 foreach (TypeSymbol parameter in function.ParameterTypes) AddType(parameter);
                 break;
+            case FunctionValueTypeSymbol function:
+                AddType(function.ReturnType);
+                foreach (TypeSymbol parameter in function.ParameterTypes) AddType(parameter);
+                break;
             case ArrayTypeSymbol array: AddType(array.ElementType); break;
             case AtomicTypeSymbol atomic: AddType(atomic.ElementType); break;
             case OwnershipTypeSymbol ownership: AddType(ownership.ElementType); break;
@@ -632,6 +643,9 @@ internal sealed class XelibIrBuilder
             ReferenceTypeSymbol value => new(id, XelibTypeKind.Reference, ElementTypeId: TypeId(value.ElementType),
                 IsReadonly: value.IsReadonly),
             FunctionPointerTypeSymbol value => new(id, XelibTypeKind.FunctionPointer,
+                ReturnTypeId: TypeId(value.ReturnType),
+                ParameterTypeIds: value.ParameterTypes.Select(TypeId).ToImmutableArray()),
+            FunctionValueTypeSymbol value => new(id, XelibTypeKind.FunctionValue,
                 ReturnTypeId: TypeId(value.ReturnType),
                 ParameterTypeIds: value.ParameterTypes.Select(TypeId).ToImmutableArray()),
             ArrayTypeSymbol value => new(id, XelibTypeKind.Array, ElementTypeId: TypeId(value.ElementType),
@@ -705,6 +719,9 @@ internal sealed class XelibIrBuilder
                         new XelibReferenceReturnOriginRecord(XelibStableMappings.ToXelib(origin.Origin.Kind),
                             origin.Origin.ParameterOrdinal, origin.Origin.FieldOrdinals),
                         origin.IsReadonly)).ToImmutableArray(),
+                Captures = value.LambdaCaptures.Select(capture => new XelibCaptureRecord(
+                    capture.Name, TypeId(capture.Type), TypeId(capture.StorageType),
+                    XelibStableMappings.ToXelib(capture.CaptureKind), capture.Ordinal)).ToImmutableArray(),
             },
             FieldSymbol value => record with
             {
@@ -916,6 +933,8 @@ internal sealed class XelibIrBuilder
                 if (value.DelegatesToThisConstructor) result |= XelibSymbolFlags.DelegatesToThisConstructor;
                 if (value.HasStackArrays) result |= XelibSymbolFlags.HasStackArrays;
                 if (value.HasScalarCleanup) result |= XelibSymbolFlags.HasScalarCleanup;
+                if (value.IsLambda) result |= XelibSymbolFlags.Lambda;
+                if (value.IsCapturingLambda) result |= XelibSymbolFlags.CapturingLambda;
                 break;
             case FieldSymbol value:
                 if (value.IsPublic) result |= XelibSymbolFlags.Public;

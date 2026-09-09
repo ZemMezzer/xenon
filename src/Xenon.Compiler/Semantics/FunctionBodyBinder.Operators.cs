@@ -148,4 +148,18 @@ internal sealed partial class FunctionBodyBinder
         }
         finally { _userConversionDepth--; }
     }
+
+    private FunctionValueTypeSymbol? GetLambdaUserConversionInput(TypeSymbol destination)
+    {
+        if (_userConversionDepth != 0) return null;
+        TypeSymbol valueDestination = OperatorFacts.ValueType(destination);
+        FunctionValueTypeSymbol[] inputs = DiscoverOperators([valueDestination], OperatorKind.ImplicitConversion)
+            .Where(candidate => candidate.Parameters.Length == 1 &&
+                candidate.Parameters[0].Type is FunctionValueTypeSymbol &&
+                TypeFacts.GetImplicitConversionCost(valueDestination, candidate.ReturnType) is not null)
+            .Select(candidate => (FunctionValueTypeSymbol)candidate.Parameters[0].Type)
+            .DistinctBy(TypeSignature.Get)
+            .ToArray();
+        return inputs.Length == 1 ? inputs[0] : null;
+    }
 }

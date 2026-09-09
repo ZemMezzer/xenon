@@ -39,6 +39,7 @@ public enum XelibTypeKind : ushort
     Storage = 14,
     Pin = 15,
     Char = 16,
+    FunctionValue = 17,
 }
 
 public enum XelibSymbolKind : ushort
@@ -94,6 +95,8 @@ public enum XelibSymbolFlags : uint
     ReadonlyStruct = 1 << 15,
     StaticStruct = 1 << 16,
     Sealed = 1 << 17,
+    Lambda = 1 << 18,
+    CapturingLambda = 1 << 19,
 }
 
 public enum XelibFunctionKind : ushort
@@ -107,7 +110,23 @@ public enum XelibFunctionKind : ushort
     DestructorGlue = 7,
     OwnershipDestructor = 8,
     StorageDestructor = 9,
+    FunctionValueDestructor = 10,
 }
+
+public enum XelibCaptureKind : byte
+{
+    Value = 1,
+    MutableBorrow = 2,
+    ReadonlyBorrow = 3,
+    Move = 4,
+}
+
+public sealed record XelibCaptureRecord(
+    string Name,
+    int TypeId,
+    int StorageTypeId,
+    XelibCaptureKind Kind,
+    int Ordinal);
 
 public enum XelibAccessorKind : byte
 {
@@ -229,6 +248,7 @@ public sealed record XelibSymbolRecord
     public ImmutableArray<XelibReferenceReturnOriginRecord> ReferenceReturnOrigins { get; init; } = [];
     public ImmutableArray<XelibSharedReturnOriginRecord> SharedReturnOrigins { get; init; } = [];
     public ImmutableArray<XelibReferenceFieldOriginRecord> ReferenceFieldOrigins { get; init; } = [];
+    public ImmutableArray<XelibCaptureRecord> Captures { get; init; } = [];
 }
 
 public enum XelibConstantKind : byte
@@ -333,6 +353,9 @@ public enum XelibBodyOpcode : ushort
     DeferredGenericAllocation = 78,
     CapturedPlace = 79,
     DeferredOperatorCall = 80,
+    FunctionValue = 81,
+    FunctionValueCall = 82,
+    FunctionValueDestruction = 83,
 }
 
 public enum XelibOperator : ushort

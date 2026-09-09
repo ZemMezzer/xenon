@@ -110,6 +110,8 @@ public static class OperatorFacts
                 (LifetimeModifierTypeSymbol x, LifetimeModifierTypeSymbol y) => x.GetType() == y.GetType() && Same(x.ElementType, y.ElementType),
                 (FunctionPointerTypeSymbol x, FunctionPointerTypeSymbol y) => Same(x.ReturnType, y.ReturnType) &&
                     x.ParameterTypes.Length == y.ParameterTypes.Length && x.ParameterTypes.Zip(y.ParameterTypes).All(pair => Same(pair.First, pair.Second)),
+                (FunctionValueTypeSymbol x, FunctionValueTypeSymbol y) => Same(x.ReturnType, y.ReturnType) &&
+                    x.ParameterTypes.Length == y.ParameterTypes.Length && x.ParameterTypes.Zip(y.ParameterTypes).All(pair => Same(pair.First, pair.Second)),
                 _ => TypeIdentity.AreSame(a, b),
             };
         }

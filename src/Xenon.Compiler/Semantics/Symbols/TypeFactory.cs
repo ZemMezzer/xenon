@@ -19,6 +19,7 @@ public sealed class TypeFactory
     private readonly ConcurrentDictionary<TypeSymbol, StorageTypeSymbol> _storage = new(TypeIdentity.Comparer);
     private readonly ConcurrentDictionary<TypeSymbol, PinTypeSymbol> _pin = new(TypeIdentity.Comparer);
     private readonly List<FunctionPointerTypeSymbol> _functionPointers = [];
+    private readonly List<FunctionValueTypeSymbol> _functionValues = [];
 
     public PointerTypeSymbol PointerTo(TypeSymbol elementType, bool isReadonly = false) =>
         _pointers.GetOrAdd((Intern(elementType), isReadonly), static key => new PointerTypeSymbol(key.Element, key.Readonly));
@@ -39,6 +40,23 @@ public sealed class TypeFactory
             if (existing is not null) return existing;
             var created = new FunctionPointerTypeSymbol(internedReturn, [.. internedParameters]);
             _functionPointers.Add(created);
+            return created;
+        }
+    }
+
+    public FunctionValueTypeSymbol FunctionValue(TypeSymbol returnType, IEnumerable<TypeSymbol> parameterTypes)
+    {
+        TypeSymbol internedReturn = Intern(returnType);
+        TypeSymbol[] internedParameters = parameterTypes.Select(Intern).ToArray();
+        lock (_functionValues)
+        {
+            FunctionValueTypeSymbol? existing = _functionValues.FirstOrDefault(candidate =>
+                TypeIdentity.AreSame(candidate.ReturnType, internedReturn) &&
+                candidate.ParameterTypes.Length == internedParameters.Length &&
+                candidate.ParameterTypes.Zip(internedParameters).All(pair => TypeIdentity.AreSame(pair.First, pair.Second)));
+            if (existing is not null) return existing;
+            var created = new FunctionValueTypeSymbol(internedReturn, [.. internedParameters]);
+            _functionValues.Add(created);
             return created;
         }
     }
@@ -83,6 +101,7 @@ public sealed class TypeFactory
     internal IReadOnlyCollection<OwnershipTypeSymbol> OwnershipTypes =>
         [.. _unique.Values, .. _shared.Values, .. _weak.Values];
     internal IReadOnlyCollection<StorageTypeSymbol> StorageTypes => [.. _storage.Values];
+    internal IReadOnlyCollection<FunctionValueTypeSymbol> FunctionValueTypes => [.. _functionValues];
 
     internal void EnsureOwnershipDestructor(
         OwnershipTypeSymbol type,
@@ -132,6 +151,22 @@ public sealed class TypeFactory
         }
     }
 
+    internal void EnsureFunctionValueDestructor(FunctionValueTypeSymbol type,
+        NamespaceSymbol globalNamespace, SyntaxNode declaration)
+    {
+        if (type.CompleteDestructor is not null) return;
+        lock (type)
+            type.CompleteDestructor ??= new FunctionSymbol(type, globalNamespace, PointerTo(type), declaration);
+    }
+
+    internal void EnsureFunctionValueDestructor(FunctionValueTypeSymbol type,
+        NamespaceSymbol globalNamespace, SymbolOrigin origin)
+    {
+        if (type.CompleteDestructor is not null) return;
+        lock (type)
+            type.CompleteDestructor ??= new FunctionSymbol(type, globalNamespace, PointerTo(type), origin);
+    }
+
     internal void EnsureStorageDestructor(StorageTypeSymbol type,
         NamespaceSymbol globalNamespace, SymbolOrigin origin)
     {
@@ -151,6 +186,7 @@ public sealed class TypeFactory
         {
             PointerTypeSymbol pointer => PointerTo(pointer.ElementType, pointer.IsReadonly),
             FunctionPointerTypeSymbol function => FunctionPointer(function.ReturnType, function.ParameterTypes),
+            FunctionValueTypeSymbol function => FunctionValue(function.ReturnType, function.ParameterTypes),
             ReferenceTypeSymbol reference => ReferenceTo(reference.ElementType, reference.IsReadonly),
             ArrayTypeSymbol array => ArrayOf(array.ElementType, array.Rank),
             AtomicTypeSymbol atomic => AtomicOf(atomic.ElementType),

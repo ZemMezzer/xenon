@@ -1,0 +1,64 @@
+namespace LambdaRuntime;
+
+struct State { public static int Cleanups; }
+struct Guard { public ~Guard() { State.Cleanups++; } }
+struct Resource { public void Use() { } public ~Resource() { State.Cleanups++; } }
+struct Holder { public function int()* Callback = function int() { return 9; }; }
+
+int Apply(function int(int)* callback, int value) { return callback(value); }
+function int(int)* Make() { return function int(int value) { return value + 1; }; }
+function int(int) MakeMultiplier(int factor)
+{
+    return [factor](int value) => { return factor * value; };
+}
+
+int Main()
+{
+    function int(int)* square = function int(int value) { return value * value; };
+    if (square(7) != 49) return 1;
+    if (Apply(function int(int value) { return value + 2; }, 3) != 5) return 2;
+    if (Make()(8) != 9) return 3;
+    if ((function int(int value) { return value * 3; })(4) != 12) return 4;
+    function int()* nested = function int() {
+        function int()* inner = function int() { return 42; };
+        return inner();
+    };
+    if (nested() != 42) return 5;
+    int multiplier = 3;
+    function int(int) byValue = [multiplier](int value) => { return multiplier * value; };
+    multiplier = 9;
+    function int(int) byValueCopy = byValue;
+    if (byValueCopy(4) != 12) return 12;
+    function int(int) returned = MakeMultiplier(10);
+    if (returned(5) != 50) return 13;
+    int total = 1;
+    {
+        function void(int) add = [&total](int value) => { total += value; };
+        add(6);
+    }
+    if (total != 7) return 14;
+    {
+        unique<Resource> resource = new Resource();
+        function void() owner = [move resource]() => { resource->Use(); };
+        function void() ownerCopy = owner;
+        owner();
+        ownerCopy();
+    }
+    if (State.Cleanups != 1) return 15;
+    int destination = 0;
+    function void(int*)* write = function void(int* output) { *output = 17; };
+    write(&destination);
+    if (destination != 17) return 6;
+    Holder holder = Holder();
+    if (holder.Callback() != 9) return 9;
+    function int()* cleanup = function int() { Guard guard = Guard(); return 6; };
+    if (cleanup() != 6 || State.Cleanups != 2) return 10;
+    function int()* fail = function int() { Guard guard = Guard(); throw 31; };
+    try { fail(); }
+    catch (readonly int& error) {
+        if (error != 31) return 7;
+        if (State.Cleanups != 3) return 11;
+        return 0;
+    }
+    return 8;
+}

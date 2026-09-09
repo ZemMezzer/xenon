@@ -43,6 +43,19 @@ public sealed record FunctionPointerTypeSyntax(
     public override string Name => "function";
 }
 
+public sealed record FunctionValueTypeSyntax(
+    SyntaxToken FunctionKeyword,
+    TypeSyntax ReturnType,
+    SyntaxToken OpenParenthesisToken,
+    ImmutableArray<TypeSyntax> ParameterTypes,
+    ImmutableArray<SyntaxToken> CommaTokens,
+    SyntaxToken CloseParenthesisToken) : TypeSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.FunctionValueType;
+    public override SyntaxToken NameToken => FunctionKeyword;
+    public override string Name => "function";
+}
+
 public sealed record ReferenceTypeSyntax(TypeSyntax ElementType, SyntaxToken AmpersandToken) : UnaryTypeSyntax(ElementType)
 {
     public override SyntaxKind Kind => SyntaxKind.ReferenceType;

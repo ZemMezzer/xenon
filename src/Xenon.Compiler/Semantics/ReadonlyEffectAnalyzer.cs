@@ -245,6 +245,22 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             }
             case BoundFunctionAddressExpression:
                 return [];
+            case BoundFunctionValueExpression functionValue:
+            {
+                var result = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                foreach (BoundFunctionValueCapture capture in functionValue.Captures)
+                    result.UnionWith(Evaluate(capture.Initializer));
+                return result;
+            }
+            case BoundFunctionValueCallExpression call:
+            {
+                HashSet<object> result = Evaluate(call.Target);
+                foreach (BoundExpression argument in call.Arguments)
+                    result.UnionWith(Evaluate(argument));
+                return ContainsAccess(call.Type) ? Uncertain(result) : [];
+            }
+            case BoundFunctionValueDestructionExpression:
+                return [];
             case BoundMethodCallExpression call:
                 return AccessorOrMethodCall(call.Method, call.Arguments, call.Receiver, call.IsPointerAccess, call);
             case BoundInterfaceMethodCallExpression call:
@@ -1013,7 +1029,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private static bool ContainsAccess(TypeSymbol type, HashSet<TypeSymbol> visited) => type switch
     {
-        PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol or InterfaceTypeSymbol => true,
+        PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol or
+            InterfaceTypeSymbol or FunctionValueTypeSymbol => true,
         IFieldStorageTypeSymbol structure when visited.Add(type) => structure.AllInstanceFields.Any(field => ContainsAccess(field.Type, visited)),
         _ => false,
     };
@@ -1029,6 +1046,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             ReferenceTypeSymbol reference => !reference.IsReadonly || ExposesWritableAccess(reference.ElementType, visited),
             ArrayTypeSymbol or InterfaceTypeSymbol => true,
             UniqueTypeSymbol or SharedTypeSymbol => true,
+            FunctionValueTypeSymbol => true,
             IFieldStorageTypeSymbol structure => structure.AllInstanceFields.Any(field => ExposesWritableAccess(field.Type, visited)),
             _ => false,
         };
