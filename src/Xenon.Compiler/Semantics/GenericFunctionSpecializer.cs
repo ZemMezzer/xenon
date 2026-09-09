@@ -41,6 +41,13 @@ internal sealed class GenericFunctionSpecializer
     internal GenericStructSpecializer StructSpecializer => _structSpecializer;
     internal TypeFactory Types => _types;
 
+    internal void AddGeneratedFunctions(IEnumerable<BoundFunction> functions)
+    {
+        foreach (BoundFunction function in functions)
+            if (!_functions.Any(existing => ReferenceEquals(existing.Symbol, function.Symbol)))
+                _functions.Add(function);
+    }
+
     public FunctionSymbol? GetOrCreate(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments,
         TextLocation location)
     {
@@ -238,6 +245,16 @@ internal sealed class GenericFunctionSpecializer
         {
             (PointerTypeSymbol left, PointerTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
+            (FunctionPointerTypeSymbol left, FunctionPointerTypeSymbol right)
+                when left.ParameterTypes.Length == right.ParameterTypes.Length =>
+                TryInfer(left.ReturnType, right.ReturnType, inferred) &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TryInfer(pair.First, pair.Second, inferred)),
+            (FunctionValueTypeSymbol left, FunctionValueTypeSymbol right)
+                when left.ParameterTypes.Length == right.ParameterTypes.Length =>
+                TryInfer(left.ReturnType, right.ReturnType, inferred) &&
+                left.ParameterTypes.Zip(right.ParameterTypes).All(pair =>
+                    TryInfer(pair.First, pair.Second, inferred)),
             (ReferenceTypeSymbol left, ReferenceTypeSymbol right) when left.IsReadonly == right.IsReadonly =>
                 TryInfer(left.ElementType, right.ElementType, inferred),
             (ReferenceTypeSymbol left, _) =>

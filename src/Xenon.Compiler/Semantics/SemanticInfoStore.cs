@@ -8,6 +8,9 @@ namespace Xenon.Compiler.Semantics;
 
 internal sealed class SemanticInfoStore
 {
+    // Anonymous bodies belong to the same binding pass as their editor information.
+    // Speculative summary passes use a separate store and never enter the emitted set.
+    public List<Xenon.Compiler.Semantics.Binding.BoundFunction> LambdaFunctions { get; } = [];
     public Dictionary<SyntaxNode, Symbol> Declarations { get; } = new(ReferenceEqualityComparer.Instance);
     public Dictionary<SyntaxNode, SymbolInfo> Symbols { get; } = new(ReferenceEqualityComparer.Instance);
     public Dictionary<SyntaxNode, SymbolInfo> Conversions { get; } = new(ReferenceEqualityComparer.Instance);
@@ -44,6 +47,11 @@ internal sealed class SemanticInfoStore
                 RecordType(pointer.ElementType, pointerType.ElementType);
                 break;
             case FunctionPointerTypeSyntax function when type is FunctionPointerTypeSymbol functionType:
+                RecordType(function.ReturnType, functionType.ReturnType);
+                foreach ((TypeSyntax parameterSyntax, TypeSymbol parameterType) in function.ParameterTypes.Zip(functionType.ParameterTypes))
+                    RecordType(parameterSyntax, parameterType);
+                break;
+            case FunctionValueTypeSyntax function when type is FunctionValueTypeSymbol functionType:
                 RecordType(function.ReturnType, functionType.ReturnType);
                 foreach ((TypeSyntax parameterSyntax, TypeSymbol parameterType) in function.ParameterTypes.Zip(functionType.ParameterTypes))
                     RecordType(parameterSyntax, parameterType);

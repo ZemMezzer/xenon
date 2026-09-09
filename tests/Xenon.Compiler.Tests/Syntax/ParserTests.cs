@@ -1257,11 +1257,34 @@ public sealed class ParserTests
     }
 
     [Fact]
-    public void Parser_RequiresTrailingStarOnFunctionPointerType()
+    public void Parser_DistinguishesFunctionValuesFromFunctionPointers()
     {
-        SyntaxTree tree = Parse("namespace Example; extern void Register(function void(int) callback);");
+        SyntaxTree tree = Parse("namespace Example; extern void Register(function void(int) callback, function void(int)* native);");
 
-        Assert.Contains(tree.Diagnostics, diagnostic => diagnostic.Message.Contains("StarToken", StringComparison.Ordinal));
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.IsType<FunctionValueTypeSyntax>(function.Parameters[0].Type);
+        Assert.IsType<FunctionPointerTypeSyntax>(function.Parameters[1].Type);
+    }
+
+    [Theory]
+    [InlineData("[](int value) => { }")]
+    [InlineData("[value](int x) => { }")]
+    [InlineData("[&value](int x) => { }")]
+    [InlineData("[readonly &value](int x) => { }")]
+    [InlineData("[move value]() => { }")]
+    public void Parser_ParsesArrowLambdaCaptureForms(string expression)
+    {
+        SyntaxTree tree = Parse($"namespace Example; void Test() {{ int value = 0; function void(int) callback = {expression}; }}");
+
+        Assert.Empty(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var declaration = Assert.IsType<VariableDeclarationStatementSyntax>(
+            Assert.Single(Assert.IsType<BlockStatementSyntax>(function.Body).Statements, statement =>
+                statement is VariableDeclarationStatementSyntax variable && variable.Initializer is LambdaExpressionSyntax));
+        var lambda = Assert.IsType<LambdaExpressionSyntax>(declaration.Initializer);
+        Assert.Equal(expression.StartsWith("[]", StringComparison.Ordinal) ? 0 : 1, lambda.Captures.Length);
+        Assert.NotNull(lambda.FatArrowToken);
     }
 
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));

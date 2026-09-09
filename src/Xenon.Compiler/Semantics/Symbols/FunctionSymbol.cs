@@ -348,6 +348,34 @@ public sealed class FunctionSymbol : Symbol
         SetMetadata(origin);
     }
 
+    internal FunctionSymbol(FunctionValueTypeSymbol functionValueType, NamespaceSymbol containingNamespace,
+        PointerTypeSymbol addressType, SyntaxNode declaration)
+        : base($"__function_value_destructor_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(functionValueType)))}",
+            SymbolKind.Function, containingNamespace)
+    {
+        FunctionKind = FunctionKind.FunctionValueDestructor;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = ParameterSymbol.Own([new ParameterSymbol("value", addressType, 0)], this);
+        Declaration = declaration;
+        Accessibility = Accessibility.Private;
+        FunctionValueType = functionValueType;
+        IsDefinition = true;
+    }
+
+    internal FunctionSymbol(FunctionValueTypeSymbol functionValueType, NamespaceSymbol containingNamespace,
+        PointerTypeSymbol addressType, SymbolOrigin origin)
+        : base($"__function_value_destructor_{Convert.ToHexString(Encoding.UTF8.GetBytes(TypeSignature.Get(functionValueType)))}",
+            SymbolKind.Function, containingNamespace)
+    {
+        FunctionKind = FunctionKind.FunctionValueDestructor;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = ParameterSymbol.Own([new ParameterSymbol("value", addressType, 0)], this);
+        Accessibility = Accessibility.Private;
+        FunctionValueType = functionValueType;
+        IsDefinition = true;
+        SetMetadata(origin);
+    }
+
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
 
     public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
@@ -359,6 +387,7 @@ public sealed class FunctionSymbol : Symbol
     public InterfaceIndexerSymbol? ContainingInterfaceIndexer => ContainingSymbol as InterfaceIndexerSymbol;
     public OwnershipTypeSymbol? OwnershipType { get; }
     public StorageTypeSymbol? StorageType { get; }
+    public FunctionValueTypeSymbol? FunctionValueType { get; }
     public FieldSymbol? ThreadLocalField { get; }
 
     public string FullName => FunctionKind switch
@@ -374,6 +403,7 @@ public sealed class FunctionSymbol : Symbol
         FunctionKind.DestructorGlue => $"{ContainingType!.FullName}.__destructor",
         FunctionKind.OwnershipDestructor => $"{ContainingNamespace.FullName}.{Name}",
         FunctionKind.StorageDestructor => $"{ContainingNamespace.FullName}.{Name}",
+        FunctionKind.FunctionValueDestructor => $"{ContainingNamespace.FullName}.{Name}",
         _ => $"{ContainingNamespace.FullName}.{Name}",
     };
 
@@ -414,9 +444,12 @@ public sealed class FunctionSymbol : Symbol
 
     public bool IsAccessor => AccessorKind != AccessorKind.None;
 
-    public override bool IsCompilerGenerated => FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor;
-    public override bool IsUserVisible => FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor) && !IsAccessor;
-    public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsAccessor && !IsOperator;
+    public bool IsLambda { get; internal set; }
+    public bool IsCapturingLambda { get; internal set; }
+    public ImmutableArray<CaptureVariableSymbol> LambdaCaptures { get; internal set; } = [];
+    public override bool IsCompilerGenerated => IsLambda || FunctionKind is FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor or FunctionKind.FunctionValueDestructor;
+    public override bool IsUserVisible => !IsLambda && FunctionKind is not (FunctionKind.InstanceInitializer or FunctionKind.ThreadLocalInitializer or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor or FunctionKind.FunctionValueDestructor) && !IsAccessor;
+    public override bool HasUserEditableIdentifier => base.HasUserEditableIdentifier && !IsLambda && !IsAccessor && !IsOperator;
     public override bool IsDefinition { get; }
 
     public int? VTableSlot { get; private set; }
@@ -600,4 +633,43 @@ public sealed class LocalVariableSymbol : VariableSymbol
     public bool RequiresArrayCleanupTransfer { get; internal set; }
     public FunctionSymbol? Destructor { get; internal set; }
     internal Binding.BoundExpression? ConstantValue { get; set; }
+}
+
+public sealed class CaptureVariableSymbol : VariableSymbol
+{
+    internal CaptureVariableSymbol(VariableSymbol capturedVariable, TypeSymbol storageType,
+        LambdaCaptureKind captureKind, int ordinal, FunctionSymbol containingFunction,
+        LambdaCaptureSyntax declaration)
+        : base(capturedVariable.Name, capturedVariable.Kind, capturedVariable.Type, containingFunction,
+            captureKind == LambdaCaptureKind.ReadonlyBorrow || capturedVariable.IsReadonly)
+    {
+        CapturedVariable = capturedVariable;
+        StorageType = storageType;
+        CaptureKind = captureKind;
+        Ordinal = ordinal;
+        Declaration = declaration;
+        SetMetadata(capturedVariable.Origin, capturedVariable.Documentation);
+    }
+
+    internal CaptureVariableSymbol(string name, TypeSymbol type, TypeSymbol storageType,
+        LambdaCaptureKind captureKind, int ordinal, FunctionSymbol containingFunction,
+        SymbolOrigin origin)
+        : base(name, SymbolKind.LocalVariable, type, containingFunction,
+            captureKind == LambdaCaptureKind.ReadonlyBorrow)
+    {
+        CapturedVariable = null;
+        StorageType = storageType;
+        CaptureKind = captureKind;
+        Ordinal = ordinal;
+        SetMetadata(origin);
+    }
+
+    public VariableSymbol? CapturedVariable { get; }
+    public TypeSymbol StorageType { get; }
+    public LambdaCaptureKind CaptureKind { get; }
+    public int Ordinal { get; }
+    internal LambdaCaptureSyntax? Declaration { get; }
+    public bool IsBorrow => CaptureKind is LambdaCaptureKind.MutableBorrow or LambdaCaptureKind.ReadonlyBorrow;
+    public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
+        CapturedVariable?.DeclaringSyntaxReferences ?? [];
 }

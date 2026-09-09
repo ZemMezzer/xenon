@@ -477,6 +477,9 @@ internal sealed class GenericStructSpecializer
         FunctionPointerTypeSymbol function => _types.FunctionPointer(
             Substitute(function.ReturnType, substitutions, origin),
             function.ParameterTypes.Select(parameter => Substitute(parameter, substitutions, origin))),
+        FunctionValueTypeSymbol function => _types.FunctionValue(
+            Substitute(function.ReturnType, substitutions, origin),
+            function.ParameterTypes.Select(parameter => Substitute(parameter, substitutions, origin))),
         ReferenceTypeSymbol reference => _types.ReferenceTo(Substitute(reference.ElementType, substitutions, origin), reference.IsReadonly),
         ArrayTypeSymbol array => _types.ArrayOf(Substitute(array.ElementType, substitutions, origin), array.Rank),
         AtomicTypeSymbol atomic => SubstituteAtomic(atomic, substitutions, origin),

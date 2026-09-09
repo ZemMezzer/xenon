@@ -20,6 +20,9 @@ public static class TypeIdentity
             (FunctionPointerTypeSymbol a, FunctionPointerTypeSymbol b) =>
                 AreSame(a.ReturnType, b.ReturnType) && a.ParameterTypes.Length == b.ParameterTypes.Length &&
                 a.ParameterTypes.Zip(b.ParameterTypes).All(pair => AreSame(pair.First, pair.Second)),
+            (FunctionValueTypeSymbol a, FunctionValueTypeSymbol b) =>
+                AreSame(a.ReturnType, b.ReturnType) && a.ParameterTypes.Length == b.ParameterTypes.Length &&
+                a.ParameterTypes.Zip(b.ParameterTypes).All(pair => AreSame(pair.First, pair.Second)),
             (ReferenceTypeSymbol a, ReferenceTypeSymbol b) => a.IsReadonly == b.IsReadonly && AreSame(a.ElementType, b.ElementType),
             (ArrayTypeSymbol a, ArrayTypeSymbol b) => a.Rank == b.Rank && AreSame(a.ElementType, b.ElementType),
             (AtomicTypeSymbol a, AtomicTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
@@ -40,6 +43,9 @@ public static class TypeIdentity
             PointerTypeSymbol pointer => HashCode.Combine(1, GetHashCode(pointer.ElementType), pointer.IsReadonly),
             FunctionPointerTypeSymbol function => function.ParameterTypes.Aggregate(
                 HashCode.Combine(11, GetHashCode(function.ReturnType)),
+                (hash, parameter) => HashCode.Combine(hash, GetHashCode(parameter))),
+            FunctionValueTypeSymbol function => function.ParameterTypes.Aggregate(
+                HashCode.Combine(12, GetHashCode(function.ReturnType)),
                 (hash, parameter) => HashCode.Combine(hash, GetHashCode(parameter))),
             ReferenceTypeSymbol reference => HashCode.Combine(2, GetHashCode(reference.ElementType), reference.IsReadonly),
             ArrayTypeSymbol array => HashCode.Combine(3, GetHashCode(array.ElementType), array.Rank),

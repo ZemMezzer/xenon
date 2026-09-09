@@ -80,6 +80,7 @@ internal sealed class Lexer
             '/' => SyntaxKind.SlashToken,
             '%' when Lookahead == '=' => SyntaxKind.PercentEqualsToken,
             '%' => SyntaxKind.PercentToken,
+            '=' when Lookahead == '>' => SyntaxKind.FatArrowToken,
             '=' when Lookahead == '=' => SyntaxKind.EqualsEqualsToken,
             '=' => SyntaxKind.EqualsToken,
             '!' when Lookahead == '=' => SyntaxKind.BangEqualsToken,
@@ -500,6 +501,7 @@ internal sealed class Lexer
 
     private static bool IsTwoCharacterToken(SyntaxKind kind) => kind is
         SyntaxKind.ArrowToken or
+        SyntaxKind.FatArrowToken or
         SyntaxKind.EqualsEqualsToken or
         SyntaxKind.BangEqualsToken or
         SyntaxKind.LessOrEqualsToken or

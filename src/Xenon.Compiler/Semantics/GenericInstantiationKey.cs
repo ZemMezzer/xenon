@@ -45,6 +45,8 @@ internal static class GenericTypeFacts
         PointerTypeSymbol pointer => ContainsGenericParameter(pointer.ElementType),
         FunctionPointerTypeSymbol function => ContainsGenericParameter(function.ReturnType) ||
             function.ParameterTypes.Any(ContainsGenericParameter),
+        FunctionValueTypeSymbol function => ContainsGenericParameter(function.ReturnType) ||
+            function.ParameterTypes.Any(ContainsGenericParameter),
         ReferenceTypeSymbol reference => ContainsGenericParameter(reference.ElementType),
         ArrayTypeSymbol array => ContainsGenericParameter(array.ElementType),
         AtomicTypeSymbol atomic => ContainsGenericParameter(atomic.ElementType),

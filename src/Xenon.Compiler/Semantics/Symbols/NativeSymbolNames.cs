@@ -17,7 +17,7 @@ public static class NativeSymbolNames
     private static string? AbiType(TypeSymbol type, ITargetTypeLayout? layout) => type switch
     {
         PointerTypeSymbol or FunctionPointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol => "ptr",
-        OwnershipTypeSymbol => null,
+        OwnershipTypeSymbol or FunctionValueTypeSymbol => null,
         EnumTypeSymbol enumeration => AbiType(enumeration.UnderlyingType, layout),
         PrimitiveTypeSymbol { IsCharacter: true } => "i32",
         PrimitiveTypeSymbol { IsInteger: true } integer =>

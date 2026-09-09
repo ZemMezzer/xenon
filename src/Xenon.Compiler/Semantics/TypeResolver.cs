@@ -60,6 +60,19 @@ internal static class TypeResolver
                 }
                 return scope.TypeFactory.FunctionPointer(returnType, parameterTypes);
             }
+            case FunctionValueTypeSyntax function:
+            {
+                TypeSymbol returnType = ResolveCore(function.ReturnType, scope, diagnostics);
+                ImmutableArray<TypeSymbol> parameterTypes = function.ParameterTypes
+                    .Select(parameter => ResolveCore(parameter, scope, diagnostics)).ToImmutableArray();
+                foreach ((TypeSyntax parameterSyntax, TypeSymbol parameterType) in function.ParameterTypes.Zip(parameterTypes))
+                    if (TypeIdentity.AreSame(parameterType, BuiltinTypes.Void))
+                        diagnostics.Report(parameterSyntax.NameToken.Location,
+                            "function value parameter type cannot be 'void'", DiagnosticIds.VoidParameterType);
+                FunctionValueTypeSymbol result = scope.TypeFactory.FunctionValue(returnType, parameterTypes);
+                scope.TypeFactory.EnsureFunctionValueDestructor(result, scope.GlobalNamespace, function);
+                return result;
+            }
             case ReferenceTypeSyntax reference:
             {
                 TypeSymbol element = ResolveCore(reference.ElementType, scope, diagnostics, isReadonly);

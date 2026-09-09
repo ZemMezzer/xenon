@@ -151,6 +151,11 @@ public static class AccessibilityRules
                     foreach (TypeSymbol parameter in function.ParameterTypes)
                         if (!Visit(parameter)) return false;
                     return true;
+                case FunctionValueTypeSymbol function:
+                    if (!Visit(function.ReturnType)) return false;
+                    foreach (TypeSymbol parameter in function.ParameterTypes)
+                        if (!Visit(parameter)) return false;
+                    return true;
                 default:
                     return true;
             }
@@ -278,6 +283,7 @@ public enum FunctionKind
     DestructorGlue,
     OwnershipDestructor,
     StorageDestructor,
+    FunctionValueDestructor,
 }
 
 public enum AccessorKind
