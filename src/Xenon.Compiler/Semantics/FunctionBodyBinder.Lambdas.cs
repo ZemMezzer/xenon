@@ -5,6 +5,7 @@ using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
+using Xenon.Compiler.Text;
 
 namespace Xenon.Compiler.Semantics;
 
@@ -25,6 +26,8 @@ internal sealed partial class FunctionBodyBinder
     private int _lambdaProbeReturnConversionCost;
     private readonly Dictionary<LambdaExpressionSyntax, ImmutableArray<PreparedLambdaCapture>>
         _preparedLambdaCaptures = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<LambdaExpressionSyntax, ExpressionSyntax> _deferredLambdaArtifactRoots =
+        new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<LambdaExpressionSyntax, Dictionary<TypeSymbol, LambdaBodyProbe>> _lambdaBodyProbes =
         new(ReferenceEqualityComparer.Instance);
     private FunctionSymbol LexicalAccessContext => _lambdaParent?.LexicalAccessContext ?? _function;
@@ -56,18 +59,73 @@ internal sealed partial class FunctionBodyBinder
         return false;
     }
 
-    private BoundExpression BindDeferredLambdaExpression(LambdaExpressionSyntax syntax)
+    private BoundExpression BindDeferredLambdaExpression(
+        LambdaExpressionSyntax syntax,
+        ExpressionSyntax artifactRoot)
     {
         // Captures are evaluated when the lambda argument is evaluated, even though
         // its signature cannot be contextualized until overload resolution finishes.
         // Preparing them here preserves source-order ownership and borrow effects.
         ExpressionFlow? before = _argumentFlowTransactions.Count == 0
             ? null : CaptureExpressionFlow();
+        ArgumentFlowTransaction? transaction = _argumentFlowTransactions.TryPeek(out var activeTransaction)
+            ? activeTransaction : null;
+        var arrayCleanupBefore = new Dictionary<LocalVariableSymbol, bool>();
+        foreach (LambdaCaptureSyntax capture in syntax.Captures)
+            if (_scope.Lookup(capture.IdentifierToken.Text) is LocalVariableSymbol
+                { Type: ArrayTypeSymbol } variable)
+                arrayCleanupBefore.TryAdd(variable, variable.RequiresArrayCleanupTransfer);
+        Dictionary<MovePlace, TextLocation>? loopSites = _loopMoveContexts.TryPeek(out var loopContext)
+            ? loopContext.Sites
+            : null;
+        HashSet<MovePlace>? loopSitesBefore = loopSites?.Keys.ToHashSet();
         PrepareLambdaCaptures(syntax);
         if (before is not null)
         {
-            ArgumentFlowTransaction transaction = _argumentFlowTransactions.Peek();
-            transaction.RecordDeferredLambdaCapture(syntax, before, CaptureExpressionFlow());
+            _deferredLambdaArtifactRoots[syntax] = artifactRoot;
+            transaction ??= _argumentFlowTransactions.Peek();
+            var borrows = ImmutableArray.CreateBuilder<ArgumentFlowTransaction.DeferredCaptureBorrow>();
+            foreach (PreparedLambdaCapture capture in _preparedLambdaCaptures[syntax])
+                if (capture.Syntax.CaptureKind is LambdaCaptureKind.MutableBorrow or LambdaCaptureKind.ReadonlyBorrow &&
+                    TryGetBorrowPlace(capture.Initializer, out BorrowPlace place, out _))
+                    borrows.Add(new ArgumentFlowTransaction.DeferredCaptureBorrow(
+                        place, capture.Syntax.CaptureKind == LambdaCaptureKind.ReadonlyBorrow));
+            KeyValuePair<MovePlace, TextLocation>[] addedLoopSites = loopSites is null
+                ? []
+                : loopSites.Where(entry => !loopSitesBefore!.Contains(entry.Key)).ToArray();
+            ImmutableArray<PreparedLambdaCapture> prepared = _preparedLambdaCaptures[syntax];
+            void RollbackAuxiliaryState(
+                IReadOnlyDictionary<MovePlace, TextLocation?> supersedingMutations)
+            {
+                foreach (var entry in arrayCleanupBefore)
+                {
+                    KeyValuePair<MovePlace, TextLocation?>? latest = supersedingMutations
+                        .Where(candidate => ReferenceEquals(candidate.Key.RootVariable, entry.Key))
+                        .Select(candidate => (KeyValuePair<MovePlace, TextLocation?>?)candidate)
+                        .LastOrDefault();
+                    entry.Key.RequiresArrayCleanupTransfer = latest?.Value is not null || entry.Value;
+                }
+                if (loopSites is not null)
+                    foreach (var entry in addedLoopSites)
+                        if (loopSites.TryGetValue(entry.Key, out TextLocation current) && current.Equals(entry.Value))
+                        {
+                            KeyValuePair<MovePlace, TextLocation?>? latest = supersedingMutations
+                                .Where(candidate => PlacesOverlap(candidate.Key, entry.Key))
+                                .Select(candidate => (KeyValuePair<MovePlace, TextLocation?>?)candidate)
+                                .LastOrDefault();
+                            if (latest?.Value is { } moveLocation)
+                                loopSites[entry.Key] = moveLocation;
+                            else
+                                loopSites.Remove(entry.Key);
+                        }
+                foreach (PreparedLambdaCapture capture in prepared)
+                    _argumentFlowCandidates.Remove(capture.Initializer);
+                _preparedLambdaCaptures.Remove(syntax);
+                _deferredLambdaArtifactRoots.Remove(syntax);
+                _deferredLambdaCaptureTransactions.Remove(syntax);
+            }
+            transaction.RecordDeferredLambdaCapture(
+                syntax, before, CaptureExpressionFlow(), borrows.ToImmutable(), RollbackAuxiliaryState);
             _deferredLambdaCaptureTransactions[syntax] = transaction;
         }
         return new BoundUnboundLambdaExpression(syntax);
@@ -138,9 +196,19 @@ internal sealed partial class FunctionBodyBinder
             RollbackRejectedDeferredLambda(syntax);
             return new BoundErrorExpression();
         }
-        if (_deferredLambdaCaptureTransactions.TryGetValue(syntax,
-                out ArgumentFlowTransaction? captureTransaction))
-            captureTransaction.CommitDeferredLambdaCapture(syntax);
+        _deferredLambdaCaptureTransactions.TryGetValue(syntax,
+            out ArgumentFlowTransaction? captureTransaction);
+        captureTransaction?.EnsureTypeFactorySnapshot(_fileScope.TypeFactory);
+        SemanticInfoStore.Snapshot? semanticSnapshot = captureTransaction is null
+            ? null : _semanticInfo.CaptureSnapshot();
+        (GenericStructSpecializer? transactionalStructSpecializer,
+            GenericFunctionSpecializer? transactionalFunctionSpecializer) = captureTransaction is null
+            ? (null, null)
+            : captureTransaction.GetTransactionalSpecializers(
+                _fileScope.GenericStructSpecializer, _genericSpecializer, _diagnostics);
+        FileSymbolScope lambdaScope = transactionalStructSpecializer is null
+            ? _fileScope
+            : _fileScope.WithGenericStructSpecializer(transactionalStructSpecializer);
 
         string name = CreateLambdaName(syntax);
         TypeSyntax returnSyntax = syntax.ExplicitReturnType ?? new NamedTypeSyntax(
@@ -169,8 +237,8 @@ internal sealed partial class FunctionBodyBinder
         foreach ((ParameterSyntax parameter, ParameterSymbol symbol) in syntax.Parameters.Zip(function.Parameters))
             _semanticInfo.Declarations[parameter] = symbol;
 
-        var binder = new FunctionBodyBinder(function, _fileScope, _diagnostics, _constants,
-            _semanticInfo, _genericSpecializer, _cancellationToken)
+        var binder = new FunctionBodyBinder(function, lambdaScope, _diagnostics, _constants,
+            _semanticInfo, transactionalFunctionSpecializer ?? _genericSpecializer, _cancellationToken)
         {
             _lambdaParent = this,
             _isLambdaCompatibilityProbe = this._isLambdaCompatibilityProbe,
@@ -183,6 +251,19 @@ internal sealed partial class FunctionBodyBinder
         BoundBlockStatement body = binder.BindBody(syntax.Body);
         _semanticInfo.LambdaFunctions.Add(new BoundFunction(function, body));
         foreach (var entry in binder.ExpressionLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
+        if (captureTransaction is not null && semanticSnapshot is not null)
+        {
+            SemanticInfoStore.Delta semanticDelta = _semanticInfo.CaptureDelta(semanticSnapshot);
+            ExpressionSyntax artifactRoot = _deferredLambdaArtifactRoots.GetValueOrDefault(syntax, syntax);
+            captureTransaction.RecordMaterializedLambda(
+                syntax,
+                commitArtifacts: static () => { },
+                rollbackArtifacts: () =>
+                {
+                    _semanticInfo.Rollback(semanticDelta);
+                    _semanticInfo.RollbackSyntax(artifactRoot);
+                });
+        }
 
         if (pointerTarget is not null)
             return new BoundFunctionAddressExpression(function, pointerTarget);
@@ -197,7 +278,8 @@ internal sealed partial class FunctionBodyBinder
         if (!_deferredLambdaCaptureTransactions.TryGetValue(syntax,
                 out ArgumentFlowTransaction? transaction))
             return;
-        ExpressionFlow flow = transaction.RollbackUnmaterializedLambdaCaptures(CaptureExpressionFlow());
+        ExpressionFlow flow = transaction.RollbackUnmaterializedLambdaCaptures(
+            CaptureExpressionFlow(), _diagnostics, OnTransactionalDiagnosticRemoved);
         RestoreExpressionFlow(flow);
     }
 
@@ -241,7 +323,8 @@ internal sealed partial class FunctionBodyBinder
                 LambdaCaptureKind.ReadonlyBorrow => _fileScope.TypeFactory.ReferenceTo(source.Type, isReadonly: true),
                 _ => source.Type,
             };
-            BoundExpression sourceExpression = new BoundVariableExpression(source);
+            BoundExpression sourceExpression = BindNameExpression(
+                new NameExpressionSyntax(capture.IdentifierToken));
             BoundExpression initializer;
             if (capture.CaptureKind == LambdaCaptureKind.Move)
             {
@@ -293,6 +376,9 @@ internal sealed partial class FunctionBodyBinder
             return null;
 
         var diagnostics = new DiagnosticBag();
+        TypeFactory.Snapshot typeFactorySnapshot = _fileScope.TypeFactory.CaptureSnapshot();
+        try
+        {
         for (int index = 0; index < syntax.Parameters.Length; index++)
         {
             TypeSymbol parameterType = TypeResolver.Resolve(syntax.Parameters[index].Type,
@@ -320,6 +406,11 @@ internal sealed partial class FunctionBodyBinder
         int representationPenalty = valueTarget is not null ? 0 : 1;
         int rankedReturnCost = Math.Min(returnCost.Value, int.MaxValue - 3);
         return rankedReturnCost + representationPenalty;
+        }
+        finally
+        {
+            _fileScope.TypeFactory.Rollback(typeFactorySnapshot);
+        }
     }
 
     private int? GetLambdaBodyReturnConversionCost(LambdaExpressionSyntax syntax, TypeSymbol returnType)
@@ -377,9 +468,14 @@ internal sealed partial class FunctionBodyBinder
         }
         function.LambdaCaptures = captureSymbols.ToImmutable();
 
+        GenericStructSpecializer? speculativeStructSpecializer =
+            _fileScope.GenericStructSpecializer?.CreateSpeculative(diagnostics);
         GenericFunctionSpecializer? speculativeSpecializer =
-            _genericSpecializer?.CreateSpeculative(diagnostics);
-        var binder = new FunctionBodyBinder(function, _fileScope, diagnostics, _constants,
+            _genericSpecializer?.CreateSpeculative(diagnostics, speculativeStructSpecializer);
+        FileSymbolScope speculativeScope = speculativeStructSpecializer is null
+            ? _fileScope
+            : _fileScope.WithGenericStructSpecializer(speculativeStructSpecializer);
+        var binder = new FunctionBodyBinder(function, speculativeScope, diagnostics, _constants,
             new SemanticInfoStore(), speculativeSpecializer, _cancellationToken)
         {
             _lambdaParent = this,

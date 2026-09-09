@@ -41,9 +41,23 @@ internal sealed class GenericFunctionSpecializer
     internal GenericStructSpecializer StructSpecializer => _structSpecializer;
     internal TypeFactory Types => _types;
 
-    internal GenericFunctionSpecializer CreateSpeculative(DiagnosticBag diagnostics) =>
-        new(_implementations, _types, diagnostics, _constants, _structSpecializer,
+    internal GenericFunctionSpecializer CreateSpeculative(
+        DiagnosticBag diagnostics,
+        GenericStructSpecializer? structSpecializer = null)
+    {
+        var result = new GenericFunctionSpecializer(
+            _implementations, _types, diagnostics, _constants, structSpecializer ?? _structSpecializer,
             _resolveNamespace, _cancellationToken);
+        foreach (var entry in _symbols) result._symbols.Add(entry.Key, entry.Value);
+        return result;
+    }
+
+    internal void MergeFrom(GenericFunctionSpecializer speculative)
+    {
+        foreach (var entry in speculative._symbols)
+            _symbols.TryAdd(entry.Key, entry.Value);
+        AddGeneratedFunctions(speculative._functions);
+    }
 
     internal void AddGeneratedFunctions(IEnumerable<BoundFunction> functions)
     {
