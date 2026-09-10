@@ -469,7 +469,17 @@ public sealed class SemanticModel
 
     private static bool IsReferenceableSymbol(Symbol symbol)
     {
-        if (symbol.IsSourceDefined || symbol.Origin.Kind == SymbolOriginKind.Library) return true;
+        Symbol sourceIdentity = symbol switch
+        {
+            FunctionSymbol { OriginalDefinition: not null } function => function.OriginalDefinition,
+            StructTypeSymbol { GenericDefinition: not null } structure => structure.GenericDefinition,
+            FieldSymbol { GenericDefinition: not null } field => field.GenericDefinition,
+            PropertySymbol { GenericDefinition: not null } property => property.GenericDefinition,
+            IndexerSymbol { GenericDefinition: not null } indexer => indexer.GenericDefinition,
+            ConstantSymbol { GenericDefinition: not null } constant => constant.GenericDefinition,
+            _ => symbol,
+        };
+        if (sourceIdentity.IsSourceDefined || sourceIdentity.Origin.Kind == SymbolOriginKind.Library) return true;
         if (symbol is SyntheticMemberSymbol) return true;
         if (symbol is not ParameterSymbol { Name: "value", ContainingSymbol: FunctionSymbol accessor })
             return false;

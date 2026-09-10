@@ -414,6 +414,7 @@ public sealed class FunctionSymbol : Symbol
     public ImmutableArray<GenericParameterSymbol> TypeParameters => _typeParameters;
 
     public FunctionSymbol? GenericDefinition { get; private set; }
+    public FunctionSymbol? OriginalDefinition { get; private set; }
     public ImmutableArray<TypeSymbol> TypeArguments { get; private set; } = [];
     public bool IsGenericSpecialization => GenericDefinition is not null;
 
@@ -473,8 +474,10 @@ public sealed class FunctionSymbol : Symbol
     internal void SetGenericSpecialization(FunctionSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
     {
         GenericDefinition = definition;
+        OriginalDefinition = definition;
         TypeArguments = typeArguments;
     }
+    internal void SetOriginalDefinition(FunctionSymbol definition) => OriginalDefinition = definition;
     internal void SetConstructorOverload(int index, int count)
     {
         ConstructorOverload = index;

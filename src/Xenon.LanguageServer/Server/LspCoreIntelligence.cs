@@ -152,7 +152,9 @@ internal static class LspCoreIntelligence
     {
         (SemanticModel model, int position) = await ModelAndPositionAsync(context, lspPosition);
         Symbol? symbol = FindSymbol(model, context.Document.SyntaxTree, position);
-        if (symbol is null || !context.Snapshot.TryGetSymbolId(UnwrapAlias(symbol), out WorkspaceSymbolId id))
+        if (symbol is null) return Array.Empty<LspLocation>();
+        symbol = SourceNavigationTarget(UnwrapAlias(symbol));
+        if (!context.Snapshot.TryGetSymbolId(symbol, out WorkspaceSymbolId id))
             return Array.Empty<LspLocation>();
         WorkspaceReferenceIndex index = await context.Snapshot.GetReferenceIndexAsync(context.CancellationToken)
             .ConfigureAwait(false);
@@ -581,7 +583,7 @@ internal static class LspCoreIntelligence
 
     private static Symbol SourceNavigationTarget(Symbol symbol) => symbol switch
     {
-        FunctionSymbol { GenericDefinition: not null } function => function.GenericDefinition,
+        FunctionSymbol { OriginalDefinition: not null } function => function.OriginalDefinition,
         StructTypeSymbol { GenericDefinition: not null } structure => structure.GenericDefinition,
         FieldSymbol { GenericDefinition: not null } field => field.GenericDefinition,
         PropertySymbol { GenericDefinition: not null } property => property.GenericDefinition,

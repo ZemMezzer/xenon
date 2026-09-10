@@ -209,7 +209,8 @@ internal sealed class SemanticAnalyzer
 
         HashSet<string> callableSummaryDiagnosticIds =
             [DiagnosticIds.UseAfterMove, DiagnosticIds.PartiallyMovedUse,
-                DiagnosticIds.InconsistentReceiverMoveEffect, DiagnosticIds.EscapingLocalReference];
+                DiagnosticIds.InconsistentReceiverMoveEffect, DiagnosticIds.EscapingLocalReference,
+                DiagnosticIds.AggregateReferenceEscape];
         foreach (Diagnostic diagnostic in lastDiagnostics.Where(diagnostic => callableSummaryDiagnosticIds.Contains(diagnostic.Id)))
         {
             bool duplicate = _diagnostics.Any(existing =>
