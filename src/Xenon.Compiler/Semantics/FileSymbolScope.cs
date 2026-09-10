@@ -66,12 +66,13 @@ internal sealed class FileSymbolScope
 
     internal TypeSymbol? ResolveTypeForTooling(IReadOnlyList<string> parts)
     {
-        if (parts.Count != 1) return ResolveTypePath(parts);
+        if (parts.Count != 1) return ResolveUniqueTypeDefinitionPath(parts);
         if (_localTypes.TryGetValue(parts[0], out TypeSymbol? localType)) return localType;
         if (_aliases.TryGetValue(parts[0], out UsingAliasTarget? alias) && alias?.Type is not null)
             return alias.Type;
         DeclaredTypeSymbol[] candidates = ContainingNamespace.FindTypes(parts[0])
             .Concat(_importedNamespaces.SelectMany(@namespace => @namespace.FindTypes(parts[0])))
+            .Where(type => type.GenericArity == 0)
             .Distinct().ToArray();
         return candidates.Length == 1 ? candidates[0] : null;
     }
@@ -96,7 +97,8 @@ internal sealed class FileSymbolScope
 
             string[] parts = directive.NameParts.Select(part => part.Text).ToArray();
             NamespaceSymbol? namespaceTarget = ResolveNamespacePath(parts);
-            TypeSymbol? typeTarget = ResolveTypePath(parts);
+            IReadOnlyList<DeclaredTypeSymbol> typeCandidates = ResolveTypeDefinitionPath(parts);
+            TypeSymbol? typeTarget = typeCandidates.Count == 1 ? typeCandidates[0] : null;
 
             if (!directive.HasAlias)
             {
@@ -104,10 +106,10 @@ internal sealed class FileSymbolScope
                 {
                     diagnostics.Report(
                         directive.NameParts[0].Location,
-                        typeTarget is not null
+                        typeCandidates.Count != 0
                             ? $"using directive '{directive.Name}' names a type; use an alias such as 'using Name = {directive.Name};'"
                             : $"unknown namespace '{directive.Name}'",
-                        typeTarget is not null ? DiagnosticIds.UsingDirectiveTargetsType : DiagnosticIds.UnknownNamespace);
+                        typeCandidates.Count != 0 ? DiagnosticIds.UsingDirectiveTargetsType : DiagnosticIds.UnknownNamespace);
                     continue;
                 }
 
@@ -126,6 +128,18 @@ internal sealed class FileSymbolScope
                     directive.AliasToken.Location,
                     $"using alias '{alias}' is already declared in this file",
                     DiagnosticIds.DuplicateDeclaration);
+                continue;
+            }
+
+            if (typeCandidates.Count > 1)
+            {
+                string arities = string.Join(", ", typeCandidates.Select(type => type.GenericArity)
+                    .Distinct().Order()
+                    .Select(arity => arity.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                diagnostics.Report(
+                    directive.NameParts[0].Location,
+                    $"using alias target '{directive.Name}' is ambiguous between {FormatTypeCandidates(typeCandidates)}; matching generic arities: {arities}",
+                    DiagnosticIds.AmbiguousName);
                 continue;
             }
 
@@ -151,49 +165,81 @@ internal sealed class FileSymbolScope
             Symbol target = (Symbol?)typeTarget ?? namespaceTarget!;
             _aliasSymbols.Add(new AliasSymbol(alias, target, directive));
             SemanticInfo?.Declarations[directive] = _aliasSymbols[^1];
+            SemanticInfo?.ExplicitReferences.Add(new ResolvedSymbolReference(
+                target,
+                directive.NameParts[^1].Location,
+                typeTarget is not null ? ResolvedReferenceKind.Type : ResolvedReferenceKind.Reference));
         }
     }
 
     public TypeSymbol? ResolveType(string name, TextLocation location, DiagnosticBag diagnostics)
+        => ResolveType(name, 0, location, diagnostics);
+
+    public TypeSymbol? ResolveType(string name, int genericArity, TextLocation location,
+        DiagnosticBag diagnostics)
     {
         if (_localTypes.TryGetValue(name, out TypeSymbol? localType))
         {
+            if (genericArity != 0)
+            {
+                ReportGenericArityMismatch(name, genericArity, [0], location, diagnostics);
+                return BuiltinTypes.Error;
+            }
             return localType;
         }
 
         if (_aliases.TryGetValue(name, out UsingAliasTarget? alias) && alias is { Type: not null })
         {
+            int aliasArity = alias.Type is DeclaredTypeSymbol declared ? declared.GenericArity : 0;
+            if (aliasArity != genericArity)
+            {
+                ReportGenericArityMismatch(name, genericArity, [aliasArity], location, diagnostics);
+                return BuiltinTypes.Error;
+            }
             return alias.Type;
         }
 
-        IReadOnlyList<DeclaredTypeSymbol> local = ContainingNamespace.FindTypes(name);
-        if (local.Count == 1)
+        IReadOnlyList<DeclaredTypeSymbol> localByName = ContainingNamespace.FindTypes(name);
+        DeclaredTypeSymbol[] local = localByName.Where(type => type.GenericArity == genericArity).ToArray();
+        if (local.Length == 1)
         {
             return local[0];
         }
-        if (local.Count > 1)
+        if (local.Length > 1)
         {
             diagnostics.Report(location, $"type name '{name}' is ambiguous between {FormatTypeCandidates(local)}",
                 DiagnosticIds.AmbiguousName);
             return BuiltinTypes.Error;
         }
 
-        List<TypeSymbol> matches = _importedNamespaces
+        DeclaredTypeSymbol[] importedByName = _importedNamespaces
             .SelectMany(@namespace => @namespace.FindTypes(name))
+            .Distinct()
+            .ToArray();
+        TypeSymbol[] matches = importedByName
+            .Where(type => type.GenericArity == genericArity)
             .Cast<TypeSymbol>()
-            .ToList();
+            .ToArray();
 
-        if (matches.Count == 1)
+        if (matches.Length == 1)
         {
             return matches[0];
         }
 
-        if (matches.Count > 1)
+        if (matches.Length > 1)
         {
             diagnostics.Report(
                 location,
                 $"type name '{name}' is ambiguous between {FormatTypeCandidates(matches)}",
                 DiagnosticIds.AmbiguousName);
+            return BuiltinTypes.Error;
+        }
+
+        int[] availableArities = localByName.Concat(importedByName)
+            .Select(type => type.GenericArity).Distinct().Order().ToArray();
+        if (availableArities.Length != 0)
+        {
+            ReportGenericArityMismatch(name, genericArity, availableArities, location, diagnostics);
             return BuiltinTypes.Error;
         }
 
@@ -387,6 +433,14 @@ internal sealed class FileSymbolScope
     }
 
     public TypeSymbol? ResolveQualifiedType(IReadOnlyList<string> parts)
+        => ResolveQualifiedTypeCore(parts, 0, TextLocation.None, null);
+
+    public TypeSymbol? ResolveQualifiedType(IReadOnlyList<string> parts, int genericArity,
+        TextLocation location, DiagnosticBag diagnostics)
+        => ResolveQualifiedTypeCore(parts, genericArity, location, diagnostics);
+
+    private TypeSymbol? ResolveQualifiedTypeCore(IReadOnlyList<string> parts, int genericArity,
+        TextLocation location, DiagnosticBag? diagnostics)
     {
         if (parts.Count == 0)
         {
@@ -397,16 +451,20 @@ internal sealed class FileSymbolScope
         {
             if (_aliases.TryGetValue(parts[0], out UsingAliasTarget? alias) && alias is { Type: not null })
             {
-                return alias.Type;
+                int aliasArity = alias.Type is DeclaredTypeSymbol declared ? declared.GenericArity : 0;
+                if (aliasArity == genericArity) return alias.Type;
+                if (diagnostics is not null)
+                    ReportGenericArityMismatch(parts[0], genericArity, [aliasArity], location, diagnostics);
+                return diagnostics is null ? null : BuiltinTypes.Error;
             }
 
             IReadOnlyList<DeclaredTypeSymbol> candidates = ContainingNamespace.FindTypes(parts[0]);
-            return candidates.Count == 1 ? candidates[0] : null;
+            return SelectQualifiedType(parts, candidates, genericArity, location, diagnostics);
         }
 
         NamespaceSymbol? containingNamespace = ResolveNamespacePrefix(parts, parts.Count - 1);
         IReadOnlyList<DeclaredTypeSymbol>? qualifiedCandidates = containingNamespace?.FindTypes(parts[^1]);
-        return qualifiedCandidates?.Count == 1 ? qualifiedCandidates[0] : null;
+        return SelectQualifiedType(parts, qualifiedCandidates ?? [], genericArity, location, diagnostics);
     }
 
     public FunctionSymbol? ResolveQualifiedFunction(
@@ -498,20 +556,72 @@ internal sealed class FileSymbolScope
     private NamespaceSymbol? ResolveNamespacePath(IReadOnlyList<string> parts) =>
         ResolveNamespacePrefix(parts, parts.Count);
 
-    private TypeSymbol? ResolveTypePath(IReadOnlyList<string> parts)
+    private TypeSymbol? ResolveUniqueTypeDefinitionPath(IReadOnlyList<string> parts)
+    {
+        IReadOnlyList<DeclaredTypeSymbol> candidates = ResolveTypeDefinitionPath(parts);
+        return candidates.Count == 1 ? candidates[0] : null;
+    }
+
+    /// <summary>
+    /// Resolves a path that names a type declaration without supplying type arguments.
+    /// Unlike ordinary type syntax, this lookup is intentionally arity-neutral so a
+    /// using alias can bind to one unique generic definition.
+    /// </summary>
+    private IReadOnlyList<DeclaredTypeSymbol> ResolveTypeDefinitionPath(IReadOnlyList<string> parts)
     {
         if (parts.Count == 0)
         {
-            return null;
+            return [];
         }
 
         if (parts.Count == 1)
         {
-            return GlobalNamespace.FindAnyType(parts[0]) ?? ContainingNamespace.FindAnyType(parts[0]);
+            IReadOnlyList<DeclaredTypeSymbol> global = GlobalNamespace.FindTypes(parts[0]);
+            if (global.Count != 0) return global;
+
+            IReadOnlyList<DeclaredTypeSymbol> local = ContainingNamespace.FindTypes(parts[0]);
+            if (local.Count != 0) return local;
+
+            return _importedNamespaces
+                .SelectMany(@namespace => @namespace.FindTypes(parts[0]))
+                .Distinct()
+                .ToArray();
         }
 
         NamespaceSymbol? @namespace = ResolveNamespacePrefix(parts, parts.Count - 1);
-        return @namespace?.FindAnyType(parts[^1]);
+        return @namespace?.FindTypes(parts[^1]) ?? [];
+    }
+
+    private static TypeSymbol? SelectQualifiedType(IReadOnlyList<string> parts,
+        IReadOnlyList<DeclaredTypeSymbol> candidates, int genericArity, TextLocation location,
+        DiagnosticBag? diagnostics)
+    {
+        DeclaredTypeSymbol[] matches = candidates.Where(type => type.GenericArity == genericArity).ToArray();
+        if (matches.Length == 1) return matches[0];
+        if (matches.Length > 1)
+        {
+            diagnostics?.Report(location,
+                $"type name '{string.Join('.', parts)}' is ambiguous between {FormatTypeCandidates(matches)}",
+                DiagnosticIds.AmbiguousName);
+            return diagnostics is null ? null : BuiltinTypes.Error;
+        }
+        if (candidates.Count != 0 && diagnostics is not null)
+        {
+            ReportGenericArityMismatch(string.Join('.', parts), genericArity,
+                candidates.Select(type => type.GenericArity), location, diagnostics);
+            return BuiltinTypes.Error;
+        }
+        return null;
+    }
+
+    private static void ReportGenericArityMismatch(string name, int requestedArity,
+        IEnumerable<int> availableArities, TextLocation location, DiagnosticBag diagnostics)
+    {
+        string available = string.Join(", ", availableArities.Distinct().Order()
+            .Select(arity => arity.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        diagnostics.Report(location,
+            $"type '{name}' does not have generic arity {requestedArity}; available arities: {available}",
+            DiagnosticIds.GenericArityMismatch);
     }
 
     private static string FormatTypeCandidates(IEnumerable<TypeSymbol> types) =>

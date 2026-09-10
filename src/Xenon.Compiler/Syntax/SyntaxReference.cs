@@ -37,6 +37,7 @@ public sealed class SyntaxReference
     public SyntaxToken IdentifierToken => Declaration switch
     {
         NamespaceDeclarationSyntax syntax => syntax.NameParts[NamespacePartIndex],
+        UsingDirectiveSyntax { AliasToken: not null } syntax => syntax.AliasToken,
         TypeDeclarationSyntax syntax => syntax.IdentifierToken,
         FunctionDeclarationSyntax syntax => syntax.IdentifierToken,
         GenericParameterSyntax syntax => syntax.IdentifierToken,

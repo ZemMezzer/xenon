@@ -22,6 +22,8 @@ public abstract class DeclaredTypeSymbol : TypeSymbol
     public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short) =>
         format == TypeDisplayFormat.FullyQualified ? FullName : Name;
     public string DeclarationKind { get; }
+    /// <summary>The number of generic parameters in this nominal declaration.</summary>
+    public virtual int GenericArity => 0;
     public Accessibility Accessibility { get; }
     public bool IsPublic => Accessibility == Accessibility.Public;
     public override bool IsDefinition => IsSemanticDefinition;

@@ -14,10 +14,10 @@ internal static class TypeSignature
         GenericParameterSymbol generic when genericPositions is not null &&
             genericPositions.TryGetValue(generic, out int position) => $"generic({position})",
         GenericParameterSymbol generic =>
-            $"generic({generic.ContainingSymbol?.QualifiedName}:{generic.Ordinal})",
+            $"generic({GenericOwner(generic.ContainingSymbol)}:{generic.Ordinal})",
         StructTypeSymbol { GenericDefinition: { } definition } specialization =>
-            $"struct({definition.FullName}<{string.Join(",", specialization.TypeArguments.Select(argument => Get(argument, genericPositions)))}>)",
-        DeclaredTypeSymbol declared => $"{declared.DeclarationKind}({declared.FullName})",
+            $"struct({definition.FullName}`{definition.GenericArity}<{string.Join(",", specialization.TypeArguments.Select(argument => Get(argument, genericPositions)))}>)",
+        DeclaredTypeSymbol declared => $"{declared.DeclarationKind}({declared.FullName}`{declared.GenericArity})",
         PointerTypeSymbol pointer => $"ptr{(pointer.IsReadonly ? "readonly" : "")}({Get(pointer.ElementType, genericPositions)})",
         FunctionPointerTypeSymbol function => $"fn({Get(function.ReturnType, genericPositions)};{string.Join(",", function.ParameterTypes.Select(parameter => Get(parameter, genericPositions)))})",
         FunctionValueTypeSymbol function => $"function({Get(function.ReturnType, genericPositions)};{string.Join(",", function.ParameterTypes.Select(parameter => Get(parameter, genericPositions)))})",
@@ -30,6 +30,13 @@ internal static class TypeSignature
         StorageTypeSymbol storage => $"storage({Get(storage.ElementType, genericPositions)})",
         PinTypeSymbol pin => $"pin({Get(pin.ElementType, genericPositions)})",
         _ => type.Name,
+    };
+
+    private static string GenericOwner(Symbol? owner) => owner switch
+    {
+        DeclaredTypeSymbol type => $"{type.QualifiedName}`{type.GenericArity}",
+        FunctionSymbol function => $"{GenericOwner(function.ContainingSymbol)}:{function.Name}`{function.TypeParameters.Length}",
+        _ => owner?.QualifiedName ?? string.Empty,
     };
 
     public static string Parameters(ImmutableArray<ParameterSymbol> parameters) =>

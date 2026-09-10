@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -94,7 +95,7 @@ public sealed class TypeArchitectureTests
     public void GenericArgumentsAreSyntaxOnlyAndNeverSilentlyDiscarded()
     {
         var compilation = Compilation.Create(SourceText.From("namespace Example; struct Box {} void F(Box<int> value) {}"));
-        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Message.Contains("generic type arguments"));
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.GenericArityMismatch);
     }
 
     [Fact]

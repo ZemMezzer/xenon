@@ -662,7 +662,7 @@ internal sealed class SemanticAnalyzer
                 type.SetTypeParameters(CreateGenericParameters(declaration.TypeParameters, type));
                 if (!@namespace.TryDeclareType(type))
                 {
-                    DeclaredTypeSymbol? previous = @namespace.FindAnyType(type.Name);
+                    DeclaredTypeSymbol? previous = @namespace.FindType(type.Name, type.GenericArity);
                     _diagnostics.Report(
                         declaration.IdentifierToken.Location,
                         $"type '{@namespace.FullName}.{type.Name}' is already declared",

@@ -8,6 +8,40 @@ namespace Xenon.Compiler.Tests.ProjectSystem;
 public sealed class WorkspaceIndexAndConcurrencyTests
 {
     [Fact]
+    public async Task SymbolAndReferenceIndexesKeepSameNamedGenericTypeAritiesAndMembersDistinct()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("App", sources: [("main.xe", """
+            namespace App;
+            struct Function<T>
+            {
+                public int Invoke() { return 20; }
+            }
+            struct Function<T1, T2>
+            {
+                public int Invoke() { return 22; }
+            }
+            int Use(Function<int> first, Function<int, int> second)
+            {
+                return first.Invoke() + second.Invoke();
+            }
+            """)]);
+        using Workspace workspace = directory.CreateWorkspace();
+        WorkspaceSymbolIndex symbols = await workspace.CurrentSnapshot.GetSymbolIndexAsync();
+        WorkspaceReferenceIndex references = await workspace.CurrentSnapshot.GetReferenceIndexAsync();
+
+        SymbolIndexEntry[] types = symbols.Search(qualifiedName: "App.Function")
+            .Where(entry => entry.Kind == SymbolKind.Type).ToArray();
+        SymbolIndexEntry[] methods = symbols.Search(qualifiedName: "App.Function.Invoke").ToArray();
+        Assert.Equal(2, types.Length);
+        Assert.Equal(2, types.Select(entry => entry.Id.DeclarationIdentity).Distinct().Count());
+        Assert.Equal(2, methods.Length);
+        Assert.Equal(2, methods.Select(entry => entry.Id.DeclarationIdentity).Distinct().Count());
+        Assert.All(types, type => Assert.Single(references.FindReferences(type.Id)));
+        Assert.All(methods, method => Assert.Single(references.FindReferences(method.Id)));
+    }
+
+    [Fact]
     public async Task MemberRelationshipIndexBuildsTransitiveOverrideAndInterfaceFamilies()
     {
         using var directory = new WorkspaceTestDirectory();

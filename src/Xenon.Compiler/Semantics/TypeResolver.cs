@@ -182,9 +182,13 @@ internal static class TypeResolver
                     return ownership;
                 }
 
+                int genericArity = named.TypeArguments?.Arguments.Length ?? 0;
                 TypeSymbol? type = named.NameParts.Length == 1
-                    ? BuiltinTypes.FromSyntaxKind(named.NameToken.Kind) ?? scope.ResolveType(named.Name, named.NameToken.Location, diagnostics)
-                    : scope.ResolveQualifiedType(named.NameParts.Select(part => part.Text).ToArray());
+                    ? BuiltinTypes.FromSyntaxKind(named.NameToken.Kind) ?? scope.ResolveType(named.Name, genericArity,
+                        named.NameToken.Location, diagnostics)
+                    : scope.ResolveQualifiedType(named.NameParts.Select(part => part.Text).ToArray(), genericArity,
+                        named.NameToken.Location, diagnostics);
+                if (TypeIdentity.AreSame(type, BuiltinTypes.Error)) return BuiltinTypes.Error;
                 if (named.TypeArguments is { } arguments)
                 {
                     if (type is not StructTypeSymbol structure)

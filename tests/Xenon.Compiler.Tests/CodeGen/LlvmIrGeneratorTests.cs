@@ -110,6 +110,41 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_UsesDistinctNativeIdentitiesForSameNamedGenericTypeArities()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Function<TOut, TIn>
+            {
+                public int Invoke() { return 20; }
+            }
+            struct Function<TOut, TIn1, TIn2>
+            {
+                public int Invoke() { return 22; }
+            }
+            int Use()
+            {
+                Function<int, int> first = Function<int, int>();
+                Function<int, int, int> second = Function<int, int, int>();
+                return first.Invoke() + second.Invoke();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol[] functions = compilation.SemanticModel.GlobalNamespace.Namespaces.Single().Structs
+            .Where(type => type.IsGenericSpecialization).OrderBy(type => type.GenericArity).ToArray();
+        Assert.Equal([2, 3], functions.Select(type => type.GenericArity));
+        string[] nativeNames = functions.Select(type =>
+            NativeSymbolNames.Get(type.Methods.Single(method => method.Name == "Invoke"))).ToArray();
+        Assert.Equal(2, nativeNames.Distinct(StringComparer.Ordinal).Count());
+
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost(),
+            "same-name-generic-arities");
+        Assert.All(nativeNames, nativeName => Assert.Contains(
+            Convert.ToHexString(Encoding.UTF8.GetBytes(nativeName)), ir, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Generator_RespectsRuntimeCheckCompilationOption()
     {
         const string Source = "namespace Example; int Divide(int value, int divisor) { return value / divisor; }";

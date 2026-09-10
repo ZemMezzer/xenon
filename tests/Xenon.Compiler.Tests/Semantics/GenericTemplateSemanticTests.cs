@@ -11,6 +11,285 @@ namespace Xenon.Compiler.Tests.Semantics;
 public sealed class GenericTemplateSemanticTests
 {
     [Fact]
+    public void Analyzer_AllowsSameNamedTypesWithDistinctGenericAritiesIncludingZero()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Function { }
+            struct Function<TOut> { }
+            struct Function<TOut, T1> { }
+            struct Function<TOut, T1, T2> { }
+            struct Function<TOut, T1, T2, T3> { }
+            struct Function<TOut, T1, T2, T3, T4> { }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        Assert.Equal([0, 1, 2, 3, 4, 5], compilation.SemanticModel.GlobalNamespace
+            .FindNamespace("Example")!.Structs.Select(type => type.GenericArity).Order());
+    }
+
+    [Fact]
+    public void Analyzer_ResolvesSameNamedGenericTypesDirectlyByArity()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Foo<T> { public T one; }
+            struct Foo<T1, T2> { public T2 two; }
+            struct Foo<T1, T2, T3> { public T3 three; }
+            struct Uses
+            {
+                Foo<int> one;
+                Foo<int, float> two;
+                Foo<int, float, bool> three;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol uses = compilation.SemanticModel.GlobalNamespace.FindNamespace("Example")!.Structs
+            .Single(type => type.Name == "Uses");
+        Assert.Equal([1, 2, 3], uses.Fields.Select(field =>
+            Assert.IsType<StructTypeSymbol>(field.Type).GenericDefinition!.GenericArity));
+        Assert.Equal(["int", "float", "bool"], uses.Fields.Select(field =>
+            Assert.IsType<StructTypeSymbol>(field.Type).TypeArguments[^1].Name));
+    }
+
+    [Fact]
+    public void Analyzer_AliasesUniqueGenericDefinitionsWithoutForcingArityZero()
+    {
+        Compilation compilation = Create("""
+            using B = Box;
+            using P = Example.Pair;
+            using F = Example.Function;
+            namespace Example;
+            struct Box<T> { }
+            struct Pair<T1, T2> { }
+            struct Function<TOut, T1, T2, T3, T4> { }
+            struct Uses
+            {
+                B<int> box;
+                P<int, float> pair;
+                F<int, int, int, int, int> callback;
+                Box<int> directBox;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        NamespaceSymbol @namespace = compilation.SemanticModel.GlobalNamespace.FindNamespace("Example")!;
+        StructTypeSymbol uses = @namespace.Structs.Single(type => type.Name == "Uses");
+        Assert.Equal([1, 2, 5, 1], uses.Fields.Select(field =>
+            Assert.IsType<StructTypeSymbol>(field.Type).GenericDefinition!.GenericArity));
+        Assert.Same(uses.Fields[0].Type, uses.Fields[3].Type);
+
+        UsingDirectiveSyntax boxAliasSyntax = compilation.SyntaxTrees[0].Root.Usings[0];
+        AliasSymbol boxAlias = Assert.IsType<AliasSymbol>(
+            compilation.SemanticModel.GetDeclaredSymbol(boxAliasSyntax));
+        Assert.Same(@namespace.Structs.Single(type => type.Name == "Box"), boxAlias.Target);
+    }
+
+    [Fact]
+    public void Analyzer_ResolvesBareGenericAliasTargetThroughImportedNamespace()
+    {
+        Compilation compilation = Compilation.Create([
+            SyntaxTree.Parse(SourceText.From(
+                "namespace Library; struct Box<T> { }", "library.xe")),
+            SyntaxTree.Parse(SourceText.From("""
+                using Library;
+                using B = Box;
+                namespace App;
+                struct Uses { B<int> value; }
+                """, "app.xe")),
+        ]);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol valueType = Assert.IsType<StructTypeSymbol>(compilation.SemanticModel.GlobalNamespace
+            .FindNamespace("App")!.Structs.Single().Fields.Single().Type);
+        Assert.Equal(1, valueType.GenericDefinition!.GenericArity);
+        Assert.Equal("Library.Box", valueType.GenericDefinition.FullName);
+    }
+
+    [Theory]
+    [InlineData("struct Function<T> { } struct Function<T1, T2> { }", "1, 2")]
+    [InlineData("struct Function { } struct Function<T> { }", "0, 1")]
+    public void Analyzer_ReportsAmbiguousBareAliasTargetAcrossGenericArities(
+        string declarations, string arities)
+    {
+        Compilation compilation = Create($$"""
+            using F = Example.Function;
+            namespace Example;
+            {{declarations}}
+            """);
+
+        Diagnostic diagnostic = Assert.Single(compilation.Diagnostics,
+            item => item.Id == DiagnosticIds.AmbiguousName);
+        Assert.Contains("using alias target 'Example.Function' is ambiguous", diagnostic.Message,
+            StringComparison.Ordinal);
+        Assert.Contains($"matching generic arities: {arities}", diagnostic.Message,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(compilation.Diagnostics,
+            item => item.Id is DiagnosticIds.UnknownNamespaceOrType or DiagnosticIds.UnknownType);
+    }
+
+    [Fact]
+    public void Analyzer_ReportsNormalWrongArityDiagnosticThroughGenericAlias()
+    {
+        Compilation compilation = Create("""
+            using B = Example.Box;
+            namespace Example;
+            struct Box<T> { }
+            struct Uses { B<int, float> value; }
+            """);
+
+        Diagnostic diagnostic = Assert.Single(compilation.Diagnostics,
+            item => item.Id == DiagnosticIds.GenericArityMismatch);
+        Assert.Contains("generic arity 2", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("available arities: 1", diagnostic.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(compilation.Diagnostics, item => item.Id == DiagnosticIds.UnknownType);
+    }
+
+    [Fact]
+    public void Analyzer_UsesGenericAliasForConstructorsOperatorsAndPrivateStaticIdentity()
+    {
+        Compilation compilation = Create("""
+            using V = Example.Value;
+            namespace Example;
+            struct Value<T>
+            {
+                public T Item;
+                private static int Hidden = 40;
+                public static int Count = 2;
+                public Value(T item) { Item = move item; }
+                public static int ReadHidden() { return V<T>.Hidden; }
+                public static Value<T> operator +(Value<T> left, Value<T> right)
+                {
+                    return move left;
+                }
+            }
+            int Use()
+            {
+                V<int> left = V<int>(20);
+                V<int> right = V<int>(22);
+                V<int> sum = move left + move right;
+                return sum.Item + V<int>.Count + V<int>.ReadHidden();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_PreservesBareGenericSelfReferenceWithSameNamedArityZeroType()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct State { }
+            struct State<T>
+            {
+                private static int value;
+                public static int Test()
+                {
+                    State.value = 42;
+                    return State.value;
+                }
+            }
+            int Use() { return State<int>.Test(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void Analyzer_UsesArityBeforeImportAmbiguityAndForQualifiedLookup()
+    {
+        Compilation compilation = Compilation.Create([
+            SyntaxTree.Parse(SourceText.From("namespace A; struct Function<T1, T2> { }", "a.xe")),
+            SyntaxTree.Parse(SourceText.From("namespace B; struct Function<T1, T2, T3> { }", "b.xe")),
+            SyntaxTree.Parse(SourceText.From("""
+                using A;
+                using B;
+                namespace App;
+                struct Uses
+                {
+                    Function<int, int> importedTwo;
+                    Function<int, int, int> importedThree;
+                    A.Function<int, int> qualifiedTwo;
+                    B.Function<int, int, int> qualifiedThree;
+                }
+                """, "app.xe")),
+        ]);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol uses = compilation.SemanticModel.GlobalNamespace.FindNamespace("App")!.Structs.Single();
+        Assert.Equal([2, 3, 2, 3], uses.Fields.Select(field =>
+            Assert.IsType<StructTypeSymbol>(field.Type).GenericDefinition!.GenericArity));
+    }
+
+    [Fact]
+    public void Analyzer_IndexesForwardSameNamedGenericDeclarationsAcrossFilesByArity()
+    {
+        Compilation compilation = Compilation.Create([
+            SyntaxTree.Parse(SourceText.From("""
+                namespace Example;
+                struct Uses { Foo<int> one; Foo<int, float> two; }
+                """, "uses.xe")),
+            SyntaxTree.Parse(SourceText.From("namespace Example; struct Foo<T> { }", "foo1.xe")),
+            SyntaxTree.Parse(SourceText.From("namespace Example; struct Foo<T1, T2> { }", "foo2.xe")),
+        ]);
+
+        Assert.Empty(compilation.Diagnostics);
+        StructTypeSymbol uses = compilation.SemanticModel.GlobalNamespace.FindNamespace("Example")!.Structs
+            .Single(type => type.Name == "Uses");
+        Assert.Equal([1, 2], uses.Fields.Select(field =>
+            Assert.IsType<StructTypeSymbol>(field.Type).GenericDefinition!.GenericArity));
+    }
+
+    [Fact]
+    public void Analyzer_ReportsAvailableAritiesWhenNoGenericDeclarationMatches()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Foo<T> { }
+            struct Foo<T1, T2, T3> { }
+            struct Uses { Foo<int, float> value; }
+            """);
+
+        Diagnostic diagnostic = Assert.Single(compilation.Diagnostics);
+        Assert.Equal(DiagnosticIds.GenericArityMismatch, diagnostic.Id);
+        Assert.Contains("generic arity 2", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("1, 3", diagnostic.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(compilation.Diagnostics, item => item.Id == DiagnosticIds.AmbiguousName);
+    }
+
+    [Fact]
+    public void Analyzer_RejectsSameNamedTypesWithTheSameArityAndReportsPreviousDeclaration()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Foo<T> { }
+            struct Foo<U> { }
+            """);
+
+        Diagnostic diagnostic = Assert.Single(compilation.Diagnostics,
+            item => item.Id == DiagnosticIds.DuplicateDeclaration);
+        RelatedDiagnosticLocation previous = Assert.Single(diagnostic.RelatedLocations);
+        Assert.Equal("Foo", previous.Location.Source.GetText(previous.Location.Span));
+    }
+
+    [Fact]
+    public void Analyzer_DoesNotSharePrivateAccessAcrossSameNamedGenericArities()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Foo<T> { private int value; }
+            struct Foo<T1, T2>
+            {
+                public int Read(Foo<T1> other) { return other.value; }
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics, item => item.Id == DiagnosticIds.InaccessibleSymbol);
+    }
+
+    [Fact]
     public void Analyzer_ResolvesGenericParametersThroughoutFunctionAndStructSignatures()
     {
         Compilation compilation = Create("""

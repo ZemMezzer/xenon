@@ -1737,6 +1737,192 @@ public sealed class XenonBuildDriverTests
     }
 
     [Fact]
+    public async Task XelibPreservesSameNamedGenericTypeAritiesWithoutLibrarySources()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("GenericArityXelib", "xenon-library", """
+            namespace GenericArityXelib;
+            public struct Function<TOut, TIn>
+            {
+                public int Value;
+                public Function(int value) { Value = value + 1; }
+                public static Function<TOut, TIn> operator implicit(int value)
+                {
+                    return Function<TOut, TIn>(value);
+                }
+                public int Invoke() { return Value; }
+            }
+            public struct Function<TOut, TIn1, TIn2>
+            {
+                public int Value;
+                public Function(int value) { Value = value + 1; }
+                public static Function<TOut, TIn1, TIn2> operator implicit(int value)
+                {
+                    return Function<TOut, TIn1, TIn2>(value);
+                }
+                public int Invoke() { return Value; }
+            }
+            """);
+
+        XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
+            "GenericArityXelibApp", """
+                using GenericArityXelib;
+                namespace GenericArityXelibApp;
+                int Main()
+                {
+                    Function<int, int> first = 20;
+                    Function<int, int, int> second = 20;
+                    return first.Invoke() + second.Invoke();
+                }
+                """);
+
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        StructTypeSymbol[] definitions = app.Compilation!.SemanticModel.GlobalNamespace.Namespaces
+            .Single(scope => scope.Name == "GenericArityXelib").Structs
+            .Where(type => type.IsGenericDefinition).OrderBy(type => type.GenericArity).ToArray();
+        Assert.Equal([2, 3], definitions.Select(type => type.GenericArity));
+    }
+
+    [Fact]
+    public async Task SourceAndXelibSameNamedTypesCoexistOnlyWhenGenericAritiesDiffer()
+    {
+        using var directory = new TemporaryProject();
+        string libraryProject = directory.WriteDependencyProject("GenericArityMix", "xenon-library", """
+            namespace GenericArityMix;
+            public struct Function<TOut, TIn>
+            {
+                public int Invoke() { return 20; }
+            }
+            """);
+        string libraryProjectPath = Path.GetFullPath(Path.Combine(directory.Root, libraryProject));
+        XenonBuildResult library = new XenonBuildDriver().Build(new XenonBuildRequest(
+            libraryProjectPath, OutputRoot: directory.OutputRoot));
+        Assert.True(library.Success, library.Failure ?? string.Join(Environment.NewLine, library.Diagnostics));
+        Directory.Delete(Path.Combine(Path.GetDirectoryName(libraryProjectPath)!, "src"), recursive: true);
+
+        directory.WriteProject("GenericArityMixApp", "executable", """
+            namespace GenericArityMix;
+            struct Function<TOut, TIn1, TIn2>
+            {
+                public int Invoke() { return 22; }
+            }
+            int Main()
+            {
+                Function<int, int> first = Function<int, int>();
+                Function<int, int, int> second = Function<int, int, int>();
+                return first.Invoke() + second.Invoke();
+            }
+            """);
+        string relativeLibrary = Path.GetRelativePath(directory.Root, library.ArtifactPath!).Replace('\\', '/');
+        File.AppendAllText(directory.ProjectFile, $"""
+
+            [libraries]
+            libraries = ["{relativeLibrary}"]
+            """);
+
+        XenonBuildResult app = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(app.Success, string.Join(Environment.NewLine, app.Diagnostics) +
+            Environment.NewLine + app.Failure);
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            app.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+
+        File.WriteAllText(Path.Combine(directory.Root, "src", "main.xe"), """
+            namespace GenericArityMix;
+            struct Function<TResult, TValue> { }
+            int Main() { return 0; }
+            """);
+        XenonBuildResult duplicate = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.False(duplicate.Success);
+        Assert.Contains(duplicate.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.DuplicateDeclaration);
+    }
+
+    [Fact]
+    public async Task FunctionValueWrappersWithOneThroughFourInputsCompileLinkAndRun()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("FunctionArityRuntime", "executable", """
+            namespace FunctionArityRuntime;
+            struct Function<TOut, TIn1>
+            {
+                private function TOut(TIn1) callback;
+                private Function(function TOut(TIn1) value) { callback = value; }
+                public static Function<TOut, TIn1> operator implicit(function TOut(TIn1) value)
+                {
+                    return Function<TOut, TIn1>(value);
+                }
+                public TOut Invoke(TIn1 value1) { return callback(value1); }
+            }
+            struct Function<TOut, TIn1, TIn2>
+            {
+                private function TOut(TIn1, TIn2) callback;
+                private Function(function TOut(TIn1, TIn2) value) { callback = value; }
+                public static Function<TOut, TIn1, TIn2> operator implicit(function TOut(TIn1, TIn2) value)
+                {
+                    return Function<TOut, TIn1, TIn2>(value);
+                }
+                public TOut Invoke(TIn1 value1, TIn2 value2) { return callback(value1, value2); }
+            }
+            struct Function<TOut, TIn1, TIn2, TIn3>
+            {
+                private function TOut(TIn1, TIn2, TIn3) callback;
+                private Function(function TOut(TIn1, TIn2, TIn3) value) { callback = value; }
+                public static Function<TOut, TIn1, TIn2, TIn3> operator implicit(
+                    function TOut(TIn1, TIn2, TIn3) value)
+                {
+                    return Function<TOut, TIn1, TIn2, TIn3>(value);
+                }
+                public TOut Invoke(TIn1 value1, TIn2 value2, TIn3 value3)
+                {
+                    return callback(value1, value2, value3);
+                }
+            }
+            struct Function<TOut, TIn1, TIn2, TIn3, TIn4>
+            {
+                private function TOut(TIn1, TIn2, TIn3, TIn4) callback;
+                private Function(function TOut(TIn1, TIn2, TIn3, TIn4) value) { callback = value; }
+                public static Function<TOut, TIn1, TIn2, TIn3, TIn4> operator implicit(
+                    function TOut(TIn1, TIn2, TIn3, TIn4) value)
+                {
+                    return Function<TOut, TIn1, TIn2, TIn3, TIn4>(value);
+                }
+                public TOut Invoke(TIn1 value1, TIn2 value2, TIn3 value3, TIn4 value4)
+                {
+                    return callback(value1, value2, value3, value4);
+                }
+            }
+            int Main()
+            {
+                Function<bool, int> positive = [](int value) => { return value > 0; };
+                Function<int, int, int> add = [](int left, int right) => { return left + right; };
+                Function<int, int, int, int> sum3 = [](int a, int b, int c) => { return a + b + c; };
+                Function<int, int, int, int, int> sum4 = [](int a, int b, int c, int d) =>
+                    { return a + b + c + d; };
+                if (!positive.Invoke(1)) return 1;
+                if (add.Invoke(19, 23) != 42) return 2;
+                if (sum3.Invoke(10, 12, 20) != 42) return 3;
+                if (sum4.Invoke(9, 10, 11, 12) != 42) return 4;
+                return 42;
+            }
+            """);
+
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics) +
+            Environment.NewLine + result.Failure);
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
     public async Task XelibGenericTargetLayoutConstantAndThreadLocalInitializerRemainPortable()
     {
         using var directory = new TemporaryProject();
