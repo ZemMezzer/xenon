@@ -244,7 +244,8 @@ internal static class XelibExportKey
     {
         NamespaceSymbol value => $"N:{Tag(XelibSymbolKind.Namespace)}:{value.FullName}",
         StructTypeSymbol { GenericDefinition: not null } value => TypeKey(value),
-        StructTypeSymbol value => $"T:{Tag(XelibSymbolKind.Struct)}:{value.FullName}",
+        StructTypeSymbol value => $"T:{Tag(XelibSymbolKind.Struct)}:{value.FullName}" +
+            (RequiresAritySuffix(value) ? $":{value.GenericArity}" : string.Empty),
         InterfaceTypeSymbol value => $"T:{Tag(XelibSymbolKind.Interface)}:{value.FullName}",
         EnumTypeSymbol value => $"T:{Tag(XelibSymbolKind.Enum)}:{value.FullName}",
         TemplateSymbol value => $"T:{Tag(XelibSymbolKind.Template)}:{value.QualifiedName}",
@@ -277,6 +278,12 @@ internal static class XelibExportKey
     };
 
     private static string Tag(XelibSymbolKind kind) => ((ushort)kind).ToString(CultureInfo.InvariantCulture);
+
+    // Preserve the v1 key for the overwhelmingly common unambiguous declaration.
+    // All declarations participate because these keys also order non-exported symbols and types.
+    private static bool RequiresAritySuffix(StructTypeSymbol type) =>
+        type.ContainingNamespace.Structs.Count(candidate =>
+            !candidate.IsGenericSpecialization && candidate.Name == type.Name) > 1;
 
     public static string TypeKey(TypeSymbol type) => type switch
     {
@@ -854,10 +861,6 @@ internal sealed class XelibIrBuilder
     {
         if (_symbolIds is not null && _symbolIds.TryGetValue(symbol, out int id))
             return XelibSymbolReference.Local(id);
-        Symbol root = symbol;
-        while (root.ContainingSymbol is { } owner) root = owner;
-        if (root is NamespaceSymbol @namespace && _dependencyByRoot.TryGetValue(@namespace, out int dependencyId))
-            return XelibSymbolReference.External(dependencyId, XelibExportKey.Create(symbol));
         if (symbol.Origin is { Kind: SymbolOriginKind.Library, LibraryContentIdentity: not null,
             LibrarySymbolKey: not null } origin)
         {
@@ -871,6 +874,10 @@ internal sealed class XelibIrBuilder
             if (byIdentity >= 0)
                 return XelibSymbolReference.External(byIdentity + 1, origin.LibrarySymbolKey);
         }
+        Symbol root = symbol;
+        while (root.ContainingSymbol is { } owner) root = owner;
+        if (root is NamespaceSymbol @namespace && _dependencyByRoot.TryGetValue(@namespace, out int dependencyId))
+            return XelibSymbolReference.External(dependencyId, XelibExportKey.Create(symbol));
         throw new XelibFormatException(XelibErrorCode.InvalidReference,
             $"symbol '{symbol.QualifiedName}' is not owned by this library or a declared dependency");
     }

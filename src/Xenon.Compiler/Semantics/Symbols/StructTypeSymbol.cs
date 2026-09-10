@@ -74,6 +74,7 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     public ImmutableArray<FunctionSymbol> Methods => _methods;
     public ImmutableArray<FunctionSymbol> VirtualMethods => _virtualMethods;
     public ImmutableArray<GenericParameterSymbol> TypeParameters => _typeParameters;
+    public override int GenericArity => GenericDefinition?.GenericArity ?? _typeParameters.Length;
     public bool IsGenericDefinition => !_typeParameters.IsEmpty;
     public StructTypeSymbol? GenericDefinition { get; private set; }
     public ImmutableArray<TypeSymbol> TypeArguments { get; private set; } = [];

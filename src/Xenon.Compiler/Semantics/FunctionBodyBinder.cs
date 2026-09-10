@@ -3167,7 +3167,7 @@ internal sealed partial class FunctionBodyBinder
             nameToken = parts[^1];
             string[] receiverParts = parts.Take(parts.Length - 1).Select(part => part.Text).ToArray();
             TypeSymbol? receiverType = receiverParts.Length == 1
-                ? _fileScope.ResolveType(receiverParts[0], parts[0].Location, lookupDiagnostics)
+                ? ResolveUnqualifiedTypeForExpression(receiverParts[0], parts[0].Location, lookupDiagnostics)
                 : _fileScope.ResolveQualifiedType(receiverParts);
             candidates = receiverType is DeclaredTypeSymbol declaredType
                 ? declaredType.LookupMethods(nameToken.Text).ToArray()
@@ -5714,7 +5714,8 @@ internal sealed partial class FunctionBodyBinder
                 dottedName.Length >= 2 &&
                 _scope.Lookup(dottedName[0].Text) is null &&
                 (_fileScope.CanStartQualifiedName(dottedName[0].Text) ||
-                 _fileScope.ResolveType(dottedName[0].Text, dottedName[0].Location, _diagnostics) is not null))
+                 ResolveUnqualifiedTypeForExpression(dottedName[0].Text, dottedName[0].Location,
+                     new DiagnosticBag()) is not null))
             {
                 return null;
             }
@@ -6341,7 +6342,7 @@ internal sealed partial class FunctionBodyBinder
                 return false;
             }
 
-            type = _fileScope.ResolveType(identifier, name.IdentifierToken.Location, _diagnostics);
+            type = ResolveUnqualifiedTypeForExpression(identifier, name.IdentifierToken.Location, _diagnostics);
             location = name.IdentifierToken.Location;
             return type is not null;
         }
@@ -6562,7 +6563,7 @@ internal sealed partial class FunctionBodyBinder
         if (name.IdentifierToken.Text == "destruct")
             return BindLifetimeOperation(syntax, name, arguments);
 
-        TypeSymbol? callTargetType = _fileScope.ResolveType(
+        TypeSymbol? callTargetType = ResolveUnqualifiedTypeForExpression(
             name.IdentifierToken.Text,
             name.IdentifierToken.Location,
             _diagnostics);
@@ -6805,8 +6806,11 @@ internal sealed partial class FunctionBodyBinder
                 return argumentIndex < functionValue.ParameterTypes.Length ? functionValue.ParameterTypes[argumentIndex] : null;
 
             var lookupDiagnostics = new DiagnosticBag();
-            TypeSymbol? targetType = _fileScope.ResolveType(name.IdentifierToken.Text,
-                name.IdentifierToken.Location, lookupDiagnostics);
+            TypeSymbol? targetType = syntax.TypeArguments is { } explicitTypeArguments
+                ? _fileScope.ResolveType(name.IdentifierToken.Text, explicitTypeArguments.Arguments.Length,
+                    name.IdentifierToken.Location, lookupDiagnostics)
+                : ResolveUnqualifiedTypeForExpression(name.IdentifierToken.Text,
+                    name.IdentifierToken.Location, lookupDiagnostics);
             if (targetType is StructTypeSymbol structure)
                 candidates.AddRange(structure.Constructors);
             else if (_function.ContainingType is { } containingType)
@@ -7406,8 +7410,8 @@ internal sealed partial class FunctionBodyBinder
         if (syntax.Target is NameExpressionSyntax name)
         {
             location = name.IdentifierToken.Location;
-            TypeSymbol? possibleType = _fileScope.ResolveType(name.IdentifierToken.Text, location,
-                new DiagnosticBag());
+            TypeSymbol? possibleType = _fileScope.ResolveType(name.IdentifierToken.Text,
+                typeArguments.Arguments.Length, location, new DiagnosticBag());
             if (possibleType is StructTypeSymbol { IsGenericDefinition: true })
                 return BindExplicitGenericStructConstruction(syntax, name, typeArguments, arguments);
             candidates = _fileScope.ResolveFunctions(name.IdentifierToken.Text).ToArray();
@@ -7638,7 +7642,7 @@ internal sealed partial class FunctionBodyBinder
             if (parts.Length > 1 && !_fileScope.CanStartQualifiedName(firstName))
                 return false;
             type = parts.Length == 1
-                ? _fileScope.ResolveType(firstName, parts[0].Location, new DiagnosticBag())
+                ? ResolveUnqualifiedTypeForExpression(firstName, parts[0].Location, new DiagnosticBag())
                 : _fileScope.ResolveQualifiedType(parts.Select(part => part.Text).ToArray());
         }
 
@@ -7647,6 +7651,18 @@ internal sealed partial class FunctionBodyBinder
             ReferenceEquals(specialization.GenericDefinition, definition))
             type = specialization;
         return type is not null;
+    }
+
+    private TypeSymbol? ResolveUnqualifiedTypeForExpression(string name, TextLocation location,
+        DiagnosticBag diagnostics)
+    {
+        if (_function.ContainingStruct is { } containingStruct)
+        {
+            StructTypeSymbol definition = containingStruct.GenericDefinition ?? containingStruct;
+            if (definition.IsGenericDefinition && string.Equals(definition.Name, name, StringComparison.Ordinal))
+                return containingStruct;
+        }
+        return _fileScope.ResolveType(name, location, diagnostics);
     }
 
     private bool HasValueSymbol(string name, TextLocation location) =>

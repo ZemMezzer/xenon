@@ -502,7 +502,7 @@ public sealed class SemanticModelTests
         TypeSyntax type = function.Parameters[0].Type;
 
         Assert.IsType<ErrorTypeSymbol>(model.GetTypeInfo(type).Type);
-        Assert.Contains(model.GetDiagnostics(), diagnostic => diagnostic.Message.Contains("generic type arguments", StringComparison.Ordinal));
+        Assert.Contains(model.GetDiagnostics(), diagnostic => diagnostic.Id == DiagnosticIds.GenericArityMismatch);
     }
 
     [Fact]
@@ -922,7 +922,7 @@ public sealed class SemanticModelTests
             (Example("enum Value { A, A }"), DiagnosticIds.DuplicateEnumMember),
             (Example("const int A = B; const int B = A;"), DiagnosticIds.ConstantCycle),
             (Example("struct Base {} struct Derived : Base { public override void Run() {} }"), DiagnosticIds.NoCompatibleOverrideTarget),
-            (Example("struct Box {} void Test(Box<int> value) {}"), DiagnosticIds.GenericTypeArgumentsNotSupported),
+            (Example("struct Box {} void Test(Box<int> value) {}"), DiagnosticIds.GenericArityMismatch),
             (Example("void Test(void& value) {}"), DiagnosticIds.VoidReferenceElementType),
             (Example("readonly int Test() { return 1; }"), DiagnosticIds.InvalidReadonlyReturnQualifier),
             (Example("enum State { Ready } void Test() { State value = State.Missing; }"), DiagnosticIds.UnknownEnumMember),

@@ -559,7 +559,7 @@ internal sealed partial class FunctionBodyBinder
                 return [];
             string[] receiverParts = parts.Take(parts.Length - 1).Select(part => part.Text).ToArray();
             TypeSymbol? receiverType = receiverParts.Length == 1
-                ? _fileScope.ResolveType(receiverParts[0], parts[0].Location, new DiagnosticBag())
+                ? ResolveUnqualifiedTypeForExpression(receiverParts[0], parts[0].Location, new DiagnosticBag())
                 : _fileScope.ResolveQualifiedType(receiverParts);
             candidates = receiverType is DeclaredTypeSymbol declaredType
                 ? declaredType.LookupMethods(parts[^1].Text)

@@ -229,6 +229,102 @@ public sealed class CoreIntelligenceTests
     }
 
     [Fact]
+    public async Task SameNamedGenericTypeAritiesRemainDistinctAcrossCoreLanguageFeatures()
+    {
+        const string source = """
+            namespace Game;
+            struct Function<TOut, TIn> { }
+            struct Function<TOut, TIn1, TIn2> { }
+            void Use(Function<int, int> unary, Function<int, int, int> binary) { }
+            void Complete() { Fun }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("generic-arities.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        int unaryUse = source.IndexOf("Function<int, int> unary", StringComparison.Ordinal);
+        int binaryUse = source.IndexOf("Function<int, int, int> binary", StringComparison.Ordinal);
+        JsonElement unaryDefinition = await RequestAtAsync(session, "textDocument/definition", uri, source, unaryUse);
+        JsonElement binaryDefinition = await RequestAtAsync(session, "textDocument/definition", uri, source, binaryUse);
+        Assert.Equal(1, Assert.Single(unaryDefinition.EnumerateArray()).GetProperty("range")
+            .GetProperty("start").GetProperty("line").GetInt32());
+        Assert.Equal(2, Assert.Single(binaryDefinition.EnumerateArray()).GetProperty("range")
+            .GetProperty("start").GetProperty("line").GetInt32());
+
+        JsonElement unaryHover = await RequestAtAsync(session, "textDocument/hover", uri, source, unaryUse);
+        JsonElement binaryHover = await RequestAtAsync(session, "textDocument/hover", uri, source, binaryUse);
+        Assert.Contains("Function<TOut, TIn>", unaryHover.GetProperty("contents").GetProperty("value").GetString());
+        Assert.Contains("Function<TOut, TIn1, TIn2>", binaryHover.GetProperty("contents").GetProperty("value").GetString());
+
+        JsonElement unaryReferences = await RequestAtAsync(session, "textDocument/references", uri, source,
+            unaryUse, new { includeDeclaration = true });
+        JsonElement binaryReferences = await RequestAtAsync(session, "textDocument/references", uri, source,
+            binaryUse, new { includeDeclaration = true });
+        Assert.Equal(2, unaryReferences.GetArrayLength());
+        Assert.Equal(2, binaryReferences.GetArrayLength());
+
+        JsonElement rename = await RequestAtAsync(session, "textDocument/rename", uri, source, unaryUse,
+            newName: "UnaryFunction");
+        JsonElement[] edits = rename.GetProperty("changes").GetProperty(uri).EnumerateArray().ToArray();
+        Assert.Equal(2, edits.Length);
+        Assert.DoesNotContain(edits, edit => edit.GetProperty("range").GetProperty("start")
+            .GetProperty("line").GetInt32() == 2);
+
+        int completionPosition = source.LastIndexOf("Fun", StringComparison.Ordinal) + "Fun".Length;
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
+            completionPosition);
+        JsonElement[] functionItems = completion.GetProperty("items").EnumerateArray()
+            .Where(item => item.GetProperty("label").GetString() == "Function").ToArray();
+        Assert.Equal(2, functionItems.Length);
+        Assert.Contains(functionItems, item => item.GetProperty("detail").GetString()!.Contains("<TOut, TIn>"));
+        Assert.Contains(functionItems, item => item.GetProperty("detail").GetString()!.Contains("<TOut, TIn1, TIn2>"));
+    }
+
+    [Fact]
+    public async Task GenericTypeAliasHoverAndDefinitionUseItsConcreteTargetDeclaration()
+    {
+        const string source = """
+            using B = Game.Box;
+            namespace Game;
+            struct Box<T> { public T value; }
+            void Use(B<int> item) { item.value; }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("generic-alias.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        int aliasTarget = source.IndexOf("Box;", StringComparison.Ordinal);
+        int aliasUse = source.IndexOf("B<int>", StringComparison.Ordinal);
+        JsonElement targetDefinition = await RequestAtAsync(session, "textDocument/definition", uri,
+            source, aliasTarget);
+        JsonElement useDefinition = await RequestAtAsync(session, "textDocument/definition", uri,
+            source, aliasUse);
+        Assert.Equal(2, Assert.Single(targetDefinition.EnumerateArray()).GetProperty("range")
+            .GetProperty("start").GetProperty("line").GetInt32());
+        Assert.Equal(2, Assert.Single(useDefinition.EnumerateArray()).GetProperty("range")
+            .GetProperty("start").GetProperty("line").GetInt32());
+
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, aliasUse);
+        Assert.Contains("Box<T>", hover.GetProperty("contents").GetProperty("value").GetString());
+    }
+
+    [Fact]
     public async Task CoreRequestsUseSemanticModelAndWorkspaceIndexes()
     {
         const string source = """

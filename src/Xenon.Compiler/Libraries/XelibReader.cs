@@ -214,6 +214,7 @@ internal sealed class XelibSemanticReconstruction
         CreateNamespaces();
         CreateDeclaredSymbols();
         CreateGenericParameters();
+        RegisterDeclaredSymbols();
         foreach (XelibTypeRecord record in _typeRecords) _ = ResolveType(record.Id);
         CreateNonFunctionMembers();
         CreateFunctions();
@@ -384,14 +385,6 @@ internal sealed class XelibSemanticReconstruction
                 _ => throw new InvalidOperationException(),
             };
             _symbols.Add(record.Id, created);
-            bool declared = created switch
-            {
-                DeclaredTypeSymbol type => owner.TryDeclareType(type),
-                TemplateSymbol template => owner.TryDeclareTemplate(template),
-                _ => false,
-            };
-            if (!declared) throw XelibReader.Invalid(
-                $"duplicate declaration '{created.QualifiedName}'", _path);
         }
     }
 
@@ -411,6 +404,24 @@ internal sealed class XelibSemanticReconstruction
             }).ToArray();
             if (_symbols.GetValueOrDefault(group.Key) is StructTypeSymbol structure)
                 structure.SetTypeParameters([.. parameters]);
+        }
+    }
+
+    private void RegisterDeclaredSymbols()
+    {
+        foreach (XelibSymbolRecord record in _symbolRecords.Where(item => item.Kind is
+            XelibSymbolKind.Struct or XelibSymbolKind.Interface or XelibSymbolKind.Enum or XelibSymbolKind.Template))
+        {
+            Symbol created = _symbols[record.Id];
+            NamespaceSymbol owner = (NamespaceSymbol)created.ContainingSymbol!;
+            bool declared = created switch
+            {
+                DeclaredTypeSymbol type => owner.TryDeclareType(type),
+                TemplateSymbol template => owner.TryDeclareTemplate(template),
+                _ => false,
+            };
+            if (!declared) throw XelibReader.Invalid(
+                $"duplicate declaration '{created.QualifiedName}'", _path);
         }
     }
 

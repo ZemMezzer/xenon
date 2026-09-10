@@ -97,7 +97,18 @@ public sealed class NamespaceSymbol : Symbol
     internal ConstantSymbol? FindConstant(string name) => FindSingle(_constants, name);
     internal IReadOnlyList<ConstantSymbol> FindConstants(string name) => _constants.GetValueOrDefault(name) ?? [];
 
-    internal bool TryDeclareType(DeclaredTypeSymbol type) => !_templates.ContainsKey(type.Name) && TryDeclare(_types, type.Name, type);
+    internal bool TryDeclareType(DeclaredTypeSymbol type)
+    {
+        if (_templates.ContainsKey(type.Name)) return false;
+        if (!_types.TryGetValue(type.Name, out List<DeclaredTypeSymbol>? candidates))
+        {
+            _types.Add(type.Name, [type]);
+            return true;
+        }
+        if (candidates.Any(candidate => candidate.GenericArity == type.GenericArity)) return false;
+        candidates.Add(type);
+        return true;
+    }
 
     internal bool TryDeclareTemplate(TemplateSymbol template) =>
         !_types.ContainsKey(template.Name) && TryDeclare(_templates, template.Name, template);
@@ -106,7 +117,13 @@ public sealed class NamespaceSymbol : Symbol
     internal IReadOnlyList<TemplateSymbol> FindTemplates(string name) => _templates.GetValueOrDefault(name) ?? [];
 
     internal DeclaredTypeSymbol? FindAnyType(string name) => FindSingle(_types, name);
+    internal DeclaredTypeSymbol? FindType(string name, int genericArity) =>
+        FindSingle(FindTypes(name, genericArity));
     internal IReadOnlyList<DeclaredTypeSymbol> FindTypes(string name) => _types.GetValueOrDefault(name) ?? [];
+    internal IReadOnlyList<DeclaredTypeSymbol> FindTypes(string name, int genericArity) =>
+        _types.TryGetValue(name, out List<DeclaredTypeSymbol>? candidates)
+            ? candidates.Where(candidate => candidate.GenericArity == genericArity).ToArray()
+            : [];
 
     private static void AddCandidate<T>(Dictionary<string, List<T>> dictionary, string name, T value)
     {
@@ -125,4 +142,7 @@ public sealed class NamespaceSymbol : Symbol
 
     private static T? FindSingle<T>(Dictionary<string, List<T>> dictionary, string name) where T : class =>
         dictionary.TryGetValue(name, out List<T>? candidates) && candidates.Count == 1 ? candidates[0] : null;
+
+    private static T? FindSingle<T>(IReadOnlyList<T> candidates) where T : class =>
+        candidates.Count == 1 ? candidates[0] : null;
 }

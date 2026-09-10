@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -189,6 +190,139 @@ public sealed class XelibContainerTests
             item.Key.Contains($":{(ushort)XelibFunctionKind.Method}:", StringComparison.Ordinal));
         Assert.DoesNotContain(exports, item => item.Key.Contains("Template", StringComparison.Ordinal));
         Assert.NotEqual((int)FunctionKind.Ordinary, (int)XelibFunctionKind.Ordinary);
+    }
+
+    [Fact]
+    public void UnambiguousGenericTypeKeepsLegacyV1KeyThroughTransitiveXelibWrite()
+    {
+        Compilation dependency = Compilation.Create(SourceText.From("""
+            namespace LegacyKeys;
+            public struct Box<T> { public T Value; }
+            """, "dependency.xe"));
+        Assert.False(dependency.HasErrors, string.Join(Environment.NewLine, dependency.Diagnostics));
+        byte[] dependencyBytes = XelibWriter.Write(dependency, new XelibWriteOptions("LegacyKeys"));
+        XelibContainer dependencyContainer = XelibContainer.Read(dependencyBytes);
+        ImmutableArray<XelibExport> dependencyExports = XelibJson.Deserialize<ImmutableArray<XelibExport>>(
+            dependencyContainer.GetRequiredSection(XelibSectionKind.Exports).AsSpan(), null);
+        string legacyKey = $"T:{(ushort)XelibSymbolKind.Struct}:LegacyKeys.Box";
+        Assert.Contains(dependencyExports, item => item.Key == legacyKey);
+        Assert.DoesNotContain(dependencyExports, item => item.Key == legacyKey + ":1");
+
+        LibraryCompilationReference dependencyReference = XelibReader.Read(dependencyBytes);
+        Compilation intermediate = Compilation.Create(new CompilationOptions(), [dependencyReference],
+            SourceText.From("""
+                using LegacyKeys;
+                namespace Intermediate;
+                public struct Holder { public Box<int> Value; }
+                """, "intermediate.xe"));
+        Assert.False(intermediate.HasErrors, string.Join(Environment.NewLine, intermediate.Diagnostics));
+        byte[] intermediateBytes = XelibWriter.Write(intermediate, new XelibWriteOptions(
+            "Intermediate", Dependencies: [new XelibDependencyInput(
+                dependencyReference, dependencyReference.LibraryIdentity)]));
+
+        LibraryCompilationReference roundTripped = XelibReader.Read(intermediateBytes, [dependencyReference]);
+        Assert.Contains(roundTripped.GlobalNamespace.Namespaces.Single(scope => scope.Name == "Intermediate").Structs,
+            type => type.Name == "Holder");
+    }
+
+    [Fact]
+    public void SameNamedGenericTypeFamilyUsesAritySuffixedXelibKeys()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace ArityKeys;
+            public struct Function<T> { }
+            public struct Function<T1, T2> { }
+            public struct Mixed<T> { }
+            internal struct Mixed<T1, T2> { }
+            internal struct Hidden<T> { }
+            internal struct Hidden<T1, T2> { }
+            """, "arity-keys.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        XelibContainer container = XelibContainer.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("ArityKeys")));
+        ImmutableArray<XelibExport> exports = XelibJson.Deserialize<ImmutableArray<XelibExport>>(
+            container.GetRequiredSection(XelibSectionKind.Exports).AsSpan(), null);
+        string prefix = $"T:{(ushort)XelibSymbolKind.Struct}:ArityKeys.Function:";
+
+        Assert.Contains(exports, item => item.Key == prefix + "1");
+        Assert.Contains(exports, item => item.Key == prefix + "2");
+        Assert.DoesNotContain(exports, item => item.Key == prefix[..^1]);
+
+        NamespaceSymbol scope = library.SemanticModel.GlobalNamespace.Namespaces.Single();
+        Assert.Equal(2, scope.Structs.Where(type => type.Name == "Mixed")
+            .Select(XelibExportKey.Create).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(2, scope.Structs.Where(type => type.Name == "Hidden")
+            .Select(XelibExportKey.Create).Distinct(StringComparer.Ordinal).Count());
+        Assert.EndsWith(":1", XelibExportKey.Create(scope.Structs.Single(type =>
+            type.Name == "Mixed" && type.GenericArity == 1)), StringComparison.Ordinal);
+        Assert.EndsWith(":2", XelibExportKey.Create(scope.Structs.Single(type =>
+            type.Name == "Hidden" && type.GenericArity == 2)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UniqueGenericDefinitionAliasResolvesFromSourceLessXelib()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace AliasLibrary;
+            public struct Box<T> { public T Value; }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("AliasLibrary")), metadataOnly: true);
+
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using B = AliasLibrary.Box;
+            namespace App;
+            struct Uses { B<int> aliased; AliasLibrary.Box<int> direct; }
+            """, "app.xe"));
+
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        StructTypeSymbol uses = app.SemanticModel.GlobalNamespace.FindNamespace("App")!.Structs.Single();
+        Assert.Same(uses.Fields[0].Type, uses.Fields[1].Type);
+        Assert.Equal(SymbolOriginKind.Library,
+            Assert.IsType<StructTypeSymbol>(uses.Fields[0].Type).GenericDefinition!.Origin.Kind);
+    }
+
+    [Fact]
+    public void GenericAliasFamilyAmbiguityIsPreservedAcrossXelibAndMixedSource()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace AliasLibrary;
+            public struct Function<T> { }
+            public struct Function<T1, T2> { }
+            """, "library.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("AliasLibrary")), metadataOnly: true);
+
+        Compilation xelibOnly = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using F = AliasLibrary.Function;
+            namespace App;
+            """, "xelib-only.xe"));
+        Diagnostic xelibDiagnostic = Assert.Single(xelibOnly.Diagnostics,
+            item => item.Id == DiagnosticIds.AmbiguousName);
+        Assert.Contains("matching generic arities: 1, 2", xelibDiagnostic.Message, StringComparison.Ordinal);
+
+        Compilation unaryLibrary = Compilation.Create(SourceText.From("""
+            namespace MixedLibrary;
+            public struct Function<T> { }
+            """, "unary-library.xe"));
+        LibraryCompilationReference unaryReference = XelibReader.Read(
+            XelibWriter.Write(unaryLibrary, new XelibWriteOptions("MixedLibrary")), metadataOnly: true);
+        Compilation mixed = Compilation.Create(new CompilationOptions(), [unaryReference], SourceText.From("""
+            using F = MixedLibrary.Function;
+            namespace MixedLibrary;
+            struct Function<T1, T2> { }
+            struct Uses { Function<int> unary; Function<int, float> binary; }
+            """, "mixed.xe"));
+
+        Diagnostic mixedDiagnostic = Assert.Single(mixed.Diagnostics,
+            item => item.Id == DiagnosticIds.AmbiguousName);
+        Assert.Contains("matching generic arities: 1, 2", mixedDiagnostic.Message, StringComparison.Ordinal);
+        StructTypeSymbol uses = mixed.SemanticModel.GlobalNamespace.FindNamespace("MixedLibrary")!.Structs
+            .Single(type => type.Name == "Uses");
+        Assert.Equal([1, 2], uses.Fields.Select(field =>
+            Assert.IsType<StructTypeSymbol>(field.Type).GenericDefinition!.GenericArity));
     }
 
     [Fact]
