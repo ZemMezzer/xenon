@@ -430,6 +430,7 @@ internal sealed class GenericStructSpecializer
         ImmutableArray<FunctionSymbol>.Builder methods)
     {
         if (source is null || specialized is null) return;
+        specialized.SetOriginalDefinition(source);
         methods.Add(specialized);
         _specializedFunctions.Add((source, owner), specialized);
     }

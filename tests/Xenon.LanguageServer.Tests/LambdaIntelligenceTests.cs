@@ -8,6 +8,64 @@ namespace Xenon.LanguageServer.Tests;
 public sealed class LambdaIntelligenceTests
 {
     [Fact]
+    public async Task GenericPrivateMemberAccessKeepsDiagnosticsAndSymbolIdentity()
+    {
+        const string source = """
+            namespace App;
+            struct Box<T>
+            {
+                private void Test() { Box<T> value = Box<T>(); }
+                public static void Run()
+                {
+                    Box<T> value = Box<T>();
+                    value.Test();
+                }
+            }
+            void Use() { Box<int>.Run(); Box<float>.Run(); }
+            """;
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("main.xe", source)).AbsoluteUri;
+        var published = new TaskCompletionSource<JsonElement>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = new LanguageServerSession((method, value) =>
+        {
+            if (method == "textDocument/publishDiagnostics")
+                published.TrySetResult(Result(value));
+            return Task.CompletedTask;
+        }, diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        JsonElement diagnostics = await published.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Empty(diagnostics.GetProperty("diagnostics").EnumerateArray());
+
+        SourceText text = SourceText.From(source);
+        int useOffset = source.LastIndexOf("Test", StringComparison.Ordinal);
+        LspPosition position = LspTextCoordinates.ToPosition(text, useOffset);
+        var parameters = new { textDocument = new { uri }, position };
+        JsonElement hover = Result(await session.HandleRequestAsync("textDocument/hover",
+            LspTestProtocol.Json(parameters), default));
+        Assert.Contains("private void Test()",
+            hover.GetProperty("contents").GetProperty("value").GetString());
+        JsonElement definition = Result(await session.HandleRequestAsync("textDocument/definition",
+            LspTestProtocol.Json(parameters), default));
+        Assert.Equal(3, Assert.Single(definition.EnumerateArray()).GetProperty("range")
+            .GetProperty("start").GetProperty("line").GetInt32());
+        JsonElement references = Result(await session.HandleRequestAsync("textDocument/references",
+            LspTestProtocol.Json(new
+            {
+                textDocument = new { uri },
+                position,
+                context = new { includeDeclaration = true },
+            }), default));
+        Assert.True(references.GetArrayLength() >= 2, references.ToString());
+    }
+
+    [Fact]
     public async Task LambdaParameterSupportsHoverDefinitionRenameAndIsolatedCompletion()
     {
         const string source = """

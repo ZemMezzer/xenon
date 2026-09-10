@@ -3125,6 +3125,12 @@ public sealed class XenonBuildDriverTests
             {
                 return [value]() => { };
             }
+            public struct ClosureHolder
+            {
+                public function void() Callback;
+                public ClosureHolder(function void() callback) { Callback = callback; }
+                public void Invoke() { Callback(); }
+            }
             public struct CallbackHolder<T>
             {
                 public function int() Callback = []() => { return 42; };
@@ -3154,9 +3160,11 @@ public sealed class XenonBuildDriverTests
                 if (multiplier(5) != 50) return 1;
                 {
                     function void() owner = MakeOwner(1);
-                    function void() copy = owner;
+                    ClosureHolder firstOwner = ClosureHolder(owner);
+                    ClosureHolder secondOwner = ClosureHolder(owner);
                     owner();
-                    copy();
+                    firstOwner.Invoke();
+                    secondOwner.Invoke();
                 }
                 if (Destroyed() != 1) return 2;
                 if (Apply<int>(41, [](int value) => { return value + 1; }) != 42) return 3;
@@ -3164,7 +3172,10 @@ public sealed class XenonBuildDriverTests
                 if (captured() != 42) return 4;
                 {
                     function void() kept = Keep<ConsumerResource>(new ConsumerResource());
-                    kept();
+                    ClosureHolder firstKept = ClosureHolder(kept);
+                    ClosureHolder secondKept = ClosureHolder(kept);
+                    firstKept.Invoke();
+                    secondKept.Invoke();
                 }
                 if (ConsumerState.Destroyed != 1) return 5;
                 CallbackHolder<int> holder = CallbackHolder<int>();

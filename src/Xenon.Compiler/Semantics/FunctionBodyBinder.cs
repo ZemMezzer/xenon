@@ -45,6 +45,7 @@ internal sealed partial class FunctionBodyBinder
     private readonly HashSet<BoundScope> _retainedStackScopes = [];
     private readonly List<ImmutableArray<MovePlace>> _receiverMoveEffectExits = [];
     private readonly List<ReferenceReturnOrigin> _referenceReturnOrigins = [];
+    private readonly List<ReferenceFieldOrigin> _aggregateReturnOrigins = [];
     private readonly List<SharedReturnOrigin> _sharedReturnOrigins = [];
     private readonly Dictionary<string, ImmutableArray<ReferenceFieldOrigin>> _constructorReferenceOrigins = [];
     private int _loopDepth;
@@ -845,7 +846,12 @@ internal sealed partial class FunctionBodyBinder
                 .DistinctBy(ReferenceFieldOriginKey)
                 .OrderBy(ReferenceFieldOriginKey, StringComparer.Ordinal)
                 .ToImmutableArray()
-            : []);
+            : ContainsValueReferenceStorage(_function.ReturnType)
+                ? _aggregateReturnOrigins
+                    .DistinctBy(ReferenceFieldOriginKey)
+                    .OrderBy(ReferenceFieldOriginKey, StringComparer.Ordinal)
+                    .ToImmutableArray()
+                : []);
         RecordScope(body, _scope);
         if (!AlwaysReturns(boundBody)) ValidateRequiredFields(body.CloseBraceToken.Location);
         if (_function.FunctionKind == FunctionKind.Constructor &&
@@ -1839,7 +1845,8 @@ internal sealed partial class FunctionBodyBinder
                 ImmutableArray<ValueReference> metadata = GetValueReferenceMetadata(initializer, metadataType);
                 SetValueReferenceMetadata(new MovePlace(variable, []), variable, metadata,
                     syntax.IdentifierToken.Location,
-                    HasDeferredReferenceUse(type) ? int.MaxValue : FindLastReferenceUse(variable, syntax));
+                    HasDeferredReferenceUse(type) ? int.MaxValue : FindLastReferenceUse(variable, syntax),
+                    initializer);
                 ValidateAggregateDestructionOrder(variable,
                     metadata.Select(reference => reference.Source).ToImmutableArray(),
                     syntax.IdentifierToken.Location);
@@ -2011,6 +2018,11 @@ internal sealed partial class FunctionBodyBinder
     private readonly record struct ValueReference(
         ImmutableArray<FieldSymbol> CarrierPath,
         ReferenceSource Source,
+        bool IsReadonly,
+        bool IsClosureProvenance);
+
+    private readonly record struct MappedReferenceSource(
+        ReferenceSource Source,
         bool IsReadonly);
 
     private void ValidateReturnedReference(BoundExpression expression, TextLocation location)
@@ -2054,7 +2066,13 @@ internal sealed partial class FunctionBodyBinder
 
     private void ValidateReturnedAggregateReferences(BoundExpression expression, TextLocation location)
     {
-        ReferenceSource[] invalid = GetReferenceSources(expression)
+        ImmutableArray<ValueReference> references = GetValueReferenceMetadata(expression, _function.ReturnType);
+        foreach (ValueReference reference in references)
+            _aggregateReturnOrigins.Add(new ReferenceFieldOrigin(
+                reference.CarrierPath.Select(field => field.Ordinal).ToImmutableArray(),
+                ToCallableReferenceOrigin(reference.Source), reference.IsReadonly));
+
+        ReferenceSource[] invalid = references.Select(reference => reference.Source)
             .DistinctBy(ReferenceSourceKey)
             .Where(source => !IsSafeReferenceReturnSource(source)).ToArray();
         if (invalid.Length == 0) return;
@@ -2146,10 +2164,12 @@ internal sealed partial class FunctionBodyBinder
                             capture.Initializer, capture.Variable.StorageType)
                         .Select(reference => reference.Source))
                     .ToImmutableArray();
-            case BoundCallExpression call when call.Function.ReturnType is ReferenceTypeSymbol ||
-                                               ContainsValueReferenceStorage(call.Function.ReturnType):
+            case BoundCallExpression call when call.Function.ReturnType is ReferenceTypeSymbol:
                 return ComposeReferenceReturnOrigins(call.Function, call.Arguments, receiver: null,
                     conservativeDispatch: false);
+            case BoundCallExpression call when ContainsValueReferenceStorage(call.Function.ReturnType):
+                return GetValueReferenceMetadata(call, call.Type)
+                    .Select(reference => reference.Source).ToImmutableArray();
             case BoundStructConstructionExpression construction:
                 return ContainsValueReferenceStorage(construction.Type)
                     ? construction.StructType.AllInstanceFields.Zip(construction.Arguments)
@@ -2174,14 +2194,18 @@ internal sealed partial class FunctionBodyBinder
             case BoundMoveExpression move when
                 _expressionReferenceMetadata.TryGetValue(move, out ImmutableArray<ValueReference> movedValue):
                 return movedValue.Select(reference => reference.Source).ToImmutableArray();
-            case BoundMethodCallExpression call when call.Method.ReturnType is ReferenceTypeSymbol ||
-                                                     ContainsValueReferenceStorage(call.Method.ReturnType):
+            case BoundMethodCallExpression call when call.Method.ReturnType is ReferenceTypeSymbol:
                 return ComposeReferenceReturnOrigins(call.Method, call.Arguments, call.Receiver,
                     conservativeDispatch: call.Method.IsVirtual || call.Method.IsOverride);
-            case BoundInterfaceMethodCallExpression call when
-                call.Method.ReturnType is ReferenceTypeSymbol ||
-                ContainsValueReferenceStorage(call.Method.ReturnType):
+            case BoundMethodCallExpression call when ContainsValueReferenceStorage(call.Method.ReturnType):
+                return GetValueReferenceMetadata(call, call.Type)
+                    .Select(reference => reference.Source).ToImmutableArray();
+            case BoundInterfaceMethodCallExpression call when call.Method.ReturnType is ReferenceTypeSymbol:
                 return [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])];
+            case BoundInterfaceMethodCallExpression call when
+                ContainsValueReferenceStorage(call.Method.ReturnType):
+                return GetValueReferenceMetadata(call, call.Type)
+                    .Select(reference => reference.Source).ToImmutableArray();
             case BoundErrorExpression:
                 return [];
             default:
@@ -2231,7 +2255,8 @@ internal sealed partial class FunctionBodyBinder
                             capture.Initializer, capture.Variable.StorageType)
                         .Select(reference => new ValueReference([], reference.Source,
                             reference.IsReadonly || capture.Variable.CaptureKind ==
-                            LambdaCaptureKind.ReadonlyBorrow)))
+                            LambdaCaptureKind.ReadonlyBorrow,
+                            IsClosureProvenance: true)))
                     .ToImmutableArray();
             case BoundVariableExpression or BoundMemberAccessExpression
                 when TryGetValueCarrierPlace(expression, out MovePlace carrier):
@@ -2272,6 +2297,16 @@ internal sealed partial class FunctionBodyBinder
             case BoundConstructorCallExpression construction:
                 return ComposeConstructorReferenceMetadata(construction.Type,
                     construction.Constructor, construction.Arguments);
+            case BoundCallExpression call when ContainsValueReferenceStorage(call.Type):
+                return ComposeCallableReferenceMetadata(call.Type, call.Function,
+                    call.Arguments, receiver: null, conservativeDispatch: false);
+            case BoundMethodCallExpression call when ContainsValueReferenceStorage(call.Type):
+                return ComposeCallableReferenceMetadata(call.Type, call.Method,
+                    call.Arguments, call.Receiver,
+                    conservativeDispatch: call.Method.IsVirtual || call.Method.IsOverride);
+            case BoundInterfaceMethodCallExpression call when ContainsValueReferenceStorage(call.Type):
+                return ComposeCallableReferenceMetadata(call.Type, call.Method,
+                    call.Arguments, call.Receiver, conservativeDispatch: true);
             case BoundStorageConstructExpression construction:
                 if (construction.Value is { } direct)
                     return GetValueReferenceMetadata(direct, construction.ValueType);
@@ -2293,14 +2328,32 @@ internal sealed partial class FunctionBodyBinder
         TypeSymbol type,
         ImmutableArray<ReferenceSource> sources)
     {
-        var leaves = ImmutableArray.CreateBuilder<(ImmutableArray<FieldSymbol> Path, bool IsReadonly)>();
+        var leaves = ImmutableArray.CreateBuilder<(
+            ImmutableArray<FieldSymbol> Path,
+            bool IsReadonly,
+            bool IsClosureProvenance)>();
         CollectReferenceLeaves(type, [], leaves, []);
         if (sources.IsEmpty || leaves.Count == 0) return [];
         var result = ImmutableArray.CreateBuilder<ValueReference>(leaves.Count);
         for (int index = 0; index < leaves.Count; index++)
         {
             var leaf = leaves[index];
-            result.Add(new ValueReference(leaf.Path, sources[Math.Min(index, sources.Length - 1)], leaf.IsReadonly));
+            ReferenceSource source = sources[Math.Min(index, sources.Length - 1)];
+            bool sourceRepresentsCarrier = source.Kind is
+                ReferenceSourceKind.Receiver or ReferenceSourceKind.Static;
+            if (!sourceRepresentsCarrier && source.Variable is VariableSymbol variable &&
+                GetTypeAtOrdinalPath(variable.Type, source.FieldOrdinals) is { } sourceType)
+                sourceRepresentsCarrier = TypeIdentity.AreSame(sourceType, type);
+            if (!leaf.Path.IsEmpty && sourceRepresentsCarrier)
+            {
+                source = source with
+                {
+                    FieldOrdinals = source.FieldOrdinals.AddRange(
+                        leaf.Path.Select(field => field.Ordinal)),
+                };
+            }
+            result.Add(new ValueReference(leaf.Path, source,
+                leaf.IsReadonly, leaf.IsClosureProvenance));
         }
         return result.ToImmutable();
     }
@@ -2326,22 +2379,104 @@ internal sealed partial class FunctionBodyBinder
         var result = ImmutableArray.CreateBuilder<ValueReference>();
         foreach (ReferenceFieldOrigin entry in summary)
         {
-            if (!TryResolveFieldPath(constructedType, entry.FieldOrdinals, out ImmutableArray<FieldSymbol> carrierPath))
-                continue;
-            ImmutableArray<ReferenceSource> sources = entry.Origin.Kind switch
+            if (!TryResolveFieldPath(constructedType, entry.FieldOrdinals,
+                    out ImmutableArray<FieldSymbol> carrierPath))
+                return AttachReferenceLeaves(constructedType,
+                    [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])]);
+            ImmutableArray<MappedReferenceSource> sources = entry.Origin.Kind switch
             {
                 ReferenceReturnOriginKind.Parameter when entry.Origin.ParameterOrdinal >= 0 &&
                     entry.Origin.ParameterOrdinal < arguments.Length =>
-                    AppendReferenceFields(GetReferenceSources(arguments[entry.Origin.ParameterOrdinal]),
+                    ResolveCallableArgumentSources(arguments[entry.Origin.ParameterOrdinal],
+                        constructor.Parameters[entry.Origin.ParameterOrdinal].Type,
                         entry.Origin.FieldOrdinals),
                 ReferenceReturnOriginKind.Static =>
-                    [new ReferenceSource(ReferenceSourceKind.Static, null, entry.Origin.FieldOrdinals)],
-                _ => [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])],
+                    [new(new ReferenceSource(ReferenceSourceKind.Static, null,
+                        entry.Origin.FieldOrdinals), false)],
+                _ => [new(new ReferenceSource(ReferenceSourceKind.Unknown, null, []), false)],
             };
-            foreach (ReferenceSource source in sources)
-                result.Add(new ValueReference(carrierPath, source, entry.IsReadonly));
+            foreach (MappedReferenceSource source in sources)
+                result.Add(new ValueReference(carrierPath, source.Source,
+                    entry.IsReadonly || source.IsReadonly,
+                    IsClosureProvenance: GetReferenceLeafType(constructedType, carrierPath) is
+                        FunctionValueTypeSymbol));
         }
         return result.ToImmutable();
+    }
+
+    private ImmutableArray<ValueReference> ComposeCallableReferenceMetadata(
+        TypeSymbol returnType,
+        FunctionSymbol callable,
+        ImmutableArray<BoundExpression> arguments,
+        BoundExpression? receiver,
+        bool conservativeDispatch)
+    {
+        if (conservativeDispatch)
+            return AttachReferenceLeaves(returnType,
+                [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])]);
+
+        ImmutableArray<ReferenceFieldOrigin> summary = callable.ReferenceFieldOrigins;
+        if (summary.IsEmpty && callable.GenericDefinition is { } definition)
+            summary = definition.ReferenceFieldOrigins;
+        if (summary.IsEmpty)
+            return callable.IsDefinition
+                ? []
+                : AttachReferenceLeaves(returnType,
+                    [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])]);
+
+        var result = ImmutableArray.CreateBuilder<ValueReference>();
+        foreach (ReferenceFieldOrigin entry in summary)
+        {
+            if (!TryResolveFieldPath(returnType, entry.FieldOrdinals,
+                    out ImmutableArray<FieldSymbol> carrierPath))
+                return AttachReferenceLeaves(returnType,
+                    [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])]);
+            ImmutableArray<MappedReferenceSource> sources = entry.Origin.Kind switch
+            {
+                ReferenceReturnOriginKind.Parameter when entry.Origin.ParameterOrdinal >= 0 &&
+                    entry.Origin.ParameterOrdinal < arguments.Length =>
+                    ResolveCallableArgumentSources(arguments[entry.Origin.ParameterOrdinal],
+                        callable.Parameters[entry.Origin.ParameterOrdinal].Type,
+                        entry.Origin.FieldOrdinals),
+                ReferenceReturnOriginKind.Receiver when receiver is not null =>
+                    ResolveCallableArgumentSources(receiver, callable.ContainingType!,
+                        entry.Origin.FieldOrdinals),
+                ReferenceReturnOriginKind.Static =>
+                    [new(new ReferenceSource(ReferenceSourceKind.Static, null,
+                        entry.Origin.FieldOrdinals), false)],
+                _ => [new(new ReferenceSource(ReferenceSourceKind.Unknown, null, []), false)],
+            };
+            bool closureProvenance = GetReferenceLeafType(returnType, carrierPath) is
+                FunctionValueTypeSymbol;
+            foreach (MappedReferenceSource source in sources)
+                result.Add(new ValueReference(carrierPath, source.Source,
+                    entry.IsReadonly || source.IsReadonly,
+                    closureProvenance));
+        }
+        return result.ToImmutable();
+    }
+
+    private ImmutableArray<MappedReferenceSource> ResolveCallableArgumentSources(
+        BoundExpression argument,
+        TypeSymbol parameterType,
+        ImmutableArray<int> fieldOrdinals)
+    {
+        if (GetTypeAtOrdinalPath(parameterType, fieldOrdinals) is null)
+            return [new(new ReferenceSource(ReferenceSourceKind.Unknown, null, []), false)];
+        ImmutableArray<MappedReferenceSource> projected = GetValueReferenceMetadata(argument, parameterType)
+            .Where(reference => reference.CarrierPath.Select(field => field.Ordinal)
+                .SequenceEqual(fieldOrdinals))
+            .Select(reference => new MappedReferenceSource(reference.Source, reference.IsReadonly))
+            .DistinctBy(reference =>
+                $"{ReferenceSourceKey(reference.Source)}:{reference.IsReadonly}")
+            .ToImmutableArray();
+        return projected.IsEmpty
+            ? AppendReferenceFields(GetReferenceSources(argument), fieldOrdinals)
+                .Select(source => new MappedReferenceSource(source,
+                    GetTypeAtOrdinalPath(parameterType, fieldOrdinals) is
+                        ReferenceTypeSymbol { IsReadonly: true }))
+                .ToImmutableArray()
+            : projected;
     }
 
     private void UpdateConstructorReferenceOrigins(
@@ -2436,20 +2571,39 @@ internal sealed partial class FunctionBodyBinder
     private static bool IsOrdinalPathPrefix(ImmutableArray<int> prefix, ImmutableArray<int> path) =>
         prefix.Length <= path.Length && prefix.SequenceEqual(path.Take(prefix.Length));
 
+    private static TypeSymbol GetReferenceLeafType(
+        TypeSymbol root,
+        ImmutableArray<FieldSymbol> fields)
+    {
+        TypeSymbol current = root;
+        foreach (FieldSymbol field in fields)
+        {
+            while (current is LifetimeModifierTypeSymbol modifier)
+                current = modifier.ElementType;
+            current = field.Type;
+        }
+        while (current is LifetimeModifierTypeSymbol modifier)
+            current = modifier.ElementType;
+        return current;
+    }
+
     private static void CollectReferenceLeaves(
         TypeSymbol type,
         ImmutableArray<FieldSymbol> path,
-        ImmutableArray<(ImmutableArray<FieldSymbol> Path, bool IsReadonly)>.Builder result,
+        ImmutableArray<(
+            ImmutableArray<FieldSymbol> Path,
+            bool IsReadonly,
+            bool IsClosureProvenance)>.Builder result,
         HashSet<TypeSymbol> visited)
     {
         if (type is ReferenceTypeSymbol reference)
         {
-            result.Add((path, reference.IsReadonly));
+            result.Add((path, reference.IsReadonly, false));
             return;
         }
         if (type is FunctionValueTypeSymbol)
         {
-            result.Add((path, false));
+            result.Add((path, false, true));
             return;
         }
         if (type is LifetimeModifierTypeSymbol modifier)
@@ -2468,16 +2622,22 @@ internal sealed partial class FunctionBodyBinder
         LocalVariableSymbol alias,
         ImmutableArray<ValueReference> metadata,
         TextLocation location,
-        int lastUsePosition)
+        int lastUsePosition,
+        BoundExpression? sourceExpression = null)
     {
         EndValueReferenceMetadata(carrier, location.Span.Start - 1);
         _valueReferenceMetadata[carrier] = metadata;
         if (metadata.IsEmpty) return;
         foreach (ValueReference reference in metadata)
         {
+            if (reference.IsClosureProvenance &&
+                IsFunctionValueStoragePlaceholder(reference))
+                continue;
             if (!TryGetReferenceSourcePlace([reference.Source], out MovePlace referencedPlace)) continue;
             BorrowPlace borrowPlace = DirectBorrowPlace(referencedPlace);
-            ValidateBorrowCreation(borrowPlace, reference.IsReadonly, throughAlias: null, location);
+            if (!reference.IsClosureProvenance || sourceExpression is null ||
+                !CopiesExistingFunctionValueCarrier(sourceExpression))
+                ValidateBorrowCreation(borrowPlace, reference.IsReadonly, throughAlias: null, location);
             _borrows.Add(new Borrow(alias, borrowPlace, reference.IsReadonly,
                 ParentAlias: null, lastUsePosition));
         }
@@ -2488,11 +2648,13 @@ internal sealed partial class FunctionBodyBinder
         LocalVariableSymbol alias,
         ImmutableArray<ValueReference> metadata,
         TextLocation location,
-        int lastUsePosition)
+        int lastUsePosition,
+        BoundExpression sourceExpression)
     {
         if (carrier.Fields.IsEmpty)
         {
-            SetValueReferenceMetadata(carrier, alias, metadata, location, lastUsePosition);
+            SetValueReferenceMetadata(carrier, alias, metadata, location, lastUsePosition,
+                sourceExpression);
             return;
         }
 
@@ -2505,7 +2667,8 @@ internal sealed partial class FunctionBodyBinder
         {
             CarrierPath = carrier.Fields.AddRange(reference.CarrierPath),
         }).ToImmutableArray();
-        SetValueReferenceMetadata(root, alias, retained.AddRange(projected), location, lastUsePosition);
+        SetValueReferenceMetadata(root, alias, retained.AddRange(projected), location, lastUsePosition,
+            sourceExpression);
     }
 
     private void EndValueReferenceMetadata(MovePlace carrier, int endPosition)
@@ -2535,6 +2698,7 @@ internal sealed partial class FunctionBodyBinder
         {
             foreach (ValueReference reference in metadata)
                 if (reference.CarrierPath.SequenceEqual(carrier.Fields) &&
+                    !reference.IsClosureProvenance &&
                     TryGetReferenceSourcePlace([reference.Source], out place))
                     return true;
         }
@@ -2588,17 +2752,21 @@ internal sealed partial class FunctionBodyBinder
         var result = ImmutableArray.CreateBuilder<ReferenceSource>();
         foreach (ReferenceReturnOrigin origin in origins)
         {
-            ImmutableArray<ReferenceSource> mapped = origin.Kind switch
+            ImmutableArray<MappedReferenceSource> mapped = origin.Kind switch
             {
                 ReferenceReturnOriginKind.Parameter when origin.ParameterOrdinal >= 0 &&
                                                         origin.ParameterOrdinal < arguments.Length =>
-                    GetReferenceSources(arguments[origin.ParameterOrdinal]),
-                ReferenceReturnOriginKind.Receiver when receiver is not null => GetReferenceSources(receiver),
+                    ResolveCallableArgumentSources(arguments[origin.ParameterOrdinal],
+                        callable.Parameters[origin.ParameterOrdinal].Type, origin.FieldOrdinals),
+                ReferenceReturnOriginKind.Receiver when receiver is not null =>
+                    ResolveCallableArgumentSources(receiver, callable.ContainingType!,
+                        origin.FieldOrdinals),
                 ReferenceReturnOriginKind.Static =>
-                    [new ReferenceSource(ReferenceSourceKind.Static, null, [])],
-                _ => [new ReferenceSource(ReferenceSourceKind.Unknown, null, [])],
+                    [new(new ReferenceSource(ReferenceSourceKind.Static, null,
+                        origin.FieldOrdinals), false)],
+                _ => [new(new ReferenceSource(ReferenceSourceKind.Unknown, null, []), false)],
             };
-            result.AddRange(AppendReferenceFields(mapped, origin.FieldOrdinals));
+            result.AddRange(mapped.Select(reference => reference.Source));
         }
         return result.ToImmutable();
     }
@@ -3773,6 +3941,13 @@ internal sealed partial class FunctionBodyBinder
         return true;
     }
 
+    private static bool IsFunctionValueStoragePlaceholder(ValueReference reference)
+    {
+        return reference.Source.Variable is VariableSymbol variable &&
+            GetTypeAtOrdinalPath(variable.Type, reference.Source.FieldOrdinals) is
+                FunctionValueTypeSymbol;
+    }
+
     private LifetimeOwnerResolution ResolveAuthoritativeLifetimeOwner(BoundExpression expression)
     {
         switch (expression)
@@ -4937,7 +5112,8 @@ internal sealed partial class FunctionBodyBinder
                 SetAssignedValueReferenceMetadata(assignedPlace, assignedLocal, metadata,
                     syntax.OperatorToken.Location, HasDeferredReferenceUse(target.Type)
                         ? int.MaxValue
-                        : FindLastValueUse(assignedLocal, syntax.OperatorToken.Location.Span.End));
+                        : FindLastValueUse(assignedLocal, syntax.OperatorToken.Location.Span.End),
+                    expression);
                 ValidateAggregateDestructionOrder(assignedLocal,
                     metadata.Select(reference => reference.Source).ToImmutableArray(),
                     syntax.OperatorToken.Location);
@@ -5185,7 +5361,8 @@ internal sealed partial class FunctionBodyBinder
                     GetValueReferenceMetadata(construction, storage.ElementType), targetLocation,
                     HasDeferredReferenceUse(storage.ElementType)
                         ? int.MaxValue
-                        : FindLastValueUse(storageLocal, syntax.OperatorToken.Location.Span.End));
+                        : FindLastValueUse(storageLocal, syntax.OperatorToken.Location.Span.End),
+                    construction);
         }
         MarkConstructorFieldAssigned(target);
         return construction;
@@ -6446,8 +6623,12 @@ internal sealed partial class FunctionBodyBinder
 
         if (_function.ContainingType is { } containingType)
         {
-            FunctionSymbol[] methodCandidates = GetMethodOverloads(containingType,
-                name.IdentifierToken.Text, isStatic: false);
+            FunctionSymbol[] staticMethodCandidates = _function.IsStatic
+                ? GetMethodOverloads(containingType, name.IdentifierToken.Text, isStatic: true)
+                : [];
+            FunctionSymbol[] methodCandidates = staticMethodCandidates.Length != 0
+                ? staticMethodCandidates
+                : GetMethodOverloads(containingType, name.IdentifierToken.Text, isStatic: false);
             FunctionSymbol? method = methodCandidates.Length == 0 ? null : ResolveCallableOverload(
                 methodCandidates, arguments, name.IdentifierToken.Location,
                 $"method '{containingType.Name}.{name.IdentifierToken.Text}'", syntax.Target,
@@ -6478,17 +6659,25 @@ internal sealed partial class FunctionBodyBinder
                     RollbackUnmaterializedContextualArguments(arguments);
                     return new BoundErrorExpression();
                 }
+                if (method.IsStatic)
+                {
+                    if (!_function.IsStatic)
+                    {
+                        _diagnostics.Report(name.IdentifierToken.Location,
+                            $"static method '{method.Name}' must be accessed through type '{containingType.Name}'",
+                            DiagnosticIds.StaticMethodRequiresTypeReceiver);
+                        RollbackUnmaterializedContextualArguments(arguments);
+                        return new BoundErrorExpression();
+                    }
+                    arguments = ValidateFunctionArguments(method, arguments, syntax.Arguments,
+                        name.IdentifierToken.Location,
+                        incomplete ? completedArgumentCount : null);
+                    return new BoundCallExpression(method, arguments);
+                }
                 if (_function.IsStatic)
                 {
                     _diagnostics.Report(name.IdentifierToken.Location, $"static method '{_function.Name}' cannot call instance method '{method.Name}' without an explicit instance",
                         DiagnosticIds.StaticContextInstanceMethodCall);
-                    RollbackUnmaterializedContextualArguments(arguments);
-                    return new BoundErrorExpression();
-                }
-                if (method.IsStatic)
-                {
-                    _diagnostics.Report(name.IdentifierToken.Location, $"static method '{method.Name}' must be accessed through type '{containingType.Name}'",
-                        DiagnosticIds.StaticMethodRequiresTypeReceiver);
                     RollbackUnmaterializedContextualArguments(arguments);
                     return new BoundErrorExpression();
                 }
@@ -6621,8 +6810,14 @@ internal sealed partial class FunctionBodyBinder
             if (targetType is StructTypeSymbol structure)
                 candidates.AddRange(structure.Constructors);
             else if (_function.ContainingType is { } containingType)
-                candidates.AddRange(GetMethodOverloads(containingType, name.IdentifierToken.Text,
-                    isStatic: false));
+            {
+                FunctionSymbol[] staticCandidates = _function.IsStatic
+                    ? GetMethodOverloads(containingType, name.IdentifierToken.Text, isStatic: true)
+                    : [];
+                candidates.AddRange(staticCandidates.Length != 0
+                    ? staticCandidates
+                    : GetMethodOverloads(containingType, name.IdentifierToken.Text, isStatic: false));
+            }
             if (candidates.Count == 0)
                 candidates.AddRange(_fileScope.ResolveFunctions(name.IdentifierToken.Text));
         }
@@ -6978,6 +7173,9 @@ internal sealed partial class FunctionBodyBinder
         if (!ContainsValueReferenceStorage(parameterType)) return;
         foreach (ValueReference reference in GetValueReferenceMetadata(argument, parameterType))
         {
+            // Passing a function value copies/shares its closure. The borrow already belongs
+            // to that closure; the call does not create another alias to the argument storage.
+            if (reference.IsClosureProvenance && !CreatesFunctionValueCarrier(argument)) continue;
             if (!TryGetReferenceSourcePlace([reference.Source], out MovePlace referencedPlace))
                 continue;
             BorrowPlace aggregatePlace = DirectBorrowPlace(referencedPlace);
@@ -6991,6 +7189,120 @@ internal sealed partial class FunctionBodyBinder
                     $"cannot pass value borrowing '{aggregatePlace.DisplayName}' alongside an overlapping reference argument");
             callBorrows.Add(current);
         }
+    }
+
+    private static bool CreatesFunctionValueCarrier(BoundExpression expression) => expression switch
+    {
+        BoundFunctionValueExpression => true,
+        BoundReferenceConversionExpression conversion => CreatesFunctionValueCarrier(conversion.Source),
+        BoundCopyExpression copy => CreatesFunctionValueCarrier(copy.Source),
+        BoundCastExpression cast => CreatesFunctionValueCarrier(cast.Expression),
+        BoundInterfaceConversionExpression conversion => CreatesFunctionValueCarrier(conversion.Source),
+        BoundLifetimeValueExpression value => CreatesFunctionValueCarrier(value.Source),
+        BoundStructConstructionExpression construction =>
+            construction.Arguments.Any(CreatesFunctionValueCarrier),
+        BoundConstructorCallExpression construction =>
+            construction.Arguments.Any(CreatesFunctionValueCarrier),
+        BoundStorageConstructExpression construction =>
+            construction.Value is { } value
+                ? CreatesFunctionValueCarrier(value)
+                : construction.Arguments.Any(CreatesFunctionValueCarrier),
+        BoundCallExpression call => ContainsValueReferenceStorage(call.Type),
+        BoundMethodCallExpression call => ContainsValueReferenceStorage(call.Type),
+        BoundInterfaceMethodCallExpression call => ContainsValueReferenceStorage(call.Type),
+        _ => false,
+    };
+
+    private bool CopiesExistingFunctionValueCarrier(BoundExpression expression)
+    {
+        switch (expression)
+        {
+            case BoundVariableExpression { Variable: LocalVariableSymbol }:
+                return ContainsValueReferenceStorage(expression.Type);
+            case BoundMemberAccessExpression member when TryGetValueCarrierPlace(member, out _):
+                return ContainsValueReferenceStorage(member.Type);
+            case BoundReferenceConversionExpression conversion:
+                return CopiesExistingFunctionValueCarrier(conversion.Source);
+            case BoundCopyExpression copy:
+                return CopiesExistingFunctionValueCarrier(copy.Source);
+            case BoundCastExpression cast:
+                return CopiesExistingFunctionValueCarrier(cast.Expression);
+            case BoundInterfaceConversionExpression conversion:
+                return CopiesExistingFunctionValueCarrier(conversion.Source);
+            case BoundLifetimeValueExpression value:
+                return CopiesExistingFunctionValueCarrier(value.Source);
+            case BoundStructConstructionExpression construction:
+                return construction.Arguments.Any(CopiesExistingFunctionValueCarrier) &&
+                    !construction.Arguments.Any(CreatesFunctionValueCarrier);
+            case BoundConstructorCallExpression construction:
+                return construction.Arguments.Any(CopiesExistingFunctionValueCarrier) &&
+                    !construction.Arguments.Any(CreatesFunctionValueCarrier);
+            case BoundStorageConstructExpression construction:
+                return construction.Value is { } direct
+                    ? CopiesExistingFunctionValueCarrier(direct)
+                    : construction.Arguments.Any(CopiesExistingFunctionValueCarrier) &&
+                      !construction.Arguments.Any(CreatesFunctionValueCarrier);
+            case BoundCallExpression call:
+                return CallableCopiesFunctionValueCarrier(call.Function, call.Arguments,
+                    receiver: null);
+            case BoundMethodCallExpression call:
+                return CallableCopiesFunctionValueCarrier(call.Method, call.Arguments,
+                    call.Receiver);
+            default:
+                return false;
+        }
+    }
+
+    private bool CallableCopiesFunctionValueCarrier(
+        FunctionSymbol callable,
+        ImmutableArray<BoundExpression> arguments,
+        BoundExpression? receiver)
+    {
+        ImmutableArray<ReferenceFieldOrigin> summary = callable.ReferenceFieldOrigins;
+        if (summary.IsEmpty && callable.GenericDefinition is { } definition)
+            summary = definition.ReferenceFieldOrigins;
+        ReferenceFieldOrigin[] closureOrigins = summary.Where(entry =>
+        {
+            if (!TryResolveFieldPath(callable.ReturnType, entry.FieldOrdinals,
+                    out ImmutableArray<FieldSymbol> returnPath))
+                return false;
+            return GetReferenceLeafType(callable.ReturnType, returnPath) is FunctionValueTypeSymbol;
+        }).ToArray();
+        if (closureOrigins.Length == 0) return false;
+
+        return closureOrigins.All(entry => entry.Origin.Kind switch
+        {
+            ReferenceReturnOriginKind.Parameter when entry.Origin.ParameterOrdinal >= 0 &&
+                entry.Origin.ParameterOrdinal < arguments.Length &&
+                GetTypeAtOrdinalPath(callable.Parameters[entry.Origin.ParameterOrdinal].Type,
+                    entry.Origin.FieldOrdinals) is FunctionValueTypeSymbol =>
+                CopiesExistingFunctionValueCarrier(arguments[entry.Origin.ParameterOrdinal]),
+            ReferenceReturnOriginKind.Receiver when receiver is not null &&
+                GetTypeAtOrdinalPath(callable.ContainingType!, entry.Origin.FieldOrdinals) is
+                    FunctionValueTypeSymbol => CopiesExistingFunctionValueCarrier(receiver),
+            _ => false,
+        });
+    }
+
+    private static TypeSymbol? GetTypeAtOrdinalPath(
+        TypeSymbol root,
+        ImmutableArray<int> ordinals)
+    {
+        TypeSymbol current = root;
+        while (current is ReferenceTypeSymbol reference)
+            current = reference.ElementType;
+        foreach (int ordinal in ordinals)
+        {
+            while (current is LifetimeModifierTypeSymbol modifier)
+                current = modifier.ElementType;
+            if (current is not IFieldStorageTypeSymbol aggregate ||
+                aggregate.AllInstanceFields.FirstOrDefault(field => field.Ordinal == ordinal) is not FieldSymbol field)
+                return null;
+            current = field.Type;
+        }
+        while (current is LifetimeModifierTypeSymbol modifier)
+            current = modifier.ElementType;
+        return current;
     }
 
     private ArgumentFlowTransaction[] GetDeferredArgumentTransactions(
@@ -9734,7 +10046,8 @@ internal sealed partial class FunctionBodyBinder
             IEnumerable<ValueReference> references = a.Concat(b);
             merged[place] = references.DistinctBy(reference =>
                 $"{string.Join(',', reference.CarrierPath.Select(field => field.Ordinal))}:" +
-                $"{ReferenceSourceKey(reference.Source)}:{reference.IsReadonly}").ToImmutableArray();
+                $"{ReferenceSourceKey(reference.Source)}:{reference.IsReadonly}:" +
+                $"{reference.IsClosureProvenance}").ToImmutableArray();
         }
         return merged;
     }

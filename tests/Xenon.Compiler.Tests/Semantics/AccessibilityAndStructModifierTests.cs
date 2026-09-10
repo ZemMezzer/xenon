@@ -9,6 +9,107 @@ namespace Xenon.Compiler.Tests.Semantics;
 public sealed class AccessibilityAndStructModifierTests
 {
     [Fact]
+    public void GenericSpecializationsShareTheirDefinitionsPrivateAccessDomain()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Box<T>
+            {
+                private int _value;
+                private Box() { _value = 42; }
+                private void Test() { Box<T> value = Box<T>(); }
+                private static void Hidden() { }
+                private int Value { get { return _value; } }
+                private int this[int index] { get { return _value + index; } }
+
+                public static int Run()
+                {
+                    Box<T> value = Box<T>();
+                    value.Test();
+                    Hidden();
+                    return value._value + value.Value + value[0];
+                }
+
+                public static Box<T> operator implicit(int ignored)
+                {
+                    Box<T> value = Box<T>();
+                    value.Test();
+                    Hidden();
+                    int result = value._value + value.Value + value[0];
+                    return value;
+                }
+            }
+
+            int Test()
+            {
+                Box<int> first = 1;
+                Box<float> second = 2;
+                return Box<int>.Run() + Box<float>.Run();
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void GenericPrivateAccessRemainsUnavailableOutsideTheDeclaringFamily()
+    {
+        Compilation compilation = Create("""
+            namespace Example;
+            struct Box<T>
+            {
+                private Box() { }
+                private int Value;
+                private void Hidden() { }
+            }
+            struct Other<T>
+            {
+                public void Run(Box<T> value)
+                {
+                    Box<T> created = Box<T>();
+                    value.Hidden();
+                    int result = value.Value;
+                }
+            }
+            """);
+
+        Assert.Equal(3, compilation.Diagnostics.Count(
+            diagnostic => diagnostic.Id == DiagnosticIds.InaccessibleSymbol));
+    }
+
+    [Fact]
+    public void XelibGenericSpecializationPreservesPrivateAccessDomainWithoutSource()
+    {
+        Compilation library = Create("""
+            namespace Library;
+            public struct Box<T>
+            {
+                private int _value;
+                private Box() { _value = 42; }
+                private int Value { get { return _value; } }
+                private void Hidden() { }
+                public static int Run()
+                {
+                    Box<T> value = Box<T>();
+                    value.Hidden();
+                    return value._value + value.Value;
+                }
+            }
+            """);
+        Assert.Empty(library.Diagnostics);
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Library")));
+
+        Compilation consumer = CreateConsumer(reference, """
+            using Library;
+            namespace App;
+            int Run() { return Box<int>.Run() + Box<float>.Run(); }
+            """);
+
+        Assert.Empty(consumer.Diagnostics);
+    }
+
+    [Fact]
     public void InternalDeclarationsAreVisibleOnlyInsideTheirProjectBoundary()
     {
         Compilation library = Create("""

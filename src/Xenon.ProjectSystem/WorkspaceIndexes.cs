@@ -335,6 +335,7 @@ internal static class WorkspaceIndexBuilder
         IReadOnlyDictionary<SourceFileId, (ProjectId ProjectId, DocumentId DocumentId)> sourceMap,
         out WorkspaceSymbolId id)
     {
+        symbol = SourceIdentity(symbol);
         foreach (var syntaxReference in symbol.DeclaringSyntaxReferences
             .OrderBy(reference => reference.Path, StringComparer.Ordinal)
             .ThenBy(reference => reference.Span.Start))
@@ -346,6 +347,17 @@ internal static class WorkspaceIndexBuilder
         id = default;
         return false;
     }
+
+    private static Symbol SourceIdentity(Symbol symbol) => symbol switch
+    {
+        FunctionSymbol { OriginalDefinition: not null } function => SourceIdentity(function.OriginalDefinition),
+        StructTypeSymbol { GenericDefinition: not null } structure => SourceIdentity(structure.GenericDefinition),
+        FieldSymbol { GenericDefinition: not null } field => SourceIdentity(field.GenericDefinition),
+        PropertySymbol { GenericDefinition: not null } property => SourceIdentity(property.GenericDefinition),
+        IndexerSymbol { GenericDefinition: not null } indexer => SourceIdentity(indexer.GenericDefinition),
+        ConstantSymbol { GenericDefinition: not null } constant => SourceIdentity(constant.GenericDefinition),
+        _ => symbol,
+    };
 
     internal static SourceReference CreateDeclarationReference(Symbol symbol,
         IReadOnlyDictionary<SourceFileId, (ProjectId ProjectId, DocumentId DocumentId)> sourceMap)

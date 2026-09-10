@@ -82,7 +82,7 @@ public static class AccessibilityRules
         DeclaredTypeSymbol? declaringType = symbol as DeclaredTypeSymbol ?? symbol.GetContainingSymbol<DeclaredTypeSymbol>();
         DeclaredTypeSymbol? accessingType = accessingSymbol as DeclaredTypeSymbol ?? accessingSymbol.GetContainingSymbol<DeclaredTypeSymbol>();
         bool sameType = declaringType is not null && accessingType is not null &&
-            TypeIdentity.AreSame(declaringType, accessingType);
+            AreSamePrivateAccessDomain(declaringType, accessingType);
         bool privateAccess = declaringType is null
             ? ReferenceEquals(ContainingNamespace(symbol), ContainingNamespace(accessingSymbol))
             : sameType;
@@ -232,6 +232,19 @@ public static class AccessibilityRules
         for (StructTypeSymbol? current = candidate; current is not null; current = current.BaseType)
             if (TypeIdentity.AreSame(current, expected)) return true;
         return false;
+    }
+
+    private static bool AreSamePrivateAccessDomain(
+        DeclaredTypeSymbol declaringType,
+        DeclaredTypeSymbol accessingType)
+    {
+        TypeSymbol declaringOwner = declaringType is StructTypeSymbol declaringStruct
+            ? declaringStruct.GenericDefinition ?? declaringStruct
+            : declaringType;
+        TypeSymbol accessingOwner = accessingType is StructTypeSymbol accessingStruct
+            ? accessingStruct.GenericDefinition ?? accessingStruct
+            : accessingType;
+        return TypeIdentity.AreSame(declaringOwner, accessingOwner);
     }
 
     public static bool HaveSameInternalBoundary(Symbol left, Symbol right)

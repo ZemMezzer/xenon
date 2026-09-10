@@ -1848,6 +1848,525 @@ public sealed class LambdaTests
     }
 
     [Fact]
+    public void FunctionValueCopiesDoNotBorrowTheirSourceStorage()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Holder
+            {
+                public function void(int) Callback;
+                public Holder(function void(int) callback) { Callback = callback; }
+            }
+            function void(int) PassThrough(function void(int) callback) { return callback; }
+            void Consume(function void(int) callback) { }
+            void Handle(int value) { }
+            void Test()
+            {
+                function void(int) callback = [](int value) => { };
+                Holder first = Holder(callback);
+                Holder second = Holder(callback);
+                Holder third = Holder(callback);
+                function void(int) a = callback;
+                function void(int) b = callback;
+                a = callback;
+                b = callback;
+                first.Callback = callback;
+                second.Callback = callback;
+                Consume(callback);
+                Consume(callback);
+                Consume(callback);
+                function void(int) passed = PassThrough(callback);
+                function void(int)* pointer = &Handle;
+                function void(int)* pointerCopy = pointer;
+                pointerCopy(1);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void AggregateFunctionValueParametersUseValueCopySemantics()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Holder
+            {
+                public function void() Callback;
+                public Holder(function void() callback) { Callback = callback; }
+            }
+            struct Wrapper
+            {
+                public Holder Value;
+                public Wrapper(Holder value) { Value = value; }
+            }
+            struct Outer
+            {
+                public Wrapper Value;
+                public Outer(Wrapper value) { Value = value; }
+            }
+            struct GenericHolder<T>
+            {
+                public function void(T) Callback;
+                public GenericHolder(function void(T) callback) { Callback = callback; }
+            }
+            struct Multi
+            {
+                public function void() First;
+                public function void() Second;
+                public Multi(function void() first, function void() second)
+                {
+                    First = first;
+                    Second = second;
+                }
+            }
+            struct ReceiverBox
+            {
+                public Multi Value;
+                public Multi Clone() { return Value; }
+            }
+            struct RawHolder
+            {
+                public function void()* Callback;
+                public RawHolder(function void()* callback) { Callback = callback; }
+            }
+            void Consume(Holder value) { }
+            Holder PassThrough(Holder source) { return source; }
+            Wrapper Pass(Wrapper source)
+            {
+                Wrapper first = source;
+                Wrapper second = source;
+                return second;
+            }
+            void Copy(Holder source)
+            {
+                Holder first = source;
+                Holder second = source;
+                first = source;
+                second = source;
+                Holder constructedFirst = Holder(source.Callback);
+                Holder constructedSecond = Holder(source.Callback);
+                Consume(source);
+                Consume(source);
+                Consume(source);
+                Holder returned = PassThrough(source);
+                Wrapper wrapper = Wrapper(source);
+                Wrapper wrapperCopy = wrapper;
+                Wrapper wrapperThird = wrapperCopy;
+                wrapperCopy.Value = source;
+                wrapperThird.Value = source;
+                Outer outer = Outer(wrapper);
+                Outer outerCopy = outer;
+                Outer outerThird = outerCopy;
+                Wrapper passed = Pass(wrapper);
+            }
+            void CopyGeneric<T>(GenericHolder<T> source)
+            {
+                GenericHolder<T> first = source;
+                GenericHolder<T> second = source;
+                first = source;
+                second = source;
+            }
+            void CopyReceiverResult(ReceiverBox source)
+            {
+                Multi first = source.Clone();
+                Multi second = source.Clone();
+            }
+            void Handle() { }
+            void Test()
+            {
+                function void()* pointer = &Handle;
+                RawHolder raw = RawHolder(pointer);
+                RawHolder rawCopy = raw;
+                RawHolder rawThird = rawCopy;
+                function void(int) callback = [](int value) => { };
+                GenericHolder<int> generic = GenericHolder<int>(callback);
+                CopyGeneric<int>(generic);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void AggregateFunctionValueCopiesPreserveRealBorrowRootsAndEscapes()
+    {
+        const string declarations = """
+            struct Holder
+            {
+                public function void() Callback;
+                public Holder(function void() callback) { Callback = callback; }
+            }
+            Holder PassThrough(Holder source)
+            {
+                Holder copy = source;
+                return copy;
+            }
+            """;
+        Compilation mutable = Compile($$"""
+            namespace Example;
+            {{declarations}}
+            void Test()
+            {
+                int value = 0;
+                function void() callback = [&value]() => { value++; };
+                Holder source = Holder(callback);
+                Holder first = source;
+                Holder second = source;
+                Holder returned = PassThrough(source);
+                value++;
+            }
+            """);
+        Assert.Contains(mutable.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.BorrowedPlaceAccess &&
+                          diagnostic.Message.Contains("'value'", StringComparison.Ordinal));
+        Assert.DoesNotContain(mutable.Diagnostics,
+            diagnostic => diagnostic.Message.StartsWith(
+                "cannot access 'source'", StringComparison.Ordinal));
+
+        Compilation validReadOnly = Compile($$"""
+            namespace Example;
+            {{declarations}}
+            void Test()
+            {
+                int config = 0;
+                function void() callback = [readonly &config]() => { int copy = config; };
+                Holder source = Holder(callback);
+                Holder first = source;
+                Holder second = PassThrough(source);
+                int observed = config;
+                function void() another = [readonly &config]() => { int copy = config; };
+                Holder third = Holder(another);
+                source.Callback();
+                second.Callback();
+                third.Callback();
+            }
+            """);
+        Assert.Empty(validReadOnly.Diagnostics);
+
+        Compilation readOnly = Compile($$"""
+            namespace Example;
+            {{declarations}}
+            void Test()
+            {
+                int config = 0;
+                function void() callback = [readonly &config]() => { int copy = config; };
+                Holder source = Holder(callback);
+                Holder first = source;
+                Holder second = source;
+                config++;
+            }
+            """);
+        Assert.Contains(readOnly.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.BorrowedPlaceMutation &&
+                          diagnostic.Message.Contains("'config'", StringComparison.Ordinal));
+        Assert.DoesNotContain(readOnly.Diagnostics,
+            diagnostic => diagnostic.Message.StartsWith(
+                "cannot access 'source'", StringComparison.Ordinal));
+
+        Compilation escape = Compile($$"""
+            namespace Example;
+            {{declarations}}
+            Holder Create()
+            {
+                int local = 0;
+                function void() callback = [&local]() => { local++; };
+                Holder source = Holder(callback);
+                Holder copy = source;
+                return copy;
+            }
+            """);
+        Assert.Contains(escape.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AggregateReferenceEscape);
+
+        Compilation stabilizedEscape = Compile("""
+            namespace Example;
+            struct Holder
+            {
+                public function void() Callback;
+                public Holder(function void() callback) { Callback = callback; }
+            }
+            Holder Create()
+            {
+                int local = 0;
+                function void() callback = [&local]() => { local++; };
+                return Forward(Holder(callback));
+            }
+            Holder Forward(Holder source) { return Later(source); }
+            Holder Later(Holder source) { return source; }
+            """);
+        Assert.Contains(stabilizedEscape.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AggregateReferenceEscape);
+    }
+
+    [Fact]
+    public void MixedAndMultipleFunctionFieldsKeepIndependentProvenance()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Mixed
+            {
+                public int& Ref;
+                public function void() Callback;
+                public Mixed(int& reference, function void() callback)
+                {
+                    Ref = reference;
+                    Callback = callback;
+                }
+            }
+            struct Multi
+            {
+                public function void() First;
+                public function void() Second;
+                public Multi(function void() first, function void() second)
+                {
+                    First = first;
+                    Second = second;
+                }
+            }
+            void Test()
+            {
+                int referenceRoot = 0;
+                int callbackRoot = 0;
+                function void() callback = [&callbackRoot]() => { callbackRoot++; };
+                Mixed source = Mixed(referenceRoot, callback);
+                Mixed first = source;
+                Mixed second = source;
+                referenceRoot++;
+                callbackRoot++;
+
+                int firstRoot = 0;
+                int secondRoot = 0;
+                function void() firstCallback = [&firstRoot]() => { firstRoot++; };
+                function void() secondCallback = [&secondRoot]() => { secondRoot++; };
+                Multi callbacks = Multi(firstCallback, secondCallback);
+                Multi callbacksCopy = callbacks;
+                Multi callbacksThird = callbacksCopy;
+                firstRoot++;
+                secondRoot++;
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Message.Contains("'referenceRoot'", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Message.Contains("'callbackRoot'", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Message.Contains("'firstRoot'", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Message.Contains("'secondRoot'", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.ValueNotCopyable &&
+                          diagnostic.Message.Contains("'Ref'", StringComparison.Ordinal));
+        Assert.DoesNotContain(compilation.Diagnostics,
+            diagnostic => diagnostic.Message.StartsWith(
+                              "cannot access 'source'", StringComparison.Ordinal) ||
+                          diagnostic.Message.StartsWith(
+                              "cannot access 'callbacks'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GenericFunctionValueWrapperOperatorCanReuseItsParameter()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Action<T>
+            {
+                private function void(T) _callback;
+                public Action(function void(T) callback) { _callback = callback; }
+                private Action() { }
+                public static Action<T> operator implicit(function void(T) callback)
+                {
+                    Action<T> a = Action<T>(callback);
+                    a.Test();
+                    return Action<T>(callback);
+                }
+                public void Invoke(T value) { _callback(value); }
+                private void Test() { Action<T> action = Action<T>(); }
+            }
+            void Test()
+            {
+                function void(int) callback = [](int value) => { };
+                Action<int> first = Action<int>(callback);
+                Action<int> second = Action<int>(callback);
+                Action<int> converted = callback;
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+    }
+
+    [Fact]
+    public void CopiedFunctionValuesPreserveTheirCapturedBorrowRoot()
+    {
+        const string declarations = """
+            struct Holder
+            {
+                public function void() Callback;
+                public Holder(function void() callback) { Callback = callback; }
+            }
+            """;
+        Compilation valid = Compile($$"""
+            namespace Example;
+            {{declarations}}
+            void Test()
+            {
+                int value = 0;
+                function void() callback = [&value]() => { value++; };
+                function void() copy = callback;
+                Holder first = Holder(callback);
+                Holder second = Holder(callback);
+                first.Callback();
+                second.Callback();
+                copy();
+            }
+            """);
+        Assert.Empty(valid.Diagnostics);
+
+        Compilation invalid = Compile($$"""
+            namespace Example;
+            {{declarations}}
+            void Test()
+            {
+                int value = 0;
+                function void() callback = [&value]() => { value++; };
+                Holder first = Holder(callback);
+                Holder second = Holder(callback);
+                value++;
+            }
+            """);
+        Assert.Contains(invalid.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.BorrowedPlaceAccess &&
+                          diagnostic.Message.Contains("'value'", StringComparison.Ordinal));
+        Assert.DoesNotContain(invalid.Diagnostics,
+            diagnostic => diagnostic.Message.StartsWith("cannot access 'callback'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TransientWrapperReturnedByCallParticipatesInArgumentBorrowChecks()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Holder { public function void() Callback; }
+            Holder Wrap(int& value)
+            {
+                function void() callback = [value]() => { value++; };
+                return Holder { callback };
+            }
+            void Consume(Holder callback, int& value) { }
+            void Test()
+            {
+                int value = 0;
+                Consume(Wrap(value), value);
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.BorrowConflict);
+    }
+
+    [Fact]
+    public void BorrowedClosureCannotEscapeThroughNestedValueWrappers()
+    {
+        Compilation compilation = Compile("""
+            namespace Example;
+            struct Holder
+            {
+                public function void() Callback;
+                public Holder(function void() callback) { Callback = callback; }
+            }
+            struct Wrapper
+            {
+                public Holder Value;
+                public Wrapper(Holder value) { Value = value; }
+            }
+            Wrapper Create()
+            {
+                int local = 0;
+                function void() callback = [&local]() => { local++; };
+                return Wrapper(Holder(callback));
+            }
+            """);
+
+        Assert.Contains(compilation.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AggregateReferenceEscape);
+
+        Compilation passThrough = Compile("""
+            namespace Example;
+            function void() Pass(function void() callback) { return callback; }
+            function void() Create()
+            {
+                int local = 0;
+                function void() callback = [&local]() => { local++; };
+                return Pass(callback);
+            }
+            """);
+        Assert.Contains(passThrough.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AggregateReferenceEscape);
+    }
+
+    [Fact]
+    public void XelibFunctionValueWrappersPreserveClosureProvenanceWithoutBorrowingParameters()
+    {
+        Compilation library = Compile("""
+            namespace Library;
+            public struct Holder<T>
+            {
+                public function void(T) Callback;
+                public Holder(function void(T) callback) { Callback = callback; }
+            }
+            public struct Wrapper<T>
+            {
+                public Holder<T> Value;
+                public Wrapper(Holder<T> value) { Value = value; }
+            }
+            public Holder<T> Wrap<T>(function void(T) callback) { return Holder<T>(callback); }
+            public Wrapper<T> Pass<T>(Wrapper<T> source)
+            {
+                Wrapper<T> first = source;
+                Wrapper<T> second = source;
+                return second;
+            }
+            """);
+        Assert.Empty(library.Diagnostics);
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Library")));
+
+        Compilation valid = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Library;
+            namespace App;
+            void Test(function void(int) callback, Wrapper<int> source)
+            {
+                Holder<int> first = Wrap<int>(callback);
+                Holder<int> second = Wrap<int>(callback);
+                Holder<int> third = Holder<int>(callback);
+                Wrapper<int> wrapperFirst = source;
+                Wrapper<int> wrapperSecond = source;
+                Wrapper<int> wrapperThird = Pass<int>(source);
+            }
+            """, "valid.xe"));
+        Assert.Empty(valid.Diagnostics);
+
+        Compilation invalid = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Library;
+            namespace App;
+            Wrapper<int> Create()
+            {
+                int value = 0;
+                function void(int) callback = [&value](int item) => { value += item; };
+                Holder<int> holder = Wrap<int>(callback);
+                Wrapper<int> source = Wrapper<int>(holder);
+                Wrapper<int> copy = source;
+                return Pass<int>(copy);
+            }
+            """, "invalid.xe"));
+        Assert.Contains(invalid.Diagnostics,
+            diagnostic => diagnostic.Id == DiagnosticIds.AggregateReferenceEscape);
+        Assert.DoesNotContain(invalid.Diagnostics,
+            diagnostic => diagnostic.Message.StartsWith("cannot access 'callback'", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void GenericFunctionValueSignaturesSpecialize()
     {
         Compilation compilation = Compile("""
