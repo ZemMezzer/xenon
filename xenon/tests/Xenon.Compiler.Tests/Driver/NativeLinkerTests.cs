@@ -7797,6 +7797,45 @@ public sealed class NativeLinkerTests
         Assert.Equal(42, exit);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_GenericCleanupSpecializationDestroysEachMovedValueOnce(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Counters { public static int Destroyed; }
+            struct Resource
+            {
+                public ~Resource() { Counters.Destroyed++; }
+            }
+            struct Wrapper<T>
+            {
+                public void Consume(T first, T second)
+                {
+                    { T nested = move first; }
+                    T local = move second;
+                }
+            }
+
+            int Main()
+            {
+                {
+                    Wrapper<Resource> managed = Wrapper<Resource>();
+                    Resource first = Resource();
+                    Resource second = Resource();
+                    managed.Consume(move first, move second);
+                }
+                if (Counters.Destroyed != 2) return 1;
+                Wrapper<int> trivial = Wrapper<int>();
+                trivial.Consume(1, 2);
+                if (Counters.Destroyed != 2) return 2;
+                return 42;
+            }
+            """, optimization);
+
+        Assert.Equal(42, exit);
+    }
+
     private static int RunIterationFourProgram(string source, int optimization)
     {
         Compilation compilation = CreateExecutableCompilation(

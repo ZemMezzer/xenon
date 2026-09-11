@@ -2478,10 +2478,18 @@ public sealed class LlvmIrGenerator
             }
         }
 
+        private CleanupScope RequireCleanupScope(string cleanup)
+        {
+            if (_cleanupScopes.Count != 0) return _cleanupScopes[^1];
+            throw new LlvmCodeGenerationException(
+                $"Internal cleanup metadata invariant failed in '{_function.FullName}': " +
+                $"{cleanup} cleanup was requested without an active cleanup scope.");
+        }
+
         private void InitializeScalarCleanup(VariableSymbol variable)
         {
             if (!_scalarCleanup.TryGetValue(variable, out ImmutableArray<ScalarCleanupEntry> cleanups)) return;
-            CleanupScope scope = _cleanupScopes[^1];
+            CleanupScope scope = RequireCleanupScope($"scalar '{variable.Name}'");
             if (_useDirectOwnershipCleanup)
             {
                 foreach (ScalarCleanupEntry cleanup in cleanups)
@@ -3638,7 +3646,7 @@ public sealed class LlvmIrGenerator
         private void InitializeArrayCleanup(LocalVariableSymbol variable)
         {
             if (!_arrayCleanup.TryGetValue(variable, out ArrayCleanupEntry cleanup)) return;
-            _arrayScopeHeads[variable] = _cleanupScopes[^1].Head;
+            _arrayScopeHeads[variable] = RequireCleanupScope($"array '{variable.Name}'").Head;
             _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0), cleanup.Registered);
             _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
                 _builder.BuildStructGEP2(_cleanupNodeType, cleanup.Node, 5));
@@ -5706,7 +5714,7 @@ public sealed class LlvmIrGenerator
             if (expression.Storage == ArrayStorageKind.Stack && elementDestructor is not null)
             {
                 stackCleanupNode = _builder.BuildAlloca(_cleanupNodeType, "stack.cleanup.registration");
-                EmitCleanupRegistration(stackCleanupNode, _cleanupScopes[^1].Head,
+                EmitCleanupRegistration(stackCleanupNode, RequireCleanupScope("stack array").Head,
                     GetValueStorageAddress(data, expression.ElementType),
                     requiresElementInitialization ? SizeConstant(0) : length,
                     elementSize, elementDestructor);
