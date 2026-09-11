@@ -3418,13 +3418,24 @@ public sealed class LlvmIrGenerator
                     if (section.Value is BoundLiteralExpression literal && !FitsTargetInteger(literal.Value, _getIntegerBitWidth(integer), integer.IsSigned))
                         throw new LlvmCodeGenerationException("case value is out of range for the selected target's switch operand type");
             LLVMValueRef value = EmitExpression(statement.Expression);
-            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("switch.end");
             var blocks = new LLVMBasicBlockRef[statement.Sections.Length];
+
+            // Preserve source order in the function's basic-block layout. The order in which
+            // blocks are appended is an input to LLVM's machine block placement heuristics;
+            // placing the merge first and cases in reverse order can produce a pathological
+            // jump-table layout for hot switches.
+            for (int i = 0; i < blocks.Length; i++)
+                if (!statement.Sections[i].Body.Statements.IsEmpty)
+                    blocks[i] = _llvmFunction.AppendBasicBlock("switch.case");
+
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("switch.end");
             LLVMBasicBlockRef next = end;
             for (int i = blocks.Length - 1; i >= 0; i--)
             {
-                if (!statement.Sections[i].Body.Statements.IsEmpty) next = _llvmFunction.AppendBasicBlock("switch.case");
-                blocks[i] = next;
+                if (!statement.Sections[i].Body.Statements.IsEmpty)
+                    next = blocks[i];
+                else
+                    blocks[i] = next;
             }
             LLVMBasicBlockRef fallback = end;
             for (int i = 0; i < blocks.Length; i++)
