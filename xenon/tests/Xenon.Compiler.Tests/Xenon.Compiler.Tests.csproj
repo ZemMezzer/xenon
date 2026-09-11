@@ -4,22 +4,30 @@
     <IsTestProject>true</IsTestProject>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
   </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(MicrosoftNetTestSdkVersion)" />
+    <!-- Managed testhost cannot consume the static archives linked into NativeAOT. -->
+    <PackageReference Include="libLLVM" Version="$(LlvmSharpVersion)" PrivateAssets="all" />
     <PackageReference Include="xunit" Version="$(XunitVersion)" />
     <PackageReference Include="xunit.runner.visualstudio" Version="$(XunitRunnerVisualStudioVersion)">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <ProjectReference Include="../../src/Xenon.Driver/Xenon.Driver.csproj" />
-    <ProjectReference Include="../Xenon.TestProcess/Xenon.TestProcess.csproj" ReferenceOutputAssembly="false" />
-    <None Remove="Cases/**/*;HarnessCases/**/*" />
-    <None Include="Cases/**/*;HarnessCases/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
-  <Target Name="CopyTestProcess" AfterTargets="Build">
-    <ItemGroup>
-      <TestProcessFiles Include="$(MSBuildThisFileDirectory)../../out/Xenon.TestProcess/bin/$(Configuration)/$(TargetFramework)/*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(TestProcessFiles)" DestinationFolder="$(OutDir)TestProcess" SkipUnchangedFiles="true" />
-  </Target>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
+    <ProjectReference Include="../../src/Xenon.Cli/Xenon.Cli.csproj" />
+    <ProjectReference Include="../../src/Xenon.Compiler/Xenon.Compiler.csproj" />
+    <ProjectReference Include="../../src/Xenon.Driver/Xenon.Driver.csproj" />
+    <ProjectReference Include="../../src/Xenon.ProjectSystem/Xenon.ProjectSystem.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../Workspaces/**/*">
+      <Link>Workspaces/%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 </Project>

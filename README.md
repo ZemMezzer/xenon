@@ -25,9 +25,9 @@ The repository contains the compiler, LLVM code generator, build driver, project
 
 Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)** and add the extracted `xenon` executable to your `PATH`.
 
-Release archives are Native AOT distributions for Windows x64/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
+Release archives are Native AOT distributions for Windows x86/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
 
-Xenon itself still uses LLVM 20 for code generation. Each release archive includes the matching native LLVM runtime (`libLLVM.dll` on Windows or `libLLVM.dylib` on macOS), which must remain next to the `xenon` executable. Xenon also produces native binaries, so a host linker is required:
+Xenon uses LLVM 20 for code generation. Release executables contain the required LLVM code through static linkage; no adjacent `LLVM-C.dll`, `libLLVM.dll`, `libLLVM.dylib`, or `libLLVM.so` is required. Xenon also produces native binaries, so a host linker is required:
 
 - **Windows:** Visual Studio 2022 Build Tools with the **Desktop development with C++** workload;
 - **macOS:** Xcode Command Line Tools.
@@ -122,27 +122,39 @@ Run `xenon --help` to see all available options.
 
 ## Building Xenon from source
 
-Building the compiler requires the .NET SDK version selected in [`global.json`](global.json), plus the native toolchain listed in [Quick start](#quick-start). These are build-time requirements only; users of a release archive do not need .NET.
+CMake at the repository root owns the complete build graph: it builds the pinned LLVM submodule as static libraries, restores the .NET solution, and publishes the NativeAOT compiler with those libraries linked into the executable. Required host dependencies are:
+
+- Git with submodule support;
+- CMake 3.24 or newer;
+- the .NET SDK selected by [`xenon/global.json`](xenon/global.json);
+- Visual Studio 2022 Build Tools with the Desktop development with C++ workload and a Windows SDK on Windows;
+- Xcode Command Line Tools on Apple Silicon macOS.
+
+Clone and build on Windows:
 
 ```console
-dotnet restore Xenon.sln
-dotnet build Xenon.sln --configuration Release
-dotnet test Xenon.sln --configuration Release --no-build
+git clone --recurse-submodules https://github.com/ZemMezzer/xenon.git
+cd xenon
+Build.bat win_x86
 ```
 
-Build outputs are written to the `out/` directory.
-
-Publish a Native AOT distribution on the matching operating system and architecture:
+Use `Build.bat win_arm64` on Windows Arm64. On Apple Silicon macOS:
 
 ```console
-# Windows x64
-dotnet publish src/Xenon.Cli/Xenon.Cli.csproj -c Release -r win-x64
-
-# Apple Silicon macOS
-dotnet publish src/Xenon.Cli/Xenon.Cli.csproj -c Release -r osx-arm64
+git clone --recurse-submodules https://github.com/ZemMezzer/xenon.git
+cd xenon
+./Build.sh
 ```
 
-The supported release RIDs are `win-x64`, `win-arm64`, and `osx-arm64`. Native AOT distributions are built by GitHub Actions on matching native runners rather than cross-compiled from Linux. Intel macOS (`osx-x64`) is not currently released because the LLVM 20 runtime package used by Xenon does not provide that target.
+For an existing clone, initialize LLVM with `git submodule update --init --recursive`. Supported platform/RID pairs are `win_x86` / `win-x86`, `win_arm64` / `win-arm64`, and `darwin_arm64` / `osx-arm64`.
+
+All generated CMake, LLVM, MSBuild, and NativeAOT files live under `build/<platform>/`. The final executable is written to `build/<platform>/xenon/publish/`; deleting root `build/` performs a complete clean. The `check` target additionally runs the statically linked LLVM C++ smoke test, `xenon --version`, compiles and runs a minimal Xenon program, and checks source-tree cleanliness:
+
+```console
+cmake --build build/win_x86/cmake --config Release --target check
+```
+
+Run the complete managed and end-to-end suite through CMake with `--target xenon-tests`. The .NET solution remains available at `xenon/Xenon.sln`; direct restore/build/test commands also redirect outputs to `build/local/`, so they do not create `bin/` or `obj/` directories in the source tree.
 
 ## License
 

@@ -11,7 +11,7 @@ public sealed class TestSandbox
     public TestSandbox(string testName)
     {
         string? configuredRoot = Environment.GetEnvironmentVariable("XENON_TEST_SANDBOX_ROOT");
-        string root = configuredRoot ?? Path.Combine(FindRepository(), ".xenon-test-sandboxes");
+        string root = configuredRoot ?? Path.Combine(FindRepositoryRoot(), "build", "local", "xenon", "test-sandboxes");
         string name = string.Concat(testName.Select(c => char.IsAsciiLetterOrDigit(c) || c == '-' ? c : '_'));
         // MSVC tools still encounter MAX_PATH restrictions; keep the label short, retain uniqueness.
         Root = Path.GetFullPath(Path.Combine(root, RunId, $"{name[..Math.Min(12, name.Length)]}-{Guid.NewGuid().ToString("N")[..16]}"));
@@ -50,10 +50,10 @@ public sealed class TestSandbox
         }
     }
 
-    private static string FindRepository()
+    private static string FindRepositoryRoot()
     {
         for (DirectoryInfo? directory = new(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
-            if (File.Exists(Path.Combine(directory.FullName, "Xenon.sln"))) return directory.FullName;
+            if (File.Exists(Path.Combine(directory.FullName, "xenon", "Xenon.sln"))) return directory.FullName;
         return Path.GetTempPath();
     }
 }

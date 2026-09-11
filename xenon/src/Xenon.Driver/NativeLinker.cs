@@ -436,11 +436,19 @@ public sealed class NativeLinker
             visualCppRoots.Add(configuredTools);
         }
 
+        // A 32-bit NativeAOT process resolves both SpecialFolder values to
+        // Program Files (x86). ProgramW6432 is the Windows-provided route to the
+        // native Program Files directory where Visual Studio is normally installed.
+        string? nativeProgramFiles = Environment.GetEnvironmentVariable("ProgramW6432");
         foreach (string programFilesRoot in new[]
                  {
                      Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                      Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                 }.Distinct(StringComparer.OrdinalIgnoreCase))
+                     nativeProgramFiles,
+                 }
+                 .Where(path => !string.IsNullOrWhiteSpace(path))
+                 .Select(path => path!)
+                 .Distinct(StringComparer.OrdinalIgnoreCase))
         {
             foreach (string version in new[] { "2022", "2019", "2017" })
             {
