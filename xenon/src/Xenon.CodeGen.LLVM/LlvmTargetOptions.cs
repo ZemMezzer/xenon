@@ -159,10 +159,18 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
                 return;
             }
 
-            LLVMApi.InitializeAllTargetInfos();
-            LLVMApi.InitializeAllTargets();
-            LLVMApi.InitializeAllTargetMCs();
-            LLVMApi.InitializeAllAsmPrinters();
+            // Keep this list aligned with LLVM_TARGETS_TO_BUILD in the root CMake project.
+            // InitializeAll* makes NativeAOT retain imports for every LLVM backend, which
+            // defeats the intentionally small static LLVM build.
+            LLVMApi.InitializeX86TargetInfo();
+            LLVMApi.InitializeX86Target();
+            LLVMApi.InitializeX86TargetMC();
+            LLVMApi.InitializeX86AsmPrinter();
+
+            LLVMApi.InitializeAArch64TargetInfo();
+            LLVMApi.InitializeAArch64Target();
+            LLVMApi.InitializeAArch64TargetMC();
+            LLVMApi.InitializeAArch64AsmPrinter();
             _targetsInitialized = true;
         }
     }

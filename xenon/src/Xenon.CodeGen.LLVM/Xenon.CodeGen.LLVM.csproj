@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Xenon.CodeGen.LLVM</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- LLVMSharp.Interop declares libLLVM as a transitive runtime dependency.
+         Restore only the two managed binding packages so the repository-built
+         static LLVM is the sole native implementation used by NativeAOT. -->
+    <PackageDownload Include="LLVMSharp" Version="[$(LlvmSharpVersion)]" />
+    <PackageDownload Include="LLVMSharp.Interop" Version="[$(LlvmSharpVersion)]" />
+    <Reference Include="LLVMSharp">
+      <HintPath>$(NuGetPackageRoot)llvmsharp/$(LlvmSharpVersion)/lib/net8.0/LLVMSharp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="LLVMSharp.Interop">
+      <HintPath>$(NuGetPackageRoot)llvmsharp.interop/$(LlvmSharpVersion)/lib/net8.0/LLVMSharp.Interop.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Xenon.Compiler/Xenon.Compiler.csproj" />
+  </ItemGroup>
+</Project>

@@ -10,13 +10,25 @@
 
   <ItemGroup>
     <Compile Include="../Shared/XenonBuildInfo.cs" Link="XenonBuildInfo.cs" />
-    <None Include="../../LICENSE" Link="LICENSE" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="../../../LICENSE" Link="LICENSE" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">
-    <!-- Native AOT calls dlopen directly. Let dyld resolve the bundled LLVM runtime
-         from the directory that contains the xenon executable. -->
-    <LinkerArg Include="-Wl,-rpath,@executable_path" />
+  <Import Project="$(LLVMNativePropsFile)"
+          Condition="'$(XenonStaticLLVM)' == 'true' and Exists('$(LLVMNativePropsFile)')" />
+
+  <Target Name="ValidateStaticLlvmConfiguration"
+          BeforeTargets="Publish"
+          Condition="'$(XenonStaticLLVM)' == 'true'">
+    <Error Condition="'$(LLVMNativePropsFile)' == ''"
+           Text="LLVMNativePropsFile must point to the CMake-generated static LLVM props file." />
+    <Error Condition="!Exists('$(LLVMNativePropsFile)')"
+           Text="Static LLVM props file was not found: $(LLVMNativePropsFile)" />
+  </Target>
+
+  <ItemGroup Condition="'$(XenonStaticLLVM)' == 'true'">
+    <!-- LLVMSharp imports the C API from 'libLLVM'. NativeAOT resolves these
+         imports directly against the CMake-built static component archives. -->
+    <DirectPInvoke Include="libLLVM" />
   </ItemGroup>
 
   <ItemGroup>
