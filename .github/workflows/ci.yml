@@ -63,6 +63,20 @@ jobs:
         with:
           global-json-file: xenon/global.json
 
+      - name: Resolve pinned LLVM revision
+        id: llvm-revision
+        shell: pwsh
+        run: |
+          $revision = git -C llvm/llvm-project rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the LLVM submodule revision.' }
+          "revision=$revision" >> $env:GITHUB_OUTPUT
+
+      - name: Restore LLVM build cache
+        uses: actions/cache@v4
+        with:
+          path: build/${{ matrix.platform }}/llvm
+          key: llvm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/WriteLlvmNativeProps.cmake') }}
+
       - name: Build on Windows
         if: runner.os == 'Windows'
         shell: cmd
