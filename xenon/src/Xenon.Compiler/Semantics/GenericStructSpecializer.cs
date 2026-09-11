@@ -458,8 +458,6 @@ internal sealed class GenericStructSpecializer
             source.IsDefinition, source.DelegatesToThisConstructor, origin: SymbolOrigin.CompilerGenerated,
             documentation: source.Documentation, implementation: source.Implementation,
             accessorKind: source.AccessorKind, operatorKind: source.OperatorKind);
-        function.HasStackArrays = source.HasStackArrays;
-        function.HasScalarCleanup = source.HasScalarCleanup;
         return function;
     }
 

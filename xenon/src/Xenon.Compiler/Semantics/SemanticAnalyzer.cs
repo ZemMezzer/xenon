@@ -168,6 +168,11 @@ internal sealed class SemanticAnalyzer
         AddGeneratedDestructorFunctions(functions);
         ValidateRawFunctionPointerSignatures();
 
+        // Binding generic definitions may only produce preliminary cleanup metadata.
+        // Re-derive it after every concrete source or Library IR body is materialized.
+        foreach (BoundFunction function in functions)
+            FunctionCleanupAnalyzer.Recompute(function.Symbol, function.Body);
+
         // Lifecycle/accessor checks need all bodies, including declarations that
         // occur after the readonly caller and synthesized field initializers.
         var bodies = functions.ToDictionary(bound => bound.Symbol, bound => bound.Body);

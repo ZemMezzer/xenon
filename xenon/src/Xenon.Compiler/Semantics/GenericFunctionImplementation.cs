@@ -315,8 +315,6 @@ internal sealed class LibraryGenericFunctionImplementation(
             {
                 IsLambda = true,
                 IsCapturingLambda = source.IsCapturingLambda,
-                HasStackArrays = source.HasStackArrays,
-                HasScalarCleanup = source.HasScalarCleanup,
             };
             specializedLambdas.Add(source, created);
             created.LambdaCaptures = source.LambdaCaptures.Select(capture =>
