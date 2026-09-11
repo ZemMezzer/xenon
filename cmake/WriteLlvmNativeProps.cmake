@@ -41,6 +41,12 @@ endif()
 separate_arguments(_libraries NATIVE_COMMAND "${_libraries_output}")
 separate_arguments(_system_libraries NATIVE_COMMAND "${_system_output}")
 
+# NativeAOT performs its final link with the C compiler driver. Unlike a normal
+# CMake C++ target, that does not add the C++ runtime required by static LLVM.
+if(XENON_PLATFORM STREQUAL "darwin_arm64")
+  list(APPEND _system_libraries "-lc++")
+endif()
+
 set(_props "<Project>\n  <ItemGroup Condition=\"'$(XenonStaticLLVM)' == 'true'\">\n")
 foreach(_library IN LISTS _libraries)
   if(NOT EXISTS "${_library}")
