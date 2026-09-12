@@ -226,6 +226,213 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_UsesHostFeaturesOnlyForExplicitNativeCpuMode()
+    {
+        LlvmTargetOptions portable = LlvmTargetOptions.CreateHost(optimizationLevel: 3);
+        LlvmTargetOptions native = LlvmTargetOptions.CreateHost(
+            optimizationLevel: 3,
+            cpuMode: LlvmTargetCpuMode.Native);
+
+        Assert.Equal(string.Empty, portable.Cpu);
+        Assert.Equal(string.Empty, portable.Features);
+        Assert.False(string.IsNullOrWhiteSpace(native.Cpu));
+        Assert.False(string.IsNullOrWhiteSpace(native.Features));
+    }
+
+    [Fact]
+    public void Generator_ExposesPrePostIrAssemblyAndOptimizationRemarks()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int AddOne(int value) { return value + 1; }
+            export int Use(int value) { int copy = value; return AddOne(copy); }
+            """);
+        string? preOptimizationIr = null;
+        string? postOptimizationIr = null;
+        string? assembly = null;
+        var remarks = new List<string>();
+        var diagnostics = new LlvmOptimizationDiagnostics
+        {
+            PreOptimizationIr = value => preOptimizationIr = value,
+            PostOptimizationIr = value => postOptimizationIr = value,
+            Assembly = value => assembly = value,
+            OptimizationRemark = remarks.Add,
+        };
+
+        _ = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            LlvmTargetOptions.CreateHost(optimizationLevel: 3),
+            "optimization-diagnostics",
+            new LlvmCodeGenerationOptions("optimization-diagnostics",
+                optimizationDiagnostics: diagnostics));
+
+        Assert.Contains("alloca", preOptimizationIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("alloca", postOptimizationIr, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(assembly));
+        Assert.NotEmpty(remarks);
+    }
+
+    [Fact]
+    public void Generator_EmitsCallForProvenNoThrowCalleeAndInvokeForThrowingCallee()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Guard { public ~Guard() { } }
+            int Leaf(int value) { return value + 1; }
+            int Fail() { throw 7; }
+            int UseLeaf() { Guard guard = Guard(); return Leaf(41); }
+            int UseFail() { Guard guard = Guard(); return Fail(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), "effect-analysis");
+
+        Assert.Contains("call i32", ir, StringComparison.Ordinal);
+        Assert.Contains("invoke i32", ir, StringComparison.Ordinal);
+        Assert.Contains("memory(none)", ir, StringComparison.Ordinal);
+        Assert.Contains("nounwind", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_PropagatesThrowingEffectsThroughCallsAndRecursiveComponents()
+    {
+        const string module = "effect-fixed-point";
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Guard { public ~Guard() { } }
+            int Leaf(int value) { return value + 1; }
+            int Middle(int value) { return Leaf(value); }
+            int Top(int value) { return Middle(value); }
+            int Fail() { throw 7; }
+            int ThrowMiddle() { return Fail(); }
+            int ThrowTop() { return ThrowMiddle(); }
+            int Even(int value) { if (value == 0) return 1; return Odd(value - 1); }
+            int Odd(int value) { if (value == 0) return 0; return Even(value - 1); }
+            int ThrowEven(int value) { if (value == 0) return Fail(); return ThrowOdd(value - 1); }
+            int ThrowOdd(int value) { if (value == 0) return 0; return ThrowEven(value - 1); }
+            int UseLeafWithCleanup() { Guard guard = Guard(); return Leaf(41); }
+            int UseFailWithCleanup() { Guard guard = Guard(); return Fail(); }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), module);
+
+        foreach (string name in new[] { "Leaf", "Middle", "Top", "Even", "Odd" })
+            AssertFunctionAttribute(compilation, ir, name, "nounwind", expected: true);
+        foreach (string name in new[] { "Fail", "ThrowMiddle", "ThrowTop", "ThrowEven", "ThrowOdd" })
+            AssertFunctionAttribute(compilation, ir, name, "nounwind", expected: false);
+
+        Assert.Contains($"call i32 @{ManagedSymbol(module, "Example.Leaf", "function")}",
+            FunctionBody(ir, ManagedSymbol(module, "Example.UseLeafWithCleanup", "function")),
+            StringComparison.Ordinal);
+        Assert.Contains($"invoke i32 @{ManagedSymbol(module, "Example.Fail", "function")}",
+            FunctionBody(ir, ManagedSymbol(module, "Example.UseFailWithCleanup", "function")),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_TreatsUnknownExternAndIndirectCallsAsPotentiallyThrowing()
+    {
+        const string module = "effect-unknown-calls";
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Guard { public ~Guard() { } }
+            int EnableExceptions() { throw 7; }
+            extern int Native(int value);
+            int CallExtern() { Guard guard = Guard(); return Native(1); }
+            int CallIndirect(function int(int)* callback)
+            {
+                Guard guard = Guard();
+                return callback(1);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), module);
+
+        AssertFunctionAttribute(compilation, ir, "CallExtern", "nounwind", expected: false);
+        AssertFunctionAttribute(compilation, ir, "CallIndirect", "nounwind", expected: false);
+        Assert.Contains("invoke i32 @Native", FunctionBody(ir,
+            ManagedSymbol(module, "Example.CallExtern", "function")), StringComparison.Ordinal);
+        Assert.Contains("invoke i32 %", FunctionBody(ir,
+            ManagedSymbol(module, "Example.CallIndirect", "function")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_DoesNotMarkFunctionWithThrowingParameterDestructorNounwind()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Item { public ~Item() { throw 7; } }
+            void Consume(Item value) { }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        FunctionSymbol consume = compilation.SemanticModel.Functions.Single(
+            function => function.Symbol.Name == "Consume").Symbol;
+        string encodedIdentity = Convert.ToHexString(Encoding.UTF8.GetBytes(consume.FullName));
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), "parameter-cleanup-effects");
+        string definition = ir.Split('\n').Single(line =>
+            line.StartsWith("define ", StringComparison.Ordinal) &&
+            line.Contains(encodedIdentity, StringComparison.Ordinal));
+        int attributeMarker = definition.LastIndexOf('#');
+        Assert.True(attributeMarker >= 0, definition);
+        string attributeNumber = new(definition[(attributeMarker + 1)..]
+            .TakeWhile(char.IsAsciiDigit).ToArray());
+        string attributes = ir.Split('\n').Single(line =>
+            line.StartsWith($"attributes #{attributeNumber} =", StringComparison.Ordinal));
+
+        Assert.DoesNotContain("nounwind", attributes, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_DescribesXenonMemoryRuntimeToLlvm()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            void Allocate(nuint count)
+            {
+                int* values = cast<int*>(malloc(count * sizeof(int)));
+                free(values);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation, LlvmTargetOptions.CreateHost(), "allocator-attributes");
+
+        AssertAllocator(ir, "@malloc(", "\"alloc-family\"=\"malloc\"",
+            "allockind(\"alloc,uninitialized\")", "allocsize(0)", "nounwind");
+        AssertAllocator(ir, "@calloc(", "\"alloc-family\"=\"malloc\"",
+            "allockind(\"alloc,zeroed\")", "allocsize(0,1)", "nounwind");
+        AssertAllocator(ir, "@free(", "\"alloc-family\"=\"malloc\"",
+            "allockind(\"free\")", "nounwind");
+        Assert.Contains("declare void @free(ptr allocptr", ir, StringComparison.Ordinal);
+
+        AssertAllocator(ir, "@__xenon_malloc(", "\"alloc-family\"=\"xenon\"",
+            "allockind(\"alloc,uninitialized\")", "allocsize(0)", "nounwind");
+        AssertAllocator(ir, "@__xenon_calloc(", "\"alloc-family\"=\"xenon\"",
+            "allockind(\"alloc,zeroed\")", "allocsize(0,1)", "nounwind");
+        AssertAllocator(ir, "@__xenon_aligned_malloc(", "\"alloc-family\"=\"xenon\"",
+            "allockind(\"alloc,uninitialized,aligned\")", "allocsize(0)", "nounwind");
+        AssertAllocator(ir, "@__xenon_free(", "\"alloc-family\"=\"xenon\"",
+            "allockind(\"free\")", "nounwind");
+
+        Assert.Contains("declare noalias ptr @malloc(", ir, StringComparison.Ordinal);
+        Assert.Contains("declare noalias ptr @calloc(", ir, StringComparison.Ordinal);
+        Assert.Contains("define internal noalias ptr @__xenon_malloc(", ir, StringComparison.Ordinal);
+        Assert.Contains("define internal noalias ptr @__xenon_calloc(", ir, StringComparison.Ordinal);
+        Assert.Contains("define internal noalias ptr @__xenon_aligned_malloc(", ir, StringComparison.Ordinal);
+        Assert.Contains("define internal void @__xenon_free(ptr allocptr", ir, StringComparison.Ordinal);
+        Assert.Contains("@__xenon_aligned_malloc(i64", ir, StringComparison.Ordinal);
+        Assert.Contains("i64 allocalign", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_VerifiesLoopVectorizerOutput()
     {
         Compilation compilation = CreateCompilation("""
@@ -1771,6 +1978,75 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
+    public void Generator_OptimizesStaticXenonDependencyInTheConsumingModule()
+    {
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(optimizationLevel: 3);
+        Compilation library = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            references: null,
+            SourceText.From("namespace MathLib; public int AddTwo(int value) { return value + 2; }",
+                "math.xe"));
+        Compilation application = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Executable),
+            [new SourceCompilationReference(library)],
+            SourceText.From("using MathLib; namespace App; int Main() { return AddTwo(40); }",
+                "app.xe"));
+
+        Assert.False(application.HasErrors, string.Join(Environment.NewLine, application.Diagnostics));
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            application,
+            target,
+            "App",
+            new LlvmCodeGenerationOptions("App", [
+                new LlvmNativeReference(library, LlvmNativeReferenceKind.Static, "MathLib")
+            ]));
+
+        Assert.Contains("ret i32 42", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("call i32", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain(ManagedSymbol("MathLib", "MathLib.AddTwo", "function"), ir,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_PreservesExportedCAbiFromWholeProgramStaticDependency()
+    {
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(
+            optimizationLevel: 3,
+            positionIndependentCode: true);
+        Compilation library = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            references: null,
+            SourceText.From(
+                "namespace StaticApi; export int Add(int left, int right) { return left + right; }",
+                "static-api.xe"));
+        Compilation sharedConsumer = Compilation.Create(
+            new CompilationOptions(CompilationOutputKind.Library),
+            [new SourceCompilationReference(library)],
+            SourceText.From(
+                "namespace SharedConsumer; public int KeepModule() { return 0; }",
+                "shared-consumer.xe"));
+
+        Assert.False(sharedConsumer.HasErrors,
+            string.Join(Environment.NewLine, sharedConsumer.Diagnostics));
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            sharedConsumer,
+            target,
+            "SharedConsumer",
+            new LlvmCodeGenerationOptions("SharedConsumer", [
+                new LlvmNativeReference(
+                    library,
+                    LlvmNativeReferenceKind.Static,
+                    "StaticApiLibrary")
+            ]));
+
+        string export = ir.Split('\n').Single(line =>
+            line.StartsWith("define ", StringComparison.Ordinal) &&
+            line.Contains("@StaticApi_Add(", StringComparison.Ordinal));
+        Assert.DoesNotContain(" internal ", export, StringComparison.Ordinal);
+        Assert.Contains("ret i32", FunctionBody(ir, "StaticApi_Add"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Generator_InterfaceRuntimeIdentityIsStableAcrossModulesAndScopedByAbiIdentity()
     {
         LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
@@ -3046,6 +3322,58 @@ public sealed class LlvmIrGeneratorTests
     private static string ManagedSymbol(string abiIdentity, string sourceIdentity, string category) =>
         $"__xenon_{category}_{Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(abiIdentity))}_" +
         Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(sourceIdentity));
+
+    private static void AssertAllocator(string ir, string functionName, params string[] attributes)
+    {
+        string declaration = ir.Split('\n').Single(line =>
+            (line.StartsWith("declare ", StringComparison.Ordinal) ||
+             line.StartsWith("define ", StringComparison.Ordinal)) &&
+            line.Contains(functionName, StringComparison.Ordinal));
+        int marker = declaration.LastIndexOf('#');
+        Assert.True(marker >= 0, declaration);
+        string number = new(declaration[(marker + 1)..].TakeWhile(char.IsAsciiDigit).ToArray());
+        string group = ir.Split('\n').Single(line =>
+            line.StartsWith($"attributes #{number} =", StringComparison.Ordinal));
+        foreach (string attribute in attributes)
+            Assert.Contains(attribute, group, StringComparison.Ordinal);
+    }
+
+    private static void AssertFunctionAttribute(
+        Compilation compilation,
+        string ir,
+        string functionName,
+        string attribute,
+        bool expected)
+    {
+        FunctionSymbol symbol = compilation.SemanticModel.Functions.Single(
+            function => function.Symbol.Name == functionName).Symbol;
+        string identity = Convert.ToHexString(Encoding.UTF8.GetBytes(symbol.FullName));
+        string definition = ir.Split('\n').Single(line =>
+            line.StartsWith("define ", StringComparison.Ordinal) &&
+            line.Contains(identity, StringComparison.Ordinal));
+        int marker = definition.LastIndexOf('#');
+        if (marker < 0)
+        {
+            Assert.False(expected, definition);
+            return;
+        }
+        string number = new(definition[(marker + 1)..].TakeWhile(char.IsAsciiDigit).ToArray());
+        string group = ir.Split('\n').Single(line =>
+            line.StartsWith($"attributes #{number} =", StringComparison.Ordinal));
+        if (expected)
+            Assert.Contains(attribute, group, StringComparison.Ordinal);
+        else
+            Assert.DoesNotContain(attribute, group, StringComparison.Ordinal);
+    }
+
+    private static string FunctionBody(string ir, string symbol)
+    {
+        int start = ir.IndexOf($"@{symbol}(", StringComparison.Ordinal);
+        Assert.True(start >= 0, $"missing function {symbol}");
+        int end = ir.IndexOf("\n}", start, StringComparison.Ordinal);
+        Assert.True(end > start, $"unterminated function {symbol}");
+        return ir[start..end];
+    }
 
     private static string CreateTemporaryDirectory()
     {

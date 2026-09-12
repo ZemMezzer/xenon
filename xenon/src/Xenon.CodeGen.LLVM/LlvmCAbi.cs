@@ -532,7 +532,16 @@ internal sealed unsafe class LlvmCAbiMarshaller
         LLVMValueRef target,
         LlvmCAbiFunctionPlan plan,
         IReadOnlyList<LLVMValueRef> logicalArguments,
-        string name)
+        string name) => EmitCall(target, plan, logicalArguments, name,
+            (functionType, function, arguments, callName) =>
+                _builder.BuildCall2(functionType, function, arguments, callName));
+
+    public LLVMValueRef EmitCall(
+        LLVMValueRef target,
+        LlvmCAbiFunctionPlan plan,
+        IReadOnlyList<LLVMValueRef> logicalArguments,
+        string name,
+        Func<LLVMTypeRef, LLVMValueRef, LLVMValueRef[], string, LLVMValueRef> callEmitter)
     {
         var physical = new List<LLVMValueRef>();
         LLVMValueRef resultStorage = default;
@@ -545,7 +554,7 @@ internal sealed unsafe class LlvmCAbiMarshaller
         for (int index = 0; index < plan.Parameters.Length; index++)
             PackParameter(plan.Parameters[index], logicalArguments[index], physical);
 
-        LLVMValueRef call = _builder.BuildCall2(
+        LLVMValueRef call = callEmitter(
             plan.FunctionType,
             target,
             physical.ToArray(),

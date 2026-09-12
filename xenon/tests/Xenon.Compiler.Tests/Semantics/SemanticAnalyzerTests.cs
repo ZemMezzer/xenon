@@ -2189,7 +2189,8 @@ public sealed class SemanticAnalyzerTests
         Assert.Contains(invalid.Diagnostics, diagnostic =>
             diagnostic.Message == "property 'Current' cannot be read through a readonly interface receiver because its getter is mutable");
         Assert.Contains(invalid.Diagnostics, diagnostic =>
-            diagnostic.Message == "no indexer of type 'IMutable' matches the provided arguments");
+            diagnostic.Id == DiagnosticIds.MutableGetterOnReadonlyReceiver &&
+            diagnostic.Message == "indexer on interface 'IMutable' cannot be read through a readonly receiver because its getter is mutable");
     }
 
     [Fact]

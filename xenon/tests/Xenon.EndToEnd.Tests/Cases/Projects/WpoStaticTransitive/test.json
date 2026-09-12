@@ -1,0 +1,6 @@
+{
+  "input": "App/App.xeproj",
+  "profiles": ["release"],
+  "run": true,
+  "expectedExitCode": 42
+}

@@ -3,6 +3,15 @@ using Xenon.Compiler;
 
 namespace Xenon.CodeGen.LLVM;
 
+/// <summary>Optional observability hooks for one LLVM optimization run.</summary>
+public sealed class LlvmOptimizationDiagnostics
+{
+    public Action<string>? PreOptimizationIr { get; init; }
+    public Action<string>? PostOptimizationIr { get; init; }
+    public Action<string>? Assembly { get; init; }
+    public Action<string>? OptimizationRemark { get; init; }
+}
+
 /// <summary>The native linkage used for one semantic compilation reference.</summary>
 public enum LlvmNativeReferenceKind
 {
@@ -38,11 +47,13 @@ public sealed class LlvmCodeGenerationOptions
 {
     public LlvmCodeGenerationOptions(
         string abiIdentity,
-        IEnumerable<LlvmNativeReference>? nativeReferences = null)
+        IEnumerable<LlvmNativeReference>? nativeReferences = null,
+        LlvmOptimizationDiagnostics? optimizationDiagnostics = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(abiIdentity);
         AbiIdentity = abiIdentity;
         NativeReferences = nativeReferences?.ToImmutableArray() ?? [];
+        OptimizationDiagnostics = optimizationDiagnostics;
         if (NativeReferences.Any(reference => reference is null))
             throw new ArgumentException("Native references cannot contain null entries.", nameof(nativeReferences));
         var seen = new HashSet<Compilation>(ReferenceEqualityComparer.Instance);
@@ -54,4 +65,5 @@ public sealed class LlvmCodeGenerationOptions
 
     public string AbiIdentity { get; }
     public ImmutableArray<LlvmNativeReference> NativeReferences { get; }
+    public LlvmOptimizationDiagnostics? OptimizationDiagnostics { get; }
 }

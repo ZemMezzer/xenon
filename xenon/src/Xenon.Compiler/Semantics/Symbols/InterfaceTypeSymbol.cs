@@ -107,7 +107,7 @@ public sealed class InterfaceTypeSymbol : DeclaredTypeSymbol
     public IEnumerable<InterfaceIndexerSymbol> AllIndexers =>
         SelfAndBaseInterfaces.SelectMany(type => type.Indexers)
             .OrderBy(indexer => indexer.ContainingInterface.FullName, StringComparer.Ordinal)
-            .DistinctBy(indexer => TypeSignature.Parameters(indexer.Parameters));
+            .DistinctBy(indexer => TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly));
 
     public bool IsOrInherits(InterfaceTypeSymbol target) =>
         TypeIdentity.AreSame(this, target) || BaseInterfaces.Any(@interface => @interface.IsOrInherits(target));

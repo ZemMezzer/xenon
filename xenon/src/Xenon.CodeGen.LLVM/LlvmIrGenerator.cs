@@ -20,23 +20,28 @@ public sealed class LlvmIrGenerator
 {
     private static readonly object OptimizedContextLock = new();
     private int _invocationStarted;
-    private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = [];
+    private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<string, LlvmFunction> _nativeFunctions = new(StringComparer.Ordinal);
-    private readonly Dictionary<FunctionSymbol, LlvmCAbiFunction> _cAbiFunctions = [];
-    private readonly Dictionary<FunctionSymbol, LlvmFunction> _functionValueAdapters = [];
-    private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = [];
-    private readonly Dictionary<StorageTypeSymbol, LLVMTypeRef> _storageTypes = [];
-    private readonly Dictionary<AtomicTypeSymbol, LLVMTypeRef> _atomicTypes = [];
-    private readonly Dictionary<InterfaceTypeSymbol, LLVMTypeRef> _interfaceTypes = [];
-    private readonly Dictionary<InterfaceTypeSymbol, LLVMValueRef> _interfaceKeys = [];
-    private readonly Dictionary<TypeSymbol, LLVMValueRef> _exceptionTypeKeys = new(TypeIdentity.Comparer);
-    private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields = [];
-    private readonly HashSet<FieldSymbol> _referencedStaticFields = [];
+    private readonly Dictionary<FunctionSymbol, LlvmCAbiFunction> _cAbiFunctions = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<FunctionSymbol, LlvmFunction> _functionValueAdapters = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<StructTypeSymbol, LLVMTypeRef> _structTypes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<StorageTypeSymbol, LLVMTypeRef> _storageTypes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<AtomicTypeSymbol, LLVMTypeRef> _atomicTypes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<InterfaceTypeSymbol, LLVMTypeRef> _interfaceTypes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<InterfaceTypeSymbol, LLVMValueRef> _interfaceKeys = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<string, LLVMValueRef> _exceptionTypeKeys = new(StringComparer.Ordinal);
+    private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<FieldSymbol> _referencedStaticFields = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<Symbol> _implementationAbiRoots = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<FieldSymbol, LlvmFunction> _threadLocalEnsures = [];
-    private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables = [];
-    private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps = [];
-    private readonly Dictionary<FunctionSymbol, LlvmFunction> _closureEnvironmentDestructors = [];
+    private readonly HashSet<FunctionSymbol> _wholeProgramFunctions = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<DeclaredTypeSymbol> _wholeProgramTypes = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<FieldSymbol> _wholeProgramStaticFields = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<FieldSymbol, LlvmFunction> _threadLocalEnsures = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<StructTypeSymbol, LlvmVTable> _virtualTables = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<StructTypeSymbol, LlvmVTable> _interfaceMaps = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<FunctionSymbol, LlvmFunction> _closureEnvironmentDestructors = new(ReferenceEqualityComparer.Instance);
+    private IReadOnlyDictionary<FunctionSymbol, LlvmFunctionEffects> _functionEffects =
+        new Dictionary<FunctionSymbol, LlvmFunctionEffects>(ReferenceEqualityComparer.Instance);
     private LLVMContextRef _context;
     private LLVMModuleRef _module;
     private NativeTargetMachine? _targetMachine;
@@ -260,6 +265,9 @@ public sealed class LlvmIrGenerator
 
         IReadOnlyDictionary<NamespaceSymbol, LlvmNativeReference> nativeReferences =
             ValidateNativeReferences(compilation, codeGenerationOptions);
+        ImmutableArray<LlvmNativeReference> wholeProgramReferences = targetMachine is { OptimizationLevel: > 0 }
+            ? GetWholeProgramStaticReferences(compilation, nativeReferences)
+            : [];
 
         // LLVM 20.1.2's optimization passes create some loop metadata and
         // opaque pointer types in the global context. Optimized modules must
@@ -291,14 +299,33 @@ public sealed class LlvmIrGenerator
             DeclareInterfaceTypes(compilation.SemanticModel.GlobalNamespace);
             foreach (CompilationReference reference in compilation.References)
                 DeclareInterfaceTypes(reference.GlobalNamespace);
+            foreach (LlvmNativeReference reference in wholeProgramReferences)
+                DeclareInterfaceTypes(reference.Compilation.SemanticModel.GlobalNamespace);
             DeclareStructTypes(compilation.SemanticModel.GlobalNamespace);
+            foreach (LlvmNativeReference reference in wholeProgramReferences)
+                DeclareStructTypes(reference.Compilation.SemanticModel.GlobalNamespace);
             if (targetMachine is not null)
                 _cAbi = new LlvmCAbi(
                     _context,
                     targetMachine,
                     LlvmTypeLayout.Create(targetMachine),
                     MapType);
-            ImmutableArray<BoundFunction> implementationFunctions = compilation.GetStaticImplementationFunctions();
+            var implementationFunctionBuilder = ImmutableArray.CreateBuilder<BoundFunction>();
+            implementationFunctionBuilder.AddRange(compilation.GetStaticImplementationFunctions());
+            foreach (LlvmNativeReference reference in wholeProgramReferences)
+            {
+                MarkWholeProgramSymbols(reference.Compilation);
+                foreach (BoundFunction function in reference.Compilation.GetStaticImplementationFunctions()
+                             .Where(function => reference.Compilation.IsSymbolDefinedInCurrentArtifact(function.Symbol)))
+                {
+                    if (_wholeProgramFunctions.Add(function.Symbol))
+                        implementationFunctionBuilder.Add(function);
+                }
+            }
+            ImmutableArray<BoundFunction> implementationFunctions = implementationFunctionBuilder
+                .DistinctBy(function => function.Symbol, ReferenceEqualityComparer.Instance)
+                .ToImmutableArray();
+            _functionEffects = LlvmFunctionEffectAnalysis.Analyze(implementationFunctions);
             DeclareFunctions(compilation.SemanticModel.GlobalNamespace);
             foreach (BoundFunction function in implementationFunctions)
                 if (!_functions.ContainsKey(function.Symbol))
@@ -315,14 +342,20 @@ public sealed class LlvmIrGenerator
             DeclareInterfaceTables(compilation.SemanticModel.GlobalNamespace);
             foreach (CompilationReference reference in compilation.References)
                 DeclareInterfaceTables(reference.GlobalNamespace);
+            foreach (LlvmNativeReference reference in wholeProgramReferences)
+                DeclareInterfaceTables(reference.Compilation.SemanticModel.GlobalNamespace);
             DeclareVirtualTables(compilation.SemanticModel.GlobalNamespace);
             foreach (CompilationReference reference in compilation.References)
                 DeclareVirtualTables(reference.GlobalNamespace);
+            foreach (LlvmNativeReference reference in wholeProgramReferences)
+                DeclareVirtualTables(reference.Compilation.SemanticModel.GlobalNamespace);
             DeclareStaticFields(compilation.SemanticModel.GlobalNamespace);
             foreach (CompilationReference reference in compilation.References)
                 DeclareStaticFields(reference.GlobalNamespace);
+            foreach (LlvmNativeReference reference in wholeProgramReferences)
+                DeclareStaticFields(reference.Compilation.SemanticModel.GlobalNamespace);
             foreach (FieldSymbol field in _referencedStaticFields) DeclareStaticField(field);
-            DeclareThreadLocalHelpers(compilation.SemanticModel.GlobalNamespace);
+            DeclareThreadLocalHelpers();
             EmitClosureEnvironmentDestructors();
             EmitFunctionBodies(implementationFunctions);
             EmitCAbiThunks();
@@ -334,8 +367,13 @@ public sealed class LlvmIrGenerator
             _module.Verify(LLVMVerifierFailureAction.LLVMReturnStatusAction);
             if (targetMachine is not null)
             {
-                LlvmOptimizer.Run(_module, targetMachine);
+                LlvmOptimizationDiagnostics? diagnostics = codeGenerationOptions?.OptimizationDiagnostics;
+                diagnostics?.PreOptimizationIr?.Invoke(_module.PrintToString());
+                LlvmOptimizer.Run(_module, targetMachine, diagnostics?.OptimizationRemark);
                 _module.Verify(LLVMVerifierFailureAction.LLVMReturnStatusAction);
+                diagnostics?.PostOptimizationIr?.Invoke(_module.PrintToString());
+                if (diagnostics?.Assembly is { } assemblySink)
+                    assemblySink(EmitAssembly(_module, targetMachine));
             }
             return resultFactory(_module);
         }
@@ -415,6 +453,49 @@ public sealed class LlvmIrGenerator
             throw new LlvmCodeGenerationException(
                 "LLVM IR cannot be generated while the compilation contains errors.");
         }
+    }
+
+    private static ImmutableArray<LlvmNativeReference> GetWholeProgramStaticReferences(
+        Compilation compilation,
+        IReadOnlyDictionary<NamespaceSymbol, LlvmNativeReference> nativeReferences)
+    {
+        var result = ImmutableArray.CreateBuilder<LlvmNativeReference>();
+        var visited = new HashSet<Compilation>(ReferenceEqualityComparer.Instance);
+        void Visit(Compilation current)
+        {
+            foreach (SourceCompilationReference sourceReference in current.References
+                         .OfType<SourceCompilationReference>())
+            {
+                Compilation dependency = sourceReference.Compilation;
+                if (!nativeReferences.TryGetValue(dependency.SemanticModel.GlobalNamespace,
+                        out LlvmNativeReference? nativeReference) ||
+                    nativeReference.Kind != LlvmNativeReferenceKind.Static ||
+                    !visited.Add(dependency))
+                    continue;
+                result.Add(nativeReference);
+                Visit(dependency);
+            }
+        }
+        Visit(compilation);
+        return result.ToImmutable();
+    }
+
+    private void MarkWholeProgramSymbols(Compilation compilation)
+    {
+        void Visit(NamespaceSymbol @namespace)
+        {
+            foreach (DeclaredTypeSymbol type in @namespace.Structs.Cast<DeclaredTypeSymbol>()
+                         .Concat(@namespace.Enums))
+            {
+                if (!compilation.IsSymbolDefinedInCurrentArtifact(type)) continue;
+                _wholeProgramTypes.Add(type);
+                foreach (FieldSymbol field in GetStaticFields(type))
+                    if (compilation.IsSymbolDefinedInCurrentArtifact(field))
+                        _wholeProgramStaticFields.Add(field);
+            }
+            foreach (NamespaceSymbol child in @namespace.Namespaces) Visit(child);
+        }
+        Visit(compilation.SemanticModel.GlobalNamespace);
     }
 
     private static IReadOnlyDictionary<NamespaceSymbol, LlvmNativeReference> ValidateNativeReferences(
@@ -527,7 +608,8 @@ public sealed class LlvmIrGenerator
         CollectStructTypes(globalNamespace, types);
         foreach (CompilationReference reference in _compilation.References)
             CollectStructTypes(reference.GlobalNamespace, types);
-        foreach (StructTypeSymbol type in types)
+        StructTypeSymbol[] newTypes = types.Where(type => !_structTypes.ContainsKey(type)).ToArray();
+        foreach (StructTypeSymbol type in newTypes)
         {
             string typeName = _compilation.IsSymbolDefinedInCurrentArtifact(type)
                 ? type.FullName
@@ -535,7 +617,7 @@ public sealed class LlvmIrGenerator
             _structTypes.Add(type, _context.CreateNamedStruct(typeName));
         }
 
-        foreach (StructTypeSymbol type in types)
+        foreach (StructTypeSymbol type in newTypes)
         {
             LLVMTypeRef[] fields = LlvmStructLayout.Elements(type, MapType, LLVMTypeRef.CreatePointer(_context.Int8Type, 0));
             _structTypes[type].StructSetBody(fields, false);
@@ -580,7 +662,8 @@ public sealed class LlvmIrGenerator
             LLVMTypeRef tableType = LLVMTypeRef.CreateArray(elementType, (uint)type.VirtualMethods.Length + 1);
             LLVMValueRef table = _module.AddGlobal(tableType, GetManagedName(
                 type, "vtable", GetVirtualTableSourceName(type)));
-            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(type);
+            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(type) ||
+                _wholeProgramTypes.Contains(type);
             table.Linkage = LLVMLinkage.LLVMExternalLinkage;
             if (owned)
             {
@@ -619,7 +702,8 @@ public sealed class LlvmIrGenerator
         {
             if (_interfaceMaps.ContainsKey(type)) continue;
             var tables = new Dictionary<InterfaceTypeSymbol, (LlvmVTable Table, FunctionSymbol[] Implementations)>();
-            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(type);
+            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(type) ||
+                _wholeProgramTypes.Contains(type);
             foreach (InterfaceTypeSymbol @interface in type.ImplementedInterfaces
                 .OrderBy(item => item.FullName, StringComparer.Ordinal))
             {
@@ -696,7 +780,8 @@ public sealed class LlvmIrGenerator
         LLVMTypeRef fieldType = MapType(field.Type);
         LLVMValueRef global = _module.AddGlobal(fieldType, GetManagedName(
             field, "static_field", GetStaticFieldSourceName(field)));
-        bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(field);
+        bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(field) ||
+            _wholeProgramStaticFields.Contains(field);
         global.Linkage = !owned || IsExternallyVisible(field)
             || _implementationAbiRoots.Contains(field)
             ? LLVMLinkage.LLVMExternalLinkage : LLVMLinkage.LLVMInternalLinkage;
@@ -711,14 +796,15 @@ public sealed class LlvmIrGenerator
         _staticFields.Add(field, global);
     }
 
-    private void DeclareThreadLocalHelpers(NamespaceSymbol @namespace)
+    private void DeclareThreadLocalHelpers()
     {
         LLVMTypeRef helperType = LLVMTypeRef.CreateFunction(_context.VoidType, [], false);
         foreach (FieldSymbol field in _staticFields.Keys.Where(RequiresThreadLocalEnsure).ToArray())
         {
             string helperName = GetManagedName(field, "threadlocal_ensure", GetStaticFieldSourceName(field));
             LLVMValueRef helper = _module.AddFunction(helperName, helperType);
-            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(field);
+            bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(field) ||
+                _wholeProgramStaticFields.Contains(field);
             helper.Linkage = !owned || IsExternallyVisible(field)
                 || _implementationAbiRoots.Contains(field)
                 ? LLVMLinkage.LLVMExternalLinkage
@@ -1359,10 +1445,16 @@ public sealed class LlvmIrGenerator
             return;
         }
         LLVMValueRef value = _module.AddFunction(implementationName, functionType);
-        bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(function);
+        ApplyProvenFunctionAttributes(function, value);
+        bool wholeProgramDefinition = _wholeProgramFunctions.Contains(function);
+        bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(function) || wholeProgramDefinition;
         if (!owned)
         {
             value.Linkage = LLVMLinkage.LLVMExternalLinkage;
+        }
+        else if (wholeProgramDefinition && !function.IsExport)
+        {
+            value.Linkage = LLVMLinkage.LLVMInternalLinkage;
         }
         else if (function.IsAbstract)
         {
@@ -1409,6 +1501,9 @@ public sealed class LlvmIrGenerator
         if (function.IsExport && IsWindowsTarget())
             thunk.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
         ApplyCAbiFunctionAttributes(thunk, abiPlan);
+        // ABI marshalling can read/write indirect argument and return storage even
+        // when the Xenon implementation itself is memory(none).
+        ApplyProvenFunctionAttributes(function, thunk, includeMemoryEffects: false);
         _cAbiFunctions.Add(function, new LlvmCAbiFunction(thunk, abiPlan));
         if (function.IsExport)
             _nativeFunctions.Add(nativeName, new LlvmFunction(thunk, abiPlan.FunctionType));
@@ -1599,7 +1694,9 @@ public sealed class LlvmIrGenerator
             string resultName = TypeIdentity.AreSame(symbol.ReturnType, BuiltinTypes.Void)
                 ? string.Empty : "result";
             LLVMValueRef result;
-            if (exceptionsEnabled)
+            bool implementationMayThrow = !_functionEffects.TryGetValue(symbol, out LlvmFunctionEffects effects) ||
+                effects.MayThrow;
+            if (exceptionsEnabled && implementationMayThrow)
             {
                 LLVMBasicBlockRef normal = abi.Value.AppendBasicBlock("invoke.continue");
                 LLVMBasicBlockRef unwind = abi.Value.AppendBasicBlock("invoke.unwind");
@@ -1744,6 +1841,7 @@ public sealed class LlvmIrGenerator
                 function.Symbol,
                 declaration.Value,
                 _functions,
+                _functionEffects,
                 _cAbiFunctions,
                 _cAbi,
                 _staticFields,
@@ -1808,11 +1906,14 @@ public sealed class LlvmIrGenerator
         }
 
         LLVMValueRef nativeEntryPoint = _module.AddFunction("main", nativeEntryPointType);
+        ApplyProvenFunctionAttributes(entryPoint, nativeEntryPoint);
         LLVMBasicBlockRef block = nativeEntryPoint.AppendBasicBlock("entry");
         using LLVMBuilderRef builder = _context.CreateBuilder();
         builder.PositionAtEnd(block);
         LLVMValueRef result;
-        if (_exceptionsEnabled)
+        bool entryPointMayThrow = !_functionEffects.TryGetValue(entryPoint, out LlvmFunctionEffects effects) ||
+            effects.MayThrow;
+        if (_exceptionsEnabled && entryPointMayThrow)
         {
             LLVMBasicBlockRef normal = nativeEntryPoint.AppendBasicBlock("invoke.continue");
             LLVMBasicBlockRef unwind = nativeEntryPoint.AppendBasicBlock("invoke.unwind");
@@ -2090,6 +2191,15 @@ public sealed class LlvmIrGenerator
         calloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
         free.Linkage = LLVMLinkage.LLVMInternalLinkage;
 
+        ApplyAllocatorAttributes(nativeMalloc, "malloc"u8, allockind: 1 | 8, allocSize: uint.MaxValue);
+        ApplyAllocatorAttributes(nativeCalloc, "malloc"u8, allockind: 1 | 16, allocSize: 1);
+        ApplyDeallocatorAttributes(nativeFree, "malloc"u8);
+        ApplyAllocatorAttributes(malloc, "xenon"u8, allockind: 1 | 8, allocSize: uint.MaxValue);
+        ApplyAllocatorAttributes(alignedMalloc, allockind: 1 | 8 | 32,
+            allocSize: uint.MaxValue, alignmentParameterIndex: 2, family: "xenon"u8);
+        ApplyAllocatorAttributes(calloc, "xenon"u8, allockind: 1 | 16, allocSize: 1);
+        ApplyDeallocatorAttributes(free, "xenon"u8);
+
         EmitMemoryRuntimeBodies(pointerType, sizeType,
             nativeMalloc, nativeMallocType, nativeFree, nativeFreeType,
             malloc, mallocType, alignedMalloc, alignedMallocType,
@@ -2107,6 +2217,97 @@ public sealed class LlvmIrGenerator
             _module.AddFunction("llvm.stacksave.p0", LLVMTypeRef.CreateFunction(pointerType, [], false)),
             _module.AddFunction("llvm.stackrestore.p0", freeType));
         return _memoryRuntime;
+    }
+
+    private static string EmitAssembly(LLVMModuleRef module, NativeTargetMachine targetMachine)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"xenon-{Guid.NewGuid():N}.s");
+        try
+        {
+            targetMachine.Handle.EmitToFile(module, path, LLVMCodeGenFileType.LLVMAssemblyFile);
+            return File.ReadAllText(path);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    private unsafe void ApplyProvenFunctionAttributes(
+        FunctionSymbol symbol,
+        LLVMValueRef function,
+        bool includeMemoryEffects = true)
+    {
+        if (!_functionEffects.TryGetValue(symbol, out LlvmFunctionEffects effects)) return;
+        if (!effects.MayThrow)
+            AddFunctionEnumAttribute(function, "nounwind"u8);
+        if (includeMemoryEffects && !effects.MayAccessMemory)
+            AddFunctionEnumAttribute(function, "memory"u8, 0);
+        if (effects.InlineCandidate)
+            AddFunctionEnumAttribute(function, "inlinehint"u8);
+    }
+
+    private unsafe void AddFunctionEnumAttribute(
+        LLVMValueRef function,
+        ReadOnlySpan<byte> name,
+        ulong value = 0)
+        => AddEnumAttribute(function, LLVMAttributeIndex.LLVMAttributeFunctionIndex, name, value);
+
+    private unsafe void AddEnumAttribute(
+        LLVMValueRef function,
+        LLVMAttributeIndex index,
+        ReadOnlySpan<byte> name,
+        ulong value = 0)
+    {
+        fixed (byte* pointer = name)
+        {
+            uint kind = LLVMApi.GetEnumAttributeKindForName((sbyte*)pointer, (UIntPtr)name.Length);
+            if (kind == 0)
+                throw new LlvmCodeGenerationException($"LLVM does not recognize function attribute '{System.Text.Encoding.UTF8.GetString(name)}'.");
+            function.AddAttributeAtIndex(index, _context.CreateEnumAttribute(kind, value));
+        }
+    }
+
+    private void ApplyAllocatorAttributes(
+        LLVMValueRef function,
+        ReadOnlySpan<byte> family,
+        ulong allockind,
+        ulong allocSize,
+        uint? alignmentParameterIndex = null)
+    {
+        AddFunctionEnumAttribute(function, "nounwind"u8);
+        AddFunctionEnumAttribute(function, "allockind"u8, allockind);
+        AddFunctionEnumAttribute(function, "allocsize"u8, allocSize);
+        AddFunctionStringAttribute(function, "alloc-family"u8, family);
+        AddEnumAttribute(function, LLVMAttributeIndex.LLVMAttributeReturnIndex, "noalias"u8);
+        if (alignmentParameterIndex is uint alignmentIndex)
+            AddEnumAttribute(function, (LLVMAttributeIndex)alignmentIndex, "allocalign"u8);
+    }
+
+    private void ApplyDeallocatorAttributes(LLVMValueRef function, ReadOnlySpan<byte> family)
+    {
+        AddFunctionEnumAttribute(function, "nounwind"u8);
+        AddFunctionEnumAttribute(function, "allockind"u8, 4);
+        AddFunctionStringAttribute(function, "alloc-family"u8, family);
+        AddEnumAttribute(function, (LLVMAttributeIndex)1, "allocptr"u8);
+    }
+
+    private unsafe void AddFunctionStringAttribute(
+        LLVMValueRef function,
+        ReadOnlySpan<byte> name,
+        ReadOnlySpan<byte> value)
+    {
+        fixed (byte* namePointer = name)
+        fixed (byte* valuePointer = value)
+        {
+            var attribute = new LLVMAttributeRef((nint)LLVMApi.CreateStringAttribute(
+                _context,
+                (sbyte*)namePointer,
+                checked((uint)name.Length),
+                (sbyte*)valuePointer,
+                checked((uint)value.Length)));
+            function.AddAttributeAtIndex(LLVMAttributeIndex.LLVMAttributeFunctionIndex, attribute);
+        }
     }
 
     private unsafe void EmitMemoryRuntimeBodies(
@@ -2330,8 +2531,8 @@ public sealed class LlvmIrGenerator
 
     private LLVMValueRef GetOrDeclareExceptionTypeKey(TypeSymbol type)
     {
-        if (_exceptionTypeKeys.TryGetValue(type, out LLVMValueRef existing)) return existing;
         string identity = GetExceptionTypeRuntimeIdentity(type);
+        if (_exceptionTypeKeys.TryGetValue(identity, out LLVMValueRef existing)) return existing;
         var identities = new List<string> { identity };
         if (type is StructTypeSymbol structure)
             for (StructTypeSymbol? baseType = structure.BaseType; baseType is not null; baseType = baseType.BaseType)
@@ -2345,7 +2546,7 @@ public sealed class LlvmIrGenerator
         data.IsGlobalConstant = true;
         data.Initializer = LLVMValueRef.CreateConstArray(_context.Int8Type,
             bytes.Select(value => LLVMValueRef.CreateConstInt(_context.Int8Type, value, false)).ToArray());
-        _exceptionTypeKeys.Add(type, data);
+        _exceptionTypeKeys.Add(identity, data);
         return data;
     }
 
@@ -2395,6 +2596,7 @@ public sealed class LlvmIrGenerator
         private readonly FunctionSymbol _function;
         private readonly LLVMValueRef _llvmFunction;
         private readonly Dictionary<FunctionSymbol, LlvmFunction> _functions;
+        private readonly IReadOnlyDictionary<FunctionSymbol, LlvmFunctionEffects> _functionEffects;
         private readonly Dictionary<FunctionSymbol, LlvmCAbiFunction> _cAbiFunctions;
         private readonly LlvmCAbi? _cAbi;
         private readonly Dictionary<FieldSymbol, LLVMValueRef> _staticFields;
@@ -2467,6 +2669,7 @@ public sealed class LlvmIrGenerator
             FunctionSymbol function,
             LLVMValueRef llvmFunction,
             Dictionary<FunctionSymbol, LlvmFunction> functions,
+            IReadOnlyDictionary<FunctionSymbol, LlvmFunctionEffects> functionEffects,
             Dictionary<FunctionSymbol, LlvmCAbiFunction> cAbiFunctions,
             LlvmCAbi? cAbi,
             Dictionary<FieldSymbol, LLVMValueRef> staticFields,
@@ -2498,6 +2701,7 @@ public sealed class LlvmIrGenerator
             _function = function;
             _llvmFunction = llvmFunction;
             _functions = functions;
+            _functionEffects = functionEffects;
             _cAbiFunctions = cAbiFunctions;
             _cAbi = cAbi;
             _staticFields = staticFields;
@@ -3195,6 +3399,17 @@ public sealed class LlvmIrGenerator
             LlvmFunction function,
             LLVMValueRef[] arguments,
             string name) => EmitPotentiallyThrowingCall(function.Type, function.Value, arguments, name);
+
+        private LLVMValueRef EmitPotentiallyThrowingCall(
+            FunctionSymbol symbol,
+            LlvmFunction function,
+            LLVMValueRef[] arguments,
+            string name)
+        {
+            if (_functionEffects.TryGetValue(symbol, out LlvmFunctionEffects effects) && !effects.MayThrow)
+                return _builder.BuildCall2(function.Type, function.Value, arguments, name);
+            return EmitPotentiallyThrowingCall(function.Type, function.Value, arguments, name);
+        }
 
         private LLVMValueRef EmitPotentiallyThrowingCall(
             LLVMTypeRef functionType,
@@ -6584,7 +6799,7 @@ public sealed class LlvmIrGenerator
             EmitTransferredArguments(arguments).CopyTo(values, 1);
 
             LLVMValueRef result = EmitLifecycleTargetCall(
-                llvmFunction.Type, llvmFunction.Value, values);
+                llvmFunction.Type, llvmFunction.Value, values, function);
             MarkConstructionLifecycleCompleted(function);
             return result;
         }
@@ -6592,8 +6807,15 @@ public sealed class LlvmIrGenerator
         private LLVMValueRef EmitLifecycleTargetCall(
             LLVMTypeRef functionType,
             LLVMValueRef target,
-            LLVMValueRef[] arguments)
+            LLVMValueRef[] arguments,
+            FunctionSymbol? directTarget = null)
         {
+            if (directTarget is not null &&
+                _functionEffects.TryGetValue(directTarget, out LlvmFunctionEffects effects) &&
+                !effects.MayThrow)
+            {
+                return _builder.BuildCall2(functionType, target, arguments, string.Empty);
+            }
             if (_exceptionsEnabled && _unwindCleanupDepth > 0 && arguments.Length == 1)
             {
                 LlvmFunction cleanup = _getExceptionRuntime().Cleanup;
@@ -7148,7 +7370,7 @@ public sealed class LlvmIrGenerator
             arguments.CopyTo(callArguments, 1);
             LlvmFunction signature = _functions[accessor];
             if (accessor.VTableSlot is not int slot)
-                return EmitPotentiallyThrowingCall(signature, callArguments, name);
+                return EmitPotentiallyThrowingCall(accessor, signature, callArguments, name);
 
             if (!_virtualTables.TryGetValue(receiverType, out LlvmVTable vtable))
                 throw new LlvmCodeGenerationException($"struct '{receiverType.Name}' has no virtual method table.");
@@ -7249,7 +7471,7 @@ public sealed class LlvmIrGenerator
             EmitTransferredArguments(expression.Arguments).CopyTo(arguments, 1);
 
             string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "method.call";
-            LLVMValueRef result = EmitPotentiallyThrowingCall(function, arguments, name);
+            LLVMValueRef result = EmitPotentiallyThrowingCall(expression.Method, function, arguments, name);
             ApplyReceiverMoveEffects(expression.Receiver, expression.Method);
             return result;
         }
@@ -7305,7 +7527,7 @@ public sealed class LlvmIrGenerator
             if (setter.VTableSlot is not int slot)
             {
                 LlvmFunction function = _functions[setter];
-                EmitPotentiallyThrowingCall(function, new[] { receiver, value }, string.Empty);
+                EmitPotentiallyThrowingCall(setter, function, new[] { receiver, value }, string.Empty);
                 return value;
             }
 
@@ -7351,7 +7573,7 @@ public sealed class LlvmIrGenerator
             if (setter.VTableSlot is not int slot)
             {
                 LlvmFunction function = _functions[setter];
-                EmitPotentiallyThrowingCall(function, arguments, string.Empty);
+                EmitPotentiallyThrowingCall(setter, function, arguments, string.Empty);
                 return value;
             }
 
@@ -7461,12 +7683,13 @@ public sealed class LlvmIrGenerator
                     abi.Value,
                     abi.Plan,
                     logicalArguments,
-                    "call");
+                    "call",
+                    EmitPotentiallyThrowingCall);
             }
             LlvmFunction function = _functions[expression.Function];
             LLVMValueRef[] arguments = EmitTransferredArguments(expression.Arguments);
             string name = TypeIdentity.AreSame(expression.Type, BuiltinTypes.Void) ? string.Empty : "call";
-            return EmitPotentiallyThrowingCall(function, arguments, name);
+            return EmitPotentiallyThrowingCall(expression.Function, function, arguments, name);
         }
 
         private LLVMValueRef EmitIndirectCall(BoundIndirectCallExpression expression)
@@ -7486,7 +7709,8 @@ public sealed class LlvmIrGenerator
                     target,
                     plan,
                     arguments,
-                    "indirect.call");
+                    "indirect.call",
+                    EmitPotentiallyThrowingCall);
             }
             LLVMTypeRef signature = LLVMTypeRef.CreateFunction(
                 _mapType(expression.FunctionPointerType.ReturnType),

@@ -1,0 +1,12 @@
+namespace Wpo.StaticCore;
+
+struct State
+{
+    public static int Shared = 20;
+    public static threadlocal int Local = 20;
+}
+
+public int AddTwo(int value) { return value + 2; }
+public int Fold() { return AddTwo(40); }
+public int ReadState() { return State.Shared + State.Local; }
+public void Fail() { throw 9; }

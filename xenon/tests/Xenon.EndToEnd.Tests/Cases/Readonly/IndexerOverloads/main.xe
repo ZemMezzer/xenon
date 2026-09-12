@@ -1,0 +1,54 @@
+namespace ReadonlyIndexerOverloads;
+
+template Indexed
+{
+    int* this[int index] { get; }
+    readonly int* readonly this[int index] { get; }
+}
+
+struct Buffer<T>
+{
+    public T MutableValue;
+    public T ReadonlyValue;
+
+    public Buffer(T mutableValue, T readonlyValue)
+    {
+        MutableValue = move mutableValue;
+        ReadonlyValue = move readonlyValue;
+    }
+
+    public T* this[int index]
+    {
+        get { return &MutableValue; }
+    }
+
+    public readonly T* readonly this[int index]
+    {
+        get { return &ReadonlyValue; }
+    }
+}
+
+int ReadMutable<T>(T& value) where T : Indexed
+{
+    int* pointer = value[0];
+    return *pointer;
+}
+
+int ReadReadonly<T>(readonly T& value) where T : Indexed
+{
+    readonly int* pointer = value[0];
+    return *pointer;
+}
+
+int Main()
+{
+    Buffer<int> value = Buffer<int>(5, 35);
+    Buffer<int>& mutable = value;
+    int* writable = mutable[0];
+    *writable = 7;
+    int mutableResult = ReadMutable<Buffer<int>>(mutable);
+    readonly Buffer<int>& readOnly = mutable;
+    readonly int* readable = readOnly[0];
+    int readonlyResult = ReadReadonly<Buffer<int>>(readOnly);
+    return mutableResult + readonlyResult + *readable - 35;
+}
