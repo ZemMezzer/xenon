@@ -64,7 +64,7 @@ public sealed class LlvmIrGeneratorTests
             {
                 Box<int>* box = new Box<int>(42);
                 int value = box->Get();
-                free(box);
+                delete(box);
                 return value;
             }
             """);
@@ -237,7 +237,7 @@ public sealed class LlvmIrGeneratorTests
                 for (int i = 0; i < count; i++)
                     values[i] = values[i] * 3 + 1;
                 int result = values[count - 1];
-                free(values);
+                delete(values);
                 return result;
             }
             """).WithOptions(new CompilationOptions(
@@ -621,8 +621,7 @@ public sealed class LlvmIrGeneratorTests
         {
             int start = ir.IndexOf("@" + ManagedSymbol("xenon", $"Example.{function}", "function"), StringComparison.Ordinal);
             string body = ir[start..ir.IndexOf("\n}", start, StringComparison.Ordinal)];
-            string allocator = function is "Vector" or "Matrix" ? "calloc" : "malloc";
-            int allocation = body.IndexOf($"call ptr @{allocator}", StringComparison.Ordinal);
+            int allocation = body.IndexOf("call ptr @__xenon_aligned_malloc", StringComparison.Ordinal);
             int check = body.IndexOf("allocation.valid = icmp ne ptr", StringComparison.Ordinal);
             int branch = body.IndexOf("br i1 %allocation.valid", StringComparison.Ordinal);
             Assert.True(allocation >= 0 && check > allocation && branch > check, body);
@@ -633,7 +632,7 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
-    public void Generator_UsesZeroedAllocatorWithoutRedundantMemsetForHeapArrays()
+    public void Generator_ZeroInitializesAlignedHeapArrays()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -642,8 +641,10 @@ public sealed class LlvmIrGeneratorTests
 
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
 
-        Assert.Contains($"call ptr @calloc(i{IntPtr.Size * 8} 1, i{IntPtr.Size * 8}", ir, StringComparison.Ordinal);
-        Assert.DoesNotContain("call void @llvm.memset", ir, StringComparison.Ordinal);
+        int start = ir.IndexOf("@" + ManagedSymbol("xenon", "Example.Create", "function"), StringComparison.Ordinal);
+        string body = ir[start..ir.IndexOf("\n}", start, StringComparison.Ordinal)];
+        Assert.Contains($"call ptr @__xenon_aligned_malloc(i{IntPtr.Size * 8}", body, StringComparison.Ordinal);
+        Assert.Equal(1, body.Split("call void @llvm.memset", StringSplitOptions.None).Length - 1);
     }
 
     [Fact]
@@ -886,7 +887,7 @@ public sealed class LlvmIrGeneratorTests
                 Pair stack = Pair { 20, 22 };
                 Pair* heap = new Pair { stack.X, stack.Y };
                 int result = heap->X + heap->Y;
-                free(heap);
+                delete(heap);
                 return result;
             }
             """);
@@ -895,8 +896,8 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, target, "heap-struct");
 
         Assert.Contains("insertvalue %Example.Pair", llvmIr, StringComparison.Ordinal);
-        Assert.Contains($"call ptr @malloc(i{IntPtr.Size * 8} 8)", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call void @free", llvmIr, StringComparison.Ordinal);
+        Assert.Contains($"call ptr @__xenon_aligned_malloc(i{IntPtr.Size * 8} 8, i{IntPtr.Size * 8} 4)", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call void @__xenon_free", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -941,11 +942,11 @@ public sealed class LlvmIrGeneratorTests
             {
                 Box value = Box(42);
                 Box* heap = new Box(10);
-                free(heap);
+                delete(heap);
 
                 int[] dynamic = new int[10];
                 dynamic[0] = 7;
-                free(dynamic);
+                delete(dynamic);
 
                 int[] temporary = int[4];
                 temporary[1] = 3;
@@ -964,7 +965,7 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("stack.array = alloca i8", llvmIr, StringComparison.Ordinal);
         Assert.Contains("array.metadata.address", llvmIr, StringComparison.Ordinal);
         Assert.Contains("getelementptr", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call ptr @calloc", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("call ptr @__xenon_aligned_malloc", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1053,7 +1054,7 @@ public sealed class LlvmIrGeneratorTests
                 Consume(null);
                 Box value = Box(null);
                 Box* heap = new Box(null);
-                free(heap);
+                delete(heap);
                 if (ReturnNull() == null)
                     return 0;
 
@@ -1539,7 +1540,7 @@ public sealed class LlvmIrGeneratorTests
             {
                 Enemy* enemy = new Enemy { };
                 Entity* entity = enemy;
-                free(entity);
+                delete(entity);
                 return 0;
             }
             """);
@@ -1567,7 +1568,7 @@ public sealed class LlvmIrGeneratorTests
             int Main()
             {
                 Enemy* enemy = new Enemy { };
-                free(enemy);
+                delete(enemy);
                 return 0;
             }
             """);
@@ -1592,7 +1593,7 @@ public sealed class LlvmIrGeneratorTests
             {
                 Derived* derived = new Derived { };
                 Base* value = derived;
-                free(value);
+                delete(value);
                 return 0;
             }
             """);
@@ -2149,13 +2150,13 @@ public sealed class LlvmIrGeneratorTests
                 int dimension = 1;
                 int length = values.GetLength(dimension);
                 int result = cast<int>(values[1,2]) + cast<int>(State.Ready) - 1;
-                free(values);
+                delete(values);
                 return result;
             }
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
-        Assert.Contains($"call ptr @calloc(i{pointerBits}", ir, StringComparison.Ordinal);
+        Assert.Contains($"call ptr @__xenon_aligned_malloc(i{pointerBits}", ir, StringComparison.Ordinal);
         Assert.Contains("array.dimension.inrange = icmp ult i32", ir, StringComparison.Ordinal);
         Assert.Contains("array.linear.index", ir, StringComparison.Ordinal);
         Assert.Contains("getelementptr inbounds i32", ir, StringComparison.Ordinal);
@@ -2389,7 +2390,7 @@ public sealed class LlvmIrGeneratorTests
     [InlineData("enum E { A = 1 / (cast<int>(sizeof(nint)) - 4) }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "valid operations")]
     [InlineData("void M(nuint x) { switch(x) { case sizeof(nint): break; case cast<nuint>(4): break; } }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "duplicate case")]
     [InlineData("void M(int x) { switch(x) { case 1 / (cast<int>(sizeof(nint)) - 4): break; } }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "compile-time constant")]
-    [InlineData("void M() { int[] a = new int[1]; a.GetLength(cast<int>(sizeof(nint)) - 4); free(a); }", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "dimension must be")]
+    [InlineData("void M() { int[] a = new int[1]; a.GetLength(cast<int>(sizeof(nint)) - 4); delete(a); }", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "dimension must be")]
     public void Generator_ReportsTargetDependentErrorsInSemanticPass(string source, string invalidTarget, string validTarget, string diagnostic)
     {
         Compilation original = CreateCompilation("namespace Example; " + source);
@@ -2508,9 +2509,12 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("stack.destroy.element", ir, StringComparison.Ordinal);
         Assert.Contains("local.cleanup.node", ir, StringComparison.Ordinal);
         Assert.Contains("local.constructed", ir, StringComparison.Ordinal);
-        Assert.DoesNotContain("call void @free", ir, StringComparison.Ordinal);
-        Assert.DoesNotContain("call ptr @malloc", ir, StringComparison.Ordinal);
-        Assert.DoesNotContain("call ptr @calloc", ir, StringComparison.Ordinal);
+        int start = ir.IndexOf("@" + ManagedSymbol("xenon", "Example.Test", "function"), StringComparison.Ordinal);
+        string body = ir[start..ir.IndexOf("\n}", start, StringComparison.Ordinal)];
+        Assert.DoesNotContain("call void @__xenon_free", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("call ptr @__xenon_malloc", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("call ptr @__xenon_aligned_malloc", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("call ptr @__xenon_calloc", body, StringComparison.Ordinal);
     }
 
     [Theory]

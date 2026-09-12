@@ -85,7 +85,7 @@ public static class SyntaxFacts
             ["throw"] = SyntaxKind.ThrowKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
     private static readonly FrozenSet<SyntaxKind> KeywordKinds = Keywords.Values.ToFrozenSet();
-    private static readonly string[] ContextualEditorKeywords = ["destruct"];
+    private static readonly string[] ContextualEditorKeywords = ["calloc", "delete", "destruct", "malloc"];
 
     public static SyntaxKind GetKeywordKind(string text) =>
         Keywords.TryGetValue(text, out SyntaxKind kind) ? kind : SyntaxKind.IdentifierToken;

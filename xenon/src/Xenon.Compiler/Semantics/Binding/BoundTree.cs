@@ -65,6 +65,8 @@ internal static class BoundTree
         BoundArrayMetadataExpression value => new[] { value.Receiver }.Concat(Optional(value.Dimension)),
         BoundNewExpression value => value.Arguments,
         BoundFreeExpression value => [value.Pointer],
+        BoundDeleteExpression value => [value.Pointer],
+        BoundRawAllocationExpression value => value.Arguments,
         BoundCallExpression value => value.Arguments,
         BoundIndirectCallExpression value => new[] { value.Target }.Concat(value.Arguments),
         BoundFunctionValueExpression value => value.Captures.Select(capture => (BoundNode)capture.Initializer),

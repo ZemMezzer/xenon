@@ -841,7 +841,7 @@ public sealed class XelibContainerTests
             int Main() {
                 Value* value = new Value();
                 int result = value->Number;
-                free(value);
+                delete(value);
                 return result;
             }
             """);
@@ -1201,6 +1201,130 @@ public sealed class XelibContainerTests
             Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
             _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
         }
+    }
+
+    [Fact]
+    public void ImportedGenericDestructorCleanupUsesConcreteOwner()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace GenericCleanup;
+            struct Box<T>
+            {
+                public storage<byte> MoveOnly;
+                public ~Box() { }
+            }
+            """, "generic-cleanup.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("GenericCleanup")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using GenericCleanup;
+            namespace App;
+            int Main()
+            {
+                Box<int> value = Box<int>();
+                return 0;
+            }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction destructor = Assert.Single(app.GetStaticImplementationFunctions(), function =>
+            function.Symbol.FunctionKind == FunctionKind.Destructor &&
+            function.Symbol.ContainingStruct?.GenericDefinition is not null);
+        BoundDestroyFieldsExpression cleanup = Assert.IsType<BoundDestroyFieldsExpression>(
+            destructor.Body.ExitCleanup);
+        Assert.Same(destructor.Symbol.ContainingStruct, cleanup.StructType);
+
+        var target = LlvmTargetOptions.CreateHost();
+        Compilation targeted = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+    }
+
+    [Fact]
+    public void ImportedGenericExplicitDestructUsesSpecializedValueDestructor()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace GenericDestruct;
+            public void Destroy<T>(T* value) { destruct(*value); }
+            """, "generic-destruct.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("GenericDestruct")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using GenericDestruct;
+            namespace App;
+            struct Resource { public ~Resource() { } }
+            void Exercise(Resource* value) { Destroy<Resource>(value); }
+            int Main() { return 0; }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction destroy = Assert.Single(app.GetStaticImplementationFunctions(), function =>
+            function.Symbol.GenericDefinition?.Name == "Destroy");
+        BoundExplicitDestructExpression? explicitDestruct = null;
+        XelibBodyCodec.Collect(destroy.Body, _ => { }, _ => { }, node =>
+        {
+            if (node is BoundExplicitDestructExpression destruction)
+                explicitDestruct = destruction;
+        });
+        Assert.NotNull(explicitDestruct?.Destructor);
+        Assert.Same(TypeFacts.GetCompleteDestructor(explicitDestruct!.ValueType),
+            explicitDestruct.Destructor);
+
+        var target = LlvmTargetOptions.CreateHost();
+        Compilation targeted = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+    }
+
+    [Fact]
+    public void RawMemoryOperationsAndPlacementFlagsRoundTripThroughXelibBodies()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace RawBodies;
+            struct Resource { public int Value; public ~Resource() { Value = 0; } }
+            public int Exercise()
+            {
+                Resource* memory = cast<Resource*>(malloc(sizeof(Resource), alignof(Resource)));
+                *memory = Resource();
+                destruct(*memory);
+                free(memory);
+                byte* zeroed = cast<byte*>(calloc(4, sizeof(byte)));
+                free(zeroed);
+                Resource* owned = new Resource();
+                delete(owned);
+                return 42;
+            }
+            """, "raw-bodies.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("RawBodies")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using RawBodies;
+            namespace App;
+            int Main() { return Exercise(); }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction exercise = Assert.Single(app.GetStaticImplementationFunctions(), function => function.Symbol.Name == "Exercise");
+        var allocationKinds = new HashSet<RawAllocationKind>();
+        bool hasFree = false;
+        bool hasDelete = false;
+        bool hasPlacement = false;
+        XelibBodyCodec.Collect(exercise.Body, _ => { }, _ => { }, node =>
+        {
+            if (node is BoundRawAllocationExpression allocation) allocationKinds.Add(allocation.AllocationKind);
+            if (node is BoundFreeExpression) hasFree = true;
+            if (node is BoundDeleteExpression) hasDelete = true;
+            if (node is BoundAssignmentExpression { IsRawPlacement: true }) hasPlacement = true;
+        });
+
+        Assert.Contains(RawAllocationKind.AlignedMalloc, allocationKinds);
+        Assert.Contains(RawAllocationKind.Calloc, allocationKinds);
+        Assert.True(hasFree);
+        Assert.True(hasDelete);
+        Assert.True(hasPlacement);
     }
 
     [Fact]

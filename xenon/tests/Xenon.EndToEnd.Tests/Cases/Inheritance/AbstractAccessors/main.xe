@@ -24,6 +24,6 @@ int Main()
     b[2] = 44;
     Root view = *a;
     if (a->Read() != 42 || view.Value != 42 || view[0] != 42) return 1;
-    free(a);
+    delete(a);
     return 42;
 }

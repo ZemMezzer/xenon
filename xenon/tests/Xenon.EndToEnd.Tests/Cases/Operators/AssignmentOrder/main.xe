@@ -26,5 +26,5 @@ int Main()
     int x = 1; x += (x = 10); if (x != 11) return 8;
     Log.Trace = 0; array[Index()] = grid[Index(),Index()] = Rhs(); if (Log.Trace != 1112) return 9;
     Log.Trace = 0; int old = array[Index()]++; if (Log.Trace != 1 || old != 7 || array[0] != 8) return 10;
-    free(array); free(grid); return 42;
+    delete(array); delete(grid); return 42;
 }

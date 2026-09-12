@@ -65,6 +65,8 @@ public enum BoundKind
     ArrayCreationExpression,
     NewExpression,
     FreeExpression,
+    DeleteExpression,
+    RawAllocationExpression,
     ErrorExpression,
     DeferredConstantExpression,
     DeferredGenericMethodCallExpression,

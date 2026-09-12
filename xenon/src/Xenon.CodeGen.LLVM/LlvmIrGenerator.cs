@@ -2064,26 +2064,184 @@ public sealed class LlvmIrGenerator
                 "Native symbols 'malloc', 'calloc', and 'free' are reserved for Xenon heap operations.");
         }
 
-        // Xenon deliberately has no process-global allocation registry or custom allocator
-        // state. The platform C runtime owns synchronization for malloc/calloc/free, so
-        // independent Xenon allocations may be created and released concurrently by any
-        // native thread (including releasing an allocation on a different thread).
+        // Every Xenon heap allocation carries one hidden native-pointer word immediately
+        // before the aligned address. This is the only allocator metadata: it makes one
+        // deallocator work for ordinary and over-aligned blocks on every platform without
+        // a process-global allocation registry.
         LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
         LLVMTypeRef sizeType = MapTargetInteger(BuiltinTypes.NUInt, _targetMachine.PointerBitWidth);
+        LLVMTypeRef nativeMallocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType], false);
+        LLVMTypeRef nativeCallocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType, sizeType], false);
+        LLVMTypeRef nativeFreeType = LLVMTypeRef.CreateFunction(_context.VoidType, [pointerType], false);
+        LLVMValueRef nativeMalloc = _module.AddFunction("malloc", nativeMallocType);
+        LLVMValueRef nativeCalloc = _module.AddFunction("calloc", nativeCallocType);
+        LLVMValueRef nativeFree = _module.AddFunction("free", nativeFreeType);
+
         LLVMTypeRef mallocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType], false);
+        LLVMTypeRef alignedMallocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType, sizeType], false);
         LLVMTypeRef callocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType, sizeType], false);
         LLVMTypeRef freeType = LLVMTypeRef.CreateFunction(_context.VoidType, [pointerType], false);
+        LLVMValueRef malloc = _module.AddFunction("__xenon_malloc", mallocType);
+        LLVMValueRef alignedMalloc = _module.AddFunction("__xenon_aligned_malloc", alignedMallocType);
+        LLVMValueRef calloc = _module.AddFunction("__xenon_calloc", callocType);
+        LLVMValueRef free = _module.AddFunction("__xenon_free", freeType);
+        malloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        alignedMalloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        calloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        free.Linkage = LLVMLinkage.LLVMInternalLinkage;
+
+        EmitMemoryRuntimeBodies(pointerType, sizeType,
+            nativeMalloc, nativeMallocType, nativeFree, nativeFreeType,
+            malloc, mallocType, alignedMalloc, alignedMallocType,
+            calloc, callocType, free);
         _memoryRuntime = new LlvmMemoryRuntime(
-            _module.AddFunction("malloc", mallocType),
+            malloc,
             mallocType,
-            _module.AddFunction("calloc", callocType),
+            alignedMalloc,
+            alignedMallocType,
+            calloc,
             callocType,
-            _module.AddFunction("free", freeType),
+            free,
             freeType,
             sizeType,
             _module.AddFunction("llvm.stacksave.p0", LLVMTypeRef.CreateFunction(pointerType, [], false)),
             _module.AddFunction("llvm.stackrestore.p0", freeType));
         return _memoryRuntime;
+    }
+
+    private unsafe void EmitMemoryRuntimeBodies(
+        LLVMTypeRef pointerType,
+        LLVMTypeRef sizeType,
+        LLVMValueRef nativeMalloc,
+        LLVMTypeRef nativeMallocType,
+        LLVMValueRef nativeFree,
+        LLVMTypeRef nativeFreeType,
+        LLVMValueRef malloc,
+        LLVMTypeRef mallocType,
+        LLVMValueRef alignedMalloc,
+        LLVMTypeRef alignedMallocType,
+        LLVMValueRef calloc,
+        LLVMTypeRef callocType,
+        LLVMValueRef free)
+    {
+        ulong pointerBytes = checked((ulong)GetPointerBitWidth() / 8);
+        ulong defaultAlignment = Math.Max(pointerBytes, pointerBytes * 2);
+        ulong maximum = GetPointerBitWidth() == 32 ? uint.MaxValue : ulong.MaxValue;
+        LLVMValueRef Size(ulong value) => LLVMValueRef.CreateConstInt(sizeType, value, false);
+        LLVMValueRef Null() => LLVMValueRef.CreateConstPointerNull(pointerType);
+
+        using (LLVMBuilderRef builder = _context.CreateBuilder())
+        {
+            LLVMBasicBlockRef entry = alignedMalloc.AppendBasicBlock("entry");
+            LLVMBasicBlockRef allocate = alignedMalloc.AppendBasicBlock("allocate");
+            LLVMBasicBlockRef success = alignedMalloc.AppendBasicBlock("success");
+            LLVMBasicBlockRef failure = alignedMalloc.AppendBasicBlock("failure");
+            builder.PositionAtEnd(entry);
+            LLVMValueRef size = alignedMalloc.GetParam(0);
+            LLVMValueRef alignment = alignedMalloc.GetParam(1);
+            LLVMValueRef oneLess = builder.BuildSub(alignment, Size(1), "alignment.mask");
+            LLVMValueRef nonzero = builder.BuildICmp(
+                LLVMIntPredicate.LLVMIntNE, alignment, Size(0), "alignment.nonzero");
+            LLVMValueRef powerOfTwo = builder.BuildICmp(
+                LLVMIntPredicate.LLVMIntEQ,
+                builder.BuildAnd(alignment, oneLess, "alignment.power.bits"),
+                Size(0), "alignment.power");
+            LLVMValueRef overheadFits = builder.BuildICmp(
+                LLVMIntPredicate.LLVMIntULE, alignment, Size(maximum - pointerBytes + 1),
+                "alignment.overhead.fits");
+            LLVMValueRef overhead = builder.BuildAdd(oneLess, Size(pointerBytes), "allocation.overhead");
+            LLVMValueRef sizeFits = builder.BuildICmp(
+                LLVMIntPredicate.LLVMIntULE, size,
+                builder.BuildSub(Size(maximum), overhead, "allocation.maximum"),
+                "allocation.size.fits");
+            LLVMValueRef valid = builder.BuildAnd(nonzero, powerOfTwo, "alignment.valid");
+            valid = builder.BuildAnd(valid, overheadFits, "alignment.range.valid");
+            valid = builder.BuildAnd(valid, sizeFits, "allocation.valid");
+            builder.BuildCondBr(valid, allocate, failure);
+
+            builder.PositionAtEnd(allocate);
+            LLVMValueRef allocation = builder.BuildCall2(nativeMallocType, nativeMalloc,
+                new[] { builder.BuildAdd(size, overhead, "allocation.bytes") }, "allocation.base");
+            builder.BuildCondBr(builder.BuildICmp(LLVMIntPredicate.LLVMIntNE,
+                allocation, Null(), "allocation.succeeded"), success, failure);
+
+            builder.PositionAtEnd(success);
+            LLVMValueRef candidate = builder.BuildAdd(
+                builder.BuildPtrToInt(allocation, sizeType, "allocation.base.integer"),
+                Size(pointerBytes), "allocation.candidate");
+            LLVMValueRef alignedInteger = builder.BuildAnd(
+                builder.BuildAdd(candidate, oneLess, "allocation.rounded"),
+                builder.BuildNot(oneLess, "alignment.inverse.mask"), "allocation.aligned.integer");
+            LLVMValueRef aligned = builder.BuildIntToPtr(alignedInteger, pointerType, "allocation.aligned");
+            LLVMValueRef header = builder.BuildIntToPtr(
+                builder.BuildSub(alignedInteger, Size(pointerBytes), "allocation.header.integer"),
+                pointerType, "allocation.header");
+            builder.BuildStore(allocation, header);
+            builder.BuildRet(aligned);
+
+            builder.PositionAtEnd(failure);
+            builder.BuildRet(Null());
+        }
+
+        using (LLVMBuilderRef builder = _context.CreateBuilder())
+        {
+            builder.PositionAtEnd(malloc.AppendBasicBlock("entry"));
+            builder.BuildRet(builder.BuildCall2(alignedMallocType, alignedMalloc,
+                new[] { malloc.GetParam(0), Size(defaultAlignment) }, "allocation"));
+        }
+
+        using (LLVMBuilderRef builder = _context.CreateBuilder())
+        {
+            LLVMBasicBlockRef entry = calloc.AppendBasicBlock("entry");
+            LLVMBasicBlockRef allocate = calloc.AppendBasicBlock("allocate");
+            LLVMBasicBlockRef initialize = calloc.AppendBasicBlock("initialize");
+            LLVMBasicBlockRef failure = calloc.AppendBasicBlock("failure");
+            builder.PositionAtEnd(entry);
+            LLVMValueRef count = calloc.GetParam(0);
+            LLVMValueRef elementSize = calloc.GetParam(1);
+            LLVMValueRef divisor = builder.BuildSelect(
+                builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, elementSize, Size(0), "calloc.size.zero"),
+                Size(1), elementSize, "calloc.divisor");
+            LLVMValueRef valid = builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, count,
+                builder.BuildUDiv(Size(maximum), divisor, "calloc.maximum.count"), "calloc.product.valid");
+            builder.BuildCondBr(valid, allocate, failure);
+
+            builder.PositionAtEnd(allocate);
+            LLVMValueRef bytes = builder.BuildMul(count, elementSize, "calloc.bytes");
+            LLVMValueRef allocation = builder.BuildCall2(alignedMallocType, alignedMalloc,
+                new[] { bytes, Size(defaultAlignment) }, "calloc.allocation");
+            builder.BuildCondBr(builder.BuildICmp(LLVMIntPredicate.LLVMIntNE,
+                allocation, Null(), "calloc.succeeded"), initialize, failure);
+
+            builder.PositionAtEnd(initialize);
+            LLVMApi.BuildMemSet(builder, allocation,
+                LLVMValueRef.CreateConstInt(_context.Int8Type, 0, false), bytes, 1);
+            builder.BuildRet(allocation);
+
+            builder.PositionAtEnd(failure);
+            builder.BuildRet(Null());
+        }
+
+        using (LLVMBuilderRef builder = _context.CreateBuilder())
+        {
+            LLVMBasicBlockRef entry = free.AppendBasicBlock("entry");
+            LLVMBasicBlockRef release = free.AppendBasicBlock("release");
+            LLVMBasicBlockRef done = free.AppendBasicBlock("done");
+            builder.PositionAtEnd(entry);
+            LLVMValueRef address = free.GetParam(0);
+            builder.BuildCondBr(builder.BuildICmp(LLVMIntPredicate.LLVMIntNE,
+                address, Null(), "free.nonnull"), release, done);
+            builder.PositionAtEnd(release);
+            LLVMValueRef addressInteger = builder.BuildPtrToInt(address, sizeType, "free.address.integer");
+            LLVMValueRef header = builder.BuildIntToPtr(
+                builder.BuildSub(addressInteger, Size(pointerBytes), "free.header.integer"),
+                pointerType, "free.header");
+            LLVMValueRef allocation = builder.BuildLoad2(pointerType, header, "free.allocation");
+            builder.BuildCall2(nativeFreeType, nativeFree, new[] { allocation }, string.Empty);
+            builder.BuildBr(done);
+            builder.PositionAtEnd(done);
+            builder.BuildRetVoid();
+        }
     }
 
     private LLVMValueRef GetOrDeclareTrap()
@@ -2133,6 +2291,8 @@ public sealed class LlvmIrGenerator
     private sealed record LlvmMemoryRuntime(
         LLVMValueRef Malloc,
         LLVMTypeRef MallocType,
+        LLVMValueRef AlignedMalloc,
+        LLVMTypeRef AlignedMallocType,
         LLVMValueRef Calloc,
         LLVMTypeRef CallocType,
         LLVMValueRef Free,
@@ -3919,6 +4079,8 @@ public sealed class LlvmIrGenerator
             BoundArrayMetadataExpression metadata => EmitArrayMetadata(metadata),
             BoundNewExpression @new => EmitNew(@new),
             BoundFreeExpression free => EmitFree(free),
+            BoundDeleteExpression deletion => EmitDelete(deletion),
+            BoundRawAllocationExpression allocation => EmitRawAllocation(allocation),
             _ => throw new LlvmCodeGenerationException($"Bound expression '{expression.Kind}' is not supported by LLVM code generation."),
         };
 
@@ -5240,6 +5402,7 @@ public sealed class LlvmIrGenerator
             try { value = EmitExpression(expression.Expression); }
             finally { if (expression.CapturesTarget) _capturedPlaces.Pop(); }
             bool mayDestroyPreviousValue = expression.OperatorKind == SyntaxKind.EqualsToken &&
+                !expression.IsRawPlacement &&
                 !sameScalarStorage &&
                 expression.MovedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved &&
                 (!expression.IsInitialization || expression.RequiresRuntimeInitializationCheck);
@@ -5283,7 +5446,8 @@ public sealed class LlvmIrGenerator
                 EmitLifecycleCall(replacementValueGuard!.Destructor, previousAddress, []);
                 return value;
             }
-            if (expression.OperatorKind == SyntaxKind.EqualsToken && !sameScalarStorage &&
+            if (expression.OperatorKind == SyntaxKind.EqualsToken && !expression.IsRawPlacement &&
+                !sameScalarStorage &&
                 expression.MovedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved)
             {
                 if (expression.RequiresRuntimeInitializationCheck)
@@ -5747,7 +5911,9 @@ public sealed class LlvmIrGenerator
             }
             else
             {
-                address = EmitZeroedAllocation(allocationSize, $"{expression.ElementType.Name}.heap.array");
+                address = EmitZeroedAllocation(allocationSize,
+                    $"{expression.ElementType.Name}.heap.array",
+                    SizeConstant(Math.Max(4u, _getAbiAlignment(expression.ElementType))));
             }
             _builder.BuildStore(ToInt32(length), address);
             for (int i = 0; i < dimensions.Length; i++)
@@ -5974,7 +6140,8 @@ public sealed class LlvmIrGenerator
                 runtime.SizeType,
                 Math.Max(1UL, _getAbiSize(expression.AllocatedType)),
                 false);
-            LLVMValueRef address = EmitAllocation(size, $"{expression.AllocatedType.Name}.heap");
+            LLVMValueRef address = EmitAllocation(size, $"{expression.AllocatedType.Name}.heap",
+                SizeConstant(Math.Max(1u, _getAbiAlignment(expression.AllocatedType))));
             AllocationGuard allocationGuard = BeginAllocationGuard(address);
 
             if (expression.StructType is null)
@@ -6054,30 +6221,69 @@ public sealed class LlvmIrGenerator
             _builder.PositionAtEnd(end);
         }
 
-        private LLVMValueRef EmitAllocation(LLVMValueRef size, string name)
+        private LLVMValueRef EmitAllocation(
+            LLVMValueRef size,
+            string name,
+            LLVMValueRef alignment = default)
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
-            LLVMValueRef address = _builder.BuildCall2(runtime.MallocType, runtime.Malloc, new LLVMValueRef[] { size }, name);
+            LLVMValueRef address = alignment.Handle == IntPtr.Zero
+                ? _builder.BuildCall2(runtime.MallocType, runtime.Malloc, new[] { size }, name)
+                : _builder.BuildCall2(runtime.AlignedMallocType, runtime.AlignedMalloc,
+                    new[] { size, alignment }, name);
             EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
                 LLVMValueRef.CreateConstPointerNull(address.TypeOf), "allocation.valid"));
             return address;
         }
 
-        private LLVMValueRef EmitZeroedAllocation(LLVMValueRef size, string name)
+        private LLVMValueRef EmitZeroedAllocation(
+            LLVMValueRef size,
+            string name,
+            LLVMValueRef alignment = default)
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
-            LLVMValueRef address = _builder.BuildCall2(
-                runtime.CallocType,
-                runtime.Calloc,
-                new LLVMValueRef[] { SizeConstant(1), size },
-                name);
+            LLVMValueRef address;
+            if (alignment.Handle == IntPtr.Zero)
+            {
+                address = _builder.BuildCall2(runtime.CallocType, runtime.Calloc,
+                    new[] { SizeConstant(1), size }, name);
+            }
+            else
+            {
+                address = _builder.BuildCall2(runtime.AlignedMallocType, runtime.AlignedMalloc,
+                    new[] { size, alignment }, name);
+                EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
+                    LLVMValueRef.CreateConstPointerNull(address.TypeOf), "allocation.valid"));
+                LLVMApi.BuildMemSet(_builder, address,
+                    LLVMValueRef.CreateConstInt(_context.Int8Type, 0, false), size, 1);
+                return address;
+            }
             EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address,
                 LLVMValueRef.CreateConstPointerNull(address.TypeOf), "allocation.valid"));
             return address;
         }
 
         private LLVMValueRef EmitFree(BoundFreeExpression expression)
-            => EmitFreeValue(EmitExpression(expression.Pointer), expression.Pointer.Type, expression.Destructor);
+            => EmitDeallocation(EmitExpression(expression.Pointer));
+
+        private LLVMValueRef EmitDelete(BoundDeleteExpression expression)
+            => EmitDeleteValue(EmitExpression(expression.Pointer), expression.Pointer.Type, expression.Destructor);
+
+        private LLVMValueRef EmitRawAllocation(BoundRawAllocationExpression expression)
+        {
+            LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            LLVMValueRef[] arguments = expression.Arguments.Select(EmitExpression).ToArray();
+            return expression.AllocationKind switch
+            {
+                RawAllocationKind.Malloc => _builder.BuildCall2(
+                    runtime.MallocType, runtime.Malloc, arguments, "raw.malloc"),
+                RawAllocationKind.AlignedMalloc => _builder.BuildCall2(
+                    runtime.AlignedMallocType, runtime.AlignedMalloc, arguments, "raw.malloc.aligned"),
+                RawAllocationKind.Calloc => _builder.BuildCall2(
+                    runtime.CallocType, runtime.Calloc, arguments, "raw.calloc"),
+                _ => throw new LlvmCodeGenerationException("Unknown raw allocation kind."),
+            };
+        }
 
         private LLVMValueRef EmitOwnershipDestruction(BoundOwnershipDestructionExpression expression)
         {
@@ -6088,7 +6294,7 @@ public sealed class LlvmIrGenerator
                 "ownership.handle");
             return expression.OwnershipType switch
             {
-                UniqueTypeSymbol unique => EmitFreeValue(owned, unique.StorageType, expression.ElementDestructor),
+                UniqueTypeSymbol unique => EmitDeleteValue(owned, unique.StorageType, expression.ElementDestructor),
                 SharedTypeSymbol shared => EmitSharedRelease(owned, shared, expression.ElementDestructor),
                 WeakTypeSymbol => EmitWeakRelease(owned),
                 _ => throw new LlvmCodeGenerationException("Unknown ownership destruction kind."),
@@ -6158,7 +6364,7 @@ public sealed class LlvmIrGenerator
                 OwnershipControlField(control, 2, "shared.release.storage.address"),
                 "shared.release.storage");
             SharedControlReleaseGuard controlGuard = BeginSharedControlReleaseGuard(control);
-            EmitFreeValue(data, shared.StorageType, elementDestructor);
+            EmitDeleteValue(data, shared.StorageType, elementDestructor);
             CompleteSharedControlReleaseGuard(controlGuard);
             LLVMValueRef weakAddress = OwnershipControlField(control, 1, "shared.release.weak.address");
             EmitWeakCounterRelease(control, weakAddress, "shared.release.control");
@@ -6271,7 +6477,7 @@ public sealed class LlvmIrGenerator
             _builder.PositionAtEnd(end);
         }
 
-        private LLVMValueRef EmitFreeValue(
+        private LLVMValueRef EmitDeleteValue(
             LLVMValueRef address,
             TypeSymbol storageType,
             FunctionSymbol? destructor)
@@ -6336,6 +6542,13 @@ public sealed class LlvmIrGenerator
                 string.Empty);
             _builder.BuildBr(pointerEnd);
             _builder.PositionAtEnd(pointerEnd);
+            return default;
+        }
+
+        private LLVMValueRef EmitDeallocation(LLVMValueRef address)
+        {
+            LlvmMemoryRuntime runtime = _getMemoryRuntime();
+            _builder.BuildCall2(runtime.FreeType, runtime.Free, new[] { address }, string.Empty);
             return default;
         }
 
@@ -6549,6 +6762,8 @@ public sealed class LlvmIrGenerator
                 TypeIdentity.AreSame(atomic.ElementType, expression.TargetType))
                 return value;
             if (TypeIdentity.AreSame(expression.Expression.Type, expression.TargetType))
+                return value;
+            if (expression.Expression.Type is PointerTypeSymbol && expression.TargetType is PointerTypeSymbol)
                 return value;
 
             LLVMTypeRef target = _mapType(expression.TargetType);
