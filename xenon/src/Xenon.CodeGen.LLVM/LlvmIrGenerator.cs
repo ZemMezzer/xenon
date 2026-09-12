@@ -2286,6 +2286,10 @@ public sealed class LlvmIrGenerator
         private readonly Dictionary<LocalVariableSymbol, LLVMValueRef> _arrayScopeHeads = [];
         private readonly Dictionary<BoundMoveExpression, LLVMValueRef> _arrayMoveCleanupState = new(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<BoundArrayCreationExpression, LLVMValueRef> _arrayCreationCleanupNodes = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<BoundArrayCreationExpression, ImmutableArray<LLVMValueRef>> _arrayCreationDimensions = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<LocalVariableSymbol, ImmutableArray<LLVMValueRef>> _arrayDimensionCaches = [];
+        private readonly Dictionary<LocalVariableSymbol, LLVMValueRef> _arrayDimensionCacheArrays = [];
+        private readonly Dictionary<LocalVariableSymbol, LLVMValueRef> _arrayDimensionCacheValid = [];
         private Dictionary<BoundExpression, FullExpressionTemporarySlot>? _fullExpressionTemporaries;
         private readonly Stack<LLVMValueRef> _capturedPlaces = [];
         private List<FullExpressionTemporarySlot>? _fullExpressionTemporaryOrder;
@@ -2530,6 +2534,7 @@ public sealed class LlvmIrGenerator
                 case BoundVariableDeclarationStatement variable:
                     LLVMValueRef address = _builder.BuildAlloca(_mapType(variable.Variable.Type), variable.Variable.Name);
                     _addresses.Add(variable.Variable, address);
+                    AllocateArrayDimensionCache(variable.Variable);
                     AllocateScalarCleanup(variable.Variable);
                     AllocateArrayCleanup(variable.Variable);
                     break;
@@ -3418,13 +3423,24 @@ public sealed class LlvmIrGenerator
                     if (section.Value is BoundLiteralExpression literal && !FitsTargetInteger(literal.Value, _getIntegerBitWidth(integer), integer.IsSigned))
                         throw new LlvmCodeGenerationException("case value is out of range for the selected target's switch operand type");
             LLVMValueRef value = EmitExpression(statement.Expression);
-            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("switch.end");
             var blocks = new LLVMBasicBlockRef[statement.Sections.Length];
+
+            // Preserve source order in the function's basic-block layout. The order in which
+            // blocks are appended is an input to LLVM's machine block placement heuristics;
+            // placing the merge first and cases in reverse order can produce a pathological
+            // jump-table layout for hot switches.
+            for (int i = 0; i < blocks.Length; i++)
+                if (!statement.Sections[i].Body.Statements.IsEmpty)
+                    blocks[i] = _llvmFunction.AppendBasicBlock("switch.case");
+
+            LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("switch.end");
             LLVMBasicBlockRef next = end;
             for (int i = blocks.Length - 1; i >= 0; i--)
             {
-                if (!statement.Sections[i].Body.Statements.IsEmpty) next = _llvmFunction.AppendBasicBlock("switch.case");
-                blocks[i] = next;
+                if (!statement.Sections[i].Body.Statements.IsEmpty)
+                    next = blocks[i];
+                else
+                    blocks[i] = next;
             }
             LLVMBasicBlockRef fallback = end;
             for (int i = 0; i < blocks.Length; i++)
@@ -3620,6 +3636,7 @@ public sealed class LlvmIrGenerator
                     EmitAtomicStore(value, address, atomic, initialize: true);
                 else
                     _builder.BuildStore(value, address);
+                UpdateArrayDimensionCache(statement.Variable, value, statement.Initializer);
                 EmitScalarRegistration(statement.Variable, address);
                 EmitArrayRegistration(statement.Variable, value, statement.Initializer);
             }
@@ -3628,6 +3645,46 @@ public sealed class LlvmIrGenerator
                 // The wrapper itself is live even while it contains no T.
                 EmitScalarRegistration(statement.Variable, address);
             }
+        }
+
+        private void AllocateArrayDimensionCache(LocalVariableSymbol variable)
+        {
+            if (variable.Type is not ArrayTypeSymbol array) return;
+            var cache = ImmutableArray.CreateBuilder<LLVMValueRef>(array.Rank);
+            for (int i = 0; i < array.Rank; i++)
+                cache.Add(_builder.BuildAlloca(_context.Int32Type,
+                    $"{variable.Name}.array.dimension.cache.{i}"));
+            _arrayDimensionCaches.Add(variable, cache.MoveToImmutable());
+            _arrayDimensionCacheArrays.Add(variable,
+                _builder.BuildAlloca(_mapType(variable.Type), $"{variable.Name}.array.cache.value"));
+            _arrayDimensionCacheValid.Add(variable,
+                _builder.BuildAlloca(_context.Int1Type, $"{variable.Name}.array.cache.valid"));
+        }
+
+        private void UpdateArrayDimensionCache(
+            LocalVariableSymbol variable,
+            LLVMValueRef arrayValue,
+            BoundExpression source)
+        {
+            if (!_arrayDimensionCaches.TryGetValue(variable,
+                    out ImmutableArray<LLVMValueRef> cache))
+                return;
+
+            BoundArrayCreationExpression? creation = FindArrayCreationSource(source);
+            if (creation is null ||
+                !_arrayCreationDimensions.TryGetValue(creation,
+                    out ImmutableArray<LLVMValueRef> dimensions))
+            {
+                _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 0),
+                    _arrayDimensionCacheValid[variable]);
+                return;
+            }
+
+            _builder.BuildStore(arrayValue, _arrayDimensionCacheArrays[variable]);
+            for (int i = 0; i < cache.Length; i++)
+                _builder.BuildStore(dimensions[i], cache[i]);
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1),
+                _arrayDimensionCacheValid[variable]);
         }
 
         private void AllocateArrayCleanup(LocalVariableSymbol variable)
@@ -5255,6 +5312,9 @@ public sealed class LlvmIrGenerator
             }
 
             _builder.BuildStore(value, address);
+            if (expression.OperatorKind == SyntaxKind.EqualsToken &&
+                expression.Target is BoundVariableExpression { Variable: LocalVariableSymbol assignedArray })
+                UpdateArrayDimensionCache(assignedArray, value, expression.Expression);
             MarkDestructorFieldReinitialized(expression.Target);
             MarkConstructorFieldInitialized(expression);
             if (TryGetScalarProjection(expression.Target, out VariableSymbol variable, out ImmutableArray<FieldSymbol> initializedPath))
@@ -5658,6 +5718,8 @@ public sealed class LlvmIrGenerator
                 EmitRuntimeCheck(valid);
                 return ConvertIntegerToSize(value, dimension.Type);
             }).ToArray();
+            LLVMValueRef[] storedDimensions = dimensions.Select(ToInt32).ToArray();
+            _arrayCreationDimensions[expression] = storedDimensions.ToImmutableArray();
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
             LLVMValueRef hasZeroDimension = LLVMValueRef.CreateConstInt(_context.Int1Type, 0);
             foreach (LLVMValueRef dimension in dimensions)
@@ -5689,7 +5751,7 @@ public sealed class LlvmIrGenerator
             }
             _builder.BuildStore(ToInt32(length), address);
             for (int i = 0; i < dimensions.Length; i++)
-                _builder.BuildStore(ToInt32(dimensions[i]), MetadataAddress(address, IntConstant(i + 1)));
+                _builder.BuildStore(storedDimensions[i], MetadataAddress(address, IntConstant(i + 1)));
             LLVMValueRef data = ArrayData(address, expression.ArrayType);
             if (expression.Storage == ArrayStorageKind.Stack)
             {
@@ -5769,13 +5831,65 @@ public sealed class LlvmIrGenerator
         }
 
         private LLVMValueRef ArrayData(LLVMValueRef array, ArrayTypeSymbol type) =>
-            _builder.BuildGEP2(_context.Int8Type, array, new LLVMValueRef[] { SizeConstant(ArrayHeaderSize(type)) }, "array.data");
+            _builder.BuildInBoundsGEP2(_context.Int8Type, array,
+                new LLVMValueRef[] { SizeConstant(ArrayHeaderSize(type)) }, "array.data");
 
         private LLVMValueRef MetadataAddress(LLVMValueRef array, LLVMValueRef slot) =>
-            _builder.BuildGEP2(_context.Int32Type, array, new LLVMValueRef[] { slot }, "array.metadata.address");
+            _builder.BuildInBoundsGEP2(_context.Int32Type, array,
+                new LLVMValueRef[] { slot }, "array.metadata.address");
 
         private LLVMValueRef ReadDimension(LLVMValueRef array, LLVMValueRef dimension) =>
-            _builder.BuildLoad2(_context.Int32Type, MetadataAddress(array, _builder.BuildAdd(dimension, IntConstant(1))), "array.dimension");
+            _builder.BuildLoad2(_context.Int32Type,
+                MetadataAddress(array, _builder.BuildAdd(dimension, IntConstant(1))), "array.dimension");
+
+        private LLVMValueRef ReadIndexDimension(
+            BoundExpression receiver,
+            LLVMValueRef array,
+            int dimension)
+        {
+            if (receiver is not BoundVariableExpression { Variable: LocalVariableSymbol variable } ||
+                !_arrayDimensionCaches.TryGetValue(variable,
+                    out ImmutableArray<LLVMValueRef> cache))
+                return ReadDimension(array, IntConstant(dimension));
+
+            LLVMValueRef valid = _builder.BuildLoad2(_context.Int1Type,
+                _arrayDimensionCacheValid[variable], "array.cache.valid");
+            LLVMValueRef cachedArray = _builder.BuildLoad2(array.TypeOf,
+                _arrayDimensionCacheArrays[variable], "array.cache.value");
+            LLVMValueRef hit = _builder.BuildAnd(valid,
+                _builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, cachedArray, array,
+                    "array.cache.matches"), "array.cache.hit");
+            LLVMBasicBlockRef hitBlock = _llvmFunction.AppendBasicBlock("array.cache.hit");
+            LLVMBasicBlockRef missBlock = _llvmFunction.AppendBasicBlock("array.cache.miss");
+            LLVMBasicBlockRef endBlock = _llvmFunction.AppendBasicBlock("array.cache.ready");
+            _builder.BuildCondBr(hit, hitBlock, missBlock);
+
+            _builder.PositionAtEnd(hitBlock);
+            LLVMValueRef hitValue = _builder.BuildLoad2(_context.Int32Type,
+                cache[dimension], "array.dimension.cached");
+            LLVMBasicBlockRef hitIncoming = _builder.InsertBlock;
+            _builder.BuildBr(endBlock);
+
+            _builder.PositionAtEnd(missBlock);
+            LLVMValueRef missValue = default;
+            for (int i = 0; i < cache.Length; i++)
+            {
+                LLVMValueRef current = ReadDimension(array, IntConstant(i));
+                _builder.BuildStore(current, cache[i]);
+                if (i == dimension) missValue = current;
+            }
+            _builder.BuildStore(array, _arrayDimensionCacheArrays[variable]);
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, 1),
+                _arrayDimensionCacheValid[variable]);
+            LLVMBasicBlockRef missIncoming = _builder.InsertBlock;
+            _builder.BuildBr(endBlock);
+
+            _builder.PositionAtEnd(endBlock);
+            LLVMValueRef result = _builder.BuildPhi(_context.Int32Type,
+                "array.dimension.selected");
+            result.AddIncoming([hitValue, missValue], [hitIncoming, missIncoming], 2);
+            return result;
+        }
 
         private LLVMValueRef EmitArrayMetadata(BoundArrayMetadataExpression expression)
         {
@@ -6856,11 +6970,14 @@ public sealed class LlvmIrGenerator
                     LLVMValueRef index = ConvertIntegerToSize(value, argument.Type);
                     if (_getIntegerBitWidth(argument.Type) > _getIntegerBitWidth(BuiltinTypes.NUInt))
                         EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULE, value, LLVMValueRef.CreateConstInt(value.TypeOf, uint.MaxValue), "array.index.fits"));
-                    LLVMValueRef dimension = ConvertIntegerToSize(ReadDimension(pointer, IntConstant(i)), BuiltinTypes.Int);
+                    LLVMValueRef dimensionValue =
+                        ReadIndexDimension(expression.Receiver, pointer, i);
+                    LLVMValueRef dimension = ConvertIntegerToSize(dimensionValue, BuiltinTypes.Int);
                     EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULT, index, dimension, "array.index.inrange"));
                     linear = _builder.BuildAdd(_builder.BuildMul(linear, dimension), index, "array.linear.index");
                 }
-                return _builder.BuildGEP2(_mapType(arrayType.ElementType), ArrayData(pointer, arrayType), new LLVMValueRef[] { linear }, "element.address");
+                return _builder.BuildInBoundsGEP2(_mapType(arrayType.ElementType),
+                    ArrayData(pointer, arrayType), new LLVMValueRef[] { linear }, "element.address");
             }
             LLVMValueRef pointerIndex = EmitExpression(expression.Index);
             TypeSymbol elementType = expression.Receiver.Type switch
