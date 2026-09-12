@@ -2158,6 +2158,12 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains($"call ptr @calloc(i{pointerBits}", ir, StringComparison.Ordinal);
         Assert.Contains("array.dimension.inrange = icmp ult i32", ir, StringComparison.Ordinal);
         Assert.Contains("array.linear.index", ir, StringComparison.Ordinal);
+        Assert.Contains("getelementptr inbounds i32", ir, StringComparison.Ordinal);
+        Assert.Contains("getelementptr inbounds i8", ir, StringComparison.Ordinal);
+        Assert.Contains("array.dimension.cache", ir, StringComparison.Ordinal);
+        Assert.Contains("array.cache.matches = icmp eq ptr", ir, StringComparison.Ordinal);
+        Assert.Contains("array.cache.miss", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("!invariant.load", ir, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
         Assert.Contains("array.free.end", ir, StringComparison.Ordinal);
     }
@@ -2175,6 +2181,76 @@ public sealed class LlvmIrGeneratorTests
             """);
         string ir = new LlvmIrGenerator().Generate(compilation);
         Assert.Contains("ret i32 42", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Generator_EmitsSwitchCasesBeforeMergeInSourceOrder()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int Test(int value)
+            {
+                int result = 0;
+                switch (value)
+                {
+                    case 0: result = 10; break;
+                    case 1:
+                    case 2: result = 20; break;
+                    default: result = 30; break;
+                }
+                return result;
+            }
+            """);
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        string ir = new LlvmIrGenerator().Generate(compilation);
+        var caseBlocks = System.Text.RegularExpressions.Regex.Matches(
+            ir,
+            @"(?m)^switch.case[^:]*:");
+        int merge = ir.IndexOf("switch.end:", StringComparison.Ordinal);
+
+        Assert.Equal(3, caseBlocks.Count);
+        Assert.True(caseBlocks[0].Index < caseBlocks[1].Index, ir);
+        Assert.True(caseBlocks[1].Index < caseBlocks[2].Index, ir);
+        Assert.True(merge > caseBlocks[2].Index, ir);
+    }
+
+    [Fact]
+    public void Generator_PlacesSingleExitBeforeOptimizedSwitchLoop()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            int Main()
+            {
+                int value = 1;
+                for (int i = 0; i < 100000; i++)
+                {
+                    switch ((value ^ i) & 3)
+                    {
+                        case 0: value = (value * 17 + i) & 16777215; break;
+                        case 1: value = (value * 19 + (i & 255)) & 16777215; break;
+                        case 2: value = (value * 13 + (i & 1023)) & 16777215; break;
+                        default: value = (value * 23 + (i & 63)) & 16777215; break;
+                    }
+                }
+                return value;
+            }
+            """).WithOptions(new CompilationOptions(
+                CompilationOutputKind.Executable,
+                EnableRuntimeChecks: false));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        string ir = new LlvmIrGenerator().GenerateForTarget(
+            compilation,
+            LlvmTargetOptions.CreateHost(optimizationLevel: 3));
+        int entry = ir.IndexOf("@main(", StringComparison.Ordinal);
+        Assert.True(entry >= 0, ir);
+
+        int exit = ir.IndexOf(".exit:", entry, StringComparison.Ordinal);
+        int dispatch = ir.IndexOf("switch i", entry, StringComparison.Ordinal);
+
+        Assert.True(exit > entry, ir);
+        Assert.True(dispatch > exit, ir);
     }
 
     [Fact]
