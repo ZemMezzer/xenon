@@ -1,0 +1,4 @@
+using Wpo.StaticMiddle;
+namespace Wpo.StaticApp;
+
+int Main() { return Execute(); }

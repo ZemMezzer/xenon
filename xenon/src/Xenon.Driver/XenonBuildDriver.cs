@@ -15,7 +15,7 @@ public enum BuildFailureKind { Compiler, NativeTool, Environment }
 public sealed record XenonBuildRequest(
     string InputPath, string Profile = "debug", string? OutputRoot = null,
     string? TargetTriple = null, bool CompileOnly = false, TimeSpan? ToolTimeout = null,
-    bool SkipLink = false);
+    bool SkipLink = false, LlvmTargetCpuMode CpuMode = LlvmTargetCpuMode.Portable);
 
 public sealed class XenonBuildResult
 {
@@ -77,8 +77,16 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 if (project.Type != XenonProjectType.XenonLibrary &&
                     (!request.CompileOnly || compilation.RequiresTargetLayout))
                 {
-                    target = new LlvmTargetOptions(triple, profile.OptimizationLevel,
-                        PositionIndependentCode: RequiresPositionIndependentCode(project.Type, triple));
+                    bool nativeCpu = request.CpuMode == LlvmTargetCpuMode.Native;
+                    if (nativeCpu && !canLinkForHost)
+                        return Fail(result, BuildFailureKind.Compiler,
+                            "Native CPU mode requires the host target triple.");
+                    target = new LlvmTargetOptions(
+                        triple,
+                        profile.OptimizationLevel,
+                        nativeCpu ? LlvmTargetPlatform.HostCpuName : string.Empty,
+                        nativeCpu ? LlvmTargetPlatform.HostCpuFeatures : string.Empty,
+                        RequiresPositionIndependentCode(project.Type, triple));
                     compilation = LlvmIrGenerator.BindForTarget(compilation, target);
                     if (compilation.HasErrors)
                     {
@@ -152,6 +160,11 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 var linker = new NativeLinker(processRunner, request.ToolTimeout, project.RootDirectory);
                 string[] dependencyArtifacts = graph.GetNativeLinkOrder(project)
                     .Where(dependency => dependency.Type != XenonProjectType.XenonLibrary)
+                    // Optimized builds compile reachable static Xenon projects into the
+                    // consuming LLVM module before O3. Linking their archives again would
+                    // duplicate definitions and defeat whole-program internalization.
+                    .Where(dependency => target!.OptimizationLevel == 0 ||
+                        dependency.Type != XenonProjectType.StaticLibrary)
                     .Select(dependency => artifacts[dependency.Identity])
                     .Select(artifact => artifact.ImportLibraryPath ?? artifact.Path).ToArray();
                 IEnumerable<string> exportedSymbols = project.Type == XenonProjectType.SharedLibrary

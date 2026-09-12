@@ -1,4 +1,5 @@
 using Xenon.Cli;
+using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Driver;
 using Xenon.ProjectSystem;
@@ -70,6 +71,9 @@ public sealed class CliProjectModelTests
 
         XenonBuildRequest cliRequest = Program.CreateProjectBuildRequest(
             projectFile, "release", targetTriple: null, compileOnly: true, skipLink: false);
+        XenonBuildRequest nativeRequest = Program.CreateProjectBuildRequest(
+            projectFile, "release", targetTriple: null, compileOnly: true, skipLink: false,
+            nativeCpu: true);
         XenonBuildResult driverResult = new XenonBuildDriver().Build(cliRequest);
         XenonProjectGraph graph = XenonProjectGraph.Load(projectFile);
         var compilations = new Dictionary<string, Compilation>(StringComparer.OrdinalIgnoreCase);
@@ -79,6 +83,8 @@ public sealed class CliProjectModelTests
         Compilation apiCompilation = compilations[graph.Root.Identity];
 
         Assert.True(driverResult.Success, driverResult.Failure);
+        Assert.Equal(LlvmTargetCpuMode.Portable, cliRequest.CpuMode);
+        Assert.Equal(LlvmTargetCpuMode.Native, nativeRequest.CpuMode);
         Assert.Equal(graph.Projects.Select(project => project.Identity),
             driverResult.ProjectGraph!.Projects.Select(project => project.Identity));
         Assert.Equal(graph.Root.SourceFiles.ToArray(), driverResult.Project!.SourceFiles.ToArray());

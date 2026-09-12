@@ -4,6 +4,14 @@ using LLVMApi = LLVMSharp.Interop.LLVM;
 
 namespace Xenon.CodeGen.LLVM;
 
+public enum LlvmTargetCpuMode
+{
+    /// <summary>Generate code for the architecture baseline so artifacts remain portable.</summary>
+    Portable,
+    /// <summary>Use the current build machine CPU and feature set for maximum local performance.</summary>
+    Native,
+}
+
 public sealed record LlvmTargetOptions(
     string Triple,
     int OptimizationLevel = 0,
@@ -13,11 +21,21 @@ public sealed record LlvmTargetOptions(
 {
     public static LlvmTargetOptions CreateHost(
         int optimizationLevel = 0,
-        bool positionIndependentCode = false) =>
-        new(
-            LlvmTargetPlatform.HostTriple,
-            optimizationLevel,
-            PositionIndependentCode: positionIndependentCode);
+        bool positionIndependentCode = false,
+        LlvmTargetCpuMode cpuMode = LlvmTargetCpuMode.Portable) => cpuMode switch
+        {
+            LlvmTargetCpuMode.Portable => new(
+                LlvmTargetPlatform.HostTriple,
+                optimizationLevel,
+                PositionIndependentCode: positionIndependentCode),
+            LlvmTargetCpuMode.Native => new(
+                LlvmTargetPlatform.HostTriple,
+                optimizationLevel,
+                LlvmTargetPlatform.HostCpuName,
+                LlvmTargetPlatform.HostCpuFeatures,
+                positionIndependentCode),
+            _ => throw new ArgumentOutOfRangeException(nameof(cpuMode)),
+        };
 }
 
 public sealed record LlvmObjectFile(
@@ -28,6 +46,8 @@ public sealed record LlvmObjectFile(
 public static class LlvmTargetPlatform
 {
     public static string HostTriple => NativeTargetMachine.GetHostTriple();
+    public static string HostCpuName => NativeTargetMachine.GetHostCpuName();
+    public static string HostCpuFeatures => NativeTargetMachine.GetHostCpuFeatures();
 
     public static string GetObjectFileExtension(string triple) =>
         triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
@@ -72,6 +92,18 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
     {
         EnsureNativeTargetInitialized();
         return LLVMTargetRef.DefaultTriple;
+    }
+
+    public static string GetHostCpuName()
+    {
+        EnsureNativeTargetInitialized();
+        return GetOwnedMessage(LLVMApi.GetHostCPUName(), "host CPU name");
+    }
+
+    public static string GetHostCpuFeatures()
+    {
+        EnsureNativeTargetInitialized();
+        return GetOwnedMessage(LLVMApi.GetHostCPUFeatures(), "host CPU features");
     }
 
     public static NativeTargetMachine Create(LlvmTargetOptions options)
@@ -196,6 +228,21 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
         {
             return Marshal.PtrToStringUTF8((IntPtr)message)
                 ?? throw new LlvmCodeGenerationException("LLVM returned an invalid target data layout.");
+        }
+        finally
+        {
+            LLVMApi.DisposeMessage(message);
+        }
+    }
+
+    private static string GetOwnedMessage(sbyte* message, string description)
+    {
+        if (message is null)
+            throw new LlvmCodeGenerationException($"LLVM returned an empty {description}.");
+        try
+        {
+            return Marshal.PtrToStringUTF8((IntPtr)message)
+                ?? throw new LlvmCodeGenerationException($"LLVM returned an invalid {description}.");
         }
         finally
         {

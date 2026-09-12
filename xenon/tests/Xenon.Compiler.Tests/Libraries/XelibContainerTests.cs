@@ -563,6 +563,53 @@ public sealed class XelibContainerTests
     }
 
     [Fact]
+    public void MutableAndReadonlyIndexerOverloadsRoundTripWithoutSymbolCollisions()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Library;
+            public struct Buffer<T>
+            {
+                T mutableValue;
+                T readonlyValue;
+                public T* this[int index] { get { return &mutableValue; } }
+                public readonly T* readonly this[int index] { get { return &readonlyValue; } }
+            }
+            public interface IBuffer
+            {
+                int this[int index] { get; }
+                int readonly this[int index] { get; }
+            }
+            public template BufferShape
+            {
+                int this[int index] { get; }
+                int readonly this[int index] { get; }
+            }
+            """, "indexer-overloads.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("IndexerOverloads")));
+        NamespaceSymbol scope = Assert.Single(reference.GlobalNamespace.Namespaces);
+        Assert.Equal(2, Assert.Single(scope.Structs).Indexers.Length);
+        Assert.Equal(2, Assert.Single(scope.Interfaces).Indexers.Length);
+        Assert.Equal(2, Assert.Single(scope.Templates).Members.OfType<TemplateIndexerRequirementSymbol>().Count());
+
+        Compilation consumer = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Library;
+            namespace Consumer;
+            void Use(Buffer<int>& mutable, readonly Buffer<int>& readOnly,
+                IBuffer& interfaceMutable, readonly IBuffer& interfaceReadonly)
+            {
+                int* writable = mutable[0];
+                readonly int* readable = readOnly[0];
+                int first = interfaceMutable[0];
+                int second = interfaceReadonly[0];
+            }
+            """, "consumer.xe"));
+        Assert.False(consumer.HasErrors, string.Join(Environment.NewLine, consumer.Diagnostics));
+    }
+
+    [Fact]
     public void ReadonlyPropertyTemplateMatchingWorksAcrossXelib()
     {
         Compilation library = Compilation.Create(SourceText.From("""

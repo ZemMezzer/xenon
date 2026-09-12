@@ -958,10 +958,24 @@ internal sealed class SemanticAnalyzer
                                 DiagnosticIds.InvalidTemplateMember);
                             break;
                         }
-                        members.Add(new TemplateIndexerRequirementSymbol(template,
+                        var indexerRequirement = new TemplateIndexerRequirementSymbol(template,
                             ResolveTemplateType(indexer.Type, scope),
                             BindTemplateParameters(indexer.Parameters, scope),
-                            TemplateAccessibility(indexer.AccessModifierToken, indexer.SecondaryAccessModifierToken), indexer));
+                            TemplateAccessibility(indexer.AccessModifierToken, indexer.SecondaryAccessModifierToken), indexer);
+                        TemplateIndexerRequirementSymbol? duplicateIndexer = members
+                            .OfType<TemplateIndexerRequirementSymbol>()
+                            .FirstOrDefault(candidate => candidate.IsReadonly == indexerRequirement.IsReadonly &&
+                                HaveSameParameterTypes(candidate.Parameters, indexerRequirement.Parameters));
+                        if (duplicateIndexer is not null)
+                        {
+                            _diagnostics.Report(indexer.ThisKeyword.Location,
+                                $"template indexer requirement '{indexerRequirement.ToDisplayString(SymbolDisplayFormat.Signature)}' is already declared; return type and parameter names do not distinguish overloads",
+                                DiagnosticIds.InvalidOverload,
+                                duplicateIndexer.Locations.Select(location =>
+                                    new RelatedDiagnosticLocation(location, "previous declaration")));
+                            break;
+                        }
+                        members.Add(indexerRequirement);
                         break;
                     case TemplateConstructorDeclarationSyntax constructor:
                         members.Add(new TemplateConstructorRequirementSymbol(template,
@@ -2069,7 +2083,8 @@ internal sealed class SemanticAnalyzer
     {
         foreach (InterfaceTypeSymbol type in _interfaceSymbols.Values)
         {
-            foreach (var group in type.AllMethods.GroupBy(TypeSignature.Method))
+            foreach (var group in type.AllMethods.GroupBy(method =>
+                $"{TypeSignature.Method(method)}/{(method.ContainingInterfaceIndexer is not null && method.IsReadonly ? "readonly" : "mutable")}"))
             {
                 FunctionSymbol first = group.First();
                 if (group.Any(method => !TypeIdentity.AreSame(method.ReturnType, first.ReturnType) || method.IsReadonly != first.IsReadonly))
@@ -2088,7 +2103,7 @@ internal sealed class SemanticAnalyzer
                         DiagnosticIds.InheritedInterfaceMemberConflict);
             }
             foreach (var group in type.SelfAndBaseInterfaces.SelectMany(parent => parent.Indexers)
-                .GroupBy(indexer => TypeSignature.Parameters(indexer.Parameters)))
+                .GroupBy(indexer => TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly)))
             {
                 InterfaceIndexerSymbol first = group.First();
                 if (group.Any(indexer => !TypeIdentity.AreSame(indexer.Type, first.Type) ||
@@ -2168,7 +2183,8 @@ internal sealed class SemanticAnalyzer
                 if (parameters.IsEmpty)
                     _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter",
                         DiagnosticIds.IndexerRequiresParameter);
-                if (indexers.Any(candidate => HaveSameParameterTypes(candidate.Parameters, parameters)))
+                if (indexers.Any(candidate => candidate.IsReadonly == syntax.IsReadonly &&
+                    HaveSameParameterTypes(candidate.Parameters, parameters)))
                 {
                     _diagnostics.Report(syntax.ThisKeyword.Location, $"interface '{type.Name}' already declares an indexer with the same parameter types",
                         DiagnosticIds.DuplicateDeclaration);
@@ -2312,7 +2328,7 @@ internal sealed class SemanticAnalyzer
         }
         foreach (IndexerSymbol indexer in type.Indexers)
         {
-            IndexerSymbol? inherited = FindAccessibleInheritedIndexer(type, indexer.Parameters);
+            IndexerSymbol? inherited = FindAccessibleInheritedIndexer(type, indexer.Parameters, indexer.IsReadonly);
             if (indexer.Getter is { } getter) inheritedAccessorTargets.Add(getter, inherited?.Getter);
             if (indexer.Setter is { } setter) inheritedAccessorTargets.Add(setter, inherited?.Setter);
             ValidateAccessorOverride($"indexer '{indexer.ToDisplayString(SymbolDisplayFormat.Diagnostic)}'",
@@ -2389,12 +2405,13 @@ internal sealed class SemanticAnalyzer
 
     private static IndexerSymbol? FindAccessibleInheritedIndexer(
         StructTypeSymbol type,
-        ImmutableArray<ParameterSymbol> parameters)
+        ImmutableArray<ParameterSymbol> parameters,
+        bool isReadonly)
     {
         for (StructTypeSymbol? current = type.BaseType; current is not null; current = current.BaseType)
         {
             IndexerSymbol? candidate = current.Indexers.FirstOrDefault(indexer =>
-                HaveSameParameterTypes(parameters, indexer.Parameters));
+                indexer.IsReadonly == isReadonly && HaveSameParameterTypes(parameters, indexer.Parameters));
             if (candidate is not null && AccessibilityRules.IsAccessible(candidate, type)) return candidate;
         }
         return null;
@@ -2804,7 +2821,9 @@ internal sealed class SemanticAnalyzer
                 if (parameters.IsEmpty)
                     _diagnostics.Report(syntax.ThisKeyword.Location, "an indexer must declare at least one parameter",
                         DiagnosticIds.IndexerRequiresParameter);
-                if (indexers.Any(candidate => HaveSameParameterTypes(candidate.Parameters, parameters)))
+                bool isReadonly = syntax.IsReadonly || type.IsReadonly && !syntax.IsStatic;
+                if (indexers.Any(candidate => candidate.IsReadonly == isReadonly &&
+                    HaveSameParameterTypes(candidate.Parameters, parameters)))
                 {
                     _diagnostics.Report(syntax.ThisKeyword.Location, $"struct '{type.Name}' already declares an indexer with the same parameter types",
                         DiagnosticIds.DuplicateDeclaration);

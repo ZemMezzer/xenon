@@ -7,3 +7,4 @@ struct State : IValue
     public int Read() { return Seed; }
 }
 public int Value() { return 2; }
+public void Fail() { throw State(); }

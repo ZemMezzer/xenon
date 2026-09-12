@@ -1,0 +1,14 @@
+using Wpo.StaticCore;
+namespace Wpo.StaticMiddle;
+
+public int Execute()
+{
+    try { Fail(); }
+    catch (readonly int& error)
+    {
+        if (error != 9) return 1;
+        if (ReadState() != 40) return 2;
+        return Fold();
+    }
+    return 3;
+}

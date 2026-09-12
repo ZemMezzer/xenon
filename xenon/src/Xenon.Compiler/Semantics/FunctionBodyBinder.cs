@@ -6068,16 +6068,26 @@ internal sealed partial class FunctionBodyBinder
         if (receiver.Type is DeclaredTypeSymbol structType && structType is not InterfaceTypeSymbol)
         {
             bool receiverIsReadonly = IsAddressable(receiver) && !IsWritable(receiver);
+            IndexerSymbol[] indexerCandidates = structType.LookupMembers("this").OfType<IndexerSymbol>()
+                .DistinctBy(indexer => TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly))
+                .Where(candidate => candidate.Getter is not null)
+                .ToArray();
             IndexerSymbol? indexer = ResolveIndexer(
-                structType.LookupMembers("this").OfType<IndexerSymbol>().DistinctBy(indexer => TypeSignature.Parameters(indexer.Parameters)).Where(candidate =>
-                    candidate.Getter is not null &&
-                    (!receiverIsReadonly || candidate.Getter.IsReadonly)),
+                indexerCandidates,
                 arguments,
                 syntax.OpenBracketToken.Location,
                 structType.Name,
-                syntax);
+                syntax,
+                receiverIsReadonly);
             if (indexer is null)
+            {
+                if (receiverIsReadonly && indexerCandidates.Length != 0 &&
+                    indexerCandidates.All(candidate => !candidate.IsReadonly))
+                    _diagnostics.Report(syntax.OpenBracketToken.Location,
+                        $"indexer on '{structType.Name}' cannot be read through a readonly receiver because its getter is mutable",
+                        DiagnosticIds.MutableGetterOnReadonlyReceiver);
                 return new BoundErrorExpression();
+            }
             RecordSymbolAndType(syntax, indexer, indexer.Type);
             if (!IsAccessible(indexer, receiver, pointerAccess: false))
             {
@@ -6101,16 +6111,25 @@ internal sealed partial class FunctionBodyBinder
         if (receiver.Type is InterfaceTypeSymbol interfaceType)
         {
             bool receiverIsReadonly = IsReadonlyReceiver(receiver, pointerAccess: false);
+            InterfaceIndexerSymbol[] indexerCandidates = interfaceType.AllIndexers
+                .Where(candidate => candidate.Getter is not null)
+                .ToArray();
             InterfaceIndexerSymbol? indexer = ResolveIndexer(
-                interfaceType.AllIndexers.Where(candidate =>
-                    candidate.Getter is not null &&
-                    (!receiverIsReadonly || candidate.Getter.IsReadonly)),
+                indexerCandidates,
                 arguments,
                 syntax.OpenBracketToken.Location,
                 interfaceType.Name,
-                syntax);
+                syntax,
+                receiverIsReadonly);
             if (indexer is null)
+            {
+                if (receiverIsReadonly && indexerCandidates.Length != 0 &&
+                    indexerCandidates.All(candidate => !candidate.IsReadonly))
+                    _diagnostics.Report(syntax.OpenBracketToken.Location,
+                        $"indexer on interface '{interfaceType.Name}' cannot be read through a readonly receiver because its getter is mutable",
+                        DiagnosticIds.MutableGetterOnReadonlyReceiver);
                 return new BoundErrorExpression();
+            }
             RecordSymbolAndType(syntax, indexer, indexer.Type);
             FunctionSymbol getter = indexer.Getter!;
             arguments = ValidateFunctionArguments(getter, arguments, syntax.Arguments, syntax.OpenBracketToken.Location);
@@ -6194,12 +6213,14 @@ internal sealed partial class FunctionBodyBinder
         if (receiver.Type is DeclaredTypeSymbol structType && structType is not InterfaceTypeSymbol)
         {
             IndexerSymbol? indexer = ResolveIndexer(
-                structType.LookupMembers("this").OfType<IndexerSymbol>().DistinctBy(indexer => TypeSignature.Parameters(indexer.Parameters)).Where(candidate =>
+                structType.LookupMembers("this").OfType<IndexerSymbol>()
+                    .DistinctBy(indexer => TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly)).Where(candidate =>
                     candidate.Setter is not null && (isSimpleAssignment || candidate.Getter is not null)),
                 indices,
                 target.OpenBracketToken.Location,
                 structType.Name,
-                target);
+                target,
+                receiverIsReadonly: false);
             if (indexer is null)
                 return new BoundErrorExpression();
             RecordSymbolAndType(target, indexer, indexer.Type);
@@ -6250,7 +6271,8 @@ internal sealed partial class FunctionBodyBinder
             indices,
             target.OpenBracketToken.Location,
             interfaceType.Name,
-            target);
+            target,
+            receiverIsReadonly: false);
         if (interfaceIndexer is null)
             return new BoundErrorExpression();
         RecordSymbolAndType(target, interfaceIndexer, interfaceIndexer.Type);
@@ -9290,28 +9312,35 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
         string ownerName,
-        SyntaxNode syntax) =>
-        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName, syntax);
+        SyntaxNode syntax,
+        bool receiverIsReadonly) =>
+        ResolveIndexerCore(candidates, indexer => indexer.Parameters, indexer => indexer.IsReadonly,
+            arguments, location, ownerName, syntax, receiverIsReadonly);
 
     private InterfaceIndexerSymbol? ResolveIndexer(
         IEnumerable<InterfaceIndexerSymbol> candidates,
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
         string ownerName,
-        SyntaxNode syntax) =>
-        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName, syntax);
+        SyntaxNode syntax,
+        bool receiverIsReadonly) =>
+        ResolveIndexerCore(candidates, indexer => indexer.Parameters, indexer => indexer.IsReadonly,
+            arguments, location, ownerName, syntax, receiverIsReadonly);
 
     private TIndexer? ResolveIndexerCore<TIndexer>(
         IEnumerable<TIndexer> candidates,
         Func<TIndexer, ImmutableArray<ParameterSymbol>> getParameters,
+        Func<TIndexer, bool> getIsReadonly,
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
         string ownerName,
-        SyntaxNode syntax)
+        SyntaxNode syntax,
+        bool receiverIsReadonly)
         where TIndexer : Symbol
     {
         TIndexer[] candidateArray = candidates.ToArray();
         var matches = candidateArray
+            .Where(candidate => !receiverIsReadonly || getIsReadonly(candidate))
             .Where(candidate => getParameters(candidate).Length == arguments.Length)
             .Select(candidate => new
             {
@@ -9334,12 +9363,16 @@ internal sealed partial class FunctionBodyBinder
         }
         if (matches.Length == 0)
         {
-            CandidateReason reason = candidateArray.Length == 0 ? CandidateReason.NotFound
+            bool readonlyBlocked = receiverIsReadonly && candidateArray.Length != 0 &&
+                candidateArray.All(candidate => !getIsReadonly(candidate));
+            CandidateReason reason = readonlyBlocked ? CandidateReason.Inaccessible
+                : candidateArray.Length == 0 ? CandidateReason.NotFound
                 : candidateArray.All(candidate => getParameters(candidate).Length != arguments.Length)
                     ? CandidateReason.WrongArity : CandidateReason.NotInvocable;
             RecordCandidates(syntax, null, candidateArray, reason);
-            _diagnostics.Report(location, $"no indexer of type '{ownerName}' matches the provided arguments",
-                reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+            if (!readonlyBlocked)
+                _diagnostics.Report(location, $"no indexer of type '{ownerName}' matches the provided arguments",
+                    reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
             RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
@@ -9350,6 +9383,14 @@ internal sealed partial class FunctionBodyBinder
                 IsBetterConversionSequence(other.Costs, candidate.Costs)))
             .Select(candidate => candidate.Indexer)
             .ToArray();
+        if (bestMatches.Length > 1 && !receiverIsReadonly)
+        {
+            TIndexer[] mutable = bestMatches.Where(candidate => !getIsReadonly(candidate)).ToArray();
+            if (mutable.Length == 1 && bestMatches.All(candidate =>
+                    TypeSignature.Parameters(getParameters(candidate)) ==
+                    TypeSignature.Parameters(getParameters(mutable[0]))))
+                bestMatches = mutable;
+        }
         if (bestMatches.Length == 1)
         {
             RecordCandidates(syntax, bestMatches[0], candidateArray, CandidateReason.None);
@@ -10555,10 +10596,13 @@ internal sealed partial class FunctionBodyBinder
         GenericIndexerMember[] candidates = GenericConstraintMemberLookup.GetIndexers(parameter,
                 _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
             .Where(indexer => indexer.HasSetter && (isSimpleAssignment || indexer.HasGetter))
+            .DistinctBy(indexer =>
+                $"{indexer.Type.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", indexer.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})/{indexer.IsReadonly}")
             .ToArray();
         GenericIndexerMember? indexer = ResolveGenericCandidate(candidates, candidate => candidate.Symbol,
             candidate => candidate.ParameterTypes, indices, target.OpenBracketToken.Location,
-            $"writable indexer on '{parameter.Name}'", target);
+            $"writable indexer on '{parameter.Name}'", target,
+            getIsReadonly: candidate => candidate.IsReadonly, receiverIsReadonly: false);
         if (indexer is null)
         {
             if (candidates.Length == 0)
@@ -10713,18 +10757,23 @@ internal sealed partial class FunctionBodyBinder
         bool receiverIsReadonly = IsReadonlyReceiver(receiver, pointerAccess: false);
         GenericIndexerMember[] candidates = GenericConstraintMemberLookup.GetIndexers(parameter,
                 _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
-            .Where(indexer => indexer.HasGetter && (!receiverIsReadonly || indexer.IsReadonly))
-            .DistinctBy(indexer => $"{indexer.Type.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", indexer.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})")
+            .Where(indexer => indexer.HasGetter)
+            .DistinctBy(indexer => $"{indexer.Type.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", indexer.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})/{indexer.IsReadonly}")
             .ToArray();
         GenericIndexerMember? indexer = ResolveGenericCandidate(candidates, candidate => candidate.Symbol,
             candidate => candidate.ParameterTypes, arguments, syntax.OpenBracketToken.Location,
-            $"indexer on '{parameter.Name}'", syntax);
+            $"indexer on '{parameter.Name}'", syntax,
+            getIsReadonly: candidate => candidate.IsReadonly, receiverIsReadonly: receiverIsReadonly);
         if (indexer is null)
         {
             if (candidates.Length == 0)
                 _diagnostics.Report(syntax.OpenBracketToken.Location,
                     $"constraints for '{parameter.Name}' do not guarantee a readable indexer",
                     DiagnosticIds.GenericMemberNotGuaranteed);
+            else if (receiverIsReadonly && candidates.All(candidate => !candidate.IsReadonly))
+                _diagnostics.Report(syntax.OpenBracketToken.Location,
+                    $"indexer is not guaranteed readonly for '{parameter.Name}'",
+                    DiagnosticIds.MutableGetterOnReadonlyReceiver);
             return new BoundErrorExpression();
         }
         arguments = ValidateGenericArguments("this", indexer.ParameterTypes, arguments, syntax.Arguments,
@@ -10798,13 +10847,16 @@ internal sealed partial class FunctionBodyBinder
 
     private T? ResolveGenericCandidate<T>(IEnumerable<T> source, Func<T, Symbol> getSymbol,
         Func<T, ImmutableArray<TypeSymbol>> getParameterTypes, ImmutableArray<BoundExpression> arguments,
-        TextLocation location, string description, SyntaxNode syntax, int? completedArgumentCount = null)
+        TextLocation location, string description, SyntaxNode syntax, int? completedArgumentCount = null,
+        Func<T, bool>? getIsReadonly = null, bool? receiverIsReadonly = null)
         where T : class
     {
         T[] candidates = source.ToArray();
         int suppliedCount = completedArgumentCount ?? arguments.Length;
         bool incomplete = completedArgumentCount.HasValue;
         var matches = candidates.Where(candidate =>
+                receiverIsReadonly != true || getIsReadonly?.Invoke(candidate) != false)
+            .Where(candidate =>
                 (incomplete ? getParameterTypes(candidate).Length >= suppliedCount :
                     getParameterTypes(candidate).Length == suppliedCount))
             .Select(candidate => new
@@ -10825,24 +10877,37 @@ internal sealed partial class FunctionBodyBinder
                 IsBetterConversionSequence(other.Costs, candidate.Costs)))
             .Select(candidate => candidate.Candidate)
             .ToArray();
+        if (bestMatches.Length > 1 && receiverIsReadonly == false && getIsReadonly is not null)
+        {
+            T[] mutable = bestMatches.Where(candidate => !getIsReadonly(candidate)).ToArray();
+            if (mutable.Length == 1 && bestMatches.All(candidate =>
+                    HaveSameTypes(getParameterTypes(candidate), getParameterTypes(mutable[0]))))
+                bestMatches = mutable;
+        }
         if (bestMatches.Length == 1)
         {
             RecordCandidates(syntax, getSymbol(bestMatches[0]), candidates.Select(getSymbol),
                 incomplete ? CandidateReason.Incomplete : CandidateReason.None);
             return bestMatches[0];
         }
-        CandidateReason reason = candidates.Length == 0 ? CandidateReason.NotFound
+        bool readonlyBlocked = receiverIsReadonly == true && candidates.Length != 0 &&
+            getIsReadonly is not null && candidates.All(candidate => !getIsReadonly(candidate));
+        CandidateReason reason = readonlyBlocked ? CandidateReason.Inaccessible
+            : candidates.Length == 0 ? CandidateReason.NotFound
             : bestMatches.Length > 1 ? CandidateReason.Ambiguous
             : candidates.All(candidate => getParameterTypes(candidate).Length != suppliedCount)
                 ? CandidateReason.WrongArity : CandidateReason.NotInvocable;
         RecordCandidates(syntax, null, candidates.Select(getSymbol), reason);
-        if (candidates.Length != 0 && !incomplete)
+        if (candidates.Length != 0 && !incomplete && !readonlyBlocked)
             _diagnostics.Report(location, bestMatches.Length > 1 ? $"{description} is ambiguous" :
                 $"no {description} matches the provided arguments",
                 bestMatches.Length > 1 ? DiagnosticIds.AmbiguousCall :
                 reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
         RollbackUnmaterializedContextualArguments(arguments);
         return null;
+
+        static bool HaveSameTypes(ImmutableArray<TypeSymbol> left, ImmutableArray<TypeSymbol> right) =>
+            left.Length == right.Length && left.Zip(right).All(pair => TypeIdentity.AreSame(pair.First, pair.Second));
     }
 
     private ImmutableArray<BoundExpression> ValidateGenericArguments(string name,
