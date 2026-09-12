@@ -2158,6 +2158,12 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains($"call ptr @calloc(i{pointerBits}", ir, StringComparison.Ordinal);
         Assert.Contains("array.dimension.inrange = icmp ult i32", ir, StringComparison.Ordinal);
         Assert.Contains("array.linear.index", ir, StringComparison.Ordinal);
+        Assert.Contains("getelementptr inbounds i32", ir, StringComparison.Ordinal);
+        Assert.Contains("getelementptr inbounds i8", ir, StringComparison.Ordinal);
+        Assert.Contains("array.dimension.cache", ir, StringComparison.Ordinal);
+        Assert.Contains("array.cache.matches = icmp eq ptr", ir, StringComparison.Ordinal);
+        Assert.Contains("array.cache.miss", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("!invariant.load", ir, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
         Assert.Contains("array.free.end", ir, StringComparison.Ordinal);
     }
