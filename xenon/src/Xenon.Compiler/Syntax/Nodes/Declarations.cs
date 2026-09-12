@@ -401,6 +401,7 @@ public sealed record InterfaceIndexerDeclarationSyntax(
 public sealed record InterfaceDeclarationSyntax(
     SyntaxToken InterfaceKeyword,
     SyntaxToken IdentifierToken,
+    GenericParameterListSyntax? TypeParameters,
     SyntaxToken? ColonToken,
     ImmutableArray<TypeSyntax> BaseInterfaces,
     ImmutableArray<SyntaxToken> BaseCommaTokens,

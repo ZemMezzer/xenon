@@ -31,6 +31,11 @@ public static class TypeIdentity
             (WeakTypeSymbol a, WeakTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
             (StorageTypeSymbol a, StorageTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
             (PinTypeSymbol a, PinTypeSymbol b) => AreSame(a.ElementType, b.ElementType),
+            (InterfaceTypeSymbol { GenericDefinition: not null } a,
+                InterfaceTypeSymbol { GenericDefinition: not null } b) =>
+                ReferenceEquals(a.GenericDefinition, b.GenericDefinition) &&
+                a.TypeArguments.Length == b.TypeArguments.Length &&
+                a.TypeArguments.Zip(b.TypeArguments).All(pair => AreSame(pair.First, pair.Second)),
             _ => false,
         };
     }
@@ -55,6 +60,10 @@ public static class TypeIdentity
             WeakTypeSymbol weak => HashCode.Combine(6, GetHashCode(weak.ElementType)),
             StorageTypeSymbol storage => HashCode.Combine(7, GetHashCode(storage.ElementType)),
             PinTypeSymbol pin => HashCode.Combine(9, GetHashCode(pin.ElementType)),
+            InterfaceTypeSymbol { GenericDefinition: not null } @interface =>
+                @interface.TypeArguments.Aggregate(
+                    HashCode.Combine(13, RuntimeHelpers.GetHashCode(@interface.GenericDefinition)),
+                    (hash, argument) => HashCode.Combine(hash, GetHashCode(argument))),
             _ => RuntimeHelpers.GetHashCode(type),
         };
     }

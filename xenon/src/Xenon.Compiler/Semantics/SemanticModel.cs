@@ -473,9 +473,12 @@ public sealed class SemanticModel
         {
             FunctionSymbol { OriginalDefinition: not null } function => function.OriginalDefinition,
             StructTypeSymbol { GenericDefinition: not null } structure => structure.GenericDefinition,
+            InterfaceTypeSymbol { GenericDefinition: not null } @interface => @interface.GenericDefinition,
             FieldSymbol { GenericDefinition: not null } field => field.GenericDefinition,
             PropertySymbol { GenericDefinition: not null } property => property.GenericDefinition,
+            InterfacePropertySymbol { GenericDefinition: not null } property => property.GenericDefinition,
             IndexerSymbol { GenericDefinition: not null } indexer => indexer.GenericDefinition,
+            InterfaceIndexerSymbol { GenericDefinition: not null } indexer => indexer.GenericDefinition,
             ConstantSymbol { GenericDefinition: not null } constant => constant.GenericDefinition,
             _ => symbol,
         };
@@ -758,6 +761,9 @@ public sealed class SemanticModel
                 case OwnershipTypeSymbol ownership: type = ownership.ElementType; continue;
                 case LifetimeModifierTypeSymbol modifier: type = modifier.ElementType; continue;
                 case StructTypeSymbol { GenericDefinition: { } definition }:
+                    declared = definition;
+                    return true;
+                case InterfaceTypeSymbol { GenericDefinition: { } definition }:
                     declared = definition;
                     return true;
                 case DeclaredTypeSymbol result: declared = result; return true;

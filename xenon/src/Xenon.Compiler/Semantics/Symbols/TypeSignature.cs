@@ -17,6 +17,8 @@ internal static class TypeSignature
             $"generic({GenericOwner(generic.ContainingSymbol)}:{generic.Ordinal})",
         StructTypeSymbol { GenericDefinition: { } definition } specialization =>
             $"struct({definition.FullName}`{definition.GenericArity}<{string.Join(",", specialization.TypeArguments.Select(argument => Get(argument, genericPositions)))}>)",
+        InterfaceTypeSymbol { GenericDefinition: { } definition } specialization =>
+            $"interface({definition.FullName}`{definition.GenericArity}<{string.Join(",", specialization.TypeArguments.Select(argument => Get(argument, genericPositions)))}>)",
         DeclaredTypeSymbol declared => $"{declared.DeclarationKind}({declared.FullName}`{declared.GenericArity})",
         PointerTypeSymbol pointer => $"ptr{(pointer.IsReadonly ? "readonly" : "")}({Get(pointer.ElementType, genericPositions)})",
         FunctionPointerTypeSymbol function => $"fn({Get(function.ReturnType, genericPositions)};{string.Join(",", function.ParameterTypes.Select(parameter => Get(parameter, genericPositions)))})",

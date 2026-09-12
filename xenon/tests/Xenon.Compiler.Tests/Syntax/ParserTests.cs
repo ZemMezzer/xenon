@@ -1287,5 +1287,19 @@ public sealed class ParserTests
         Assert.NotNull(lambda.FatArrowToken);
     }
 
+    [Fact]
+    public void Parser_PreservesGenericInterfaceTypeParameters()
+    {
+        SyntaxTree tree = Parse("""
+            namespace Example;
+            interface PairComparer<TFirst, TSecond> { bool Equals(TFirst first, TSecond second); }
+            """);
+
+        Assert.Empty(tree.Diagnostics);
+        var declaration = Assert.IsType<InterfaceDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        Assert.Equal(["TFirst", "TSecond"],
+            declaration.TypeParameters!.Parameters.Select(parameter => parameter.IdentifierToken.Text));
+    }
+
     private static SyntaxTree Parse(string source) => SyntaxTree.Parse(SourceText.From(source, "test.xe"));
 }

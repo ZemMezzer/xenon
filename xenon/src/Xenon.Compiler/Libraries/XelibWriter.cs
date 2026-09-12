@@ -244,9 +244,11 @@ internal static class XelibExportKey
     {
         NamespaceSymbol value => $"N:{Tag(XelibSymbolKind.Namespace)}:{value.FullName}",
         StructTypeSymbol { GenericDefinition: not null } value => TypeKey(value),
+        InterfaceTypeSymbol { GenericDefinition: not null } value => TypeKey(value),
         StructTypeSymbol value => $"T:{Tag(XelibSymbolKind.Struct)}:{value.FullName}" +
             (RequiresAritySuffix(value) ? $":{value.GenericArity}" : string.Empty),
-        InterfaceTypeSymbol value => $"T:{Tag(XelibSymbolKind.Interface)}:{value.FullName}",
+        InterfaceTypeSymbol value => $"T:{Tag(XelibSymbolKind.Interface)}:{value.FullName}" +
+            (RequiresAritySuffix(value) ? $":{value.GenericArity}" : string.Empty),
         EnumTypeSymbol value => $"T:{Tag(XelibSymbolKind.Enum)}:{value.FullName}",
         TemplateSymbol value => $"T:{Tag(XelibSymbolKind.Template)}:{value.QualifiedName}",
         FunctionSymbol value => $"F:{Owner(value)}:{value.Name}:{value.TypeParameters.Length}:" +
@@ -281,13 +283,23 @@ internal static class XelibExportKey
 
     // Preserve the v1 key for the overwhelmingly common unambiguous declaration.
     // All declarations participate because these keys also order non-exported symbols and types.
-    private static bool RequiresAritySuffix(StructTypeSymbol type) =>
-        type.ContainingNamespace.Structs.Count(candidate =>
-            !candidate.IsGenericSpecialization && candidate.Name == type.Name) > 1;
+    private static bool RequiresAritySuffix(DeclaredTypeSymbol type) =>
+        type.ContainingNamespace.Types.Count(candidate =>
+            candidate.DeclarationKind == type.DeclarationKind &&
+            !IsGenericSpecialization(candidate) && candidate.Name == type.Name) > 1;
+
+    private static bool IsGenericSpecialization(DeclaredTypeSymbol type) => type switch
+    {
+        StructTypeSymbol structure => structure.IsGenericSpecialization,
+        InterfaceTypeSymbol @interface => @interface.IsGenericSpecialization,
+        _ => false,
+    };
 
     public static string TypeKey(TypeSymbol type) => type switch
     {
         StructTypeSymbol { GenericDefinition: not null } value =>
+            $"constructed({Create(value.GenericDefinition)};{string.Join(',', value.TypeArguments.Select(TypeKey))})",
+        InterfaceTypeSymbol { GenericDefinition: not null } value =>
             $"constructed({Create(value.GenericDefinition)};{string.Join(',', value.TypeArguments.Select(TypeKey))})",
         DeclaredTypeSymbol value => Create(value),
         GenericParameterSymbol value => Create(value),
@@ -385,6 +397,12 @@ internal sealed class XelibIrBuilder
             XelibBodyCodec.Collect(constant.BoundValue, AddType, VisitExternalOrLocal);
         }
 
+        while (true)
+        {
+            Symbol[] snapshot = _symbols.ToArray();
+            foreach (Symbol symbol in snapshot) CollectSymbolTypes(symbol);
+            if (snapshot.Length == _symbols.Count) break;
+        }
         Symbol[] orderedSymbols = _symbols.OrderBy(XelibExportKey.Create, StringComparer.Ordinal).ToArray();
         _symbolIds = new Dictionary<Symbol, int>(ReferenceEqualityComparer.Instance);
         for (int index = 0; index < orderedSymbols.Length; index++)
@@ -469,6 +487,8 @@ internal sealed class XelibIrBuilder
         switch (symbol)
         {
             case StructTypeSymbol type:
+                if (type.BaseType is { } baseType) VisitExternalOrLocal(baseType);
+                foreach (InterfaceTypeSymbol item in type.Interfaces) VisitExternalOrLocal(item);
                 foreach (GenericParameterSymbol item in type.TypeParameters) VisitSymbol(item);
                 foreach (FieldSymbol item in type.Fields) VisitSymbol(item);
                 foreach (FieldSymbol item in type.StaticFields) VisitSymbol(item);
@@ -481,6 +501,8 @@ internal sealed class XelibIrBuilder
                 if (type.Destructor is { } destructor) VisitFunction(destructor);
                 break;
             case InterfaceTypeSymbol type:
+                foreach (InterfaceTypeSymbol item in type.BaseInterfaces) VisitExternalOrLocal(item);
+                foreach (GenericParameterSymbol item in type.TypeParameters) VisitSymbol(item);
                 foreach (FunctionSymbol item in type.Methods) VisitFunction(item);
                 foreach (InterfacePropertySymbol item in type.Properties) VisitSymbol(item);
                 foreach (InterfaceIndexerSymbol item in type.Indexers) VisitSymbol(item);
@@ -605,6 +627,11 @@ internal sealed class XelibIrBuilder
                 foreach (TypeSymbol argument in structure.TypeArguments) AddType(argument);
                 if (!structure.IsOpenGenericType) VisitExternalOrLocal(structure);
                 break;
+            case InterfaceTypeSymbol { GenericDefinition: not null } @interface:
+                VisitExternalOrLocal(@interface.GenericDefinition);
+                foreach (TypeSymbol argument in @interface.TypeArguments) AddType(argument);
+                VisitExternalOrLocal(@interface);
+                break;
             case DeclaredTypeSymbol declared: VisitExternalOrLocal(declared); break;
             case GenericParameterSymbol parameter: VisitExternalOrLocal(parameter); break;
             case TemplateSelfTypeSymbol self: VisitExternalOrLocal(self.Template); break;
@@ -637,6 +664,10 @@ internal sealed class XelibIrBuilder
         return type switch
         {
             StructTypeSymbol { GenericDefinition: not null } value => new(id, XelibTypeKind.ConstructedGeneric,
+                Symbol: Reference(value.GenericDefinition),
+                TypeArgumentIds: value.TypeArguments.Select(TypeId).ToImmutableArray(),
+                ConstructedSymbol: !value.IsOpenGenericType || _symbolIds.ContainsKey(value) ? Reference(value) : null),
+            InterfaceTypeSymbol { GenericDefinition: not null } value => new(id, XelibTypeKind.ConstructedGeneric,
                 Symbol: Reference(value.GenericDefinition),
                 TypeArgumentIds: value.TypeArguments.Select(TypeId).ToImmutableArray(),
                 ConstructedSymbol: !value.IsOpenGenericType || _symbolIds.ContainsKey(value) ? Reference(value) : null),
@@ -693,6 +724,7 @@ internal sealed class XelibIrBuilder
             },
             InterfaceTypeSymbol value => record with
             {
+                TypeParameterIds = value.TypeParameters.Select(Id).ToImmutableArray(),
                 InterfaceTypeIds = value.BaseInterfaces.Select(TypeId).ToImmutableArray(),
                 RelatedSymbolIds = value.AllMethods.Select(Id).ToImmutableArray(),
             },

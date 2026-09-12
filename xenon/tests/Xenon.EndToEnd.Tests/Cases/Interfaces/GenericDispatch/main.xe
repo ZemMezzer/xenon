@@ -1,0 +1,29 @@
+namespace GenericInterfaceDispatch;
+
+interface Equatable<T>
+{
+    bool Equals(readonly T& other);
+}
+
+struct Foo : Equatable<Foo>
+{
+    public int Value;
+
+    public bool Equals(readonly Foo& other)
+    {
+        return Value == other.Value;
+    }
+}
+
+int Main()
+{
+    Foo a = Foo();
+    a.Value = 42;
+
+    Foo b = Foo();
+    b.Value = 42;
+
+    Equatable<Foo> value = a;
+    if (!value.Equals(b)) return 1;
+    return 0;
+}

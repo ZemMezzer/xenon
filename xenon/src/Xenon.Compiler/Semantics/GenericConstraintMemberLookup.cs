@@ -125,6 +125,8 @@ internal static class GenericConstraintMemberLookup
         TemplateSelfTypeSymbol self when ReferenceEquals(self.Template, template) => parameter,
         StructTypeSymbol { GenericDefinition: not null } constructed when specializer is not null =>
             SubstituteConstructedTemplateSelf(constructed, template, parameter, types, specializer),
+        InterfaceTypeSymbol { GenericDefinition: not null } constructed when specializer is not null =>
+            SubstituteConstructedTemplateSelf(constructed, template, parameter, types, specializer),
         PointerTypeSymbol pointer => types.PointerTo(
             SubstituteTemplateSelf(pointer.ElementType, template, parameter, types, specializer), pointer.IsReadonly),
         FunctionPointerTypeSymbol function => types.FunctionPointer(
@@ -155,6 +157,19 @@ internal static class GenericConstraintMemberLookup
     };
 
     private static TypeSymbol SubstituteConstructedTemplateSelf(StructTypeSymbol constructed,
+        TemplateSymbol template, GenericParameterSymbol parameter, TypeFactory types,
+        GenericStructSpecializer specializer)
+    {
+        ImmutableArray<TypeSymbol> arguments = constructed.TypeArguments.Select(argument =>
+            SubstituteTemplateSelf(argument, template, parameter, types, specializer)).ToImmutableArray();
+        TextLocation location = constructed.Locations is { IsEmpty: false } locations
+            ? locations[0]
+            : TextLocation.None;
+        return (TypeSymbol?)specializer.GetOrCreate(constructed.GenericDefinition!, arguments,
+            location) ?? BuiltinTypes.Error;
+    }
+
+    private static TypeSymbol SubstituteConstructedTemplateSelf(InterfaceTypeSymbol constructed,
         TemplateSymbol template, GenericParameterSymbol parameter, TypeFactory types,
         GenericStructSpecializer specializer)
     {
