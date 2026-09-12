@@ -764,6 +764,7 @@ internal sealed class Parser
     {
         SyntaxToken keyword = MatchToken(SyntaxKind.InterfaceKeyword);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
+        GenericParameterListSyntax? typeParameters = ParseGenericParameterList();
         (SyntaxToken? colon, ImmutableArray<TypeSyntax> bases, ImmutableArray<SyntaxToken> commas) = ParseBaseTypeList();
         SyntaxToken openBrace = MatchToken(SyntaxKind.OpenBraceToken);
         var methods = ImmutableArray.CreateBuilder<InterfaceMethodDeclarationSyntax>();
@@ -846,7 +847,7 @@ internal sealed class Parser
                     MatchToken(SyntaxKind.CloseBraceToken)));
             }
         }
-        return new InterfaceDeclarationSyntax(keyword, identifier, colon, bases, commas, openBrace, methods.ToImmutable(), properties.ToImmutable(), indexers.ToImmutable(), MatchToken(SyntaxKind.CloseBraceToken));
+        return new InterfaceDeclarationSyntax(keyword, identifier, typeParameters, colon, bases, commas, openBrace, methods.ToImmutable(), properties.ToImmutable(), indexers.ToImmutable(), MatchToken(SyntaxKind.CloseBraceToken));
     }
 
     private (SyntaxToken? Access, SyntaxToken? SecondaryAccess, SyntaxToken? Static, SyntaxToken? ThreadLocal, SyntaxToken? Virtual, SyntaxToken? Override, SyntaxToken? Abstract, SyntaxToken? Readonly) ParseStructMemberModifiers()

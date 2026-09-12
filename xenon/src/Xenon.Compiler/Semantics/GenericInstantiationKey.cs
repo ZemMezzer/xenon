@@ -42,6 +42,8 @@ internal static class GenericTypeFacts
         TemplateSelfTypeSymbol => true,
         StructTypeSymbol { GenericDefinition: not null } structure =>
             structure.TypeArguments.Any(ContainsGenericParameter),
+        InterfaceTypeSymbol { GenericDefinition: not null } @interface =>
+            @interface.TypeArguments.Any(ContainsGenericParameter),
         PointerTypeSymbol pointer => ContainsGenericParameter(pointer.ElementType),
         FunctionPointerTypeSymbol function => ContainsGenericParameter(function.ReturnType) ||
             function.ParameterTypes.Any(ContainsGenericParameter),

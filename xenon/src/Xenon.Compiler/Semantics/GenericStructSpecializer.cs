@@ -30,16 +30,22 @@ internal sealed class GenericStructSpecializer
     private readonly Func<NamespaceSymbol, NamespaceSymbol> _resolveNamespace;
     private readonly GenericConstraintValidator _constraintValidator = new();
     private readonly Dictionary<GenericInstantiationKey, StructTypeSymbol> _cache = [];
+    private readonly Dictionary<GenericInstantiationKey, InterfaceTypeSymbol> _interfaceCache = [];
     private readonly Dictionary<StructTypeSymbol, ImmutableDictionary<GenericParameterSymbol, TypeSymbol>> _substitutions = [];
+    private readonly Dictionary<InterfaceTypeSymbol, ImmutableDictionary<GenericParameterSymbol, TypeSymbol>> _interfaceSubstitutions = [];
     private readonly Dictionary<(FunctionSymbol Definition, StructTypeSymbol Owner), FunctionSymbol> _specializedFunctions = [];
     private readonly Dictionary<StructTypeSymbol, GenericStructSpecializationState> _states = [];
     private readonly Dictionary<StructTypeSymbol, TextLocation> _originLocations = [];
+    private readonly Dictionary<InterfaceTypeSymbol, TextLocation> _interfaceOriginLocations = [];
     private readonly HashSet<StructTypeSymbol> _constantsCompleted = [];
     private readonly HashSet<StructTypeSymbol> _invalidConstraintSpecializations = [];
+    private readonly HashSet<InterfaceTypeSymbol> _completedInterfaces = [];
+    private readonly HashSet<InterfaceTypeSymbol> _resolvingInterfaces = [];
     private readonly bool _publishSpecializations;
     private bool _fieldsReady;
     private bool _membersReady;
     private bool _constantsReady;
+    private bool _interfacesReady;
 
     public GenericStructSpecializer(TypeFactory types, DiagnosticBag diagnostics,
         Action<StructTypeSymbol>? constantsCompletedCallback = null,
@@ -54,6 +60,7 @@ internal sealed class GenericStructSpecializer
     }
 
     public IEnumerable<StructTypeSymbol> Specializations => _cache.Values;
+    public IEnumerable<InterfaceTypeSymbol> InterfaceSpecializations => _interfaceCache.Values;
     internal TypeFactory Types => _types;
     public int SpecializationCount => _cache.Count;
     public IEnumerable<SpecializedStructFunction> SpecializedFunctions => _specializedFunctions.Select(entry =>
@@ -69,12 +76,19 @@ internal sealed class GenericStructSpecializer
             _constantsReady = _constantsReady,
         };
         foreach (var entry in _cache) result._cache.Add(entry.Key, entry.Value);
+        foreach (var entry in _interfaceCache) result._interfaceCache.Add(entry.Key, entry.Value);
         foreach (var entry in _substitutions) result._substitutions.Add(entry.Key, entry.Value);
+        foreach (var entry in _interfaceSubstitutions)
+            result._interfaceSubstitutions.Add(entry.Key, entry.Value);
         foreach (var entry in _specializedFunctions) result._specializedFunctions.Add(entry.Key, entry.Value);
         foreach (var entry in _states) result._states.Add(entry.Key, entry.Value);
         foreach (var entry in _originLocations) result._originLocations.Add(entry.Key, entry.Value);
+        foreach (var entry in _interfaceOriginLocations)
+            result._interfaceOriginLocations.Add(entry.Key, entry.Value);
         result._constantsCompleted.UnionWith(_constantsCompleted);
         result._invalidConstraintSpecializations.UnionWith(_invalidConstraintSpecializations);
+        result._completedInterfaces.UnionWith(_completedInterfaces);
+        result._interfacesReady = _interfacesReady;
         return result;
     }
 
@@ -103,6 +117,22 @@ internal sealed class GenericStructSpecializer
         foreach (var entry in speculative._specializedFunctions.Where(entry =>
                      newKeys.Any(key => ReferenceEquals(speculative._cache[key], entry.Key.Owner))))
             _specializedFunctions.TryAdd(entry.Key, entry.Value);
+
+        GenericInstantiationKey[] newInterfaceKeys = speculative._interfaceCache.Keys
+            .Where(key => !_interfaceCache.ContainsKey(key)).ToArray();
+        foreach (GenericInstantiationKey key in newInterfaceKeys)
+        {
+            InterfaceTypeSymbol specialization = speculative._interfaceCache[key];
+            _interfaceCache.Add(key, specialization);
+            _interfaceSubstitutions.Add(specialization,
+                speculative._interfaceSubstitutions[specialization]);
+            _interfaceOriginLocations.Add(specialization,
+                speculative._interfaceOriginLocations[specialization]);
+            if (speculative._completedInterfaces.Contains(specialization))
+                _completedInterfaces.Add(specialization);
+            if (specialization.IsConcreteType)
+                specialization.ContainingNamespace.TryDeclareType(specialization);
+        }
     }
 
     internal FunctionSymbol GetFunctionDefinition(FunctionSymbol function)
@@ -161,6 +191,18 @@ internal sealed class GenericStructSpecializer
         CompleteAll(EnsureConstants);
     }
 
+    public void CompleteInterfaces()
+    {
+        _interfacesReady = true;
+        while (true)
+        {
+            InterfaceTypeSymbol[] snapshot = _interfaceCache.Values.ToArray();
+            foreach (InterfaceTypeSymbol specialization in snapshot)
+                EnsureInterface(specialization);
+            if (snapshot.Length == _interfaceCache.Count) return;
+        }
+    }
+
     public StructTypeSymbol? GetOrCreate(StructTypeSymbol definition,
         ImmutableArray<TypeSymbol> typeArguments, TextLocation location)
     {
@@ -209,6 +251,52 @@ internal sealed class GenericStructSpecializer
             .Zip(typeArguments).ToImmutableDictionary(pair => pair.First, pair => pair.Second);
         _substitutions.Add(specialized, substitutions);
         EnsureAvailable(specialized);
+        return specialized;
+    }
+
+    public InterfaceTypeSymbol? GetOrCreate(InterfaceTypeSymbol definition,
+        ImmutableArray<TypeSymbol> typeArguments, TextLocation location)
+    {
+        if (!definition.IsGenericDefinition)
+        {
+            _diagnostics.Report(location,
+                $"generic type arguments cannot be applied because interface '{definition.Name}' is not generic",
+                DiagnosticIds.GenericTypeArgumentsNotSupported);
+            return null;
+        }
+        if (typeArguments.Length != definition.TypeParameters.Length)
+        {
+            _diagnostics.Report(location,
+                $"generic interface '{definition.Name}' expects {definition.TypeParameters.Length} type argument(s), but {typeArguments.Length} were provided",
+                DiagnosticIds.GenericArityMismatch);
+            return null;
+        }
+
+        typeArguments = typeArguments.Select(_types.Intern).ToImmutableArray();
+        var key = new GenericInstantiationKey(definition, typeArguments);
+        if (_interfaceCache.TryGetValue(key, out InterfaceTypeSymbol? existing))
+        {
+            EnsureInterface(existing);
+            return existing;
+        }
+
+        InterfaceTypeSymbol? imported = definition.ContainingNamespace.Interfaces.FirstOrDefault(type =>
+            type.Origin.Kind == SymbolOriginKind.Library && !type.IsOpenGenericType &&
+            ReferenceEquals(type.GenericDefinition, definition) &&
+            type.TypeArguments.Length == typeArguments.Length &&
+            type.TypeArguments.Zip(typeArguments).All(pair => TypeIdentity.AreSame(pair.First, pair.Second)));
+        if (imported is not null) return imported;
+
+        string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type =>
+            type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
+        var specialized = new InterfaceTypeSymbol(name, _resolveNamespace(definition.ContainingNamespace),
+            SymbolOrigin.CompilerGenerated, definition.Documentation, definition.Accessibility);
+        specialized.SetGenericSpecialization(definition, typeArguments);
+        _interfaceCache.Add(key, specialized);
+        _interfaceOriginLocations.Add(specialized, location);
+        _interfaceSubstitutions.Add(specialized, definition.TypeParameters.Zip(typeArguments)
+            .ToImmutableDictionary(pair => pair.First, pair => pair.Second));
+        EnsureInterface(specialized);
         return specialized;
     }
 
@@ -277,6 +365,85 @@ internal sealed class GenericStructSpecializer
         EnsureConstraintsValidated(specialization);
     }
 
+    private void EnsureInterface(InterfaceTypeSymbol specialized)
+    {
+        if (!_interfacesReady || _completedInterfaces.Contains(specialized) ||
+            !_resolvingInterfaces.Add(specialized))
+            return;
+
+        try
+        {
+            InterfaceTypeSymbol definition = specialized.GenericDefinition!;
+            IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions =
+                _interfaceSubstitutions[specialized];
+            TextLocation origin = _interfaceOriginLocations[specialized];
+
+            specialized.SetBaseInterfaces(definition.BaseInterfaces.Select(baseType =>
+                Substitute(baseType, substitutions, origin)).OfType<InterfaceTypeSymbol>().ToImmutableArray());
+
+            var methods = ImmutableArray.CreateBuilder<FunctionSymbol>();
+            foreach (FunctionSymbol source in definition.Methods)
+                methods.Add(SpecializeInterfaceFunction(source, specialized, substitutions, origin));
+            specialized.SetMethods(methods.ToImmutable());
+
+            var properties = ImmutableArray.CreateBuilder<InterfacePropertySymbol>();
+            foreach (InterfacePropertySymbol source in definition.Properties)
+            {
+                TypeSymbol propertyType = Substitute(source.Type, substitutions, origin);
+                var property = new InterfacePropertySymbol(source.Name, specialized, propertyType,
+                    source.IsReadonly, SymbolOrigin.CompilerGenerated, source.Documentation);
+                property.SetGenericSpecialization(source);
+                FunctionSymbol? getter = source.Getter is null ? null :
+                    SpecializeInterfaceFunction(source.Getter, property, substitutions, origin);
+                FunctionSymbol? setter = source.Setter is null ? null :
+                    SpecializeInterfaceFunction(source.Setter, property, substitutions, origin);
+                property.SetAccessors(getter, setter);
+                properties.Add(property);
+            }
+            specialized.SetProperties(properties.ToImmutable());
+
+            var indexers = ImmutableArray.CreateBuilder<InterfaceIndexerSymbol>();
+            foreach (InterfaceIndexerSymbol source in definition.Indexers)
+            {
+                TypeSymbol indexerType = Substitute(source.Type, substitutions, origin);
+                ImmutableArray<ParameterSymbol> parameters =
+                    SubstituteParameters(source.Parameters, substitutions, origin);
+                var indexer = new InterfaceIndexerSymbol(specialized, indexerType, parameters,
+                    source.IsReadonly, SymbolOrigin.CompilerGenerated, source.Documentation);
+                indexer.SetGenericSpecialization(source);
+                FunctionSymbol? getter = source.Getter is null ? null :
+                    SpecializeInterfaceFunction(source.Getter, indexer, substitutions, origin);
+                FunctionSymbol? setter = source.Setter is null ? null :
+                    SpecializeInterfaceFunction(source.Setter, indexer, substitutions, origin);
+                indexer.SetAccessors(getter, setter);
+                indexers.Add(indexer);
+            }
+            specialized.SetIndexers(indexers.ToImmutable());
+            specialized.SetMethodSlots(specialized.AllMethods);
+            _completedInterfaces.Add(specialized);
+            if (_publishSpecializations && specialized.IsConcreteType)
+                specialized.ContainingNamespace.TryDeclareType(specialized);
+        }
+        finally
+        {
+            _resolvingInterfaces.Remove(specialized);
+        }
+    }
+
+    private FunctionSymbol SpecializeInterfaceFunction(FunctionSymbol source, Symbol owner,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation origin)
+    {
+        FunctionSymbol specialized = SpecializeFunction(source, owner,
+            Substitute(source.ReturnType, substitutions, origin),
+            SubstituteParameters(source.Parameters, substitutions, origin));
+        specialized.SetOriginalDefinition(source);
+        specialized.SetReceiverMoveEffects(source.ReceiverMoveEffects);
+        specialized.SetReferenceReturnOrigins(source.ReferenceReturnOrigins);
+        specialized.SetSharedReturnOrigins(source.SharedReturnOrigins);
+        specialized.SetReferenceFieldOrigins(source.ReferenceFieldOrigins);
+        return specialized;
+    }
+
     private void EnsureFields(StructTypeSymbol specialized)
     {
         GenericStructSpecializationState state = _states[specialized];
@@ -290,7 +457,9 @@ internal sealed class GenericStructSpecializer
         if (definition.BaseType is not null &&
             Substitute(definition.BaseType, substitutions, _originLocations[specialized]) is StructTypeSymbol baseType)
             specialized.SetBaseType(baseType);
-        specialized.SetInterfaces(definition.Interfaces);
+        specialized.SetInterfaces(definition.Interfaces.Select(@interface =>
+            Substitute(@interface, substitutions, _originLocations[specialized]))
+            .OfType<InterfaceTypeSymbol>().ToImmutableArray());
         if (definition.HasVirtualDispatch) specialized.SetHasVirtualDispatch();
 
         specialized.SetFields(definition.Fields.Select(field =>
@@ -475,23 +644,29 @@ internal sealed class GenericStructSpecializer
             return;
         _states[specialized] = GenericStructSpecializationState.ValidatingConstraints;
         bool isValid = true;
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions = _substitutions[specialized];
+        TypeSymbol SubstituteConstraint(TypeSymbol type) =>
+            Substitute(type, substitutions, _originLocations[specialized]);
         for (int index = 0; index < specialized.TypeArguments.Length; index++)
         {
             if (specialized.TypeArguments[index] is GenericParameterSymbol argumentParameter)
             {
                 foreach (GenericConstraintSymbol required in definition.TypeParameters[index].Constraints)
                 {
-                    if (GenericConstraintGuarantees.IsGuaranteed(argumentParameter, required)) continue;
+                    GenericConstraintSymbol effective =
+                        GenericConstraintGuarantees.Substitute(required, SubstituteConstraint);
+                    if (GenericConstraintGuarantees.IsGuaranteed(argumentParameter, effective)) continue;
                     isValid = false;
                     _diagnostics.Report(_originLocations[specialized],
-                        $"constraints for '{argumentParameter.Name}' do not guarantee '{required.Target.Name}' required by '{definition.Name}'" +
-                        GenericConstraintGuarantees.GetFailureDetail(argumentParameter, required),
+                        $"constraints for '{argumentParameter.Name}' do not guarantee '{effective.Target.Name}' required by '{definition.Name}'" +
+                        GenericConstraintGuarantees.GetFailureDetail(argumentParameter, effective),
                         DiagnosticIds.GenericConstraintNotSatisfied);
                 }
                 continue;
             }
             GenericConstraintValidationResult validation =
-                _constraintValidator.Validate(definition.TypeParameters[index], specialized.TypeArguments[index]);
+                _constraintValidator.Validate(definition.TypeParameters[index], specialized.TypeArguments[index],
+                    SubstituteConstraint);
             if (validation.IsValid) continue;
             isValid = false;
             _diagnostics.Report(_originLocations[specialized],
@@ -532,6 +707,8 @@ internal sealed class GenericStructSpecializer
     {
         GenericParameterSymbol parameter when substitutions.TryGetValue(parameter, out TypeSymbol? replacement) => replacement,
         StructTypeSymbol { GenericDefinition: not null } constructed => SubstituteConstructed(constructed, substitutions, origin),
+        InterfaceTypeSymbol { GenericDefinition: not null } constructed =>
+            SubstituteConstructed(constructed, substitutions, origin),
         PointerTypeSymbol pointer => _types.PointerTo(Substitute(pointer.ElementType, substitutions, origin), pointer.IsReadonly),
         FunctionPointerTypeSymbol function => _types.FunctionPointer(
             Substitute(function.ReturnType, substitutions, origin),
@@ -594,6 +771,19 @@ internal sealed class GenericStructSpecializer
     }
 
     private TypeSymbol SubstituteConstructed(StructTypeSymbol constructed,
+        IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
+    {
+        ImmutableArray<TypeSymbol> arguments = constructed.TypeArguments
+            .Select(argument => Substitute(argument, substitutions, origin)).ToImmutableArray();
+        if (arguments.Zip(constructed.TypeArguments).All(pair => TypeIdentity.AreSame(pair.First, pair.Second)))
+            return constructed;
+        TextLocation location = origin ?? (constructed.Locations is { IsEmpty: false } locations
+            ? locations[0]
+            : TextLocation.None);
+        return (TypeSymbol?)GetOrCreate(constructed.GenericDefinition!, arguments, location) ?? BuiltinTypes.Error;
+    }
+
+    private TypeSymbol SubstituteConstructed(InterfaceTypeSymbol constructed,
         IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
     {
         ImmutableArray<TypeSymbol> arguments = constructed.TypeArguments

@@ -189,40 +189,55 @@ internal static class TypeResolver
                     : scope.ResolveQualifiedType(named.NameParts.Select(part => part.Text).ToArray(), genericArity,
                         named.NameToken.Location, diagnostics);
                 if (TypeIdentity.AreSame(type, BuiltinTypes.Error)) return BuiltinTypes.Error;
+                if (type is null)
+                {
+                    TemplateSymbol? template = named.NameParts.Length == 1
+                        ? scope.ResolveTemplate(named.Name, named.NameToken.Location, diagnostics)
+                        : scope.ResolveQualifiedTemplate(named.NameParts.Select(part => part.Text).ToArray());
+                    if (template is not null)
+                    {
+                        diagnostics.Report(named.TypeArguments?.LessToken.Location ?? named.NameToken.Location,
+                            named.TypeArguments is not null
+                                ? $"type '{named.Name}' is not a generic struct or interface"
+                                : $"template '{template.Name}' is a compile-time constraint and cannot be used as a runtime type",
+                            named.TypeArguments is not null
+                                ? DiagnosticIds.GenericTypeArgumentsNotSupported
+                                : DiagnosticIds.TemplateCannotBeUsedAsType);
+                        return BuiltinTypes.Error;
+                    }
+                    diagnostics.Report(named.NameToken.Location, $"unknown type '{named.Name}'", DiagnosticIds.UnknownType);
+                    return BuiltinTypes.Error;
+                }
                 if (named.TypeArguments is { } arguments)
                 {
-                    if (type is not StructTypeSymbol structure)
+                    if (type is not StructTypeSymbol && type is not InterfaceTypeSymbol)
                     {
                         diagnostics.Report(arguments.LessToken.Location,
-                            $"type '{named.Name}' is not a generic struct",
+                            $"type '{named.Name}' is not a generic struct or interface",
                             DiagnosticIds.GenericTypeArgumentsNotSupported);
                         return BuiltinTypes.Error;
                     }
                     if (scope.GenericStructSpecializer is null)
                     {
                         diagnostics.Report(arguments.LessToken.Location,
-                            "generic struct specialization is not available in this declaration context yet",
+                            "generic type specialization is not available in this declaration context yet",
                             DiagnosticIds.GenericSpecializationNotImplemented);
                         return BuiltinTypes.Error;
                     }
                     ImmutableArray<TypeSymbol> typeArguments = arguments.Arguments
                         .Select(argument => ResolveCore(argument, scope, diagnostics)).ToImmutableArray();
-                    return (TypeSymbol?)scope.GenericStructSpecializer.GetOrCreate(structure, typeArguments,
-                        arguments.LessToken.Location) ?? BuiltinTypes.Error;
+                    return type switch
+                    {
+                        StructTypeSymbol structure =>
+                            (TypeSymbol?)scope.GenericStructSpecializer.GetOrCreate(structure, typeArguments,
+                                arguments.LessToken.Location) ?? BuiltinTypes.Error,
+                        InterfaceTypeSymbol @interface =>
+                            (TypeSymbol?)scope.GenericStructSpecializer.GetOrCreate(@interface, typeArguments,
+                                arguments.LessToken.Location) ?? BuiltinTypes.Error,
+                        _ => BuiltinTypes.Error,
+                    };
                 }
-                if (type is not null) return type;
-                TemplateSymbol? template = named.NameParts.Length == 1
-                    ? scope.ResolveTemplate(named.Name, named.NameToken.Location, diagnostics)
-                    : scope.ResolveQualifiedTemplate(named.NameParts.Select(part => part.Text).ToArray());
-                if (template is not null)
-                {
-                    diagnostics.Report(named.NameToken.Location,
-                        $"template '{template.Name}' is a compile-time constraint and cannot be used as a runtime type",
-                        DiagnosticIds.TemplateCannotBeUsedAsType);
-                    return BuiltinTypes.Error;
-                }
-                diagnostics.Report(named.NameToken.Location, $"unknown type '{named.Name}'", DiagnosticIds.UnknownType);
-                return BuiltinTypes.Error;
+                return type;
             }
             default:
                 throw new InvalidOperationException($"Unsupported type syntax '{syntax.Kind}'");

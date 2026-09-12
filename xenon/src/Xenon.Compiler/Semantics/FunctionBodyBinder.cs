@@ -7556,22 +7556,25 @@ internal sealed partial class FunctionBodyBinder
             RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
+        var substitutions = definition.TypeParameters.Zip(typeArguments)
+            .ToDictionary(pair => pair.First, pair => pair.Second);
+        TypeSymbol SubstituteConstraint(TypeSymbol type) => SubstituteGenericType(type, substitutions);
         for (int index = 0; index < typeArguments.Length; index++)
         {
             if (typeArguments[index] is not GenericParameterSymbol argumentParameter) continue;
             foreach (GenericConstraintSymbol required in definition.TypeParameters[index].Constraints)
             {
-                if (GenericConstraintGuarantees.IsGuaranteed(argumentParameter, required)) continue;
+                GenericConstraintSymbol effective =
+                    GenericConstraintGuarantees.Substitute(required, SubstituteConstraint);
+                if (GenericConstraintGuarantees.IsGuaranteed(argumentParameter, effective)) continue;
                 _diagnostics.Report(location,
-                    $"constraints for '{argumentParameter.Name}' do not guarantee '{required.Target.Name}' required by '{definition.Name}'" +
-                    GenericConstraintGuarantees.GetFailureDetail(argumentParameter, required),
+                    $"constraints for '{argumentParameter.Name}' do not guarantee '{effective.Target.Name}' required by '{definition.Name}'" +
+                    GenericConstraintGuarantees.GetFailureDetail(argumentParameter, effective),
                     DiagnosticIds.GenericConstraintNotSatisfied);
                 RollbackUnmaterializedContextualArguments(arguments);
                 return new BoundErrorExpression();
             }
         }
-        var substitutions = definition.TypeParameters.Zip(typeArguments)
-            .ToDictionary(pair => pair.First, pair => pair.Second);
         ImmutableArray<TypeSymbol> parameterTypes = definition.Parameters
             .Select(parameter => SubstituteGenericType(parameter.Type, substitutions)).ToImmutableArray();
         arguments = ValidateGenericArguments(definition.Name, parameterTypes, arguments, syntax.Arguments, location,
@@ -8320,6 +8323,8 @@ internal sealed partial class FunctionBodyBinder
         StructTypeSymbol { GenericDefinition: not null } structure =>
             (_fileScope.GenericStructSpecializer?.AreConstraintsSatisfied(structure) ?? true) &&
             structure.TypeArguments.All(AreContextualTypeConstraintsSatisfied),
+        InterfaceTypeSymbol { GenericDefinition: not null } @interface =>
+            @interface.TypeArguments.All(AreContextualTypeConstraintsSatisfied),
         FunctionPointerTypeSymbol function =>
             AreContextualTypeConstraintsSatisfied(function.ReturnType) &&
             function.ParameterTypes.All(AreContextualTypeConstraintsSatisfied),
@@ -8747,24 +8752,27 @@ internal sealed partial class FunctionBodyBinder
 
                 if (!TryInferGenericTypeArguments(candidate, arguments, out ImmutableArray<TypeSymbol> inferred))
                     continue;
+                var substitutions = candidate.TypeParameters.Zip(inferred)
+                    .ToDictionary(pair => pair.First, pair => pair.Second);
+                TypeSymbol SubstituteConstraint(TypeSymbol type) => SubstituteGenericType(type, substitutions);
                 bool constraintsSatisfied = true;
                 for (int index = 0; index < inferred.Length; index++)
                 {
                     if (inferred[index] is GenericParameterSymbol inferredParameter)
                     {
                         if (candidate.TypeParameters[index].Constraints.All(required =>
-                                GenericConstraintGuarantees.IsGuaranteed(inferredParameter, required)))
+                                GenericConstraintGuarantees.IsGuaranteed(
+                                    inferredParameter, required, SubstituteConstraint)))
                             continue;
                         constraintsSatisfied = false;
                         break;
                     }
-                    if (constraintValidator.Validate(candidate.TypeParameters[index], inferred[index]).IsValid) continue;
+                    if (constraintValidator.Validate(candidate.TypeParameters[index], inferred[index],
+                            SubstituteConstraint).IsValid) continue;
                     constraintsSatisfied = false;
                     break;
                 }
                 if (!constraintsSatisfied) continue;
-                var substitutions = candidate.TypeParameters.Zip(inferred)
-                    .ToDictionary(pair => pair.First, pair => pair.Second);
                 parameterTypes = parameterTypes.Select(type => SubstituteGenericType(type, substitutions))
                     .ToImmutableArray();
             }
@@ -8910,16 +8918,17 @@ internal sealed partial class FunctionBodyBinder
         var matches = new List<(FunctionSymbol Function, int[] Costs)>();
         foreach (FunctionSymbol candidate in candidates)
         {
+            var substitutions = candidate.TypeParameters.Zip(typeArguments)
+                .ToDictionary(pair => pair.First, pair => pair.Second);
+            TypeSymbol SubstituteConstraint(TypeSymbol type) => SubstituteGenericType(type, substitutions);
             bool validConstraints = candidate.TypeParameters.Zip(typeArguments).All(pair =>
                 pair.Second is GenericParameterSymbol generic
                     ? pair.First.Constraints.All(required =>
-                        GenericConstraintGuarantees.IsGuaranteed(generic, required))
-                    : validator.Validate(pair.First, pair.Second).IsValid);
+                        GenericConstraintGuarantees.IsGuaranteed(generic, required, SubstituteConstraint))
+                    : validator.Validate(pair.First, pair.Second, SubstituteConstraint).IsValid);
             if (!validConstraints) continue;
             if (incomplete ? candidate.Parameters.Length < suppliedCount : candidate.Parameters.Length != suppliedCount)
                 continue;
-            var substitutions = candidate.TypeParameters.Zip(typeArguments)
-                .ToDictionary(pair => pair.First, pair => pair.Second);
             TypeSymbol[] parameterTypes = candidate.Parameters.Select(parameter =>
                 SubstituteGenericType(parameter.Type, substitutions)).ToArray();
             int?[] costs = parameterTypes.Take(suppliedCount).Zip(arguments.Take(suppliedCount))
@@ -10898,6 +10907,12 @@ internal sealed partial class FunctionBodyBinder
                 TryInferGenericType(left.ElementType, right.ElementType, inferred),
             (StructTypeSymbol { GenericDefinition: not null } left,
                 StructTypeSymbol { GenericDefinition: not null } right)
+                when ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
+                     left.TypeArguments.Length == right.TypeArguments.Length =>
+                left.TypeArguments.Zip(right.TypeArguments).All(pair =>
+                    TryInferGenericType(pair.First, pair.Second, inferred)),
+            (InterfaceTypeSymbol { GenericDefinition: not null } left,
+                InterfaceTypeSymbol { GenericDefinition: not null } right)
                 when ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
                      left.TypeArguments.Length == right.TypeArguments.Length =>
                 left.TypeArguments.Zip(right.TypeArguments).All(pair =>

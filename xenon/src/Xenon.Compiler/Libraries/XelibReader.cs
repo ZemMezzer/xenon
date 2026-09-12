@@ -404,6 +404,8 @@ internal sealed class XelibSemanticReconstruction
             }).ToArray();
             if (_symbols.GetValueOrDefault(group.Key) is StructTypeSymbol structure)
                 structure.SetTypeParameters([.. parameters]);
+            else if (_symbols.GetValueOrDefault(group.Key) is InterfaceTypeSymbol @interface)
+                @interface.SetTypeParameters([.. parameters]);
         }
     }
 
@@ -712,16 +714,39 @@ internal sealed class XelibSemanticReconstruction
         return created;
     }
 
-    private StructTypeSymbol Constructed(XelibTypeRecord record)
+    private TypeSymbol Constructed(XelibTypeRecord record)
     {
-        var definition = (StructTypeSymbol)Resolve(Required(record.Symbol));
+        Symbol definition = Resolve(Required(record.Symbol));
+        ImmutableArray<TypeSymbol> arguments = record.TypeArgumentIds.Select(ResolveType).ToImmutableArray();
+        return definition switch
+        {
+            StructTypeSymbol structure => ConstructedStruct(record, structure, arguments),
+            InterfaceTypeSymbol @interface => ConstructedInterface(record, @interface, arguments),
+            _ => throw XelibReader.Invalid(
+                "constructed generic type does not reference a struct or interface definition", _path),
+        };
+    }
+
+    private StructTypeSymbol ConstructedStruct(XelibTypeRecord record, StructTypeSymbol definition,
+        ImmutableArray<TypeSymbol> arguments)
+    {
         var created = record.ConstructedSymbol is { } reference
             ? (StructTypeSymbol)Resolve(reference)
             : new StructTypeSymbol(definition.Name, definition.ContainingNamespace,
-            definition.IsAbstract, Origin(definition), definition.Documentation, definition.Accessibility,
-            definition.IsReadonly, definition.IsStatic, definition.IsSealed);
-        created.SetGenericSpecialization(definition,
-            record.TypeArgumentIds.Select(ResolveType).ToImmutableArray());
+                definition.IsAbstract, Origin(definition), definition.Documentation, definition.Accessibility,
+                definition.IsReadonly, definition.IsStatic, definition.IsSealed);
+        created.SetGenericSpecialization(definition, arguments);
+        return created;
+    }
+
+    private InterfaceTypeSymbol ConstructedInterface(XelibTypeRecord record,
+        InterfaceTypeSymbol definition, ImmutableArray<TypeSymbol> arguments)
+    {
+        var created = record.ConstructedSymbol is { } reference
+            ? (InterfaceTypeSymbol)Resolve(reference)
+            : new InterfaceTypeSymbol(definition.Name, definition.ContainingNamespace,
+                Origin(definition), definition.Documentation, definition.Accessibility);
+        created.SetGenericSpecialization(definition, arguments);
         return created;
     }
 

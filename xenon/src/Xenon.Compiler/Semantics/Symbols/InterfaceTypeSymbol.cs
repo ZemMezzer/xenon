@@ -8,6 +8,7 @@ public sealed class InterfaceTypeSymbol : DeclaredTypeSymbol
     private ImmutableArray<FunctionSymbol> _methods = [];
     private ImmutableArray<InterfacePropertySymbol> _properties = [];
     private ImmutableArray<InterfaceIndexerSymbol> _indexers = [];
+    private ImmutableArray<GenericParameterSymbol> _typeParameters = [];
     private Dictionary<FunctionSymbol, int> _methodSlots = [];
 
     internal InterfaceTypeSymbol(string name, NamespaceSymbol containingNamespace, InterfaceDeclarationSyntax declaration)
@@ -27,18 +28,44 @@ public sealed class InterfaceTypeSymbol : DeclaredTypeSymbol
             accessibility: accessibility) { }
 
     public override IEnumerable<Symbol> GetMembers() => Methods.Cast<Symbol>().Concat(Properties).Concat(Indexers);
+    public override string ToDisplayString(TypeDisplayFormat format = TypeDisplayFormat.Short)
+    {
+        string name = base.ToDisplayString(format);
+        return TypeParameters.IsEmpty ? name : $"{name}<{string.Join(", ", TypeParameters.Select(parameter => parameter.Name))}>";
+    }
     public override IEnumerable<Symbol> LookupMembers(string name) =>
         SelfAndBaseInterfaces.SelectMany(type => type.GetMembers()).Where(member => member.Name == name).Distinct();
     public ImmutableArray<InterfaceTypeSymbol> BaseInterfaces { get; private set; } = [];
     public ImmutableArray<FunctionSymbol> Methods => _methods;
     public ImmutableArray<InterfacePropertySymbol> Properties => _properties;
     public ImmutableArray<InterfaceIndexerSymbol> Indexers => _indexers;
+    public ImmutableArray<GenericParameterSymbol> TypeParameters => _typeParameters;
+    public override int GenericArity => GenericDefinition?.GenericArity ?? _typeParameters.Length;
+    public bool IsGenericDefinition => !_typeParameters.IsEmpty;
+    public InterfaceTypeSymbol? GenericDefinition { get; private set; }
+    public ImmutableArray<TypeSymbol> TypeArguments { get; private set; } = [];
+    public bool IsGenericSpecialization => GenericDefinition is not null;
+    public bool IsOpenGenericType => IsGenericDefinition ||
+        IsGenericSpecialization && TypeArguments.Any(global::Xenon.Compiler.Semantics.GenericTypeFacts.ContainsGenericParameter);
+    public bool IsConcreteType => !IsOpenGenericType;
+    public override bool IsCompilerGenerated => IsGenericSpecialization;
+    public override bool IsUserVisible => !IsGenericSpecialization;
     internal InterfaceDeclarationSyntax Declaration { get; } = null!;
 
     internal void SetBaseInterfaces(ImmutableArray<InterfaceTypeSymbol> interfaces) => BaseInterfaces = interfaces;
     internal void SetMethods(ImmutableArray<FunctionSymbol> methods) => _methods = methods;
     internal void SetProperties(ImmutableArray<InterfacePropertySymbol> properties) => _properties = properties;
     internal void SetIndexers(ImmutableArray<InterfaceIndexerSymbol> indexers) => _indexers = indexers;
+    internal void SetTypeParameters(ImmutableArray<GenericParameterSymbol> parameters)
+    {
+        _typeParameters = parameters;
+        foreach (GenericParameterSymbol parameter in parameters) parameter.SetDeclaringSymbol(this);
+    }
+    internal void SetGenericSpecialization(InterfaceTypeSymbol definition, ImmutableArray<TypeSymbol> typeArguments)
+    {
+        GenericDefinition = definition;
+        TypeArguments = typeArguments;
+    }
     internal void SetMethodSlots(IEnumerable<FunctionSymbol> methods) =>
         _methodSlots = methods.Select((method, slot) => (method, slot)).ToDictionary(pair => pair.method, pair => pair.slot);
 
@@ -126,6 +153,7 @@ public sealed class InterfaceIndexerSymbol : Symbol
     public bool IsReadonly { get; }
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
+    public InterfaceIndexerSymbol? GenericDefinition { get; private set; }
     internal InterfaceIndexerDeclarationSyntax Declaration { get; } = null!;
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
         Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
@@ -136,6 +164,9 @@ public sealed class InterfaceIndexerSymbol : Symbol
         Getter = getter;
         Setter = setter;
     }
+
+    internal void SetGenericSpecialization(InterfaceIndexerSymbol definition) =>
+        GenericDefinition = definition;
 
     internal string GetAccessorName(bool getter) =>
         IndexerSymbol.CreateAccessorName(getter ? "get_Item" : "set_Item", Parameters);
@@ -170,6 +201,7 @@ public sealed class InterfacePropertySymbol : Symbol
     public bool IsReadonly { get; }
     public FunctionSymbol? Getter { get; private set; }
     public FunctionSymbol? Setter { get; private set; }
+    public InterfacePropertySymbol? GenericDefinition { get; private set; }
     internal InterfacePropertyDeclarationSyntax Declaration { get; } = null!;
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
         Origin.Kind != SymbolOriginKind.Source ? base.DeclaringSyntaxReferences : [new(Declaration)];
@@ -179,4 +211,7 @@ public sealed class InterfacePropertySymbol : Symbol
         Getter = getter;
         Setter = setter;
     }
+
+    internal void SetGenericSpecialization(InterfacePropertySymbol definition) =>
+        GenericDefinition = definition;
 }

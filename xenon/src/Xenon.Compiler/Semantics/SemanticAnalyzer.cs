@@ -22,6 +22,7 @@ internal sealed class SemanticAnalyzer
     private readonly Dictionary<InterfaceDeclarationSyntax, InterfaceTypeSymbol> _interfaceSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<TemplateDeclarationSyntax, TemplateSymbol> _templateSymbols = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<StructDeclarationSyntax, FileSymbolScope> _structScopes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<InterfaceDeclarationSyntax, FileSymbolScope> _interfaceScopes = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<TemplateDeclarationSyntax, FileSymbolScope> _templateScopes = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<ConstantSymbol, FileSymbolScope> _constantScopes = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<ConstantSymbol> _evaluatingConstants = new(ReferenceEqualityComparer.Instance);
@@ -80,14 +81,15 @@ internal sealed class SemanticAnalyzer
         DeclareInterfaces();
         DeclareEnums();
         BindUsingDirectives();
-        BindStructGenericConstraints();
         InitializeGenericStructSpecializer();
+        BindStructGenericConstraints();
         DeclareTemplateMembers();
         BindTypeInheritance();
         ValidateStructTypeModifiers();
         ValidateInheritanceCycles();
         MarkVirtualDispatchRequirements();
         DeclareInterfaceMethods();
+        _genericStructSpecializer!.CompleteInterfaces();
         ValidateInheritedInterfaceMembers();
         AssignInterfaceMethodSlots();
         BindStructFields();
@@ -433,7 +435,7 @@ internal sealed class SemanticAnalyzer
         _genericStructSpecializer = new GenericStructSpecializer(
             _typeFactory, _diagnostics, EvaluateSpecializedConstants, ResolveCompilationNamespace);
         foreach (FileSymbolScope scope in _treeScopes.Values.Concat(_structScopes.Values)
-            .Concat(_templateScopes.Values).Distinct())
+            .Concat(_interfaceScopes.Values).Concat(_templateScopes.Values).Distinct())
             scope.SetGenericStructSpecializer(_genericStructSpecializer);
     }
 
@@ -841,6 +843,7 @@ internal sealed class SemanticAnalyzer
             foreach (InterfaceDeclarationSyntax declaration in tree.Root.Members.OfType<InterfaceDeclarationSyntax>())
             {
                 var type = new InterfaceTypeSymbol(declaration.IdentifierToken.Text, @namespace, declaration);
+                type.SetTypeParameters(CreateGenericParameters(declaration.TypeParameters, type));
                 if (!@namespace.TryDeclareType(type))
                 {
                     _diagnostics.Report(declaration.IdentifierToken.Location, $"type '{@namespace.FullName}.{type.Name}' is already declared",
@@ -874,6 +877,13 @@ internal sealed class SemanticAnalyzer
                 {
                     _structScopes.Add(declaration, scope.WithTypeParameters(_structSymbols[declaration].TypeParameters));
                 }
+            }
+
+            foreach (InterfaceDeclarationSyntax declaration in tree.Root.Members.OfType<InterfaceDeclarationSyntax>())
+            {
+                if (_interfaceSymbols.ContainsKey(declaration))
+                    _interfaceScopes.Add(declaration,
+                        scope.WithTypeParameters(_interfaceSymbols[declaration].TypeParameters));
             }
 
             foreach (TemplateDeclarationSyntax declaration in tree.Root.Members.OfType<TemplateDeclarationSyntax>())
@@ -1964,9 +1974,16 @@ internal sealed class SemanticAnalyzer
             var bases = ImmutableArray.CreateBuilder<InterfaceTypeSymbol>();
             foreach (TypeSyntax baseSyntax in declaration.BaseInterfaces)
             {
-                TypeSymbol resolved = TypeResolver.Resolve(baseSyntax, _treeScopes.First(pair => ReferenceEquals(pair.Key.Root.Members.OfType<InterfaceDeclarationSyntax>().FirstOrDefault(d => ReferenceEquals(d, declaration)), declaration)).Value, _diagnostics);
-                if (resolved is InterfaceTypeSymbol @interface && !TypeIdentity.AreSame(@interface, type))
-                    bases.Add(@interface);
+                TypeSymbol resolved = TypeResolver.Resolve(baseSyntax, _interfaceScopes[declaration], _diagnostics);
+                if (resolved is InterfaceTypeSymbol @interface)
+                {
+                    if (ReferenceEquals(@interface.GenericDefinition ?? @interface, type))
+                        _diagnostics.Report(baseSyntax.NameToken.Location,
+                            $"interface '{type.Name}' cannot inherit from itself",
+                            DiagnosticIds.SelfInheritance);
+                    else
+                        bases.Add(@interface);
+                }
                 else if (!TypeIdentity.AreSame(resolved, BuiltinTypes.Error))
                     _diagnostics.Report(baseSyntax.NameToken.Location, $"interface '{type.Name}' may inherit only from interfaces",
                         DiagnosticIds.InterfaceBaseMustBeInterface);
@@ -2087,7 +2104,7 @@ internal sealed class SemanticAnalyzer
     {
         foreach ((InterfaceDeclarationSyntax declaration, InterfaceTypeSymbol type) in _interfaceSymbols)
         {
-            FileSymbolScope scope = _treeScopes.First(pair => pair.Key.Root.Members.Contains(declaration)).Value;
+            FileSymbolScope scope = _interfaceScopes[declaration];
             var methods = ImmutableArray.CreateBuilder<FunctionSymbol>();
             foreach (InterfaceMethodDeclarationSyntax syntax in declaration.Methods)
             {
@@ -2216,9 +2233,12 @@ internal sealed class SemanticAnalyzer
 
     private static bool ReachesInterface(InterfaceTypeSymbol current, InterfaceTypeSymbol target, HashSet<InterfaceTypeSymbol> visited)
     {
-        if (TypeIdentity.AreSame(current, target))
+        InterfaceTypeSymbol currentDefinition = current.GenericDefinition ?? current;
+        InterfaceTypeSymbol targetDefinition = target.GenericDefinition ?? target;
+        if (ReferenceEquals(currentDefinition, targetDefinition))
             return true;
-        return visited.Add(current) && current.BaseInterfaces.Any(baseType => ReachesInterface(baseType, target, visited));
+        return visited.Add(currentDefinition) &&
+            currentDefinition.BaseInterfaces.Any(baseType => ReachesInterface(baseType, targetDefinition, visited));
     }
 
     private void AssignInterfaceMethodSlots()
@@ -3416,7 +3436,7 @@ internal sealed class SemanticAnalyzer
             foreach (GenericConstraintSyntax constraintSyntax in clause.Constraints)
             {
                 TypeSyntax syntax = constraintSyntax.Type;
-                if (syntax is not NamedTypeSyntax named || named.TypeArguments is not null)
+                if (syntax is not NamedTypeSyntax named)
                 {
                     _diagnostics.Report(syntax.NameToken.Location,
                         "a generic constraint must name a struct, interface, or structural template",
@@ -3424,8 +3444,18 @@ internal sealed class SemanticAnalyzer
                     continue;
                 }
 
-                string[] parts = named.NameParts.Select(part => part.Text).ToArray();
-                Symbol? target = scope.ResolveConstraintTarget(parts, named.NameToken.Location, _diagnostics);
+                Symbol? target;
+                if (named.TypeArguments is null)
+                {
+                    string[] parts = named.NameParts.Select(part => part.Text).ToArray();
+                    target = scope.ResolveConstraintTarget(parts, named.NameToken.Location, _diagnostics);
+                }
+                else
+                {
+                    TypeSymbol resolved = TypeResolver.Resolve(syntax, scope, _diagnostics);
+                    if (TypeIdentity.AreSame(resolved, BuiltinTypes.Error)) continue;
+                    target = resolved;
+                }
                 GenericConstraintKind kind = target switch
                 {
                     StructTypeSymbol => GenericConstraintKind.BaseStruct,

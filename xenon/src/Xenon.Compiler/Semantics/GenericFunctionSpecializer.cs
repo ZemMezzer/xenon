@@ -94,10 +94,14 @@ internal sealed class GenericFunctionSpecializer
             return null;
         }
 
+        var substitutions = definition.TypeParameters.Zip(typeArguments)
+            .ToDictionary(pair => pair.First, pair => pair.Second);
+        TypeSymbol SubstituteConstraint(TypeSymbol type) => Substitute(type, substitutions, location);
         for (int index = 0; index < typeArguments.Length; index++)
         {
             GenericConstraintValidationResult validation =
-                _constraintValidator.Validate(definition.TypeParameters[index], typeArguments[index]);
+                _constraintValidator.Validate(definition.TypeParameters[index], typeArguments[index],
+                    SubstituteConstraint);
             if (validation.IsValid) continue;
             _diagnostics.Report(location,
                 GenericConstraintDiagnostics.Format(definition.TypeParameters[index], typeArguments[index], validation),
@@ -109,8 +113,6 @@ internal sealed class GenericFunctionSpecializer
         var key = new GenericInstantiationKey(definition, typeArguments);
         if (_symbols.TryGetValue(key, out FunctionSymbol? existing)) return existing;
 
-        var substitutions = definition.TypeParameters.Zip(typeArguments)
-            .ToDictionary(pair => pair.First, pair => pair.Second);
         TypeSymbol returnType = Substitute(definition.ReturnType, substitutions, location);
         ImmutableArray<ParameterSymbol> parameters = definition.Parameters.Select(parameter =>
             new ParameterSymbol(parameter.Name, Substitute(parameter.Type, substitutions, location), parameter.Ordinal,
@@ -287,6 +289,11 @@ internal sealed class GenericFunctionSpecializer
                 TryInfer(left.ElementType, right.ElementType, inferred),
             (StructTypeSymbol { GenericDefinition: not null } left,
                 StructTypeSymbol { GenericDefinition: not null } right)
+                when ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
+                     left.TypeArguments.Length == right.TypeArguments.Length =>
+                left.TypeArguments.Zip(right.TypeArguments).All(pair => TryInfer(pair.First, pair.Second, inferred)),
+            (InterfaceTypeSymbol { GenericDefinition: not null } left,
+                InterfaceTypeSymbol { GenericDefinition: not null } right)
                 when ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
                      left.TypeArguments.Length == right.TypeArguments.Length =>
                 left.TypeArguments.Zip(right.TypeArguments).All(pair => TryInfer(pair.First, pair.Second, inferred)),

@@ -265,6 +265,7 @@ public static class AccessibilityRules
         {
             FunctionSymbol { GenericDefinition: not null } function => SemanticOrigin(function.GenericDefinition),
             StructTypeSymbol { GenericDefinition: not null } type => SemanticOrigin(type.GenericDefinition),
+            InterfaceTypeSymbol { GenericDefinition: not null } type => SemanticOrigin(type.GenericDefinition),
             FieldSymbol { GenericDefinition: not null } field => SemanticOrigin(field.GenericDefinition),
             PropertySymbol { GenericDefinition: not null } property => SemanticOrigin(property.GenericDefinition),
             IndexerSymbol { GenericDefinition: not null } indexer => SemanticOrigin(indexer.GenericDefinition),

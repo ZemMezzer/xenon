@@ -628,6 +628,11 @@ internal sealed class LibraryGenericFunctionImplementation(
                 constructed.TypeArguments.Select(argument =>
                     SubstituteTemplateSelf(argument, template, receiverType, specializer)).ToImmutableArray(),
                 TextLocation.None) ?? type,
+        InterfaceTypeSymbol { GenericDefinition: { } definition } constructed =>
+            specializer.StructSpecializer.GetOrCreate(definition,
+                constructed.TypeArguments.Select(argument =>
+                    SubstituteTemplateSelf(argument, template, receiverType, specializer)).ToImmutableArray(),
+                TextLocation.None) ?? type,
         _ => type,
     };
 
@@ -647,6 +652,24 @@ internal sealed class LibraryGenericFunctionImplementation(
         if (source is FunctionSymbol callable)
             return MapFunction(callable, specialization, structSpecializer, substitutions,
                 specializeLambda) ?? source;
+        if (source is InterfacePropertySymbol interfaceProperty)
+        {
+            var interfaceOwner = (InterfaceTypeSymbol)structSpecializer.Substitute(
+                interfaceProperty.ContainingInterface, substitutions);
+            return interfaceOwner.Properties.FirstOrDefault(candidate =>
+                candidate.Name == interfaceProperty.Name) ?? source;
+        }
+        if (source is InterfaceIndexerSymbol interfaceIndexer)
+        {
+            var interfaceOwner = (InterfaceTypeSymbol)structSpecializer.Substitute(
+                interfaceIndexer.ContainingInterface, substitutions);
+            TypeSymbol[] parameterTypes = interfaceIndexer.Parameters.Select(parameter =>
+                structSpecializer.Substitute(parameter.Type, substitutions)).ToArray();
+            return interfaceOwner.Indexers.FirstOrDefault(candidate =>
+                candidate.Parameters.Length == parameterTypes.Length &&
+                candidate.Parameters.Zip(parameterTypes).All(pair =>
+                    TypeIdentity.AreSame(pair.First.Type, pair.Second))) ?? source;
+        }
         StructTypeSymbol? definitionOwner = definition.ContainingStruct;
         StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
         if (ContainingStruct(source) is not { } sourceOwner) return source;
@@ -676,6 +699,22 @@ internal sealed class LibraryGenericFunctionImplementation(
     {
         if (ReferenceEquals(source, definition)) return specialization;
         if (source.IsLambda) return specializeLambda(source);
+        if (source.ContainingInterface is { } sourceInterface)
+        {
+            var owner = (InterfaceTypeSymbol)structSpecializer.Substitute(sourceInterface, substitutions);
+            TypeSymbol returnType = structSpecializer.Substitute(source.ReturnType, substitutions);
+            TypeSymbol[] parameterTypes = source.Parameters.Select(parameter =>
+                structSpecializer.Substitute(parameter.Type, substitutions)).ToArray();
+            return owner.AllMethods.SingleOrDefault(candidate =>
+                candidate.Name == source.Name &&
+                candidate.FunctionKind == source.FunctionKind &&
+                candidate.AccessorKind == source.AccessorKind &&
+                candidate.IsReadonly == source.IsReadonly &&
+                TypeIdentity.AreSame(candidate.ReturnType, returnType) &&
+                candidate.Parameters.Length == parameterTypes.Length &&
+                candidate.Parameters.Zip(parameterTypes).All(pair =>
+                    TypeIdentity.AreSame(pair.First.Type, pair.Second)));
+        }
         StructTypeSymbol? definitionOwner = definition.ContainingStruct;
         StructTypeSymbol? specializedOwner = specialization.ContainingStruct;
         if (source.ContainingStruct is not { } sourceOwner) return null;

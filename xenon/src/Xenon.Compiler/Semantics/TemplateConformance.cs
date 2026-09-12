@@ -207,6 +207,12 @@ public sealed class TemplateConformanceMatcher
                 left.TypeArguments.Length == right.TypeArguments.Length &&
                 left.TypeArguments.Zip(right.TypeArguments).All(pair =>
                     TemplateTypeMatchesNominal(pair.First, pair.Second, requiredTemplate)),
+            (InterfaceTypeSymbol { GenericDefinition: not null } left,
+                InterfaceTypeSymbol { GenericDefinition: not null } right) =>
+                ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
+                left.TypeArguments.Length == right.TypeArguments.Length &&
+                left.TypeArguments.Zip(right.TypeArguments).All(pair =>
+                    TemplateTypeMatchesNominal(pair.First, pair.Second, requiredTemplate)),
             _ => TypeIdentity.AreSame(required, available),
         };
     }
@@ -284,6 +290,12 @@ public sealed class TemplateConformanceMatcher
                 TemplateTypesMatch(left.ElementType, right.ElementType, requiredTemplate, availableTemplate),
             (StructTypeSymbol { GenericDefinition: not null } left,
                 StructTypeSymbol { GenericDefinition: not null } right) =>
+                ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
+                left.TypeArguments.Length == right.TypeArguments.Length &&
+                left.TypeArguments.Zip(right.TypeArguments).All(pair =>
+                    TemplateTypesMatch(pair.First, pair.Second, requiredTemplate, availableTemplate)),
+            (InterfaceTypeSymbol { GenericDefinition: not null } left,
+                InterfaceTypeSymbol { GenericDefinition: not null } right) =>
                 ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
                 left.TypeArguments.Length == right.TypeArguments.Length &&
                 left.TypeArguments.Zip(right.TypeArguments).All(pair =>
@@ -427,6 +439,12 @@ public sealed class TemplateConformanceMatcher
                 left.TypeArguments.Length == right.TypeArguments.Length &&
                 left.TypeArguments.Zip(right.TypeArguments).All(pair =>
                     TypesMatch(pair.First, pair.Second, template, concrete)),
+            (InterfaceTypeSymbol { GenericDefinition: not null } left,
+                InterfaceTypeSymbol { GenericDefinition: not null } right) =>
+                ReferenceEquals(left.GenericDefinition, right.GenericDefinition) &&
+                left.TypeArguments.Length == right.TypeArguments.Length &&
+                left.TypeArguments.Zip(right.TypeArguments).All(pair =>
+                    TypesMatch(pair.First, pair.Second, template, concrete)),
             _ => TypeIdentity.AreSame(expected, actual),
         };
     }
@@ -483,10 +501,14 @@ internal static class GenericConstraintGuarantees
 {
     private static readonly TemplateConformanceMatcher Templates = new();
 
-    public static bool IsGuaranteed(GenericParameterSymbol argument, GenericConstraintSymbol required) =>
-        required.Target is TemplateSymbol requiredTemplate
+    public static bool IsGuaranteed(GenericParameterSymbol argument, GenericConstraintSymbol required,
+        Func<TypeSymbol, TypeSymbol>? substitute = null)
+    {
+        required = Substitute(required, substitute);
+        return required.Target is TemplateSymbol requiredTemplate
             ? Templates.MissingRequirements(argument, requiredTemplate).IsEmpty
             : argument.Constraints.Any(available => IsGuaranteeCompatible(available, required));
+    }
 
     public static string GetFailureDetail(GenericParameterSymbol argument, GenericConstraintSymbol required)
     {
@@ -518,6 +540,16 @@ internal static class GenericConstraintGuarantees
             if (TypeIdentity.AreSame(current, target)) return true;
         return false;
     }
+
+    internal static GenericConstraintSymbol Substitute(GenericConstraintSymbol constraint,
+        Func<TypeSymbol, TypeSymbol>? substitute)
+    {
+        if (substitute is null || constraint.Target is not TypeSymbol type) return constraint;
+        TypeSymbol target = substitute(type);
+        return TypeIdentity.AreSame(target, type)
+            ? constraint
+            : new GenericConstraintSymbol(constraint.Kind, target, constraint.Origin);
+    }
 }
 
 public sealed class GenericConstraintValidator
@@ -528,12 +560,17 @@ public sealed class GenericConstraintValidator
         _templates = templates ?? new TemplateConformanceMatcher();
 
     public GenericConstraintValidationResult Validate(GenericParameterSymbol parameter, TypeSymbol concrete)
+        => Validate(parameter, concrete, null);
+
+    internal GenericConstraintValidationResult Validate(GenericParameterSymbol parameter, TypeSymbol concrete,
+        Func<TypeSymbol, TypeSymbol>? substitute)
     {
         ArgumentNullException.ThrowIfNull(parameter);
         ArgumentNullException.ThrowIfNull(concrete);
         var failures = ImmutableArray.CreateBuilder<GenericConstraintFailure>();
-        foreach (GenericConstraintSymbol constraint in parameter.Constraints)
+        foreach (GenericConstraintSymbol sourceConstraint in parameter.Constraints)
         {
+            GenericConstraintSymbol constraint = GenericConstraintGuarantees.Substitute(sourceConstraint, substitute);
             switch (constraint.Kind)
             {
                 case GenericConstraintKind.BaseStruct when constraint.Target is StructTypeSymbol required:
