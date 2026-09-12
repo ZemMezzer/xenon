@@ -124,6 +124,9 @@ public sealed class NativeLinkerTests
     private delegate nint Int32AddressDelegate(int value);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate nint NativeSizePairAddressDelegate(nuint first, nuint second);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void AddressVoidDelegate(nint value);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -1783,7 +1786,7 @@ public sealed class NativeLinkerTests
                 {
                     Item* raw = new Item(worker, iteration);
                     Check(raw->Marker == 1 && raw->Worker == worker && raw->Sequence == iteration);
-                    free(raw);
+                    delete(raw);
 
                     int length = (iteration & 15) + 1;
                     Item[] items = new Item[length];
@@ -1794,13 +1797,13 @@ public sealed class NativeLinkerTests
                         items[index].Sequence = iteration + index;
                         Check(items[index].Worker == worker && items[index].Sequence == iteration + index);
                     }
-                    free(items);
+                    delete(items);
 
                     int[] values = new int[length];
                     Check(values[0] == 0 && values[length - 1] == 0);
                     for (int index = 0; index < length; index++) values[index] = worker + iteration + index;
                     Check(values[length - 1] == worker + iteration + length - 1);
-                    free(values);
+                    delete(values);
 
                     {
                         unique<Item> owned = new Item(worker, iteration);
@@ -1824,7 +1827,7 @@ public sealed class NativeLinkerTests
             }
 
             export Item* Allocate(int token) { return new Item(token, token); }
-            export void Release(Item* value) { free(value); }
+            export void Release(Item* value) { delete(value); }
             export int Created() { return Counters.Created; }
             export int Destroyed() { return Counters.Destroyed; }
             export int Failures() { return Counters.Failures; }
@@ -3189,7 +3192,7 @@ public sealed class NativeLinkerTests
                 Globals.Counters[index + 1]++;
             }
             export int ReadCounter(int index) { return Globals.Counters[index]; }
-            export void FreeCounters() { free(Globals.Counters); }
+            export void FreeCounters() { delete(Globals.Counters); }
 
             export void SetupStates(int count) { Globals.States = new atomic<State>[count]; }
             export int IsDefaultState(int index)
@@ -3213,7 +3216,7 @@ public sealed class NativeLinkerTests
                 if (value.First != value.Fourth) return 0;
                 return 1;
             }
-            export void FreeStates() { free(Globals.States); }
+            export void FreeStates() { delete(Globals.States); }
 
             export void SetupOwned(int count)
             {
@@ -3224,7 +3227,7 @@ public sealed class NativeLinkerTests
             }
             export int FreeOwned()
             {
-                free(Globals.Owned);
+                delete(Globals.Owned);
                 return Globals.Destroyed;
             }
             export int StackOwned(int count)
@@ -3276,8 +3279,8 @@ public sealed class NativeLinkerTests
             }
             export void FreeHandles()
             {
-                free(Globals.FirstHandle);
-                free(Globals.SecondHandle);
+                delete(Globals.FirstHandle);
+                delete(Globals.SecondHandle);
             }
 
             export int AtomicStateSize() { return cast<int>(sizeof(atomic<State>)); }
@@ -3660,7 +3663,7 @@ public sealed class NativeLinkerTests
                 Vector3 stack = Vector3 { 10, 12, 20 };
                 Vector3* heap = new Vector3 { stack.X, stack.Y, stack.Z };
                 int result = heap->X + heap->Y + heap->Z;
-                free(heap);
+                delete(heap);
                 return result;
             }
             """, "heap-struct.xe"));
@@ -4709,7 +4712,7 @@ public sealed class NativeLinkerTests
             {
                 public Payload* Memory;
                 public void Dispose() { Release(); }
-                void Release() { free(Memory); Memory = null; }
+                void Release() { delete(Memory); Memory = null; }
             }
             struct Base
             {
@@ -4785,7 +4788,7 @@ public sealed class NativeLinkerTests
                 Base* heap = new Base();
                 heap->Reset();
                 int result = heap->Value;
-                free(heap);
+                delete(heap);
                 if (result != 10) return 6;
                 return 42;
             }
@@ -4889,7 +4892,7 @@ public sealed class NativeLinkerTests
                 heap[0].Pointer = &State.Value;
                 heap[1].Pointer = &output;
                 *heap[1].Pointer = 10;
-                free(heap);
+                delete(heap);
                 if (output != 10 || State.Value != 7) return 2;
                 Data[,] stack = Data[2, 2];
                 stack[0, 1].Pointer = &State.Value;
@@ -5053,7 +5056,7 @@ public sealed class NativeLinkerTests
                 alias.Destination = output;
                 *alias.Destination += 1;
                 Pair* heap = new Pair(&State.Value, output, input);
-                free(heap);
+                delete(heap);
                 {
                     Pair[] items = Pair[2];
                     items[0].Hidden = &State.Value;
@@ -5113,7 +5116,7 @@ public sealed class NativeLinkerTests
                 if (initial.Inner.Value != 0 || initial.Inner.Pointer != null) return 1;
                 Data* heap = new Data();
                 if (heap->Inner.Value != 0 || heap->Inner.Pointer != null) return 2;
-                free(heap);
+                delete(heap);
                 int output = 0;
                 Data result = Build(&output);
                 Data& alias = result;
@@ -5137,14 +5140,14 @@ public sealed class NativeLinkerTests
                 public Resource(int* trace, int id) { Trace = trace; Id = id; }
                 public ~Resource() { *Trace = *Trace * 10 + Id; }
             }
-            void readonly Destroy(Resource* resource) { free(resource); }
+            void readonly Destroy(Resource* resource) { delete(resource); }
             int readonly Run()
             {
                 int trace = 0;
                 Resource* resource = new Resource(&trace, 4);
                 Destroy(resource);
                 resource = new Resource(&trace, 2);
-                free(resource);
+                delete(resource);
                 if (trace != 42) return 1;
                 trace = 0;
                 {
@@ -5161,7 +5164,7 @@ public sealed class NativeLinkerTests
                 values[0].Id = 2;
                 values[1].Trace = &trace;
                 values[1].Id = 4;
-                free(values);
+                delete(values);
                 return trace;
             }
             int Main() { return Run(); }
@@ -5193,7 +5196,7 @@ public sealed class NativeLinkerTests
                 }
             }
             void readonly Set(IValue& value) { value.Current = 42; }
-            void readonly Destroy(Base* value) { free(value); }
+            void readonly Destroy(Base* value) { delete(value); }
             int readonly Run()
             {
                 int trace = 0;
@@ -5365,7 +5368,7 @@ public sealed class NativeLinkerTests
                 int[][,] matrices = new int[2][,];
                 matrices[0] = matrix;
                 int[,] alias = matrices[0];
-                free(matrices);
+                delete(matrices);
                 if (alias[1,2] != 5) return 2;
                 int[][] rows = new int[2][];
                 rows[0] = new int[3]; rows[1] = new int[5]; rows[1][4] = 7;
@@ -5373,7 +5376,7 @@ public sealed class NativeLinkerTests
                 if (stack.Rank != 2 || stack.GetLength(1) != 2) return 3;
                 int[] empty = new int[0];
                 int result = Inspect(alias) + rows.Length + rows[0].Length + rows[1].Length + rows[1][4] + stack.Length + empty.Length + alias[1,2];
-                free(empty); free(alias); free(rows[0]); free(rows[1]); free(rows);
+                delete(empty); delete(alias); delete(rows[0]); delete(rows[1]); delete(rows);
                 return result + 3;
             }
             """, optimization));
@@ -5397,15 +5400,15 @@ public sealed class NativeLinkerTests
                 Counter[,] values = new Counter[2, 2];
                 if (values[0,0].Id != 7) return 1;
                 values[0,0].Id = 1; values[0,1].Id = 2; values[1,0].Id = 3; values[1,1].Id = 4;
-                free(values);
-                Counter[] empty = new Counter[0]; free(empty);
+                delete(values);
+                Counter[] empty = new Counter[0]; delete(empty);
                 if (Counter.Trace != 4321 || Counter.Count != 4) return 2;
                 Counter[][] nested = new Counter[1][];
                 Counter[] child = new Counter[1]; child[0].Id = 5;
                 nested[0] = child;
-                free(nested);
+                delete(nested);
                 if (Counter.Count != 4) return 3;
-                free(child);
+                delete(child);
                 if (Counter.Trace != 43215 || Counter.Count != 5) return 4;
                 return 42;
             }
@@ -5437,7 +5440,7 @@ public sealed class NativeLinkerTests
                 Grid grid = Grid {};
                 if (grid[{{arguments}}] != 15) return 3;
                 grid[{{arguments}}] = 12;
-                free(deep); free(values); return result;
+                delete(deep); delete(values); return result;
             }
             """, 2));
     }
@@ -5455,17 +5458,17 @@ public sealed class NativeLinkerTests
             {
                 int[,,] empty = new int[2147483647,2147483647,0];
                 if (empty.Length != 0 || empty.GetLength(1) != 2147483647) return 1;
-                free(empty);
+                delete(empty);
                 int[,] values = new int[Counter.Next(), Counter.Next()];
                 if (values.Length != 2 || Counter.Value != 2) return 2;
                 Counter.Value = -1;
                 values[Counter.Next(), Counter.Next()] = 42;
                 if (Counter.Value != 1) return 3;
                 int result = values[0,1];
-                free(values);
+                delete(values);
                 int[][] nested = new int[1][];
-                free(nested[0]);
-                free(nested);
+                delete(nested[0]);
+                delete(nested);
                 return result;
             }
             """, 2));
@@ -5546,7 +5549,7 @@ public sealed class NativeLinkerTests
             {
                 Item[] values = Item[1]; values[0].Id = 8;
                 values = new Item[1]; values[0].Id = 9;
-                free(values);
+                delete(values);
             }
             int Main()
             {
@@ -5746,7 +5749,7 @@ public sealed class NativeLinkerTests
                 Base* stackFirst = &stack[0];
                 if (&first[1] != &heap[1] || first[1].Value != 20 || &stackFirst[1] != &stack[1]) return 9;
                 if (heap[0].Value != 10 || stack[0].Value != 11 || stack[1].Value != 21) return 10;
-                free(heap);
+                delete(heap);
                 PaddedChild padded = PaddedChild { cast<long>(9), cast<byte>(7), cast<byte>(5) };
                 Padded* paddedBase = &padded;
                 if (offsetof(PaddedChild, Tail) != sizeof(Padded)) return 11;
@@ -5835,7 +5838,7 @@ public sealed class NativeLinkerTests
                 IValue arrayView = *second;
                 if (arrayView.Read() != 12 || cast<int>(heap[1].Guard) != 123) return 9;
                 State.Trace = 0;
-                free(heap);
+                delete(heap);
                 if (State.Trace != 2121) return 10;
                 State.Trace = 0;
                 { Leaf[] stack = Leaf[1]; IValue stackView = stack[0]; if (stackView.Read() != 12) return 11; }
@@ -5844,12 +5847,12 @@ public sealed class NativeLinkerTests
                 Base* constructedBase = constructed;
                 IValue constructedView = *constructedBase;
                 if (constructedBase->Read() != 42 || constructedView.Read() != 42 || cast<int>(constructedBase->Guard) != 123) return 13;
-                free(constructed);
+                delete(constructed);
                 Base* allocated = new Leaf();
                 IValue allocatedView = *allocated;
                 if (allocatedView.Read() != 12) return 14;
                 State.Trace = 0;
-                free(allocated);
+                delete(allocated);
                 if (State.Trace != 21) return 15;
                 PlainDerived plain = PlainDerived();
                 Plain* plainBase = &plain;
@@ -5933,14 +5936,14 @@ public sealed class NativeLinkerTests
                 Implicit a = Implicit(); Explicit b = Explicit(); Third c = Third();
                 if (a.Value != 42 || b.Value != 42 || c.Value != 42) return 1;
                 if (a.Extra != 0 || b.Extra != 0 || c.Extra != 0) return 5;
-                Base* nil = null; free(nil);
-                free(null);
-                Plain* plain = null; free(plain);
-                free(State.Empty);
+                Base* nil = null; delete(nil);
+                delete(null);
+                Plain* plain = null; delete(plain);
+                delete(State.Empty);
                 if (State.Calls != 0) return 2;
                 Third* live = new Third();
                 if (live->Value != 42) return 3;
-                Base* up = live; free(up);
+                Base* up = live; delete(up);
                 if (State.Calls != 1) return 4;
                 return 42;
             }
@@ -6106,7 +6109,7 @@ public sealed class NativeLinkerTests
                 int[] a = new int[0]; int[,] b = new int[0,0]; int[,,] d = new int[0,0,0];
                 int[][] e = new int[0][]; int[][,] f = new int[0][,]; int[,][] g = new int[0,0][];
                 int sum = c[a] + c[b] + c[d] + c[e] + c[f] + c[g];
-                free(a); free(b); free(d); free(e); free(f); free(g);
+                delete(a); delete(b); delete(d); delete(e); delete(f); delete(g);
                 return sum * 2;
             }
             """, optimization));
@@ -6177,13 +6180,13 @@ public sealed class NativeLinkerTests
                 Log.Calls = 0;
                 C* heap = new C(); A* pointer = heap;
                 if (Log.Calls != 337 || pointer->Read() != 7) return 3;
-                free(pointer);
+                delete(pointer);
                 if (Log.Calls != 337788 || Log.Interfaces != 8) return 4;
                 Log.Calls = 0;
-                A* direct = new A(); free(direct);
+                A* direct = new A(); delete(direct);
                 if (Log.Calls != 11 || Log.Properties != 21 || Log.Interfaces != 1) return 5;
                 Log.Calls = 0;
-                C[] array = new C[2]; free(array);
+                C[] array = new C[2]; delete(array);
                 if (Log.Calls != 388388) return 6;
                 Log.Calls = 0;
                 { C[] local = C[2]; }
@@ -6217,7 +6220,7 @@ public sealed class NativeLinkerTests
             {
                 for (int mode = 0; mode < 2; mode++)
                 {
-                    Log.Value = 0; C* c = new C(mode); A* a = c; free(a);
+                    Log.Value = 0; C* c = new C(mode); A* a = c; delete(a);
                     if (Log.Value != 3421) return 1;
                 }
                 return 42;
@@ -6240,7 +6243,7 @@ public sealed class NativeLinkerTests
             {
                 public static int Count;
                 private ~Resource() { Resource.Count += 1; }
-                public static void Destroy(Resource* p) { free(p); }
+                public static void Destroy(Resource* p) { delete(p); }
             }
             int Main()
             {
@@ -6266,14 +6269,14 @@ public sealed class NativeLinkerTests
     {
         Assert.Equal(42, RunIterationFourProgram("""
             struct Item { public static int Count; public ~Item() { Item.Count += 1; } }
-            bool Cleanup(Item* p) { free(p); return true; }
+            bool Cleanup(Item* p) { delete(p); return true; }
             void Check(bool c)
             {
                 bool a = c && (Item[1].Length == 1);
                 bool b = c || (Item[1].Length == 1);
                 Item* p = new Item();
                 bool freed = c && Cleanup(p);
-                if (!c) free(p);
+                if (!c) delete(p);
             }
             int Main()
             {
@@ -6433,7 +6436,7 @@ public sealed class NativeLinkerTests
                 int x = 1; x += (x = 10); if (x != 11) return 11;
                 Log.Trace = 0; a[Index()] = grid[Index(),Index()] = Rhs(); if (Log.Trace != 1112) return 12;
                 Log.Trace = 0; int old = a[Index()]++; if (Log.Trace != 1 || old != 7 || a[0] != 8) return 13;
-                free(a); free(grid); return 42;
+                delete(a); delete(grid); return 42;
             }
             """, optimization));
     }
@@ -6513,7 +6516,7 @@ public sealed class NativeLinkerTests
                 public static void Run() { R local = R(); }
             }
             struct Item { public int Value; }
-            void readonly Destroy(Item* readonly pointer) { free(pointer); }
+            void readonly Destroy(Item* readonly pointer) { delete(pointer); }
             int Main() { R.Run(); if (R.Count != 1) return 1; Item* readonly p = new Item(); Destroy(p); return 42; }
             """, optimization));
     }
@@ -6555,7 +6558,7 @@ public sealed class NativeLinkerTests
                 view.Value = 40;
                 C& finalC = *d; if (finalC[2] != 42) return 6; finalC[1] = 43;
                 B& finalB = *d; if (finalB.Value != 42) return 7;
-                free(a); return 42;
+                delete(a); return 42;
             }
             """, optimization));
     }
@@ -6583,11 +6586,11 @@ public sealed class NativeLinkerTests
             struct F : A {}
             int Main()
             {
-                A* p = new E(); free(p); if (Log.Trace != 427) return 1;
+                A* p = new E(); delete(p); if (Log.Trace != 427) return 1;
                 Log.Trace = 0; { E value = E(); } if (Log.Trace != 427) return 2;
                 Log.Trace = 0; { E[] values = E[2]; } if (Log.Trace != 427427) return 3;
                 Log.Trace = 0; p = new F(); if (p->Read() != 1) return 4;
-                free(p); if (Log.Trace != 1) return 5;
+                delete(p); if (Log.Trace != 1) return 5;
                 Log.Trace = 0; { F value = F(); } if (Log.Trace != 1) return 6;
                 return 42;
             }
@@ -6653,7 +6656,7 @@ public sealed class NativeLinkerTests
                     slots[1] = Resource(&destroyed);
                     destruct(slots[0]);
                     destruct(slots[1]);
-                    free(slots);
+                    delete(slots);
 
                     unique<Resource> owned = new Resource(&destroyed);
                     storage<unique<Resource>> uniqueSlot;
@@ -7174,20 +7177,20 @@ public sealed class NativeLinkerTests
 
                 Reset();
                 storage<Resource>* empty = new storage<Resource>();
-                free(empty);
+                delete(empty);
                 if (State.Destructors != 0) return 7;
 
                 Reset();
                 storage<Resource>* initialized = new storage<Resource>();
                 *initialized = Resource();
-                free(initialized);
+                delete(initialized);
                 if (State.Constructors != 1 || State.Destructors != 1) return 8;
 
                 Reset();
                 storage<Resource>* ended = new storage<Resource>();
                 *ended = Resource();
                 destruct(*ended);
-                free(ended);
+                delete(ended);
                 if (State.Constructors != 1 || State.Destructors != 1) return 9;
 
                 Reset();
@@ -7198,7 +7201,7 @@ public sealed class NativeLinkerTests
                 *reused = Resource();
                 Resource* secondAddress = (*reused).Address();
                 if (firstAddress != secondAddress) return 10;
-                free(reused);
+                delete(reused);
                 if (State.Constructors != 2 || State.Destructors != 2) return 11;
 
                 Reset();
@@ -7206,7 +7209,7 @@ public sealed class NativeLinkerTests
                     storage<Resource>* moved = new storage<Resource>();
                     *moved = Resource();
                     Resource value = move *moved;
-                    free(moved);
+                    delete(moved);
                     if (State.Destructors != 0) return 12;
                 }
                 if (State.Destructors != 1) return 13;
@@ -7223,7 +7226,7 @@ public sealed class NativeLinkerTests
                 storage<Resource>[] values = new storage<Resource>[4];
                 values[0] = Resource();
                 values[3] = Resource();
-                free(values);
+                delete(values);
                 if (State.Constructors != 2 || State.Destructors != 2) return 15;
 
                 Reset();
@@ -7264,7 +7267,7 @@ public sealed class NativeLinkerTests
                 reference = Resource();
                 destruct(reference);
                 reference = Resource();
-                free(value);
+                delete(value);
                 if (State.Constructors != 2 || State.Destructors != 2) return 2;
                 return 0;
             }
@@ -7292,7 +7295,7 @@ public sealed class NativeLinkerTests
                     destruct(pointer[index]);
                     pointer[index] = Resource();
                     Resource value = move pointer[index];
-                    free(pointer);
+                    delete(pointer);
                     if (State.Constructors != 2 || State.Destructors != 1) return 1;
                 }
                 if (State.Constructors != 2 || State.Destructors != 2) return 2;
@@ -7420,10 +7423,10 @@ public sealed class NativeLinkerTests
                 floating = nanLeft;
                 if (floating : nanRight --> Floating { 2.0f }) return 13;
 
-                free(firstArray);
-                free(otherArray);
-                free(firstPointer);
-                free(otherPointer);
+                delete(firstArray);
+                delete(otherArray);
+                delete(firstPointer);
+                delete(otherPointer);
                 return 42;
             }
             """, optimization);
@@ -7834,6 +7837,210 @@ public sealed class NativeLinkerTests
             """, optimization);
 
         Assert.Equal(42, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RawPointerStorageSupportsPlacementMoveDestructFreeAndDelete(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State { public static int Destructors; }
+            struct Resource
+            {
+                public int Value;
+                public Resource(int value) { Value = value; }
+                public ~Resource() { State.Destructors++; }
+            }
+
+            int Main()
+            {
+                Resource* memoryBlock = cast<Resource*>(malloc(sizeof(Resource) * cast<nuint>(2), alignof(Resource)));
+                if (memoryBlock == null) return 1;
+                memoryBlock[0] = Resource(20);
+                memoryBlock[1] = Resource(22);
+                Resource moved = move memoryBlock[0];
+                if (moved.Value + memoryBlock[1].Value != 42) return 2;
+                destruct(memoryBlock[1]);
+                free(memoryBlock);
+                if (State.Destructors != 1) return 3;
+                destruct(moved);
+                if (State.Destructors != 2) return 4;
+
+                Resource* skipped = cast<Resource*>(malloc(sizeof(Resource)));
+                if (skipped == null) return 5;
+                *skipped = Resource(7);
+                free(skipped);
+                if (State.Destructors != 2) return 6;
+
+                Resource* deleted = new Resource(9);
+                delete(deleted);
+                if (State.Destructors != 3) return 7;
+
+                byte* zeroed = cast<byte*>(calloc(32, sizeof(byte)));
+                if (zeroed == null) return 8;
+                for (int i = 0; i < 32; i++) if (zeroed[i] != cast<byte>(0)) return 9;
+                free(zeroed);
+                free(null);
+                delete(null);
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Linker_RawPointerMembersUseNormalReplacementSemantics(int optimization)
+    {
+        Assert.Equal(42, RunIterationFourProgram("""
+            struct State
+            {
+                public static int Destructors;
+                public static int Sum;
+            }
+            struct Resource
+            {
+                public int Id;
+                public Resource(int id) { Id = id; }
+                public ~Resource()
+                {
+                    State.Destructors++;
+                    State.Sum += Id;
+                }
+            }
+            struct Holder
+            {
+                public Resource Value;
+                public Holder(int id) { Value = Resource(id); }
+            }
+            struct Inner
+            {
+                public Resource Value;
+                public Inner(int id) { Value = Resource(id); }
+            }
+            struct Outer
+            {
+                public Inner InnerValue;
+                public Outer(int id) { InnerValue = Inner(id); }
+            }
+            struct UniqueHolder
+            {
+                public unique<Resource> Value;
+                public UniqueHolder(int id) { Value = new Resource(id); }
+            }
+            struct SharedHolder
+            {
+                public shared<Resource> Value;
+                public SharedHolder(shared<Resource> value) { Value = value; }
+            }
+
+            int Main()
+            {
+                Holder* arrow = new Holder(1);
+                arrow->Value = Resource(2);
+                if (State.Destructors != 1 || State.Sum != 1) return 1;
+                delete(arrow);
+                if (State.Destructors != 2 || State.Sum != 3) return 2;
+
+                Holder* dereferenced = new Holder(3);
+                (*dereferenced).Value = Resource(4);
+                if (State.Destructors != 3 || State.Sum != 6) return 3;
+                delete(dereferenced);
+                if (State.Destructors != 4 || State.Sum != 10) return 4;
+
+                Holder* indexed = cast<Holder*>(malloc(sizeof(Holder), alignof(Holder)));
+                if (indexed == null) return 5;
+                *indexed = Holder(5);
+                if (State.Destructors != 4 || State.Sum != 10) return 6;
+                indexed[0].Value = Resource(6);
+                if (State.Destructors != 5 || State.Sum != 15) return 7;
+                destruct(indexed[0]);
+                free(indexed);
+                if (State.Destructors != 6 || State.Sum != 21) return 8;
+
+                Outer* nested = new Outer(7);
+                nested->InnerValue.Value = Resource(8);
+                if (State.Destructors != 7 || State.Sum != 28) return 9;
+                delete(nested);
+                if (State.Destructors != 8 || State.Sum != 36) return 10;
+
+                UniqueHolder* uniqueHolder = new UniqueHolder(9);
+                unique<Resource> uniqueReplacement = new Resource(10);
+                uniqueHolder->Value = move uniqueReplacement;
+                if (State.Destructors != 9 || State.Sum != 45) return 11;
+                delete(uniqueHolder);
+                if (State.Destructors != 10 || State.Sum != 55) return 12;
+
+                shared<Resource> first = new Resource(11);
+                SharedHolder* sharedHolder = new SharedHolder(first);
+                shared<Resource> sharedReplacement = new Resource(12);
+                sharedHolder->Value = sharedReplacement;
+                if (State.Destructors != 10 || State.Sum != 55) return 13;
+                first = null;
+                if (State.Destructors != 11 || State.Sum != 66) return 14;
+                delete(sharedHolder);
+                if (State.Destructors != 11 || State.Sum != 66) return 15;
+                sharedReplacement = null;
+                if (State.Destructors != 12 || State.Sum != 78) return 16;
+
+                return 42;
+            }
+            """, optimization));
+    }
+
+    [Fact]
+    public void Linker_RawAllocatorHonorsAlignmentZeroingOverflowAndNullFree()
+    {
+        Compilation compilation = Compilation.Create(SourceText.From("""
+            namespace RawMemory;
+            export void* Allocate(nuint size, nuint alignment) { return malloc(size, alignment); }
+            export void* AllocateZeroed(nuint count, nuint size) { return calloc(count, size); }
+            export void Release(void* memory) { free(memory); }
+            """, "raw-memory.xe"));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        string directory = CreateTemporaryDirectory();
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost(positionIndependentCode: true);
+        try
+        {
+            string objectPath = Path.Combine(directory, "raw-memory" + LlvmTargetPlatform.GetObjectFileExtension(target.Triple));
+            LlvmObjectFile objectFile = new LlvmObjectEmitter().Emit(compilation, objectPath, target, "raw-memory");
+            string libraryPath = XenonBuildPaths.GetSharedLibraryPath(directory, "raw-memory", "debug", target.Triple);
+            LinkedNativeArtifact library = new NativeLinker().LinkSharedLibrary(
+                objectFile.Path, libraryPath, target.Triple,
+                new NativeLinkOptions(ExportedSymbols: ["RawMemory_Allocate", "RawMemory_AllocateZeroed", "RawMemory_Release"]),
+                XenonBuildPaths.GetImportLibraryPath(directory, "raw-memory", "debug", target.Triple));
+            nint handle = NativeLibrary.Load(library.Path);
+            try
+            {
+                NativeSizePairAddressDelegate allocate = LoadDelegate<NativeSizePairAddressDelegate>(handle, "RawMemory_Allocate");
+                NativeSizePairAddressDelegate zero = LoadDelegate<NativeSizePairAddressDelegate>(handle, "RawMemory_AllocateZeroed");
+                AddressVoidDelegate release = LoadDelegate<AddressVoidDelegate>(handle, "RawMemory_Release");
+
+                nint aligned = allocate(257, 64);
+                Assert.NotEqual(0, aligned);
+                Assert.Equal(0UL, unchecked((ulong)aligned) % 64UL);
+                release(aligned);
+
+                nint zeroed = zero(32, 2);
+                Assert.NotEqual(0, zeroed);
+                for (int index = 0; index < 64; index++) Assert.Equal(0, Marshal.ReadByte(zeroed, index));
+                release(zeroed);
+
+                Assert.Equal(0, allocate(nuint.MaxValue, 16));
+                Assert.Equal(0, allocate(8, 3));
+                Assert.Equal(0, zero(nuint.MaxValue, 2));
+                release(0);
+            }
+            finally
+            {
+                NativeLibrary.Free(handle);
+            }
+        }
+        finally
+        {
+            DeleteIterationDirectory(directory);
+        }
     }
 
     private static int RunIterationFourProgram(string source, int optimization)

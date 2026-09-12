@@ -394,7 +394,7 @@ public sealed class SemanticAnalyzerTests
                 Holder holder = Holder { null };
                 Box box = Box(null);
                 Box* heap = new Box(null);
-                free(heap);
+                delete(heap);
                 if (equals && !notEquals)
                     return 0;
 
@@ -727,7 +727,7 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Fact]
-    public void Analyzer_BindsConstructorsPositionalConstructionDestructorAndFree()
+    public void Analyzer_BindsConstructorsPositionalConstructionDestructorAndDelete()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -756,7 +756,7 @@ public sealed class SemanticAnalyzerTests
                 Vector3 positional = Vector3 { x, y, z };
                 Vector3 value = Vector3(x, y, z);
                 Vector3* heap = new Vector3(x, y, z);
-                free(heap);
+                delete(heap);
             }
             """);
 
@@ -774,9 +774,9 @@ public sealed class SemanticAnalyzerTests
         var allocation = Assert.IsType<BoundNewExpression>(
             Assert.IsType<BoundVariableDeclarationStatement>(function.Body.Statements[2]).Initializer);
         Assert.NotNull(allocation.Constructor);
-        var free = Assert.IsType<BoundFreeExpression>(
+        var deletion = Assert.IsType<BoundDeleteExpression>(
             Assert.IsType<BoundExpressionStatement>(function.Body.Statements[3]).Expression);
-        Assert.Same(vector.Destructor, free.Destructor);
+        Assert.Same(vector.Destructor, deletion.Destructor);
     }
 
     [Fact]
@@ -1446,7 +1446,7 @@ public sealed class SemanticAnalyzerTests
                 int[] values = new int[10];
                 values[0] = 1;
                 Consume(values);
-                free(values);
+                delete(values);
             }
             """);
 
@@ -2543,7 +2543,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Holder { public int* Pointer; } void readonly Local(int* pointer) { Holder value = Holder { pointer }; *value.Pointer = 10; }")]
     [InlineData("int readonly Local() { int[] a = int[2]; a[0] = 10; a[1] = 20; return a[0] + a[1]; }")]
     [InlineData("int[] readonly Create() { int[] a = new int[2]; a[0] = 10; return a; }")]
-    [InlineData("void readonly Heap() { int[] a = new int[2]; a[0] = 10; free(a); }")]
+    [InlineData("void readonly Heap() { int[] a = new int[2]; a[0] = 10; delete(a); }")]
     [InlineData("int readonly Initial() { return 3; } struct Item { public int Value = Initial(); } int readonly Local() { Item item = Item {}; return item.Value; }")]
     [InlineData("struct Value { public int readonly Read() { return 10; } public int Read() { State.Value++; return 20; } } int readonly Use(Value& value) { return value.Read(); }")]
     [InlineData("struct Value { public static int readonly Read() { return 10; } } int readonly Use() { return Value.Read(); }")]
@@ -2554,16 +2554,16 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Data { public int* Pointer; } void readonly Test(int& output) { Data value = Data(); value.Pointer = &output; *value.Pointer = 10; }")]
     [InlineData("struct Data { public int* Pointer; } void readonly Test(Data* input) { Data local = Data(); local.Pointer = input->Pointer; *local.Pointer = 10; }")]
     [InlineData("struct Data { public int* Pointer; } void readonly Test(int* input) { Data[] local = Data[2]; local[0].Pointer = input; *local[0].Pointer = 10; }")]
-    [InlineData("void readonly Destroy(int* input) { free(input); }")]
+    [InlineData("void readonly Destroy(int* input) { delete(input); }")]
     [InlineData("struct Data { public int Value; public Data() { Value = 10; } } void readonly Test() { Data data = Data(); }")]
     [InlineData("struct Data { public int* Pointer; public Data(int* input) { Pointer = input; } } void readonly Test(int* output) { Data data = Data(output); *data.Pointer = 10; }")]
     [InlineData("struct Data { public int* Pointer; public Data(int* input) { Pointer = input; } } int readonly Test() { Data data = Data(State.Pointer); return *data.Pointer; }")]
     [InlineData("struct Data { public int Value = 10; public Data() { Value += 2; } } int readonly Test() { Data data = Data(); return data.Value; }")]
     [InlineData("struct Base { public int Value; public Base() { Value = 10; } } struct Data : Base { public Data() : base() { Value++; } } void readonly Test() { Data data = Data(); }")]
-    [InlineData("struct Data { public int* Pointer; public ~Data() { *Pointer += 1; } } void readonly Destroy(Data* input) { free(input); }")]
-    [InlineData("struct Data { public int* Pointer; public Data(int* output) { Pointer = output; } public ~Data() { *Pointer += 1; } } void readonly Test(int* output) { Data* value = new Data(output); free(value); }")]
+    [InlineData("struct Data { public int* Pointer; public ~Data() { *Pointer += 1; } } void readonly Destroy(Data* input) { delete(input); }")]
+    [InlineData("struct Data { public int* Pointer; public Data(int* output) { Pointer = output; } public ~Data() { *Pointer += 1; } } void readonly Test(int* output) { Data* value = new Data(output); delete(value); }")]
     [InlineData("struct Data { public int* Pointer; public ~Data() { *Pointer += 1; } } void readonly Test(int* output) { Data[] values = Data[2]; values[0].Pointer = output; values[1].Pointer = output; }")]
-    [InlineData("struct Data { public int Value; public ~Data() { Value = 0; } } void readonly Test() { Data[] values = new Data[2]; free(values); }")]
+    [InlineData("struct Data { public int Value; public ~Data() { Value = 0; } } void readonly Test() { Data[] values = new Data[2]; delete(values); }")]
     [InlineData("struct Data { public int Value; public int Current { get { return Value; } set { Value = value; } } } int readonly Test() { Data data = Data(); data.Current = 10; data.Current += 2; return data.Current; }")]
     [InlineData("struct Data { public int Value; public int this[int x, int y] { get { return Value; } set { Value = value + x + y; } } } void readonly Test(Data& data) { data[2, 3] = 10; data[2, 3] += 1; }")]
     [InlineData("struct Data { public int Value; public int Current { get { return Value; } set { Value = value; } } } void readonly Test(Data* data) { data->Current = 10; }")]
@@ -2577,8 +2577,8 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Other { public int Current { set { State.Value = value; } } } interface IValue { int Current { set; } } struct Data : IValue { public int Value; public int Current { set { Value = value; } } } void readonly Test(IValue& data) { data.Current = 10; }")]
     [InlineData("struct Pair { public int* Hidden; public int* Output; public Pair(int* hidden, int* output) { Hidden = hidden; Output = output; } } void readonly Test(int* output) { Pair value = Pair(State.Pointer, output); *value.Output = 10; }")]
     [InlineData("struct Pair { public int* Hidden = State.Pointer; public int* Output; } void readonly Test(int* output) { Pair value = Pair { State.Pointer, output }; *value.Output = 10; }")]
-    [InlineData("struct Pair { public int* Hidden; public int* Output; public Pair(int* hidden, int* output) { Hidden = hidden; Output = output; } } void readonly Test(int* output) { Pair* value = new Pair(State.Pointer, output); *value->Output = 10; free(value); }")]
-    [InlineData("struct Pair { public int* Hidden; public int* Output; public ~Pair() { *Output += 1; } } void readonly Test(int* output) { Pair* value = new Pair { State.Pointer, output }; free(value); }")]
+    [InlineData("struct Pair { public int* Hidden; public int* Output; public Pair(int* hidden, int* output) { Hidden = hidden; Output = output; } } void readonly Test(int* output) { Pair* value = new Pair(State.Pointer, output); *value->Output = 10; delete(value); }")]
+    [InlineData("struct Pair { public int* Hidden; public int* Output; public ~Pair() { *Output += 1; } } void readonly Test(int* output) { Pair* value = new Pair { State.Pointer, output }; delete(value); }")]
     [InlineData("struct Pair { public int* Hidden; public int* Output; public ~Pair() { *Output += 1; } } void readonly Test(int* output) { Pair[] values = Pair[1]; values[0].Hidden = State.Pointer; values[0].Output = output; }")]
     [InlineData("struct Base { public int* Hidden; } struct Pair : Base { public int* Output; } void readonly Test(int* output) { Pair value = Pair(); value.Hidden = State.Pointer; value.Output = output; Pair copy = value; *copy.Output = 10; }")]
     [InlineData("struct Leaf { public int* Pointer; } struct Node { public Leaf A; public Leaf B; } struct Tree { public Node A; public Node B; } void readonly Test(int* output) { Tree tree = Tree(); tree.A.A.Pointer = State.Pointer; tree.A.B.Pointer = output; Tree copy = tree; *copy.A.B.Pointer = 10; }")]
@@ -2634,27 +2634,27 @@ public sealed class SemanticAnalyzerTests
     [InlineData("void readonly Test(int*** output) { int* local = State.Pointer; *output = &local; }", "cannot store a mutable capability")]
     [InlineData("int*& readonly Identity(int*& value) { return value; } void readonly Test(int* input) { int* local = input; Identity(local) = State.Pointer; *local = 10; }", "cannot mutate hidden state")]
     [InlineData("int** readonly Identity(int** value) { return value; } void readonly Test(int* input) { int* local = input; *Identity(&local) = State.Pointer; *local = 10; }", "cannot mutate hidden state")]
-    [InlineData("void readonly Test() { free(State.Pointer); }", "cannot mutate hidden state")]
-    [InlineData("void readonly Test(readonly int* input) { free(input); }", "cannot free memory through a readonly pointer")]
+    [InlineData("void readonly Test() { delete(State.Pointer); }", "cannot mutate hidden state")]
+    [InlineData("void readonly Test(readonly int* input) { delete(input); }", "cannot delete through a readonly pointer")]
     [InlineData("void Effectful() {} void readonly Test() { Effectful(); }", "cannot call non-readonly")]
     [InlineData("extern void External(); void readonly Test() { External(); }", "cannot call non-readonly")]
     [InlineData("struct Value { public static void Effectful() {} } void readonly Test() { Value.Effectful(); }", "cannot call non-readonly")]
     [InlineData("interface IValue { void Effectful(); } void readonly Test(IValue& value) { value.Effectful(); }", "cannot verify effects of member 'Effectful' without an implementation")]
     [InlineData("struct Value { public int Current { set { State.Value = value; } } } void readonly Test(Value& value) { value.Current = 10; }", "cannot mutate hidden state")]
-    [InlineData("struct Value { public ~Value() { State.Value++; } } void readonly Test(Value* value) { free(value); }", "cannot mutate hidden state")]
+    [InlineData("struct Value { public ~Value() { State.Value++; } } void readonly Test(Value* value) { delete(value); }", "cannot mutate hidden state")]
     [InlineData("struct Value { public ~Value() { State.Value++; } } void readonly Test() { Value[] values = Value[1]; }", "cannot mutate hidden state")]
     [InlineData("int Effectful() { return 1; } struct Value { public int Field = Effectful(); } void readonly Test() { Value[] values = Value[1]; }", "cannot call non-readonly")]
     [InlineData("struct Value { public int Field = (State.Value = 1); } void readonly Test() { Value value = Value {}; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; } void readonly Test() { Data data = Data(); data.Pointer = State.Pointer; *data.Pointer = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; public void readonly Test() { Data data = Data(); data.Pointer = Pointer; *data.Pointer = 10; } }", "cannot mutate hidden state")]
     [InlineData("struct Inner { public int* Pointer; } struct Outer { public Inner Inner; } void readonly Test() { Outer local = Outer(); local.Inner.Pointer = &State.Value; Outer& alias = local; *alias.Inner.Pointer = 10; }", "cannot mutate hidden state")]
-    [InlineData("struct Data { public int* Pointer; } void readonly Test() { Data data = Data(); data.Pointer = State.Pointer; free(data.Pointer); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Pointer; } void readonly Test() { Data data = Data(); data.Pointer = State.Pointer; delete(data.Pointer); }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int Value; public Data() { State.Value++; } } void readonly Test() { Data data = Data(); }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int Value = (State.Value = 10); public Data() {} } void readonly Test() { Data data = Data(); }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; public Data(int* input) { Pointer = input; } } void readonly Test() { Data data = Data(State.Pointer); *data.Pointer = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; public Data() { Pointer = State.Pointer; } } void readonly Test() { Data data = Data(); *data.Pointer = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public Data(int* input) { *input = 10; } } void readonly Test() { Data data = Data(State.Pointer); }", "cannot mutate hidden state")]
-    [InlineData("struct Data { public int* Pointer; public ~Data() { *Pointer = 10; } } void readonly Test() { Data* data = new Data(); data->Pointer = State.Pointer; free(data); }", "cannot mutate hidden state")]
+    [InlineData("struct Data { public int* Pointer; public ~Data() { *Pointer = 10; } } void readonly Test() { Data* data = new Data(); data->Pointer = State.Pointer; delete(data); }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; public ~Data() { *Pointer = 10; } } void readonly Test() { Data[] data = Data[1]; data[0].Pointer = State.Pointer; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; public int* Current { get { return Pointer; } set { Pointer = value; } } } void readonly Test() { Data data = Data(); data.Current = State.Pointer; *data.Current = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int Value; public int Current { get { return Value; } set { Value = value; } } } struct Globals { public static Data Item; } void readonly Test() { Globals.Item.Current = 10; }", "must be writable")]
@@ -2669,7 +2669,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Pair { public int* Hidden = State.Pointer; public int* Output; } void readonly Test(int* output) { Pair value = Pair { State.Pointer, output }; *value.Hidden = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Pair { public int* Hidden; public int* Output; } Pair readonly Test(int* output) { Pair value = Pair { State.Pointer, output }; return value; }", "cannot return a mutable capability")]
     [InlineData("struct Pair { public int* Hidden; public int* Output; } Pair* readonly Test(int* output) { Pair* value = new Pair { State.Pointer, output }; return value; }", "cannot return a mutable capability")]
-    [InlineData("struct Pair { public int* Hidden; public int* Output; public ~Pair() { *Hidden += 1; } } void readonly Test(int* output) { Pair* value = new Pair { State.Pointer, output }; free(value); }", "cannot mutate hidden state")]
+    [InlineData("struct Pair { public int* Hidden; public int* Output; public ~Pair() { *Hidden += 1; } } void readonly Test(int* output) { Pair* value = new Pair { State.Pointer, output }; delete(value); }", "cannot mutate hidden state")]
     [InlineData("struct Pair { public int* Hidden; public int* Output; } struct Holder { public Pair Storage; public Pair Value { get { return Storage; } set { Storage = value; } } } void readonly Test(int* output) { Holder value = Holder(); value.Value = Pair { State.Pointer, output }; Pair copy = value.Value; *copy.Hidden = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Pair { public int* Hidden; public int* Output; } int*& readonly GetOutput(Pair& value) { return value.Output; } void readonly Test(int* output) { Pair value = Pair { output, output }; GetOutput(value) = State.Pointer; *value.Output = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Pair { public int* Hidden; public int* Output; } struct Holder { public Pair Storage; } void readonly Test(int* output) { Holder value = Holder { Pair { State.Pointer, output } }; Holder* alias = &value; Write(alias->Storage.Hidden); }", "cannot pass a mutable capability")]
@@ -2699,9 +2699,9 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Data { public void Write(int* output) { *output = 10; } } void readonly Test(int* output) { Data data = Data(); data.Write(output); }")]
     [InlineData("struct Data { public void Read(readonly int* input) { int value = *input; } } void readonly Test() { Data data = Data(); data.Read(State.Pointer); }")]
     [InlineData("struct Data { public int* Pointer; public int* Get() { return Pointer; } } void readonly Test(int* output) { Data data = Data { output }; *data.Get() = 10; }")]
-    [InlineData("struct Resource { public int* Memory; public void Dispose() { free(Memory); Memory = null; } } void readonly Test(Resource& resource) { resource.Dispose(); }")]
-    [InlineData("struct Resource { public int* Memory; public void Dispose() { free(Memory); Memory = null; } } void readonly Test(int* memory) { Resource resource = Resource { memory }; resource.Dispose(); }")]
-    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; } public Data() { Reset(); } public ~Data() { Reset(); } public int Current { set { Reset(); Value = value; } } } void readonly Test() { Data* data = new Data(); data->Current = 10; free(data); }")]
+    [InlineData("struct Resource { public int* Memory; public void Dispose() { delete(Memory); Memory = null; } } void readonly Test(Resource& resource) { resource.Dispose(); }")]
+    [InlineData("struct Resource { public int* Memory; public void Dispose() { delete(Memory); Memory = null; } } void readonly Test(int* memory) { Resource resource = Resource { memory }; resource.Dispose(); }")]
+    [InlineData("struct Data { public int Value; public void Reset() { Value = 0; } public Data() { Reset(); } public ~Data() { Reset(); } public int Current { set { Reset(); Value = value; } } } void readonly Test() { Data* data = new Data(); data->Current = 10; delete(data); }")]
     [InlineData("struct Data { public int Value; public void Recurse(int count) { if (count > 0) Recurse(count - 1); Value++; } } void readonly Test(Data& data) { data.Recurse(2); }")]
     [InlineData("struct Data { public int Value; public void First(int count) { if (count > 0) Second(count - 1); Value++; } void Second(int count) { First(count); } } void readonly Test(Data& data) { data.First(2); }")]
     [InlineData("struct Base { public int Value; public virtual void Reset() { Value = 0; } } struct Data : Base { public override void Reset() { Value = 1; } } void readonly Test(Base& data) { data.Reset(); }")]
@@ -2730,7 +2730,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Data { public int* Pointer; public void Set(int* output) { Pointer = output; } } void readonly Test(int* output) { Data data = Data { output }; data.Set(State.Pointer); *data.Pointer = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; public int* Get() { return Pointer; } } void readonly Test() { Data data = Data { State.Pointer }; *data.Get() = 10; }", "cannot mutate hidden state")]
     [InlineData("struct Data { public int* Pointer; public void Set() { Pointer = State.Pointer; } } void readonly Test(Data& data) { data.Set(); }", "cannot store a mutable capability")]
-    [InlineData("struct Resource { public int* Memory; public void Dispose() { free(Memory); Memory = null; } } void readonly Test() { Resource resource = Resource { State.Pointer }; resource.Dispose(); }", "cannot mutate hidden state")]
+    [InlineData("struct Resource { public int* Memory; public void Dispose() { delete(Memory); Memory = null; } } void readonly Test() { Resource resource = Resource { State.Pointer }; resource.Dispose(); }", "cannot mutate hidden state")]
     [InlineData("struct Resource { public void Dispose() {} } struct Globals { public static Resource* Item; } void readonly Test() { Globals.Item->Dispose(); }", "cannot call mutable instance method 'Dispose' on hidden state")]
     [InlineData("void Helper() {} struct Data { public void Reset() { Helper(); } } void readonly Test(Data& data) { data.Reset(); }", "cannot call non-readonly")]
     [InlineData("struct Data { static void Helper() {} public void Reset() { Data.Helper(); } } void readonly Test(Data& data) { data.Reset(); }", "cannot call non-readonly")]
@@ -2739,7 +2739,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("struct Base { public virtual void Reset() {} } struct Data : Base { public override void Reset() { State.Value++; } } void readonly Test(Base& data) { data.Reset(); }", "cannot mutate hidden state")]
     [InlineData("interface IData { void Reset(); } struct Safe : IData { public void Reset() {} } struct Unsafe : IData { public void Reset() { State.Value++; } } void readonly Test(IData& data) { data.Reset(); }", "cannot mutate hidden state")]
     [InlineData("struct Arg { public int* Pointer; } struct Data { public void Recurse(Arg argument, int count) { if (count > 0) Recurse(Arg { State.Pointer }, count - 1); *argument.Pointer = 10; } } void readonly Test(int* output) { Data data = Data(); data.Recurse(Arg { output }, 2); }", "hidden")]
-    [InlineData("struct Data { public void Recurse(int[] argument, int count) { if (count > 0) Recurse(State.Values, count - 1); argument[0] = 10; } } void readonly Test() { Data data = Data(); int[] values = new int[1]; data.Recurse(values, 2); free(values); }", "hidden")]
+    [InlineData("struct Data { public void Recurse(int[] argument, int count) { if (count > 0) Recurse(State.Values, count - 1); argument[0] = 10; } } void readonly Test() { Data data = Data(); int[] values = new int[1]; data.Recurse(values, 2); delete(values); }", "hidden")]
     public void Analyzer_ContextuallyRejectsMutableInstanceMethodHiddenEffects(string source, string expected)
     {
         Compilation compilation = CreateReadonlyEffectCompilation(source);
@@ -2768,10 +2768,10 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Theory]
-    [InlineData("Data[] values = new Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; *values[1].Pointer = 10; free(values);")]
+    [InlineData("Data[] values = new Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; *values[1].Pointer = 10; delete(values);")]
     [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[1].Pointer = output; Data[] alias = values; *alias[1].Pointer = 10;")]
     [InlineData("Data[,] values = Data[2, 2]; values[0, 1].Pointer = State.Pointer; values[1, 0].Pointer = output; *values[1, 0].Pointer = 10;")]
-    [InlineData("int*[] values = new int*[2]; values[0] = State.Pointer; values[1] = output; *values[1] = 10; free(values);")]
+    [InlineData("int*[] values = new int*[2]; values[0] = State.Pointer; values[1] = output; *values[1] = 10; delete(values);")]
     [InlineData("Data[] values = Data[2]; values[key].Pointer = State.Pointer; values[1].Pointer = output; *values[1].Pointer = 10;")]
     [InlineData("Data[] values = Data[2]; values[0].Pointer = State.Pointer; values[0].Pointer = output; *values[0].Pointer = 10;")]
     public void Analyzer_ReadonlyTracksSeparateArrayElements(string body)
@@ -2806,7 +2806,7 @@ public sealed class SemanticAnalyzerTests
     [Theory]
     [InlineData("struct Data { public int* Hidden; public int* Output; public void A(int n) { if (n > 0) B(n - 1); *Output = 10; } void B(int n) { C(n); } void C(int n) { A(n); } } void readonly Test(int* output) { Data data = Data { State.Pointer, output }; data.A(3); }")]
     [InlineData("struct Arg { public int* Hidden; public int* Output; } struct Data { public void A(Arg arg, int n) { if (n > 0) B(arg, n - 1); *arg.Output = 10; } void B(Arg arg, int n) { A(arg, n); } } void readonly Test(int* output) { Data data = Data(); data.A(Arg { State.Pointer, output }, 3); }")]
-    [InlineData("struct Data { public void A(int[] values, int n) { if (n > 0) B(values, n - 1); values[0] = 10; } void B(int[] values, int n) { A(values, n); } } void readonly Test() { Data data = Data(); int[] values = new int[2]; data.A(values, 3); free(values); }")]
+    [InlineData("struct Data { public void A(int[] values, int n) { if (n > 0) B(values, n - 1); values[0] = 10; } void B(int[] values, int n) { A(values, n); } } void readonly Test() { Data data = Data(); int[] values = new int[2]; data.A(values, 3); delete(values); }")]
     [InlineData("interface IReset { void Reset(); } struct Base : IReset { public void Reset() {} } struct Good : Base {} struct Unrelated : IReset { public void Reset() { State.Value++; } } void readonly Test(Base& value) { IReset view = value; view.Reset(); }")]
     public void Analyzer_ReadonlyVerifiesRecursiveEffectsAndBoundedDispatch(string source)
     {
@@ -2826,7 +2826,7 @@ public sealed class SemanticAnalyzerTests
 
     [Theory]
     [InlineData("void readonly Test() { Base value = Base(); value.Reset(); }")]
-    [InlineData("void readonly Test() { Base* value = new Base(); value->Reset(); free(value); }")]
+    [InlineData("void readonly Test() { Base* value = new Base(); value->Reset(); delete(value); }")]
     [InlineData("void readonly Test() { Base value = Base(); Base& alias = value; alias.Reset(); }")]
     [InlineData("void readonly Test() { Base value = Base(); Base* alias = &value; alias->Reset(); }")]
     [InlineData("void readonly Test() { Base value = Base(); Base copy = value; copy.Reset(); }")]
@@ -2836,7 +2836,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("void readonly Test() { Good value = Good(); Base* alias = &value; IReset view = *alias; view.Reset(); }")]
     [InlineData("interface IEffect { void Reset(); } struct Root : IEffect { public virtual void Reset() { State.Value++; } } struct Safe : Root { public override void Reset() {} } void readonly Test() { Safe value = Safe(); Root* pointer = &value; IEffect view = *pointer; view.Reset(); }")]
     [InlineData("void readonly Test(bool condition) { while (condition) { Base value = Base(); value.Reset(); break; } }")]
-    [InlineData("void readonly Test(bool condition) { while (condition) { Base* value = new Base(); value->Reset(); free(value); } }")]
+    [InlineData("void readonly Test(bool condition) { while (condition) { Base* value = new Base(); value->Reset(); delete(value); } }")]
     [InlineData("void readonly Test(bool condition) { while (condition) { Base value = Base(); IReset view = value; view.Reset(); } }")]
     [InlineData("void readonly Test() { Good value = Good(); IReset view = value; Good replacement = Good(); value = replacement; view.Reset(); }")]
     [InlineData("void readonly Test(bool condition) { Base first = Base(); Good second = Good(); IReset view = first; if (condition) view = second; view.Reset(); }")]
@@ -2940,7 +2940,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("Data data = Data(); data.Hidden = State.Pointer; data.Output = output; Write(data.Hidden);", "cannot pass a mutable capability")]
     [InlineData("Data data = Data(); data.Hidden = State.Pointer; data.Output = output; WriteNested(data);", "cannot pass a mutable capability")]
     [InlineData("Data data = Data(); data.Hidden = State.Pointer; data.Output = output; *destination = data;", "cannot store a mutable capability")]
-    [InlineData("Data data = Data(); data.Hidden = State.Pointer; data.Output = output; free(data.Hidden);", "cannot mutate hidden state")]
+    [InlineData("Data data = Data(); data.Hidden = State.Pointer; data.Output = output; delete(data.Hidden);", "cannot mutate hidden state")]
     [InlineData("Data data = Data(); data.Input = input; data.Output = output; *data.Input = 10;", "must be writable")]
     [InlineData("Data data = Data(); data.Output = input;", "cannot implicitly convert")]
     [InlineData("Data data = Data(); data.Hidden = State.Pointer; data.Property = data.Hidden; *data.Property = 10;", "cannot mutate hidden state")]
@@ -3308,9 +3308,9 @@ public sealed class SemanticAnalyzerTests
                 int[][,] matrices = new int[2][,];
                 matrices[0] = new int[3, 4];
                 int[,][][] rows = new int[1, 2][][];
-                free(rows);
-                free(matrices[0]);
-                free(matrices);
+                delete(rows);
+                delete(matrices[0]);
+                delete(matrices);
                 return result;
             }
             """);
@@ -3426,8 +3426,8 @@ public sealed class SemanticAnalyzerTests
                 int{{nesting}} nested = new int[1]{{nesting[2..]}};
                 Grid grid = Grid {};
                 grid[{{arguments}}] = grid[{{arguments}}];
-                free(values);
-                free(nested);
+                delete(values);
+                delete(nested);
             }
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
@@ -3488,9 +3488,9 @@ public sealed class SemanticAnalyzerTests
     [InlineData("Item[,,] a = Item[2,3,4]; a[1,2,3].Id = 42;")]
     [InlineData("Example.Item[,] a = Example.Item[1,2];")]
     [InlineData("int[] a = int[2]; { int[] alias = a; alias[0] = 1; }")]
-    [InlineData("int[] a = int[2]; a = new int[3]; free(a);")]
-    [InlineData("int[] a = int[2]; if (flag) a = new int[3]; else a = new int[4]; free(a);")]
-    [InlineData("int[] a = int[2]; switch (1) { case 0: a = new int[3]; break; default: a = new int[4]; break; } free(a);")]
+    [InlineData("int[] a = int[2]; a = new int[3]; delete(a);")]
+    [InlineData("int[] a = int[2]; if (flag) a = new int[3]; else a = new int[4]; delete(a);")]
+    [InlineData("int[] a = int[2]; switch (1) { case 0: a = new int[3]; break; default: a = new int[4]; break; } delete(a);")]
     public void Analyzer_AcceptsRectangularStackArraysAndInnerAliases(string body)
     {
         Compilation compilation = CreateCompilation("namespace Example; struct Item { public int Id; } void M(bool flag) { " + body + " }");
@@ -3585,8 +3585,8 @@ public sealed class SemanticAnalyzerTests
     }
 
     [Theory]
-    [InlineData("struct R { private ~R() {} } void M(R* p) { free(p); }")]
-    [InlineData("struct R { private ~R() {} } void M() { R[] p = new R[1]; free(p); }")]
+    [InlineData("struct R { private ~R() {} } void M(R* p) { delete(p); }")]
+    [InlineData("struct R { private ~R() {} } void M() { R[] p = new R[1]; delete(p); }")]
     [InlineData("struct R { private ~R() {} } void M() { R[] p = R[1]; }")]
     [InlineData("struct R { private ~R() {} } struct D : R { public ~D() {} }")]
     [InlineData("struct R { private ~R() {} } struct D : R {}")]
@@ -3673,24 +3673,20 @@ public sealed class SemanticAnalyzerTests
             struct State { public static int Value; }
             struct Base { public ~Base() { State.Value += 1; } }
             struct Derived : Base { public ~Derived() { return; } }
-            void readonly M() { Derived* p = new Derived(); free(p); }
+            void readonly M() { Derived* p = new Derived(); delete(p); }
             """);
         Assert.Contains(compilation.Diagnostics, d => d.Message.Contains("hidden", StringComparison.Ordinal));
     }
 
     [Theory]
     [InlineData("int*", false)]
-    [InlineData("readonly int*", true)]
+    [InlineData("readonly int*", false)]
     [InlineData("int* readonly", false)]
-    [InlineData("readonly int* readonly", true)]
+    [InlineData("readonly int* readonly", false)]
     public void Analyzer_FreeUsesPointeeReadonlyIndependentlyOfFunctionReadonly(string pointerType, bool rejected)
     {
-        foreach (string effect in new[] { "", "readonly " })
-        {
-            Compilation compilation = CreateCompilation($"namespace Example; void {effect}Destroy({pointerType} p) {{ free(p); }}");
-            Assert.Equal(rejected, compilation.HasErrors);
-            if (rejected) Assert.Contains(compilation.Diagnostics, d => d.Message == "cannot free memory through a readonly pointer");
-        }
+        Compilation compilation = CreateCompilation($"namespace Example; void Destroy({pointerType} p) {{ free(p); }}");
+        Assert.Equal(rejected, compilation.HasErrors);
     }
 
     [Theory]
@@ -3706,7 +3702,7 @@ public sealed class SemanticAnalyzerTests
     [InlineData("void M() { R value = R(); }")]
     [InlineData("void M() { R value; value = R(); }")]
     [InlineData("void M() { storage<R> value; }")]
-    [InlineData("void M() { storage<R>* value = new storage<R>(); free(value); }")]
+    [InlineData("void M() { storage<R>* value = new storage<R>(); delete(value); }")]
     public void Analyzer_ChecksScalarCleanupDestructorAccessibility(string source)
     {
         Compilation compilation = CreateCompilation("namespace Example; struct R { private ~R() {} } " + source);
@@ -4131,7 +4127,7 @@ public sealed class SemanticAnalyzerTests
 
     [Theory]
     [InlineData("Resource* resource = Resource.Create(); Resource.Destroy(resource);", false)]
-    [InlineData("Resource* resource = Resource.Create(); free(resource);", true)]
+    [InlineData("Resource* resource = Resource.Create(); delete(resource);", true)]
     [InlineData("Resource resource = Resource();", true)]
     [InlineData("Resource[] resources = Resource[1];", true)]
     public void Analyzer_PrivateDestructorAllowsTypeOwnedReleaseButNotExternalCleanup(string body, bool rejected)
@@ -4142,7 +4138,7 @@ public sealed class SemanticAnalyzerTests
             {
                 private virtual ~Resource() {}
                 public static Resource* Create() { return new Resource(); }
-                public static void Destroy(Resource* resource) { free(resource); }
+                public static void Destroy(Resource* resource) { delete(resource); }
                 public static void UseLocal() { Resource resource = Resource(); }
             }
             void Main() {
@@ -4337,7 +4333,7 @@ public sealed class SemanticAnalyzerTests
             {
                 Resource* pointer = new Resource();
                 unique<Resource> owner = pointer;
-                free(pointer);
+                delete(pointer);
             }
             """);
         Assert.Contains(raw.Diagnostics, diagnostic =>
@@ -5118,6 +5114,118 @@ public sealed class SemanticAnalyzerTests
 
         Assert.Empty(valid.Diagnostics);
         Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Message.Contains("bound method pointers", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_BindsCoreRawAllocationOperationsAndPointerCasts()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            void Test()
+            {
+                void* first = malloc(128);
+                void* second = malloc(256, 64);
+                byte* bytes = cast<byte*>(calloc(32, sizeof(byte)));
+                int* values = cast<int*>(first);
+                void* roundtrip = cast<void*>(values);
+                values[0] = 42;
+                free(first);
+                free(second);
+                free(bytes);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction function = Assert.Single(compilation.SemanticModel.Functions);
+        RawAllocationKind[] kinds = function.Body.Statements
+            .SelectMany(BoundTree.DescendantsAndSelf)
+            .OfType<BoundRawAllocationExpression>()
+            .Select(allocation => allocation.AllocationKind)
+            .ToArray();
+        Assert.Equal([RawAllocationKind.Malloc, RawAllocationKind.AlignedMalloc, RawAllocationKind.Calloc], kinds);
+    }
+
+    [Fact]
+    public void Analyzer_MarksOnlyDirectRawStorageWritesAsPlacementAndAllowsRawLifetimeTransfer()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource { public int Value; public ~Resource() {} }
+            struct Holder { public Resource Value; }
+            struct Inner { public Resource Value; }
+            struct Outer { public Inner InnerValue; }
+            void Test(Resource* pointer, Holder* holder, Holder* holders, Outer* outer, int index)
+            {
+                *pointer = Resource { 1 };
+                Resource moved = move pointer[index];
+                pointer[index] = move moved;
+                pointer->Value = 2;
+                holder->Value = Resource { 3 };
+                (*holder).Value = Resource { 4 };
+                holders[index].Value = Resource { 5 };
+                outer->InnerValue.Value = Resource { 6 };
+                destruct(*pointer);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundFunction function = Assert.Single(compilation.SemanticModel.Functions.Where(item => item.Symbol.Name == "Test"));
+        BoundAssignmentExpression[] assignments = function.Body.Statements
+            .SelectMany(BoundTree.DescendantsAndSelf)
+            .OfType<BoundAssignmentExpression>()
+            .ToArray();
+        Assert.Equal(
+            [true, true, false, false, false, false, false],
+            assignments.Select(assignment => assignment.IsRawPlacement));
+    }
+
+    [Fact]
+    public void Analyzer_RejectsReadonlyRawLifetimeMutationAndVoidDelete()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource { public ~Resource() {} }
+            void Invalid(readonly Resource* pointer, void* raw)
+            {
+                destruct(*pointer);
+                Resource value = move *pointer;
+                pointer[0] = Resource();
+                delete(raw);
+            }
+            """);
+
+        Assert.True(compilation.HasErrors);
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("writable", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("readonly raw pointers", StringComparison.Ordinal));
+        Assert.Contains(compilation.Diagnostics, diagnostic =>
+            diagnostic.Message.Contains("use 'free(pointer)'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Analyzer_BindsDeleteAndAcceptsNull()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Resource { public ~Resource() {} }
+            void Test()
+            {
+                Resource* value = new Resource();
+                delete(value);
+                delete(null);
+            }
+            """);
+
+        Assert.Empty(compilation.Diagnostics);
+        BoundDeleteExpression[] deletions = compilation.SemanticModel.Functions
+            .Single(function => function.Symbol.Name == "Test").Body.Statements
+            .SelectMany(BoundTree.DescendantsAndSelf)
+            .OfType<BoundDeleteExpression>()
+            .ToArray();
+        Assert.Equal(2, deletions.Length);
+        Assert.NotNull(deletions[0].Destructor);
+        Assert.Null(deletions[1].Destructor);
     }
 
     private static Compilation CreateCompilation(params string[] sources) => Compilation.Create(

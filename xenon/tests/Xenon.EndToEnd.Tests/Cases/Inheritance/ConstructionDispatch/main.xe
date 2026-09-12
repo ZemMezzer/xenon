@@ -23,7 +23,7 @@ int Main()
 {
     Derived* value = new Derived(); Base* view = value;
     if (Log.Calls != 337 || view->Read() != 7) return 1;
-    Log.Calls = 0; free(view);
+    Log.Calls = 0; delete(view);
     if (Log.Calls != 788) return 2;
     return 42;
 }

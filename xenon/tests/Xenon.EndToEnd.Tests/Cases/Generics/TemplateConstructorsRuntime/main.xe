@@ -62,10 +62,10 @@ int Main()
     if (first->value != 1 || second->value != 10 || third->value != 42) return 2;
     if (plain->value != 0) return 3;
 
-    free(vector);
-    free(first);
-    free(second);
-    free(third);
-    free(plain);
+    delete(vector);
+    delete(first);
+    delete(second);
+    delete(third);
+    delete(plain);
     return 0;
 }

@@ -373,7 +373,13 @@ public static class TypeFacts
         (IsCharacter(source) && IsInteger(target)) ||
         (target is EnumTypeSymbol && IsInteger(source)) ||
         (source is EnumTypeSymbol && IsInteger(target)) ||
-        (target is EnumTypeSymbol && TypeIdentity.AreSame(target, source));
+        (target is EnumTypeSymbol && TypeIdentity.AreSame(target, source)) ||
+        (target is PointerTypeSymbol { IsReadonly: var targetReadonly } targetPointer &&
+         source is PointerTypeSymbol { IsReadonly: var sourceReadonly } sourcePointer &&
+         (!sourceReadonly || targetReadonly) &&
+         (TypeIdentity.AreSame(targetPointer.ElementType, sourcePointer.ElementType) ||
+          TypeIdentity.AreSame(targetPointer.ElementType, BuiltinTypes.Void) ||
+          TypeIdentity.AreSame(sourcePointer.ElementType, BuiltinTypes.Void)));
 
     public static bool CanAssign(TypeSymbol destination, TypeSymbol source) =>
         GetImplicitConversionCost(destination, source) is not null;

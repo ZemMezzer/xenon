@@ -223,7 +223,7 @@ public sealed class XenonBuildDriverTests
                 try
                 {
                     Base* value = new Derived();
-                    free(value);
+                    delete(value);
                 }
                 catch (readonly int& error) { return error; }
                 return 1;
@@ -300,7 +300,7 @@ public sealed class XenonBuildDriverTests
                 try
                 {
                     Item[] values = new Item[3];
-                    free(values);
+                    delete(values);
                 }
                 catch (readonly int& error) { }
                 if (State.Trace == 321) return 42;
@@ -2199,7 +2199,7 @@ public sealed class XenonBuildDriverTests
                 public Base(int* trace) { this.trace = trace; }
                 public virtual ~Base() { *trace = *trace * 10 + 1; }
             }
-            public void Destroy(Base* value) { free(value); }
+            public void Destroy(Base* value) { delete(value); }
             """);
         XenonBuildResult app = await BuildXelibConsumerAsync(directory, libraryProject,
             "VirtualDestructorXelibApp", """
@@ -2356,7 +2356,7 @@ public sealed class XenonBuildDriverTests
                 values[0] = Invoke(callback, value);
                 values[1] = api.Transform(ReadFirst(&value));
                 int result = Sum(values) + 2;
-                free(values);
+                delete(values);
                 return result;
             }
             """);
@@ -2459,7 +2459,7 @@ public sealed class XenonBuildDriverTests
                 Value relayed = Relay<Value>(first);
                 Value* allocated = Allocate<Value>(42);
                 int result = relayed.Value + allocated->Value - 1;
-                free(allocated);
+                delete(allocated);
                 return result;
             }
             """);
@@ -2699,7 +2699,7 @@ public sealed class XenonBuildDriverTests
                     Value* heap = new Value();
                     storage<Value> stored = Value();
                     int result = direct.Number + heap->Number + stored.Number - 84;
-                    free(heap);
+                    delete(heap);
                     return result;
                 }
                 """);

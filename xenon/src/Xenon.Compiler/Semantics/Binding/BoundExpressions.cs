@@ -142,6 +142,8 @@ public sealed record BoundAssignmentExpression(
         MovedPlaceReinitialization != MovedPlaceReinitializationState.Live;
     public FieldSymbol? ConstructorField { get; init; }
     public bool RequiresRuntimeInitializationCheck { get; init; }
+    /// <summary>A low-level write through raw-pointer storage. The previous bytes are not destroyed.</summary>
+    public bool IsRawPlacement { get; init; }
 }
 
 public enum MovedPlaceReinitializationState
@@ -389,11 +391,31 @@ public sealed record BoundNewExpression(
     public bool IsDefaultInitialization { get; init; }
 }
 
-public sealed record BoundFreeExpression(
+public sealed record BoundFreeExpression(BoundExpression Pointer) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.FreeExpression;
+}
+
+public sealed record BoundDeleteExpression(
     BoundExpression Pointer,
     FunctionSymbol? Destructor) : BoundExpression(BuiltinTypes.Void)
 {
-    public override BoundKind Kind => BoundKind.FreeExpression;
+    public override BoundKind Kind => BoundKind.DeleteExpression;
+}
+
+public enum RawAllocationKind
+{
+    Malloc,
+    AlignedMalloc,
+    Calloc,
+}
+
+public sealed record BoundRawAllocationExpression(
+    RawAllocationKind AllocationKind,
+    ImmutableArray<BoundExpression> Arguments,
+    PointerTypeSymbol PointerType) : BoundExpression(PointerType)
+{
+    public override BoundKind Kind => BoundKind.RawAllocationExpression;
 }
 
 public sealed record BoundCallExpression(

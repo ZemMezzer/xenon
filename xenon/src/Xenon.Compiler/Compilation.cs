@@ -521,7 +521,7 @@ public sealed class Compilation
                 case BoundIndexerSetExpression indexer when indexer.Indexer.Setter?.VTableSlot is not null:
                     MarkVirtualReceiver(indexer.Receiver.Type, pointerAccess: false);
                     break;
-                case BoundFreeExpression
+                case BoundDeleteExpression
                 {
                     Destructor.VTableSlot: not null,
                     Pointer.Type: PointerTypeSymbol { ElementType: StructTypeSymbol freed },

@@ -361,13 +361,23 @@ internal sealed partial class ReadonlyEffectAnalyzer(
             {
                 HashSet<object> pointer = Evaluate(free.Pointer);
                 CheckWrite(pointer, free);
-                if (free.Destructor is { } destructor)
+                return [];
+            }
+            case BoundDeleteExpression deletion:
+            {
+                HashSet<object> pointer = Evaluate(deletion.Pointer);
+                CheckWrite(pointer, deletion);
+                if (deletion.Destructor is { } destructor)
                 {
-                    if (free.Pointer.Type is ArrayTypeSymbol) DestroyElements(destructor, pointer, free);
-                    else ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), pointer, free);
+                    if (deletion.Pointer.Type is ArrayTypeSymbol) DestroyElements(destructor, pointer, deletion);
+                    else ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), pointer, deletion);
                 }
                 return [];
             }
+            case BoundRawAllocationExpression allocation:
+                foreach (BoundExpression argument in allocation.Arguments) Evaluate(argument);
+                _summaryLocations.Add(Root(allocation));
+                return [Root(allocation)];
             default:
                 throw new InvalidOperationException($"Missing readonly effect analysis for '{expression.Kind}'.");
         }
