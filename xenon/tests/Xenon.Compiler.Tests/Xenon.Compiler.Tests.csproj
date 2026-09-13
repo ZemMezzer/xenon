@@ -2,6 +2,7 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
   </PropertyGroup>
 
@@ -17,6 +18,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Reference Include="LLVMSharp.Interop">
+      <HintPath>$(NuGetPackageRoot)llvmsharp.interop/$(LlvmSharpVersion)/lib/net8.0/LLVMSharp.Interop.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <ProjectReference Include="../../src/Xenon.CodeGen.LLVM/Xenon.CodeGen.LLVM.csproj" />
     <ProjectReference Include="../../src/Xenon.Cli/Xenon.Cli.csproj" />
     <ProjectReference Include="../../src/Xenon.Compiler/Xenon.Compiler.csproj" />

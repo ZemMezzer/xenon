@@ -228,7 +228,7 @@ public sealed class CharPrimitiveTests
                 readonly char* pointer = &value;
                 atomic<char> atomicValue = value;
                 char first = First(values);
-                free(values);
+                delete(values);
                 if (first != ReadPointer(pointer)) return cast<uint>(0);
                 return cast<uint>(ReadAtomic(atomicValue));
             }

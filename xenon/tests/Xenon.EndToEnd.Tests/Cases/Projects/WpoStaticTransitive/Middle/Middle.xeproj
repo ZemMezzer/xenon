@@ -1,0 +1,9 @@
+[project]
+name = "WpoStaticTransitiveMiddle"
+type = "static-library"
+
+[source]
+root = "src"
+
+[references]
+projects = ["../Core/Core.xeproj"]

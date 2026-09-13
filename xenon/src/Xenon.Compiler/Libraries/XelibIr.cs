@@ -356,6 +356,8 @@ public enum XelibBodyOpcode : ushort
     FunctionValue = 81,
     FunctionValueCall = 82,
     FunctionValueDestruction = 83,
+    Delete = 84,
+    RawAllocation = 85,
 }
 
 public enum XelibOperator : ushort

@@ -1,0 +1,9 @@
+[project]
+name = "WpoStaticSharedConsumer"
+type = "shared-library"
+
+[source]
+root = "src"
+
+[references]
+projects = ["../Core/Core.xeproj"]

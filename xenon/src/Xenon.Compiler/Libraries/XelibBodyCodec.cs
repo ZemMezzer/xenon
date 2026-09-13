@@ -110,7 +110,7 @@ public static class XelibBodyCodec
                 addType(value.AllocatedType); addType(value.PointerType);
                 if (value.Constructor is { } allocationConstructor) addSymbol(allocationConstructor);
                 break;
-            case BoundFreeExpression value when value.Destructor is { } freeDestructor: addSymbol(freeDestructor); break;
+            case BoundDeleteExpression value when value.Destructor is { } deleteDestructor: addSymbol(deleteDestructor); break;
             case BoundCallExpression value: addSymbol(value.Function); break;
             case BoundFunctionAddressExpression value:
                 addSymbol(value.Function); addType(value.FunctionPointerType); break;
@@ -329,7 +329,8 @@ public static class XelibBodyCodec
                     Operator = Map(value.OperatorKind), Flag1 = value.IsInitialization,
                     MovedPlaceReinitialization = XelibStableMappings.ToXelib(value.MovedPlaceReinitialization),
                     Symbol = value.ConstructorField is null ? null : symbol(value.ConstructorField),
-                    Flag2 = value.RequiresRuntimeInitializationCheck, Integer = value.CapturesTarget ? 1 : 0,
+                    Flag2 = value.RequiresRuntimeInitializationCheck, Flag3 = value.IsRawPlacement,
+                    Integer = value.CapturesTarget ? 1 : 0,
                     Children = [E(value.Target), E(value.Expression)] };
             case BoundCompareExchangeExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.CompareExchange, TypeId = typeId(value.Type),
@@ -462,7 +463,14 @@ public static class XelibBodyCodec
                     Children = value.Arguments.Select(E).ToImmutableArray() };
             case BoundFreeExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Free, TypeId = typeId(value.Type),
+                    Children = [E(value.Pointer)] };
+            case BoundDeleteExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.Delete, TypeId = typeId(value.Type),
                     Symbol = value.Destructor is null ? null : symbol(value.Destructor), Children = [E(value.Pointer)] };
+            case BoundRawAllocationExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.RawAllocation,
+                    TypeId = typeId(value.PointerType), Integer = (int)value.AllocationKind,
+                    Children = value.Arguments.Select(E).ToImmutableArray() };
             case BoundCallExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Call, TypeId = typeId(value.Type),
                     Symbol = symbol(value.Function), Flag1 = value.IsExplicitConversion,
@@ -604,7 +612,15 @@ public static class XelibBodyCodec
                     ? Variable(node.LocalId, node.Symbol) : null,
                     TrackedPath = node.Symbols.Select(item => (FieldSymbol)symbol(item)).ToImmutableArray() };
             case XelibBodyOpcode.Copy: return new BoundCopyExpression(E(0));
-            case XelibBodyOpcode.DestroyFields: return new BoundDestroyFieldsExpression((StructTypeSymbol)type(node.TypeId));
+            case XelibBodyOpcode.DestroyFields:
+            {
+                StructTypeSymbol destroyedType = (StructTypeSymbol)type(node.TypeId);
+                if (destroyedType.IsGenericDefinition &&
+                    currentFunction?.ContainingStruct is { GenericDefinition: { } definition } specializedOwner &&
+                    ReferenceEquals(definition, destroyedType))
+                    destroyedType = specializedOwner;
+                return new BoundDestroyFieldsExpression(destroyedType);
+            }
             case XelibBodyOpcode.OwnershipDestruction: return new BoundOwnershipDestructionExpression(
                 (OwnershipTypeSymbol)type(node.TypeId), node.Symbol is null ? null : F(node.Symbol));
             case XelibBodyOpcode.StorageDestruction: return new BoundStorageDestructionExpression(
@@ -631,6 +647,7 @@ public static class XelibBodyCodec
                 MovedPlaceReinitialization = XelibStableMappings.FromXelib(node.MovedPlaceReinitialization),
                 ConstructorField = node.Symbol is null ? null : Sym<FieldSymbol>(node.Symbol),
                 RequiresRuntimeInitializationCheck = node.Flag2,
+                IsRawPlacement = node.Flag3,
             };
             case XelibBodyOpcode.CompareExchange: return new BoundCompareExchangeExpression(E(0), E(1), E(2));
             case XelibBodyOpcode.Swap: return new BoundSwapExpression(E(0), E(1));
@@ -705,13 +722,17 @@ public static class XelibBodyCodec
                     node.Symbol is null ? null : F(node.Symbol),
                     Enumerable.Range(index, node.Integer).Select(E).ToImmutableArray(), node.Flag2);
             }
-            case XelibBodyOpcode.ExplicitDestruct: return new BoundExplicitDestructExpression(E(0),
-                type(node.AuxTypeId), node.Symbol is null ? null : F(node.Symbol))
+            case XelibBodyOpcode.ExplicitDestruct:
             {
-                TrackedVariable = node.LocalId != 0 || node.Symbol2 is not null
-                    ? Variable(node.LocalId, node.Symbol2) : null,
-                TrackedPath = node.Symbols.Select(item => (FieldSymbol)symbol(item)).ToImmutableArray(),
-            };
+                TypeSymbol valueType = type(node.AuxTypeId);
+                return new BoundExplicitDestructExpression(E(0), valueType,
+                    node.Symbol is null ? TypeFacts.GetCompleteDestructor(valueType) : F(node.Symbol))
+                {
+                    TrackedVariable = node.LocalId != 0 || node.Symbol2 is not null
+                        ? Variable(node.LocalId, node.Symbol2) : null,
+                    TrackedPath = node.Symbols.Select(item => (FieldSymbol)symbol(item)).ToImmutableArray(),
+                };
+            }
             case XelibBodyOpcode.StorageMove: return new BoundStorageMoveExpression(E(0),
                 (StorageTypeSymbol)type(node.AuxTypeId));
             case XelibBodyOpcode.InterfaceMethodCall: return new BoundInterfaceMethodCallExpression(E(0),
@@ -744,7 +765,13 @@ public static class XelibBodyCodec
             case XelibBodyOpcode.New: return new BoundNewExpression(type(node.AuxTypeId),
                 node.Symbol is null ? null : F(node.Symbol), node.Children.Select((_, i) => E(i)).ToImmutableArray(),
                 node.Flag1, (PointerTypeSymbol)type(node.TypeId)) { IsDefaultInitialization = node.Flag2 };
-            case XelibBodyOpcode.Free: return new BoundFreeExpression(E(0), node.Symbol is null ? null : F(node.Symbol));
+            case XelibBodyOpcode.Free: return new BoundFreeExpression(E(0));
+            case XelibBodyOpcode.Delete: return new BoundDeleteExpression(E(0),
+                node.Symbol is null ? null : F(node.Symbol));
+            case XelibBodyOpcode.RawAllocation: return new BoundRawAllocationExpression(
+                (RawAllocationKind)node.Integer,
+                node.Children.Select((_, i) => E(i)).ToImmutableArray(),
+                (PointerTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.Call: return new BoundCallExpression(F(node.Symbol),
                 node.Children.Select((_, i) => E(i)).ToImmutableArray()) { IsExplicitConversion = node.Flag1 };
             case XelibBodyOpcode.FunctionAddress: return new BoundFunctionAddressExpression(F(node.Symbol),
@@ -812,7 +839,8 @@ public static class XelibBodyCodec
             XelibBodyOpcode.FullExpression or XelibBodyOpcode.MemberAccess or XelibBodyOpcode.Cast or
             XelibBodyOpcode.InterfaceConversion or XelibBodyOpcode.ReferenceConversion or
             XelibBodyOpcode.ReferenceDereference or XelibBodyOpcode.LifetimeValue or
-            XelibBodyOpcode.ExplicitDestruct or XelibBodyOpcode.StorageMove or XelibBodyOpcode.Free => 1,
+            XelibBodyOpcode.ExplicitDestruct or XelibBodyOpcode.StorageMove or XelibBodyOpcode.Free or
+            XelibBodyOpcode.Delete or XelibBodyOpcode.RawAllocation => 1,
             XelibBodyOpcode.If or XelibBodyOpcode.Binary or XelibBodyOpcode.Assignment or
             XelibBodyOpcode.Swap or XelibBodyOpcode.PropertySet or XelibBodyOpcode.InterfacePropertySet => 2,
             XelibBodyOpcode.CompareExchange => 3,

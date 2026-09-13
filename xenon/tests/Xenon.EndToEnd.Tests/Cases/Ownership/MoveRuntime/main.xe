@@ -24,7 +24,7 @@ struct Buffer
 {
     public Tracked* Pointer;
     public Buffer(int id) { Pointer = new Tracked(id); }
-    public ~Buffer() { free(Pointer); Log.Freed++; }
+    public ~Buffer() { delete(Pointer); Log.Freed++; }
 }
 
 Tracked MakeTracked(int id)

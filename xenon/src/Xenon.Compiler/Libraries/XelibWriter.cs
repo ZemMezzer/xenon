@@ -259,9 +259,9 @@ internal static class XelibExportKey
         PropertySymbol value => $"P:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         InterfacePropertySymbol value => $"P:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         IndexerSymbol value => $"I:{Owner(value)}:({string.Join(',', value.Parameters.Select(p => TypeKey(p.Type)))})" +
-            $"->{TypeKey(value.Type)}",
+            $"->{TypeKey(value.Type)}" + ReadonlyIndexerSuffix(value),
         InterfaceIndexerSymbol value => $"I:{Owner(value)}:({string.Join(',', value.Parameters.Select(p => TypeKey(p.Type)))})" +
-            $"->{TypeKey(value.Type)}",
+            $"->{TypeKey(value.Type)}" + ReadonlyIndexerSuffix(value),
         ConstantSymbol value => $"C:{Owner(value)}:{value.Name}:{TypeKey(value.Type)}",
         GenericParameterSymbol value => $"G:{Owner(value)}:{value.Ordinal}",
         ParameterSymbol value => $"A:{Create(value.ContainingSymbol!)}:{value.Ordinal}:{value.Name}:{TypeKey(value.Type)}",
@@ -274,12 +274,30 @@ internal static class XelibExportKey
             $"{value.Name}:{TypeKey(value.Type)}:{value.HasGetter}:{value.HasSetter}",
         TemplateIndexerRequirementSymbol value => $"R:{Tag(XelibSymbolKind.TemplateIndexer)}:{Owner(value)}:" +
             $"({string.Join(',', value.Parameters.Select(parameter => TypeKey(parameter.Type)))})" +
-            $"->{TypeKey(value.Type)}:{value.HasGetter}:{value.HasSetter}",
+            $"->{TypeKey(value.Type)}:{value.HasGetter}:{value.HasSetter}" + ReadonlyIndexerSuffix(value),
         _ => throw new XelibFormatException(XelibErrorCode.FeatureNotRepresentable,
             $"symbol '{symbol.QualifiedName}' has no stable XELIB export key"),
     };
 
     private static string Tag(XelibSymbolKind kind) => ((ushort)kind).ToString(CultureInfo.InvariantCulture);
+
+    private static string ReadonlyIndexerSuffix(IndexerSymbol indexer) =>
+        indexer.ContainingType.GetMembers().OfType<IndexerSymbol>().Count(candidate =>
+            TypeSignature.Parameters(candidate.Parameters) == TypeSignature.Parameters(indexer.Parameters)) > 1
+            ? $":{indexer.IsReadonly}"
+            : string.Empty;
+
+    private static string ReadonlyIndexerSuffix(InterfaceIndexerSymbol indexer) =>
+        indexer.ContainingInterface.Indexers.Count(candidate =>
+            TypeSignature.Parameters(candidate.Parameters) == TypeSignature.Parameters(indexer.Parameters)) > 1
+            ? $":{indexer.IsReadonly}"
+            : string.Empty;
+
+    private static string ReadonlyIndexerSuffix(TemplateIndexerRequirementSymbol indexer) =>
+        indexer.Template.Members.OfType<TemplateIndexerRequirementSymbol>().Count(candidate =>
+            TypeSignature.Parameters(candidate.Parameters) == TypeSignature.Parameters(indexer.Parameters)) > 1
+            ? $":{indexer.IsReadonly}"
+            : string.Empty;
 
     // Preserve the v1 key for the overwhelmingly common unambiguous declaration.
     // All declarations participate because these keys also order non-exported symbols and types.

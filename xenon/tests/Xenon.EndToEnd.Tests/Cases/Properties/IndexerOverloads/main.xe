@@ -10,6 +10,6 @@ int Main()
     Values values = Values();
     int[] vector = new int[0]; int[,] matrix = new int[0,0]; int[][] nested = new int[0][];
     int result = values[vector] + values[matrix] + values[nested];
-    free(vector); free(matrix); free(nested);
+    delete(vector); delete(matrix); delete(nested);
     return result;
 }

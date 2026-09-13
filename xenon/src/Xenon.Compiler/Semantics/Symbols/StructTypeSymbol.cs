@@ -245,7 +245,7 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
         {
             var signatures = new HashSet<string>(StringComparer.Ordinal);
             return _indexers.Concat(BaseType?.AllIndexers ?? [])
-                .Where(indexer => signatures.Add(IndexerSymbol.CreateAccessorName("Item", indexer.Parameters)));
+                .Where(indexer => signatures.Add(TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly)));
         }
     }
 

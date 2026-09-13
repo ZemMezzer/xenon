@@ -15,6 +15,53 @@ namespace Xenon.Compiler.Tests.Libraries;
 
 public sealed class XelibContainerTests
 {
+    [Theory]
+    [InlineData("", true)]
+    [InlineData("public ReadonlyView(T* data) { _data = data; }", false)]
+    public void GenericConstructionPreservesSelectedPointerConstructor(string overload, bool readonlyParameter)
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Views;
+            public struct ReadonlyView<T>
+            {
+                private readonly T* _data;
+                public ReadonlyView(readonly T* data) { _data = data; }
+                public readonly T* readonly Data { get { return _data; } }
+            }
+            public struct View<T>
+            {
+                private T* _data;
+                public View(T* data) { _data = data; }
+                public ReadonlyView<T> readonly AsReadonly() { return ReadonlyView<T>(_data); }
+            }
+            public ReadonlyView<T> Make<T>(T* data) { return ReadonlyView<T>(data); }
+            """.Replace("private readonly T* _data;", "private readonly T* _data; " + overload), "views.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Views")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Views;
+            namespace App;
+            int Main()
+            {
+                int value = 42;
+                View<int> view = View<int>(&value);
+                ReadonlyView<int> result = view.AsReadonly();
+                ReadonlyView<int> second = Make<int>(&value);
+                return *result.Data + *second.Data;
+            }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        BoundFunction[] reachable = app.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(reachable, body => body.Symbol.FunctionKind == FunctionKind.Constructor &&
+            body.Symbol.ContainingStruct?.GenericDefinition?.Name == "ReadonlyView" &&
+            body.Symbol.Parameters[0].Type is PointerTypeSymbol pointer && pointer.IsReadonly == readonlyParameter);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+        Compilation targeted = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+    }
+
     [Fact]
     public void ReadonlyLibraryMethodCanBeCalledThroughStaticReadonlyField()
     {
@@ -563,6 +610,53 @@ public sealed class XelibContainerTests
     }
 
     [Fact]
+    public void MutableAndReadonlyIndexerOverloadsRoundTripWithoutSymbolCollisions()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Library;
+            public struct Buffer<T>
+            {
+                T mutableValue;
+                T readonlyValue;
+                public T* this[int index] { get { return &mutableValue; } }
+                public readonly T* readonly this[int index] { get { return &readonlyValue; } }
+            }
+            public interface IBuffer
+            {
+                int this[int index] { get; }
+                int readonly this[int index] { get; }
+            }
+            public template BufferShape
+            {
+                int this[int index] { get; }
+                int readonly this[int index] { get; }
+            }
+            """, "indexer-overloads.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("IndexerOverloads")));
+        NamespaceSymbol scope = Assert.Single(reference.GlobalNamespace.Namespaces);
+        Assert.Equal(2, Assert.Single(scope.Structs).Indexers.Length);
+        Assert.Equal(2, Assert.Single(scope.Interfaces).Indexers.Length);
+        Assert.Equal(2, Assert.Single(scope.Templates).Members.OfType<TemplateIndexerRequirementSymbol>().Count());
+
+        Compilation consumer = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Library;
+            namespace Consumer;
+            void Use(Buffer<int>& mutable, readonly Buffer<int>& readOnly,
+                IBuffer& interfaceMutable, readonly IBuffer& interfaceReadonly)
+            {
+                int* writable = mutable[0];
+                readonly int* readable = readOnly[0];
+                int first = interfaceMutable[0];
+                int second = interfaceReadonly[0];
+            }
+            """, "consumer.xe"));
+        Assert.False(consumer.HasErrors, string.Join(Environment.NewLine, consumer.Diagnostics));
+    }
+
+    [Fact]
     public void ReadonlyPropertyTemplateMatchingWorksAcrossXelib()
     {
         Compilation library = Compilation.Create(SourceText.From("""
@@ -841,7 +935,7 @@ public sealed class XelibContainerTests
             int Main() {
                 Value* value = new Value();
                 int result = value->Number;
-                free(value);
+                delete(value);
                 return result;
             }
             """);
@@ -1201,6 +1295,130 @@ public sealed class XelibContainerTests
             Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
             _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
         }
+    }
+
+    [Fact]
+    public void ImportedGenericDestructorCleanupUsesConcreteOwner()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace GenericCleanup;
+            struct Box<T>
+            {
+                public storage<byte> MoveOnly;
+                public ~Box() { }
+            }
+            """, "generic-cleanup.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("GenericCleanup")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using GenericCleanup;
+            namespace App;
+            int Main()
+            {
+                Box<int> value = Box<int>();
+                return 0;
+            }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction destructor = Assert.Single(app.GetStaticImplementationFunctions(), function =>
+            function.Symbol.FunctionKind == FunctionKind.Destructor &&
+            function.Symbol.ContainingStruct?.GenericDefinition is not null);
+        BoundDestroyFieldsExpression cleanup = Assert.IsType<BoundDestroyFieldsExpression>(
+            destructor.Body.ExitCleanup);
+        Assert.Same(destructor.Symbol.ContainingStruct, cleanup.StructType);
+
+        var target = LlvmTargetOptions.CreateHost();
+        Compilation targeted = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+    }
+
+    [Fact]
+    public void ImportedGenericExplicitDestructUsesSpecializedValueDestructor()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace GenericDestruct;
+            public void Destroy<T>(T* value) { destruct(*value); }
+            """, "generic-destruct.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("GenericDestruct")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using GenericDestruct;
+            namespace App;
+            struct Resource { public ~Resource() { } }
+            void Exercise(Resource* value) { Destroy<Resource>(value); }
+            int Main() { return 0; }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction destroy = Assert.Single(app.GetStaticImplementationFunctions(), function =>
+            function.Symbol.GenericDefinition?.Name == "Destroy");
+        BoundExplicitDestructExpression? explicitDestruct = null;
+        XelibBodyCodec.Collect(destroy.Body, _ => { }, _ => { }, node =>
+        {
+            if (node is BoundExplicitDestructExpression destruction)
+                explicitDestruct = destruction;
+        });
+        Assert.NotNull(explicitDestruct?.Destructor);
+        Assert.Same(TypeFacts.GetCompleteDestructor(explicitDestruct!.ValueType),
+            explicitDestruct.Destructor);
+
+        var target = LlvmTargetOptions.CreateHost();
+        Compilation targeted = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+    }
+
+    [Fact]
+    public void RawMemoryOperationsAndPlacementFlagsRoundTripThroughXelibBodies()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace RawBodies;
+            struct Resource { public int Value; public ~Resource() { Value = 0; } }
+            public int Exercise()
+            {
+                Resource* memory = cast<Resource*>(malloc(sizeof(Resource), alignof(Resource)));
+                *memory = Resource();
+                destruct(*memory);
+                free(memory);
+                byte* zeroed = cast<byte*>(calloc(4, sizeof(byte)));
+                free(zeroed);
+                Resource* owned = new Resource();
+                delete(owned);
+                return 42;
+            }
+            """, "raw-bodies.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("RawBodies")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using RawBodies;
+            namespace App;
+            int Main() { return Exercise(); }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+
+        BoundFunction exercise = Assert.Single(app.GetStaticImplementationFunctions(), function => function.Symbol.Name == "Exercise");
+        var allocationKinds = new HashSet<RawAllocationKind>();
+        bool hasFree = false;
+        bool hasDelete = false;
+        bool hasPlacement = false;
+        XelibBodyCodec.Collect(exercise.Body, _ => { }, _ => { }, node =>
+        {
+            if (node is BoundRawAllocationExpression allocation) allocationKinds.Add(allocation.AllocationKind);
+            if (node is BoundFreeExpression) hasFree = true;
+            if (node is BoundDeleteExpression) hasDelete = true;
+            if (node is BoundAssignmentExpression { IsRawPlacement: true }) hasPlacement = true;
+        });
+
+        Assert.Contains(RawAllocationKind.AlignedMalloc, allocationKinds);
+        Assert.Contains(RawAllocationKind.Calloc, allocationKinds);
+        Assert.True(hasFree);
+        Assert.True(hasDelete);
+        Assert.True(hasPlacement);
     }
 
     [Fact]

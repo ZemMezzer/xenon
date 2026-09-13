@@ -20,6 +20,6 @@ int Main()
     if (copy.Result != 42 || Derived.Add(20, 22) != 42) return 3;
     Derived* heap = new Derived();
     int result = heap->Read();
-    free(heap);
+    delete(heap);
     return result;
 }

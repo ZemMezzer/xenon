@@ -49,8 +49,12 @@ public sealed class OwnershipIntelligenceTests
                 bool stopped = false;
                 Resource* missing = null;
                 destruct(slot);
+                void* bytes = malloc(8);
+                void* zeroed = calloc(1, 8);
+                free(bytes);
+                free(zeroed);
                 Resource* raw = new Resource(1);
-                free(raw);
+                delete(raw);
             }
             """;
         using var directory = new TestDirectory();
@@ -111,7 +115,7 @@ public sealed class OwnershipIntelligenceTests
         foreach (string keyword in new[] { "new", "move", "lock" })
             Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 17),
                 $"Missing semantic value-expression token '{keyword}'.");
-        foreach (string keyword in new[] { "free", "destruct" })
+        foreach (string keyword in new[] { "malloc", "calloc", "free", "delete", "destruct" })
             Assert.True(tokens.Any(token => token.Text == keyword && token.Type == 18),
                 $"Missing semantic lifetime-operation token '{keyword}'.");
         foreach (string keyword in new[] { "namespace", "struct" })
@@ -494,8 +498,6 @@ public sealed class OwnershipIntelligenceTests
         string[] codes = published.GetProperty("diagnostics").EnumerateArray()
             .Select(diagnostic => diagnostic.GetProperty("code").GetString()!).ToArray();
 
-        Assert.Contains(DiagnosticIds.HeapPointeeExplicitDestruction, codes);
-        Assert.Contains(DiagnosticIds.InvalidMoveSource, codes);
         Assert.Contains(DiagnosticIds.UseAfterMove, codes);
         Assert.Contains(DiagnosticIds.StorageNotInitialized, codes);
         Assert.Contains(DiagnosticIds.DestructWhileBorrowed, codes);

@@ -81,7 +81,7 @@ int Main()
         unique<Item>[] owners = new unique<Item>[2];
         owners[0] = new Item(1);
         owners[1] = new Item(2);
-        free(owners);
+        delete(owners);
     }
     if (Log.Trace != 21) return 9;
 

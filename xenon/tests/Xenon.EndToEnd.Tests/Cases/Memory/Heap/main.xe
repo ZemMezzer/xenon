@@ -10,6 +10,6 @@ int Main()
 {
     Item* item = new Item(42);
     if (item->Value != 42) return 1;
-    free(item);
+    delete(item);
     return Item.Destroyed;
 }
