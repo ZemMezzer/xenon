@@ -106,7 +106,7 @@ public sealed class ConcurrencyHardeningTests
                 int[] expected = new int[16];
                 int[] desired = int[16];
                 Globals.Current : expected --> desired;
-                free(expected);
+                delete(expected);
             }
             void Valid()
             {
@@ -115,7 +115,7 @@ public sealed class ConcurrencyHardeningTests
                 Globals.Current = desired;
                 Globals.Current <-> desired;
                 Globals.Current : expected --> desired;
-                free(expected);
+                delete(expected);
             }
             """);
 

@@ -102,7 +102,7 @@ public sealed class LlvmConcurrencyTests
                 int[] values = new int[2];
                 values[0] = 9;
                 int result = values[0];
-                free(values);
+                delete(values);
                 return result;
             }
             """, "memory-model.xe"));

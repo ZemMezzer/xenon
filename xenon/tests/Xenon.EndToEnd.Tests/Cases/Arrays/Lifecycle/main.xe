@@ -12,14 +12,14 @@ int Main()
     if (values[0,0].Id != 7) return 1;
     values[0,0].Id = 1; values[0,1].Id = 2; values[1,0].Id = 3; values[1,1].Id = 4;
     Counter[,] alias = values;
-    free(alias);
-    Counter[] empty = new Counter[0]; free(empty);
+    delete(alias);
+    Counter[] empty = new Counter[0]; delete(empty);
     if (Counter.Trace != 4321 || Counter.Count != 4) return 2;
     Counter[][] nested = new Counter[1][];
     Counter[] child = new Counter[1]; child[0].Id = 5; nested[0] = child;
-    free(nested);
+    delete(nested);
     if (Counter.Count != 4) return 3;
-    free(child);
+    delete(child);
     if (Counter.Trace != 43215 || Counter.Count != 5) return 4;
     return 42;
 }

@@ -2938,7 +2938,7 @@ internal sealed partial class FunctionBodyBinder
         BoundArrayCreationExpression => true,
         BoundNewExpression { Constructor: not null } => true,
         BoundStaticFieldExpression { Field.IsThreadLocal: true } => true,
-        BoundFreeExpression { Destructor: not null } => true,
+        BoundDeleteExpression { Destructor: not null } => true,
         BoundExplicitDestructExpression { Destructor: not null } => true,
         BoundCompareExchangeExpression { Target.Type: AtomicTypeSymbol atomic } when
             TypeFacts.GetCompleteDestructor(atomic.ElementType) is not null => true,
@@ -3314,6 +3314,31 @@ internal sealed partial class FunctionBodyBinder
                 TransferValueReferenceMetadata(storagePlace, storageMove, syntax.MoveKeyword.Location.Span.Start);
             }
             return storageMove;
+        }
+        if (lifetimeOwner.Origin == LifetimeOwnerOriginKind.RawPointer)
+        {
+            if (!IsWritable(source))
+            {
+                _diagnostics.Report(syntax.MoveKeyword.Location,
+                    "'move' requires writable storage; readonly raw pointers cannot transfer pointee lifetimes",
+                    DiagnosticIds.InvalidMoveSource);
+                return new BoundErrorExpression();
+            }
+            if (TypeFacts.ContainsAtomicStorage(source.Type))
+            {
+                _diagnostics.Report(syntax.MoveKeyword.Location,
+                    $"cannot move '{source.Type.ToDisplayString()}' because it contains atomic storage that cannot be implicitly relocated",
+                    DiagnosticIds.AtomicStorageNotRelocatable);
+                return new BoundErrorExpression();
+            }
+            if (!TypeFacts.CanRelocate(source.Type))
+            {
+                _diagnostics.Report(syntax.MoveKeyword.Location,
+                    $"cannot move '{source.Type.ToDisplayString()}' because its address is pinned",
+                    DiagnosticIds.PinnedRelocation);
+                return new BoundErrorExpression();
+            }
+            return new BoundMoveExpression(source);
         }
         if (lifetimeOwner.OwnerPlace is not MovePlace place ||
             place.RootVariable is null && place.Fields.IsEmpty ||
@@ -3992,7 +4017,7 @@ internal sealed partial class FunctionBodyBinder
         }
 
         if (IsOrdinaryRawPointerPointee(expression))
-            return new LifetimeOwnerResolution(null, expression.Type, LifetimeAuthorityKind.AccessOnly,
+            return new LifetimeOwnerResolution(null, expression.Type, LifetimeAuthorityKind.Full,
                 LifetimeOwnerOriginKind.RawPointer);
         if (TryGetMovePlace(expression, out MovePlace place))
             return ResolveMovePlaceLifetimeOwner(place, expression.Type, LifetimeOwnerOriginKind.DirectPlace);
@@ -4347,6 +4372,7 @@ internal sealed partial class FunctionBodyBinder
         resolution = ResolveAuthoritativeLifetimeOwner(expression);
         if (resolution.Authority == LifetimeAuthorityKind.Full)
             return resolution.OwnerPlace is not null ||
+                   resolution.Origin == LifetimeOwnerOriginKind.RawPointer ||
                    resolution.Origin is LifetimeOwnerOriginKind.StoragePointer or
                        LifetimeOwnerOriginKind.StorageReference;
 
@@ -4387,11 +4413,11 @@ internal sealed partial class FunctionBodyBinder
             case LifetimeOwnerOriginKind.RawPointer:
                 if (operation == LifetimeOperationKind.EndLifetime)
                     _diagnostics.Report(location,
-                        "cannot explicitly destruct a value through an ordinary raw pointer; use 'free(ptr)' for a heap allocation, or 'storage<T>' for manual lifetime management",
-                        DiagnosticIds.HeapPointeeExplicitDestruction);
+                        "cannot explicitly destruct a value through a readonly raw pointer",
+                        DiagnosticIds.InvalidAssignmentTarget);
                 else
                     _diagnostics.Report(location,
-                        "cannot move a value through an ordinary raw pointer; raw pointers provide access but no lifetime-management authority",
+                        "cannot move a value through a readonly raw pointer",
                         DiagnosticIds.InvalidMoveSource);
                 return false;
             case LifetimeOwnerOriginKind.ReferenceField:
@@ -5141,8 +5167,19 @@ internal sealed partial class FunctionBodyBinder
                     ? fieldTarget.Field
                     : null,
             RequiresRuntimeInitializationCheck = requiresRuntimeInitializationCheck,
+            IsRawPlacement = isSimpleAssignment && IsRawPointerPlacement(target),
         };
     }
+
+    private static bool IsRawPointerPlacement(BoundExpression expression) => expression switch
+    {
+        BoundFullExpression full => IsRawPointerPlacement(full.Expression),
+        BoundReferenceDereferenceExpression dereference => IsRawPointerPlacement(dereference.Reference),
+        BoundLifetimeValueExpression value => IsRawPointerPlacement(value.Source),
+        BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken, Operand.Type: PointerTypeSymbol } => true,
+        BoundIndexExpression { Receiver.Type: PointerTypeSymbol } => true,
+        _ => false,
+    };
 
     private static int GetThisMemberDepth(BoundExpression expression)
     {
@@ -6031,16 +6068,26 @@ internal sealed partial class FunctionBodyBinder
         if (receiver.Type is DeclaredTypeSymbol structType && structType is not InterfaceTypeSymbol)
         {
             bool receiverIsReadonly = IsAddressable(receiver) && !IsWritable(receiver);
+            IndexerSymbol[] indexerCandidates = structType.LookupMembers("this").OfType<IndexerSymbol>()
+                .DistinctBy(indexer => TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly))
+                .Where(candidate => candidate.Getter is not null)
+                .ToArray();
             IndexerSymbol? indexer = ResolveIndexer(
-                structType.LookupMembers("this").OfType<IndexerSymbol>().DistinctBy(indexer => TypeSignature.Parameters(indexer.Parameters)).Where(candidate =>
-                    candidate.Getter is not null &&
-                    (!receiverIsReadonly || candidate.Getter.IsReadonly)),
+                indexerCandidates,
                 arguments,
                 syntax.OpenBracketToken.Location,
                 structType.Name,
-                syntax);
+                syntax,
+                receiverIsReadonly);
             if (indexer is null)
+            {
+                if (receiverIsReadonly && indexerCandidates.Length != 0 &&
+                    indexerCandidates.All(candidate => !candidate.IsReadonly))
+                    _diagnostics.Report(syntax.OpenBracketToken.Location,
+                        $"indexer on '{structType.Name}' cannot be read through a readonly receiver because its getter is mutable",
+                        DiagnosticIds.MutableGetterOnReadonlyReceiver);
                 return new BoundErrorExpression();
+            }
             RecordSymbolAndType(syntax, indexer, indexer.Type);
             if (!IsAccessible(indexer, receiver, pointerAccess: false))
             {
@@ -6064,16 +6111,25 @@ internal sealed partial class FunctionBodyBinder
         if (receiver.Type is InterfaceTypeSymbol interfaceType)
         {
             bool receiverIsReadonly = IsReadonlyReceiver(receiver, pointerAccess: false);
+            InterfaceIndexerSymbol[] indexerCandidates = interfaceType.AllIndexers
+                .Where(candidate => candidate.Getter is not null)
+                .ToArray();
             InterfaceIndexerSymbol? indexer = ResolveIndexer(
-                interfaceType.AllIndexers.Where(candidate =>
-                    candidate.Getter is not null &&
-                    (!receiverIsReadonly || candidate.Getter.IsReadonly)),
+                indexerCandidates,
                 arguments,
                 syntax.OpenBracketToken.Location,
                 interfaceType.Name,
-                syntax);
+                syntax,
+                receiverIsReadonly);
             if (indexer is null)
+            {
+                if (receiverIsReadonly && indexerCandidates.Length != 0 &&
+                    indexerCandidates.All(candidate => !candidate.IsReadonly))
+                    _diagnostics.Report(syntax.OpenBracketToken.Location,
+                        $"indexer on interface '{interfaceType.Name}' cannot be read through a readonly receiver because its getter is mutable",
+                        DiagnosticIds.MutableGetterOnReadonlyReceiver);
                 return new BoundErrorExpression();
+            }
             RecordSymbolAndType(syntax, indexer, indexer.Type);
             FunctionSymbol getter = indexer.Getter!;
             arguments = ValidateFunctionArguments(getter, arguments, syntax.Arguments, syntax.OpenBracketToken.Location);
@@ -6157,12 +6213,14 @@ internal sealed partial class FunctionBodyBinder
         if (receiver.Type is DeclaredTypeSymbol structType && structType is not InterfaceTypeSymbol)
         {
             IndexerSymbol? indexer = ResolveIndexer(
-                structType.LookupMembers("this").OfType<IndexerSymbol>().DistinctBy(indexer => TypeSignature.Parameters(indexer.Parameters)).Where(candidate =>
+                structType.LookupMembers("this").OfType<IndexerSymbol>()
+                    .DistinctBy(indexer => TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly)).Where(candidate =>
                     candidate.Setter is not null && (isSimpleAssignment || candidate.Getter is not null)),
                 indices,
                 target.OpenBracketToken.Location,
                 structType.Name,
-                target);
+                target,
+                receiverIsReadonly: false);
             if (indexer is null)
                 return new BoundErrorExpression();
             RecordSymbolAndType(target, indexer, indexer.Type);
@@ -6213,7 +6271,8 @@ internal sealed partial class FunctionBodyBinder
             indices,
             target.OpenBracketToken.Location,
             interfaceType.Name,
-            target);
+            target,
+            receiverIsReadonly: false);
         if (interfaceIndexer is null)
             return new BoundErrorExpression();
         RecordSymbolAndType(target, interfaceIndexer, interfaceIndexer.Type);
@@ -6464,8 +6523,10 @@ internal sealed partial class FunctionBodyBinder
     {
         if (syntax.Target is NameExpressionSyntax capturedName &&
             ReportUnsupportedLambdaCapture(capturedName.IdentifierToken)) return new BoundErrorExpression();
-        bool isLifetimeOperation = syntax.TypeArguments is null &&
-            syntax.Target is NameExpressionSyntax { IdentifierToken.Text: "destruct" };
+        string? coreOperation = syntax.TypeArguments is null && syntax.Target is NameExpressionSyntax coreName
+            ? coreName.IdentifierToken.Text : null;
+        bool isLifetimeOperation = coreOperation is "destruct" or "delete";
+        bool isRawAllocation = coreOperation is "malloc" or "calloc";
         BoundExpression? expressionTarget = syntax.TypeArguments is null &&
             syntax.Target is not (NameExpressionSyntax or MemberAccessExpressionSyntax)
                 ? BindExpression(syntax.Target) : null;
@@ -6475,6 +6536,8 @@ internal sealed partial class FunctionBodyBinder
             {
                 if (isLifetimeOperation && index == 0)
                     return BindLifetimeInvalidationOperand(argument);
+                if (isRawAllocation)
+                    return BindExpressionWithExpectedType(argument, BuiltinTypes.NUInt);
                 if (TryGetLambdaExpression(argument, out LambdaExpressionSyntax lambda))
                     return BindDeferredLambdaExpression(lambda, argument);
                 if (TryGetNamedFunctionExpression(argument, out ExpressionSyntax function))
@@ -6562,6 +6625,10 @@ internal sealed partial class FunctionBodyBinder
 
         if (name.IdentifierToken.Text == "destruct")
             return BindLifetimeOperation(syntax, name, arguments);
+        if (name.IdentifierToken.Text == "delete")
+            return BindDeleteExpression(syntax, name, arguments);
+        if (name.IdentifierToken.Text is "malloc" or "calloc")
+            return BindRawAllocationExpression(syntax, name, arguments);
 
         TypeSymbol? callTargetType = ResolveUnqualifiedTypeForExpression(
             name.IdentifierToken.Text,
@@ -7539,9 +7606,10 @@ internal sealed partial class FunctionBodyBinder
         }
         arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments,
             name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
-        if (structure is { IsOpenGenericType: true, GenericDefinition: { } genericDefinition })
+        if (structure is { IsOpenGenericType: true, GenericDefinition: not null })
             return new BoundDeferredGenericOperationExpression(BoundDeferredGenericOperationKind.Construction,
-                null, genericDefinition, arguments, null, SyntaxKind.EqualsToken, false, structure);
+                null, _fileScope.GenericStructSpecializer!.GetFunctionDefinition(constructor), arguments, null,
+                SyntaxKind.EqualsToken, false, structure);
         return new BoundConstructorCallExpression(structure, constructor, arguments);
     }
 
@@ -7810,6 +7878,17 @@ internal sealed partial class FunctionBodyBinder
 
         if (functionCandidates.Length == 0)
         {
+            // A namespace-qualified static field begins a value receiver chain.
+            // Let normal member binding resolve the rest and enforce accessibility
+            // and readonly rules instead of treating every segment as a namespace.
+            for (ExpressionSyntax receiver = target;
+                 receiver is MemberAccessExpressionSyntax member;
+                 receiver = member.Receiver)
+                if (TryResolveStaticTypeReceiver(member, out TypeSymbol? owner) &&
+                    owner is DeclaredTypeSymbol declared &&
+                    declared.FindStaticField(member.MemberToken.Text) is not null)
+                    return null;
+
             _diagnostics.Report(
                 target.MemberToken.Location,
                 $"unknown function or struct '{string.Join('.', parts)}'",
@@ -8494,22 +8573,8 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        FunctionSymbol? destructor = null;
-        TypeSymbol? destroyedType = null;
-        if (pointer.Type is PointerTypeSymbol pointerType)
-        {
-            if (pointerType.IsReadonly)
-                _diagnostics.Report(syntax.FreeKeyword.Location, "cannot free memory through a readonly pointer",
-                    DiagnosticIds.FreeThroughReadonlyPointer);
-            destructor = TypeFacts.GetCompleteDestructor(pointerType.ElementType);
-            destroyedType = pointerType.ElementType;
-        }
-        else if (pointer.Type is ArrayTypeSymbol arrayType)
-        {
-            destructor = TypeFacts.GetCompleteDestructor(arrayType.ElementType);
-            destroyedType = arrayType.ElementType;
-        }
-        else if (!TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Error))
+        if (pointer.Type is not (PointerTypeSymbol or ArrayTypeSymbol) &&
+            !TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Error))
         {
             _diagnostics.Report(
                 syntax.FreeKeyword.Location,
@@ -8518,18 +8583,116 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        if (!ValidateLifetimeOperationAuthority(pointer,
-                LifetimeOperationKind.EndLifetimeAndDeallocate, syntax.FreeKeyword.Location, out _))
-            return new BoundErrorExpression();
-
         if (TryGetMovePlace(pointer, out MovePlace pointerPlace) &&
             !ValidatePointerLifetimeInvalidation(pointerPlace, syntax.FreeKeyword.Location,
                 throughAlias: null, "free", DiagnosticIds.FreeWhileBorrowed))
             return new BoundErrorExpression();
 
-        if (destroyedType is not null)
-            ValidateDestructorAccessibility(destroyedType, syntax.FreeKeyword.Location);
-        return new BoundFreeExpression(pointer, destructor);
+        return new BoundFreeExpression(pointer);
+    }
+
+    private BoundExpression BindDeleteExpression(
+        CallExpressionSyntax syntax,
+        NameExpressionSyntax name,
+        ImmutableArray<BoundExpression> arguments)
+    {
+        if (arguments.Length != 1)
+        {
+            _diagnostics.Report(name.IdentifierToken.Location,
+                "'delete' expects exactly one argument", DiagnosticIds.WrongArity);
+            return new BoundErrorExpression();
+        }
+
+        BoundExpression pointer = arguments[0];
+        bool nullLiteral = TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Null);
+        if (nullLiteral)
+            pointer = ContextualizeNull(pointer, _fileScope.TypeFactory.PointerTo(BuiltinTypes.Byte));
+        if (GetArrayStorage(pointer) == ArrayStorageKind.Stack)
+        {
+            _diagnostics.Report(name.IdentifierToken.Location, "stack array cannot be deleted",
+                DiagnosticIds.StackArrayFree);
+            return new BoundErrorExpression();
+        }
+
+        FunctionSymbol? destructor;
+        TypeSymbol destroyedType;
+        if (pointer.Type is PointerTypeSymbol pointerType)
+        {
+            if (pointerType.IsReadonly)
+            {
+                _diagnostics.Report(name.IdentifierToken.Location,
+                    "cannot delete through a readonly pointer because deletion ends the pointee lifetime",
+                    DiagnosticIds.FreeThroughReadonlyPointer);
+                return new BoundErrorExpression();
+            }
+            if (TypeIdentity.AreSame(pointerType.ElementType, BuiltinTypes.Void))
+            {
+                _diagnostics.Report(name.IdentifierToken.Location,
+                    "'delete' cannot destroy a void pointer; use 'free(pointer)' for raw memory",
+                    DiagnosticIds.InvalidFreeOperand);
+                return new BoundErrorExpression();
+            }
+            destroyedType = pointerType.ElementType;
+            destructor = nullLiteral ? null : TypeFacts.GetCompleteDestructor(destroyedType);
+        }
+        else if (pointer.Type is ArrayTypeSymbol arrayType)
+        {
+            destroyedType = arrayType.ElementType;
+            destructor = TypeFacts.GetCompleteDestructor(destroyedType);
+        }
+        else
+        {
+            if (!TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Error))
+                _diagnostics.Report(name.IdentifierToken.Location,
+                    $"'delete' requires a heap pointer or heap array, but has type '{pointer.Type.ToDisplayString()}'",
+                    DiagnosticIds.InvalidFreeOperand);
+            return new BoundErrorExpression();
+        }
+
+        if (TryGetMovePlace(pointer, out MovePlace pointerPlace) &&
+            !ValidatePointerLifetimeInvalidation(pointerPlace, name.IdentifierToken.Location,
+                throughAlias: null, "delete", DiagnosticIds.FreeWhileBorrowed))
+            return new BoundErrorExpression();
+
+        ValidateDestructorAccessibility(destroyedType, name.IdentifierToken.Location);
+        return new BoundDeleteExpression(pointer, destructor);
+    }
+
+    private BoundExpression BindRawAllocationExpression(
+        CallExpressionSyntax syntax,
+        NameExpressionSyntax name,
+        ImmutableArray<BoundExpression> arguments)
+    {
+        string operation = name.IdentifierToken.Text;
+        bool validArity = operation == "malloc" ? arguments.Length is 1 or 2 : arguments.Length == 2;
+        if (!validArity)
+        {
+            string expected = operation == "malloc" ? "one or two arguments" : "exactly two arguments";
+            _diagnostics.Report(name.IdentifierToken.Location,
+                $"'{operation}' expects {expected}", DiagnosticIds.WrongArity);
+            return new BoundErrorExpression();
+        }
+        var converted = arguments.ToBuilder();
+        for (int index = 0; index < arguments.Length; index++)
+        {
+            if (TypeFacts.CanAssign(BuiltinTypes.NUInt, arguments[index].Type)) continue;
+            if (TypeFacts.IsInteger(arguments[index].Type) &&
+                _constants.TryFold(arguments[index], out object? constant) &&
+                SemanticAnalyzer.ToInteger(constant) is { Sign: >= 0 } integer &&
+                integer <= uint.MaxValue)
+            {
+                converted[index] = new BoundCastExpression(arguments[index], BuiltinTypes.NUInt);
+                continue;
+            }
+            ReportCannotConvert(GetLocation(syntax.Arguments[index]), arguments[index].Type, BuiltinTypes.NUInt);
+            return new BoundErrorExpression();
+        }
+
+        RawAllocationKind kind = operation == "calloc"
+            ? RawAllocationKind.Calloc
+            : arguments.Length == 2 ? RawAllocationKind.AlignedMalloc : RawAllocationKind.Malloc;
+        return new BoundRawAllocationExpression(kind, converted.ToImmutable(),
+            _fileScope.TypeFactory.PointerTo(BuiltinTypes.Void));
     }
 
     private void ValidateDestructorAccess(FunctionSymbol? destructor, TextLocation location)
@@ -9161,28 +9324,35 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
         string ownerName,
-        SyntaxNode syntax) =>
-        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName, syntax);
+        SyntaxNode syntax,
+        bool receiverIsReadonly) =>
+        ResolveIndexerCore(candidates, indexer => indexer.Parameters, indexer => indexer.IsReadonly,
+            arguments, location, ownerName, syntax, receiverIsReadonly);
 
     private InterfaceIndexerSymbol? ResolveIndexer(
         IEnumerable<InterfaceIndexerSymbol> candidates,
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
         string ownerName,
-        SyntaxNode syntax) =>
-        ResolveIndexerCore(candidates, indexer => indexer.Parameters, arguments, location, ownerName, syntax);
+        SyntaxNode syntax,
+        bool receiverIsReadonly) =>
+        ResolveIndexerCore(candidates, indexer => indexer.Parameters, indexer => indexer.IsReadonly,
+            arguments, location, ownerName, syntax, receiverIsReadonly);
 
     private TIndexer? ResolveIndexerCore<TIndexer>(
         IEnumerable<TIndexer> candidates,
         Func<TIndexer, ImmutableArray<ParameterSymbol>> getParameters,
+        Func<TIndexer, bool> getIsReadonly,
         ImmutableArray<BoundExpression> arguments,
         TextLocation location,
         string ownerName,
-        SyntaxNode syntax)
+        SyntaxNode syntax,
+        bool receiverIsReadonly)
         where TIndexer : Symbol
     {
         TIndexer[] candidateArray = candidates.ToArray();
         var matches = candidateArray
+            .Where(candidate => !receiverIsReadonly || getIsReadonly(candidate))
             .Where(candidate => getParameters(candidate).Length == arguments.Length)
             .Select(candidate => new
             {
@@ -9205,12 +9375,16 @@ internal sealed partial class FunctionBodyBinder
         }
         if (matches.Length == 0)
         {
-            CandidateReason reason = candidateArray.Length == 0 ? CandidateReason.NotFound
+            bool readonlyBlocked = receiverIsReadonly && candidateArray.Length != 0 &&
+                candidateArray.All(candidate => !getIsReadonly(candidate));
+            CandidateReason reason = readonlyBlocked ? CandidateReason.Inaccessible
+                : candidateArray.Length == 0 ? CandidateReason.NotFound
                 : candidateArray.All(candidate => getParameters(candidate).Length != arguments.Length)
                     ? CandidateReason.WrongArity : CandidateReason.NotInvocable;
             RecordCandidates(syntax, null, candidateArray, reason);
-            _diagnostics.Report(location, $"no indexer of type '{ownerName}' matches the provided arguments",
-                reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
+            if (!readonlyBlocked)
+                _diagnostics.Report(location, $"no indexer of type '{ownerName}' matches the provided arguments",
+                    reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
             RollbackUnmaterializedContextualArguments(arguments);
             return null;
         }
@@ -9221,6 +9395,14 @@ internal sealed partial class FunctionBodyBinder
                 IsBetterConversionSequence(other.Costs, candidate.Costs)))
             .Select(candidate => candidate.Indexer)
             .ToArray();
+        if (bestMatches.Length > 1 && !receiverIsReadonly)
+        {
+            TIndexer[] mutable = bestMatches.Where(candidate => !getIsReadonly(candidate)).ToArray();
+            if (mutable.Length == 1 && bestMatches.All(candidate =>
+                    TypeSignature.Parameters(getParameters(candidate)) ==
+                    TypeSignature.Parameters(getParameters(mutable[0]))))
+                bestMatches = mutable;
+        }
         if (bestMatches.Length == 1)
         {
             RecordCandidates(syntax, bestMatches[0], candidateArray, CandidateReason.None);
@@ -9787,6 +9969,12 @@ internal sealed partial class FunctionBodyBinder
                 break;
             case BoundFreeExpression free:
                 Visit(free.Pointer);
+                break;
+            case BoundDeleteExpression deletion:
+                Visit(deletion.Pointer);
+                break;
+            case BoundRawAllocationExpression allocation:
+                TransferAll(allocation.Arguments);
                 break;
         }
 
@@ -10420,10 +10608,13 @@ internal sealed partial class FunctionBodyBinder
         GenericIndexerMember[] candidates = GenericConstraintMemberLookup.GetIndexers(parameter,
                 _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
             .Where(indexer => indexer.HasSetter && (isSimpleAssignment || indexer.HasGetter))
+            .DistinctBy(indexer =>
+                $"{indexer.Type.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", indexer.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})/{indexer.IsReadonly}")
             .ToArray();
         GenericIndexerMember? indexer = ResolveGenericCandidate(candidates, candidate => candidate.Symbol,
             candidate => candidate.ParameterTypes, indices, target.OpenBracketToken.Location,
-            $"writable indexer on '{parameter.Name}'", target);
+            $"writable indexer on '{parameter.Name}'", target,
+            getIsReadonly: candidate => candidate.IsReadonly, receiverIsReadonly: false);
         if (indexer is null)
         {
             if (candidates.Length == 0)
@@ -10578,18 +10769,23 @@ internal sealed partial class FunctionBodyBinder
         bool receiverIsReadonly = IsReadonlyReceiver(receiver, pointerAccess: false);
         GenericIndexerMember[] candidates = GenericConstraintMemberLookup.GetIndexers(parameter,
                 _fileScope.TypeFactory, _fileScope.GenericStructSpecializer)
-            .Where(indexer => indexer.HasGetter && (!receiverIsReadonly || indexer.IsReadonly))
-            .DistinctBy(indexer => $"{indexer.Type.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", indexer.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})")
+            .Where(indexer => indexer.HasGetter)
+            .DistinctBy(indexer => $"{indexer.Type.ToDisplayString(TypeDisplayFormat.FullyQualified)}({string.Join(",", indexer.ParameterTypes.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))})/{indexer.IsReadonly}")
             .ToArray();
         GenericIndexerMember? indexer = ResolveGenericCandidate(candidates, candidate => candidate.Symbol,
             candidate => candidate.ParameterTypes, arguments, syntax.OpenBracketToken.Location,
-            $"indexer on '{parameter.Name}'", syntax);
+            $"indexer on '{parameter.Name}'", syntax,
+            getIsReadonly: candidate => candidate.IsReadonly, receiverIsReadonly: receiverIsReadonly);
         if (indexer is null)
         {
             if (candidates.Length == 0)
                 _diagnostics.Report(syntax.OpenBracketToken.Location,
                     $"constraints for '{parameter.Name}' do not guarantee a readable indexer",
                     DiagnosticIds.GenericMemberNotGuaranteed);
+            else if (receiverIsReadonly && candidates.All(candidate => !candidate.IsReadonly))
+                _diagnostics.Report(syntax.OpenBracketToken.Location,
+                    $"indexer is not guaranteed readonly for '{parameter.Name}'",
+                    DiagnosticIds.MutableGetterOnReadonlyReceiver);
             return new BoundErrorExpression();
         }
         arguments = ValidateGenericArguments("this", indexer.ParameterTypes, arguments, syntax.Arguments,
@@ -10663,13 +10859,16 @@ internal sealed partial class FunctionBodyBinder
 
     private T? ResolveGenericCandidate<T>(IEnumerable<T> source, Func<T, Symbol> getSymbol,
         Func<T, ImmutableArray<TypeSymbol>> getParameterTypes, ImmutableArray<BoundExpression> arguments,
-        TextLocation location, string description, SyntaxNode syntax, int? completedArgumentCount = null)
+        TextLocation location, string description, SyntaxNode syntax, int? completedArgumentCount = null,
+        Func<T, bool>? getIsReadonly = null, bool? receiverIsReadonly = null)
         where T : class
     {
         T[] candidates = source.ToArray();
         int suppliedCount = completedArgumentCount ?? arguments.Length;
         bool incomplete = completedArgumentCount.HasValue;
         var matches = candidates.Where(candidate =>
+                receiverIsReadonly != true || getIsReadonly?.Invoke(candidate) != false)
+            .Where(candidate =>
                 (incomplete ? getParameterTypes(candidate).Length >= suppliedCount :
                     getParameterTypes(candidate).Length == suppliedCount))
             .Select(candidate => new
@@ -10690,24 +10889,37 @@ internal sealed partial class FunctionBodyBinder
                 IsBetterConversionSequence(other.Costs, candidate.Costs)))
             .Select(candidate => candidate.Candidate)
             .ToArray();
+        if (bestMatches.Length > 1 && receiverIsReadonly == false && getIsReadonly is not null)
+        {
+            T[] mutable = bestMatches.Where(candidate => !getIsReadonly(candidate)).ToArray();
+            if (mutable.Length == 1 && bestMatches.All(candidate =>
+                    HaveSameTypes(getParameterTypes(candidate), getParameterTypes(mutable[0]))))
+                bestMatches = mutable;
+        }
         if (bestMatches.Length == 1)
         {
             RecordCandidates(syntax, getSymbol(bestMatches[0]), candidates.Select(getSymbol),
                 incomplete ? CandidateReason.Incomplete : CandidateReason.None);
             return bestMatches[0];
         }
-        CandidateReason reason = candidates.Length == 0 ? CandidateReason.NotFound
+        bool readonlyBlocked = receiverIsReadonly == true && candidates.Length != 0 &&
+            getIsReadonly is not null && candidates.All(candidate => !getIsReadonly(candidate));
+        CandidateReason reason = readonlyBlocked ? CandidateReason.Inaccessible
+            : candidates.Length == 0 ? CandidateReason.NotFound
             : bestMatches.Length > 1 ? CandidateReason.Ambiguous
             : candidates.All(candidate => getParameterTypes(candidate).Length != suppliedCount)
                 ? CandidateReason.WrongArity : CandidateReason.NotInvocable;
         RecordCandidates(syntax, null, candidates.Select(getSymbol), reason);
-        if (candidates.Length != 0 && !incomplete)
+        if (candidates.Length != 0 && !incomplete && !readonlyBlocked)
             _diagnostics.Report(location, bestMatches.Length > 1 ? $"{description} is ambiguous" :
                 $"no {description} matches the provided arguments",
                 bestMatches.Length > 1 ? DiagnosticIds.AmbiguousCall :
                 reason == CandidateReason.WrongArity ? DiagnosticIds.WrongArity : DiagnosticIds.NoMatchingCandidate);
         RollbackUnmaterializedContextualArguments(arguments);
         return null;
+
+        static bool HaveSameTypes(ImmutableArray<TypeSymbol> left, ImmutableArray<TypeSymbol> right) =>
+            left.Length == right.Length && left.Zip(right).All(pair => TypeIdentity.AreSame(pair.First, pair.Second));
     }
 
     private ImmutableArray<BoundExpression> ValidateGenericArguments(string name,

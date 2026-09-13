@@ -130,13 +130,13 @@ int Main()
     Wrapper[] values = new Wrapper[2];
     values[0].Item.Id = 7;
     values[1].Item.Id = 8;
-    free(values);
+    delete(values);
     if (Log.Trace != 87) return 9;
 
     Log.Trace = 0;
     Derived* derived = new Derived(1, 2);
     Base* baseValue = derived;
-    free(baseValue);
+    delete(baseValue);
     if (Log.Trace != 291) return 10;
 
     Log.Trace = 0;

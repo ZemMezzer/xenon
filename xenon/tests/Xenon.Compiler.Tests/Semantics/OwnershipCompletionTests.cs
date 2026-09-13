@@ -106,7 +106,7 @@ public sealed class OwnershipCompletionTests
                 destruct(*value);
                 *value = Resource();
                 Resource result = move *value;
-                free(value);
+                delete(value);
             }
             """);
 
@@ -866,7 +866,7 @@ public sealed class OwnershipCompletionTests
             {
                 Resource* value = new Resource();
                 Resource& reference = *value;
-                free(value);
+                delete(value);
                 reference.Use();
             }
             void DirectHeapStoragePointer()
@@ -874,7 +874,7 @@ public sealed class OwnershipCompletionTests
                 storage<Resource>* value = new storage<Resource>();
                 *value = Resource();
                 Resource& reference = *value;
-                free(value);
+                delete(value);
                 reference.Use();
             }
             """);
@@ -956,7 +956,7 @@ public sealed class OwnershipCompletionTests
                 Resource* value = new Resource();
                 Resource& reference = *value;
                 reference.Use();
-                free(value);
+                delete(value);
             }
             """);
 
@@ -995,7 +995,7 @@ public sealed class OwnershipCompletionTests
     }
 
     [Fact]
-    public void Analyzer_DistinguishesOrdinaryHeapAndStoragePointerDestruction()
+    public void Analyzer_AllowsMutableRawPointerLifetimeOperations()
     {
         Compilation compilation = Create("""
             namespace Example;
@@ -1033,13 +1033,11 @@ public sealed class OwnershipCompletionTests
                 *value = Resource();
                 destruct(*value);
                 *value = Resource();
-                free(value);
+                delete(value);
             }
             """);
 
-        Assert.Equal(5, compilation.Diagnostics.Count(diagnostic =>
-            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
-        Assert.Equal(5, compilation.Diagnostics.Length);
+        Assert.Empty(compilation.Diagnostics);
     }
 
     [Fact]
@@ -1074,15 +1072,11 @@ public sealed class OwnershipCompletionTests
             {
                 Resource* pointer = Create();
                 pointer->Use();
-                free(pointer);
+                delete(pointer);
             }
             """);
 
-        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
-            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
-        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
-            diagnostic.Id == DiagnosticIds.InvalidMoveSource));
-        Assert.Equal(6, compilation.Diagnostics.Length);
+        Assert.Empty(compilation.Diagnostics);
     }
 
     [Fact]
@@ -1129,7 +1123,7 @@ public sealed class OwnershipCompletionTests
                 Resource& reference = *value;
                 reference.Use();
                 destruct(*value);
-                free(value);
+                delete(value);
             }
             void ForwardedBorrow()
             {
@@ -1165,7 +1159,7 @@ public sealed class OwnershipCompletionTests
                 *value = Resource();
                 Resource& reference = *value;
                 destruct(reference);
-                free(value);
+                delete(value);
             }
             void LocalMove()
             {
@@ -1211,7 +1205,7 @@ public sealed class OwnershipCompletionTests
                 reference = Resource();
                 destruct(reference);
                 reference = Resource();
-                free(value);
+                delete(value);
             }
             """);
 
@@ -1219,7 +1213,7 @@ public sealed class OwnershipCompletionTests
     }
 
     [Fact]
-    public void Analyzer_RejectsRawPointerLifetimeOperationsRegardlessOfPlaceAndFlow()
+    public void Analyzer_AllowsRawPointerLifetimeOperationsRegardlessOfPlaceAndFlow()
     {
         Compilation compilation = Create("""
             namespace Example;
@@ -1314,7 +1308,7 @@ public sealed class OwnershipCompletionTests
             void LocalReplacement()
             {
                 Resource* value = new Resource();
-                free(value);
+                delete(value);
                 value = GetExternal();
                 destruct(*value);
             }
@@ -1322,7 +1316,7 @@ public sealed class OwnershipCompletionTests
             {
                 Holder holder = Holder();
                 holder.Value = new Resource();
-                free(holder.Value);
+                delete(holder.Value);
                 holder.Value = GetExternal();
                 destruct(*holder.Value);
             }
@@ -1330,14 +1324,14 @@ public sealed class OwnershipCompletionTests
             {
                 Holder holder = Holder();
                 holder.Value = new Resource();
-                free(holder.Value);
+                delete(holder.Value);
             }
             void ActiveFieldBorrow()
             {
                 Holder holder = Holder();
                 holder.Value = new Resource();
                 Resource& reference = *holder.Value;
-                free(holder.Value);
+                delete(holder.Value);
                 reference.Use();
             }
             void EndedFieldBorrow()
@@ -1346,7 +1340,7 @@ public sealed class OwnershipCompletionTests
                 holder.Value = new Resource();
                 Resource& reference = *holder.Value;
                 reference.Use();
-                free(holder.Value);
+                delete(holder.Value);
             }
             void StoragePointerField()
             {
@@ -1355,15 +1349,12 @@ public sealed class OwnershipCompletionTests
                 *holder.Value = Resource();
                 destruct(*holder.Value);
                 *holder.Value = Resource();
-                free(holder.Value);
+                delete(holder.Value);
             }
             """);
 
-        Assert.Equal(12, compilation.Diagnostics.Count(diagnostic =>
-            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
-        Assert.Single(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.InvalidMoveSource);
         Assert.Single(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.FreeWhileBorrowed);
-        Assert.Equal(14, compilation.Diagnostics.Length);
+        Assert.Single(compilation.Diagnostics);
     }
 
     [Fact]
@@ -1400,7 +1391,7 @@ public sealed class OwnershipCompletionTests
                 destruct(pointer[index]);
                 pointer[0] = Resource();
                 Resource value = move pointer[index];
-                free(pointer);
+                delete(pointer);
             }
             void ActiveMutableBorrow()
             {
@@ -1425,16 +1416,13 @@ public sealed class OwnershipCompletionTests
                 Resource& reference = pointer[0];
                 reference.Use();
                 destruct(pointer[0]);
-                free(pointer);
+                delete(pointer);
             }
             """);
 
-        Assert.Equal(3, compilation.Diagnostics.Count(diagnostic =>
-            diagnostic.Id == DiagnosticIds.HeapPointeeExplicitDestruction));
-        Assert.Single(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.InvalidMoveSource);
         Assert.Equal(2, compilation.Diagnostics.Count(diagnostic =>
             diagnostic.Id == DiagnosticIds.DestructWhileBorrowed));
-        Assert.Equal(6, compilation.Diagnostics.Length);
+        Assert.Equal(2, compilation.Diagnostics.Length);
     }
 
     [Fact]
@@ -1466,7 +1454,7 @@ public sealed class OwnershipCompletionTests
             struct Resource { public ~Resource() {} }
             void Consume(unique<Resource> value) {}
             void ConsumeShared(shared<Resource> value) {}
-            void ConsumePointer(Resource* value) { free(value); }
+            void ConsumePointer(Resource* value) { delete(value); }
             shared<Resource> Upgrade(weak<Resource> value) { return lock value; }
             void Invalid(unique<Resource> owned, weak<Resource> observer)
             {
@@ -1482,7 +1470,7 @@ public sealed class OwnershipCompletionTests
                 ConsumeShared(lock observer);
                 shared<Resource> returned = Upgrade(observer);
                 Resource* pointer = new Resource();
-                free(pointer);
+                delete(pointer);
                 ConsumePointer(new Resource());
             }
             """);
@@ -1526,7 +1514,7 @@ public sealed class OwnershipCompletionTests
                 storage<Resource>* pointer = new storage<Resource>();
                 pointer[0] = Resource();
                 Child child = move pointer[0].Child;
-                free(pointer);
+                delete(pointer);
             }
             """);
 
@@ -1988,7 +1976,7 @@ public sealed class OwnershipCompletionTests
                 Resource value = Resource();
                 Resource invalidDestruct = destruct(value);
                 Resource* pointer = new Resource();
-                Resource invalidFree = free(pointer);
+                Resource invalidFree = delete(pointer);
             }
             """);
 
@@ -2014,7 +2002,7 @@ public sealed class OwnershipCompletionTests
                 int& fromWeak = weakValue;
                 int& fromPointer = pointer;
                 int& fromBool = flag;
-                free(pointer);
+                delete(pointer);
             }
             """);
 
@@ -2047,8 +2035,8 @@ public sealed class OwnershipCompletionTests
     [InlineData("unique<int> owner = new int(); readonly int& first = *owner; int& second = *owner; int x = first; second = x;")]
     [InlineData("shared<int> owner = new int(); int& first = *owner; int& second = *owner; first = 1; second = 2;")]
     [InlineData("shared<int> owner = new int(); shared<int> alias = owner; int& first = *owner; int& second = *alias; first = 1; second = 2;")]
-    [InlineData("int* pointer = new int(); int& first = *pointer; int& second = *pointer; first = 1; second = 2; free(pointer);")]
-    [InlineData("int* pointer = new int(); int* alias = pointer; int& first = *pointer; int& second = *alias; first = 1; second = 2; free(pointer);")]
+    [InlineData("int* pointer = new int(); int& first = *pointer; int& second = *pointer; first = 1; second = 2; delete(pointer);")]
+    [InlineData("int* pointer = new int(); int* alias = pointer; int& first = *pointer; int& second = *alias; first = 1; second = 2; delete(pointer);")]
     public void Analyzer_RejectsOverlappingBorrowsThroughKnownPointeeAliases(string body)
     {
         Compilation compilation = Create($$"""
@@ -2135,7 +2123,7 @@ public sealed class OwnershipCompletionTests
                 pointerFirst = 1;
                 int& pointerSecond = *pointer;
                 pointerSecond = 2;
-                free(pointer);
+                delete(pointer);
             }
             """);
 

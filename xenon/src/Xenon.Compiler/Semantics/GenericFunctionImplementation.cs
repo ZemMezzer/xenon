@@ -373,7 +373,15 @@ internal sealed class LibraryGenericFunctionImplementation(
                 _ => null,
             };
             if (structure is null) throw InvalidGenericOperation(operation, requirement, resultType);
-            FunctionSymbol? constructor = FindConstructor(structure, arguments);
+            // The source binder already selected this overload. Argument types may differ
+            // from parameter types for implicit conversions such as T* to readonly T*.
+            FunctionSymbol? constructor = requirement is FunctionSymbol
+                { FunctionKind: FunctionKind.Constructor } selected
+                ? structure.Constructors.FirstOrDefault(candidate => ReferenceEquals(candidate, selected)) ??
+                    specializer.StructSpecializer.FindSpecializedFunction(
+                        specializer.StructSpecializer.GetFunctionDefinition(selected), structure) ??
+                    throw InvalidGenericOperation(operation, requirement, resultType)
+                : FindConstructor(structure, arguments);
             if (constructor is null && !arguments.IsEmpty)
                 throw InvalidGenericOperation(operation, requirement, resultType);
             if (operation == BoundDeferredGenericOperationKind.Construction)
@@ -454,7 +462,7 @@ internal sealed class LibraryGenericFunctionImplementation(
             BoundDeferredGenericOperationKind.IndexerSet)
         {
             if (receiverType is StructTypeSymbol structure &&
-                FindIndexer(structure.AllIndexers, arguments) is { } indexer)
+                FindIndexer(structure.AllIndexers, arguments, requirement) is { } indexer)
             {
                 if (operation == BoundDeferredGenericOperationKind.IndexerGet)
                     return new BoundMethodCallExpression(receiver,
@@ -470,7 +478,7 @@ internal sealed class LibraryGenericFunctionImplementation(
                     arguments, CompoundOperator(operatorKind), assigned, isPointerAccess, null);
             }
             if (receiverType is InterfaceTypeSymbol @interface &&
-                FindInterfaceIndexer(@interface.AllIndexers, arguments) is { } interfaceIndexer)
+                FindInterfaceIndexer(@interface.AllIndexers, arguments, requirement) is { } interfaceIndexer)
             {
                 if (operation == BoundDeferredGenericOperationKind.IndexerGet)
                     return new BoundInterfaceMethodCallExpression(receiver, @interface,
@@ -510,12 +518,13 @@ internal sealed class LibraryGenericFunctionImplementation(
         ParametersMatch(candidate.Parameters, arguments));
 
     private static IndexerSymbol? FindIndexer(IEnumerable<IndexerSymbol> candidates,
-        ImmutableArray<BoundExpression> arguments) => candidates.FirstOrDefault(candidate =>
-        ParametersMatch(candidate.Parameters, arguments));
+        ImmutableArray<BoundExpression> arguments, Symbol requirement) => candidates.FirstOrDefault(candidate =>
+        ParametersMatch(candidate.Parameters, arguments) && RequirementReadonlyMatches(requirement, candidate));
 
     private static InterfaceIndexerSymbol? FindInterfaceIndexer(
-        IEnumerable<InterfaceIndexerSymbol> candidates, ImmutableArray<BoundExpression> arguments) =>
-        candidates.FirstOrDefault(candidate => ParametersMatch(candidate.Parameters, arguments));
+        IEnumerable<InterfaceIndexerSymbol> candidates, ImmutableArray<BoundExpression> arguments,
+        Symbol requirement) => candidates.FirstOrDefault(candidate =>
+        ParametersMatch(candidate.Parameters, arguments) && RequirementReadonlyMatches(requirement, candidate));
 
     private static bool ParametersMatch(ImmutableArray<ParameterSymbol> parameters,
         ImmutableArray<BoundExpression> arguments) => parameters.Length == arguments.Length &&
@@ -590,6 +599,24 @@ internal sealed class LibraryGenericFunctionImplementation(
         {
             TemplateMethodRequirementSymbol template => template.IsReadonly == candidate.IsReadonly,
             FunctionSymbol function => function.IsReadonly == candidate.IsReadonly,
+            _ => true,
+        };
+
+    private static bool RequirementReadonlyMatches(Symbol requirement, IndexerSymbol candidate) =>
+        requirement switch
+        {
+            TemplateIndexerRequirementSymbol template => template.IsReadonly == candidate.IsReadonly,
+            IndexerSymbol indexer => indexer.IsReadonly == candidate.IsReadonly,
+            InterfaceIndexerSymbol indexer => indexer.IsReadonly == candidate.IsReadonly,
+            _ => true,
+        };
+
+    private static bool RequirementReadonlyMatches(Symbol requirement, InterfaceIndexerSymbol candidate) =>
+        requirement switch
+        {
+            TemplateIndexerRequirementSymbol template => template.IsReadonly == candidate.IsReadonly,
+            IndexerSymbol indexer => indexer.IsReadonly == candidate.IsReadonly,
+            InterfaceIndexerSymbol indexer => indexer.IsReadonly == candidate.IsReadonly,
             _ => true,
         };
 

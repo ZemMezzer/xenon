@@ -1,0 +1,6 @@
+{
+  "input": "Shared/Shared.xeproj",
+  "artifact": "sharedLibrary",
+  "profiles": ["release"],
+  "exportSymbol": "Wpo_Exported_Add"
+}

@@ -50,6 +50,7 @@ internal static class Program
         bool emitObject = projectCommand;
         string profileName = "debug";
         string? targetTriple = null;
+        bool nativeCpu = false;
         var inputs = new List<string>();
 
         while (argumentIndex < args.Length)
@@ -68,6 +69,9 @@ internal static class Program
                     break;
                 case "--release":
                     profileName = "release";
+                    break;
+                case "--native-cpu":
+                    nativeCpu = true;
                     break;
                 case "--profile":
                     if (argumentIndex == args.Length)
@@ -145,7 +149,8 @@ internal static class Program
         // selects a project/profile/target and presents the result.
         if (projectCommand)
         {
-            return RunProjectCommand(inputs[0], profileName, targetTriple, runCommand, dumpTokens);
+            return RunProjectCommand(inputs[0], profileName, targetTriple, runCommand, dumpTokens,
+                nativeCpu: nativeCpu);
         }
 
         // A project file or directory always goes through the graph-aware driver,
@@ -154,7 +159,7 @@ internal static class Program
         {
             bool compileOnly = !emitObject && !emitLlvm;
             return RunProjectCommand(inputs[0], profileName, targetTriple, run: false, dumpTokens,
-                compileOnly, skipLink: true);
+                compileOnly, skipLink: true, nativeCpu: nativeCpu);
         }
 
         CompilationInput input;
@@ -198,8 +203,15 @@ internal static class Program
             try
             {
                 string effectiveTriple = targetTriple ?? LlvmTargetPlatform.HostTriple;
-                selectedTarget = new LlvmTargetOptions(effectiveTriple, input.Profile.OptimizationLevel,
-                    PositionIndependentCode: !IsWindowsTarget(effectiveTriple));
+                if (nativeCpu && !string.Equals(effectiveTriple, LlvmTargetPlatform.HostTriple,
+                        StringComparison.OrdinalIgnoreCase))
+                    return WriteUsageError("option '--native-cpu' requires the host target triple");
+                selectedTarget = new LlvmTargetOptions(
+                    effectiveTriple,
+                    input.Profile.OptimizationLevel,
+                    nativeCpu ? LlvmTargetPlatform.HostCpuName : string.Empty,
+                    nativeCpu ? LlvmTargetPlatform.HostCpuFeatures : string.Empty,
+                    !IsWindowsTarget(effectiveTriple));
                 compilation = LlvmIrGenerator.BindForTarget(compilation, selectedTarget);
             }
             catch (LlvmCodeGenerationException exception)
@@ -355,10 +367,11 @@ internal static class Program
     }
 
     private static int RunProjectCommand(string inputPath, string profileName, string? targetTriple,
-        bool run, bool dumpTokens, bool compileOnly = false, bool skipLink = false)
+        bool run, bool dumpTokens, bool compileOnly = false, bool skipLink = false,
+        bool nativeCpu = false)
     {
         XenonBuildResult result = new XenonBuildDriver().Build(CreateProjectBuildRequest(
-            inputPath, profileName, targetTriple, compileOnly, skipLink));
+            inputPath, profileName, targetTriple, compileOnly, skipLink, nativeCpu));
         foreach (Diagnostic diagnostic in result.Diagnostics)
             DiagnosticWriter.Write(Console.Error, diagnostic);
         if (!result.Success)
@@ -386,9 +399,9 @@ internal static class Program
     }
 
     internal static XenonBuildRequest CreateProjectBuildRequest(string inputPath, string profileName,
-        string? targetTriple, bool compileOnly, bool skipLink) =>
+        string? targetTriple, bool compileOnly, bool skipLink, bool nativeCpu = false) =>
         new(inputPath, profileName, TargetTriple: targetTriple, CompileOnly: compileOnly,
-            SkipLink: skipLink);
+            SkipLink: skipLink, CpuMode: nativeCpu ? LlvmTargetCpuMode.Native : LlvmTargetCpuMode.Portable);
 
     internal static bool IsProjectShapedInput(IReadOnlyList<string> inputs) =>
         inputs.Count == 1 &&
@@ -445,10 +458,10 @@ internal static class Program
         Console.WriteLine("Xenon compiler");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  xenon build [path] [--profile debug|release] [--target triple] [--dump-tokens] [--emit-llvm]");
-        Console.WriteLine("  xenon run [path] [--profile debug|release]");
+        Console.WriteLine("  xenon build [path] [--profile debug|release] [--target triple] [--native-cpu] [--dump-tokens] [--emit-llvm]");
+        Console.WriteLine("  xenon run [path] [--profile debug|release] [--native-cpu]");
         Console.WriteLine("  xenon lsp");
-        Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] [--emit-object] <source.xe> [additional.xe ...]");
+        Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] [--emit-object] [--native-cpu] <source.xe> [additional.xe ...]");
         Console.WriteLine("  xenon --version");
         Console.WriteLine("  xenon --help");
         Console.WriteLine();

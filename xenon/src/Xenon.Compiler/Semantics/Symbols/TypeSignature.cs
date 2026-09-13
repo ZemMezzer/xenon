@@ -44,6 +44,9 @@ internal static class TypeSignature
     public static string Parameters(ImmutableArray<ParameterSymbol> parameters) =>
         string.Join(",", parameters.Select(parameter => Get(parameter.Type)));
 
+    public static string Indexer(ImmutableArray<ParameterSymbol> parameters, bool isReadonly) =>
+        $"{Parameters(parameters)}/{(isReadonly ? "readonly" : "mutable")}";
+
     public static string Parameters(FunctionSymbol function)
     {
         IReadOnlyDictionary<GenericParameterSymbol, int> positions = function.TypeParameters

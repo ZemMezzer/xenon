@@ -1,0 +1,6 @@
+[project]
+name = "WpoStaticExportCore"
+type = "static-library"
+
+[source]
+root = "src"

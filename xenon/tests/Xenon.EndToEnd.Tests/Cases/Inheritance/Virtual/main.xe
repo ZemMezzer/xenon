@@ -14,6 +14,6 @@ int Main()
     Derived* derived = new Derived();
     Base* view = derived;
     int result = view->Score();
-    free(view);
+    delete(view);
     return result;
 }

@@ -1,0 +1,9 @@
+[project]
+name = "WpoStaticTransitiveApp"
+type = "executable"
+
+[source]
+root = "src"
+
+[references]
+projects = ["../Middle/Middle.xeproj"]

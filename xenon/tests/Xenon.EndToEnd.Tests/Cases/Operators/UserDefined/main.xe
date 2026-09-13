@@ -49,6 +49,6 @@ int Main()
     values[0] = 10;
     values[Probe.Index()] += Probe.Delta();
     if (Probe.Indices != 2 || Probe.Values != 3 || cast<int>(values[0]) != 13) return 6;
-    free(values);
+    delete(values);
     return 42;
 }

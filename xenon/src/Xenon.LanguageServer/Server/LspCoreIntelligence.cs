@@ -379,7 +379,7 @@ internal static class LspCoreIntelligence
         foreach (CallExpressionSyntax call in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
                      .OfType<CallExpressionSyntax>())
             if (call.TypeArguments is null && call.Target is NameExpressionSyntax name &&
-                name.IdentifierToken.Text == "destruct")
+                name.IdentifierToken.Text is "malloc" or "calloc" or "delete" or "destruct")
                 tokens.Add((name.IdentifierToken.Location.Span, 18, 0, 3));
     }
 
@@ -430,7 +430,7 @@ internal static class LspCoreIntelligence
             "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" or "function" =>
                 "type-forming keyword",
             "new" or "move" or "lock" => "value-forming keyword",
-            "free" or "destruct" => "lifetime operation keyword",
+            "malloc" or "calloc" or "free" or "delete" or "destruct" => "lifetime operation keyword",
             "true" or "false" or "null" => "literal keyword",
             _ => "keyword",
         };

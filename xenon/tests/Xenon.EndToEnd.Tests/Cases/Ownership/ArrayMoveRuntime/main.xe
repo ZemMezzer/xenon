@@ -29,7 +29,7 @@ int Main()
     heapSource[1] = 20;
     int[] heapDestination = move heapSource;
     if (heapDestination[1] != 20) return 1;
-    free(heapDestination);
+    delete(heapDestination);
 
     int[] stackSource = int[3];
     stackSource[2] = 30;
@@ -47,7 +47,7 @@ int Main()
 
     int[] returned = MakeHeapArray(2);
     if (returned[0] != 17) return 4;
-    free(returned);
+    delete(returned);
 
     Log.DestructorCalls = 0;
     Log.Trace = 0;
