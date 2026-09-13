@@ -383,6 +383,7 @@ internal sealed partial class ReadonlyEffectAnalyzer
 
     private HashSet<object> Capture(HashSet<object> value, TypeSymbol type, object identity)
     {
+        type = UnwrapValueStorage(type);
         if (type is not IFieldStorageTypeSymbol) return value;
         if (!_context.Snapshots.TryGetValue(identity, out object? root))
             _context.Snapshots.Add(identity, root = new object());

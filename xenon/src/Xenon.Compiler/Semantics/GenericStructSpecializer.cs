@@ -140,7 +140,7 @@ internal sealed class GenericStructSpecializer
         if (_specializedFunctions.FirstOrDefault(entry => ReferenceEquals(entry.Value, function)).Key.Definition is { } definition)
             return definition;
         if (function.ContainingStruct is { Origin.Kind: SymbolOriginKind.Library, GenericDefinition: { } genericDefinition } owner)
-            return genericDefinition.Methods.FirstOrDefault(candidate =>
+            return genericDefinition.Methods.Concat(genericDefinition.Constructors).FirstOrDefault(candidate =>
                 ReferenceEquals(FindSpecializedFunction(candidate, owner), function)) ?? function;
         return function;
     }
@@ -749,9 +749,14 @@ internal sealed class GenericStructSpecializer
     private TypeSymbol SubstituteStorage(StorageTypeSymbol storage,
         IReadOnlyDictionary<GenericParameterSymbol, TypeSymbol> substitutions, TextLocation? origin)
     {
-        StorageTypeSymbol result = _types.StorageOf(Substitute(storage.ElementType, substitutions, origin));
+        TypeSymbol element = Substitute(storage.ElementType, substitutions, origin);
+        // Preserve the imported destructor association when substitution does not
+        // change the storage type; a new factory instance would duplicate its symbol.
+        if (TypeIdentity.AreSame(element, storage.ElementType)) return storage;
+        StorageTypeSymbol result = _types.StorageOf(element);
         if (storage.CompleteDestructor is { } sourceDestructor)
-            _types.EnsureStorageDestructor(result, sourceDestructor.ContainingNamespace, sourceDestructor.Origin);
+            _types.EnsureStorageDestructor(result, _resolveNamespace(sourceDestructor.ContainingNamespace),
+                SymbolOrigin.CompilerGenerated);
         return result;
     }
 
