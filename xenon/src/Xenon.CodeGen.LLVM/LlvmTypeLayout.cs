@@ -21,10 +21,13 @@ internal sealed class LlvmTypeLayout : ITargetTypeLayout
     private readonly AbiValueLayout _double;
     private readonly bool _windowsCLong;
 
-    private LlvmTypeLayout(int pointerBitWidth, AbiValueLayout pointer, AbiValueLayout @bool,
+    public string TargetTriple { get; }
+
+    private LlvmTypeLayout(string targetTriple, int pointerBitWidth, AbiValueLayout pointer, AbiValueLayout @bool,
         AbiValueLayout int8, AbiValueLayout int16, AbiValueLayout int32, AbiValueLayout int64,
         AbiValueLayout @float, AbiValueLayout @double, bool windowsCLong)
     {
+        TargetTriple = targetTriple;
         _pointerBitWidth = pointerBitWidth;
         _pointer = pointer;
         _bool = @bool;
@@ -47,7 +50,7 @@ internal sealed class LlvmTypeLayout : ITargetTypeLayout
         LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(context.Int8Type, 0);
         bool windows = target.Triple.Contains("windows", StringComparison.OrdinalIgnoreCase) ||
             target.Triple.Contains("win32", StringComparison.OrdinalIgnoreCase);
-        return new LlvmTypeLayout(target.PointerBitWidth,
+        return new LlvmTypeLayout(target.Triple, target.PointerBitWidth,
             Query(data, pointer), Query(data, context.Int1Type), Query(data, context.Int8Type),
             Query(data, context.Int16Type), Query(data, context.Int32Type), Query(data, context.Int64Type),
             Query(data, context.FloatType), Query(data, context.DoubleType), windows);

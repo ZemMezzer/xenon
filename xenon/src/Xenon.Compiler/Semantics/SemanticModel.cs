@@ -42,6 +42,10 @@ public sealed class SemanticModel
     public GenericImplementationStore GenericImplementations { get; }
     public SyntaxTree? SyntaxTree => _primaryTree;
 
+    internal SemanticModel WithAdditionalDiagnostics(ImmutableArray<Diagnostic> diagnostics) => diagnostics.IsEmpty
+        ? this : new(GlobalNamespace, TypeFactory, Functions, SemanticDiagnostics.AddRange(diagnostics),
+            _syntaxTrees, _semanticInfo, GenericImplementations, RequiresTargetLayout, _primaryTree);
+
     internal SemanticModel ForTree(SyntaxTree tree) => new(GlobalNamespace, TypeFactory, Functions,
         SemanticDiagnostics, _syntaxTrees, _semanticInfo, GenericImplementations, RequiresTargetLayout, tree);
 

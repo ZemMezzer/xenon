@@ -10,6 +10,7 @@ namespace Xenon.ProjectSystem;
 public sealed class ProjectSnapshot
 {
     private readonly string _profileName;
+    private readonly string? _targetTriple;
     private readonly ImmutableDictionary<DocumentId, DocumentSnapshot> _documentsById;
     private readonly ImmutableDictionary<SourceFileId, (ProjectId ProjectId, DocumentId DocumentId)> _sourceMap;
     private readonly ImmutableDictionary<DocumentId, ImmutableArray<SymbolIndexEntry>>? _symbolContributions;
@@ -28,8 +29,11 @@ public sealed class ProjectSnapshot
         ProjectSymbolIndex? reusableSymbolIndex = null,
         ProjectReferenceIndex? reusableReferenceIndex = null,
         ImmutableHashSet<DocumentId>? symbolDocumentsToRebuild = null,
-        ImmutableHashSet<DocumentId>? referenceDocumentsToRebuild = null)
+        ImmutableHashSet<DocumentId>? referenceDocumentsToRebuild = null, string? targetTriple = null)
     {
+        _targetTriple = targetTriple;
+        var conditional = XenonProjectCompilationFactory.GetConditionalOptions(configuration, profileName, targetTriple);
+        documents = documents.Select(document => document.WithConditionalOptions(conditional)).ToImmutableArray();
         Id = id;
         Version = version;
         Configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
@@ -58,7 +62,7 @@ public sealed class ProjectSnapshot
         DeclarationFingerprint = string.Join('|', documents.OrderBy(document => document.Id)
             .Select(document => $"{document.Id}:{document.DeclarationFingerprint}"));
         LibraryFingerprint = CreateLibraryFingerprint(configuration);
-        DeclarationFingerprint += $"|xelib:{LibraryFingerprint}";
+        DeclarationFingerprint += $"|xelib:{LibraryFingerprint}|defines:{conditional.Identity}";
     }
 
     public ProjectId Id { get; }
@@ -97,7 +101,7 @@ public sealed class ProjectSnapshot
         cancellationToken.ThrowIfCancellationRequested();
         Compilation created = XenonProjectCompilationFactory.Create(Configuration, _profileName,
             Documents.Select(document => document.SyntaxTree), dependencies, cancellationToken,
-            metadataOnlyXelib: true);
+            metadataOnlyXelib: true, targetTriple: _targetTriple);
         cancellationToken.ThrowIfCancellationRequested();
         Compilation? winner = Interlocked.CompareExchange(ref _compilation, created, null);
         return winner ?? created;

@@ -27,20 +27,23 @@ public static class XelibWriter
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.Name);
+        var buildOptions = compilation.Options.ConditionalOptions.ForLibraryBuild();
+        compilation = compilation.WithOptions(compilation.Options with { ConditionalCompilation = buildOptions });
         if (compilation.HasErrors)
             throw new XelibFormatException(XelibErrorCode.FeatureNotRepresentable,
-                "a library cannot be emitted while the compilation contains errors");
-        if (compilation.TargetLayout is not null)
+                "a library cannot be emitted while the selected compilation contains errors: " +
+                string.Join("; ", compilation.Diagnostics.Select(d => $"{d.Id}: {d.Message}")));
+        if (compilation.RequiresTargetLayout && compilation.TargetLayout is null)
             throw new XelibFormatException(XelibErrorCode.FeatureNotRepresentable,
-                "a portable XELIB must be emitted before target layout binding");
-
+                "bind the compilation for its target before writing target-dependent XELIB layout");
         ImmutableArray<XelibDependencyInput> inputs = options.Dependencies.IsDefault ? [] : options.Dependencies;
         ValidateDependencies(compilation, inputs);
-        var builder = new XelibIrBuilder(compilation, inputs);
-        XelibIrPayload payload = builder.Build();
+        var configuration = new XelibBuildConfiguration(buildOptions.TargetTriple!, [.. buildOptions.UserDefines]);
+        XelibIrPayload payload = new XelibIrBuilder(compilation, inputs).Build();
 
         var sections = new SortedDictionary<XelibSectionKind, byte[]>
         {
+            [XelibSectionKind.BuildConfiguration] = XelibJson.Serialize(configuration),
             [XelibSectionKind.Strings] = XelibJson.Serialize(payload.Strings),
             [XelibSectionKind.Dependencies] = XelibJson.Serialize(payload.Dependencies),
             [XelibSectionKind.Types] = XelibJson.Serialize(payload.Types),
@@ -129,7 +132,8 @@ public static class XelibWriter
     }
 }
 
-public sealed record XelibMetadata(XelibManifest Manifest, ImmutableArray<XelibDependency> Dependencies);
+public sealed record XelibMetadata(XelibManifest Manifest, ImmutableArray<XelibDependency> Dependencies,
+    XelibBuildConfiguration Configuration);
 
 public static class XelibMetadataReader
 {
@@ -156,7 +160,7 @@ public static class XelibMetadataReader
             manifest.LibraryIrVersion != container.Header.LibraryIrVersion)
             throw new XelibFormatException(XelibErrorCode.InvalidRecord,
                 "manifest versions do not match the XELIB header", path);
-        if (dependencies.Any(item => item.Id <= 0 || string.IsNullOrWhiteSpace(item.Name) ||
+        if (dependencies.IsDefault || dependencies.Any(item => item is null || item.Id <= 0 || string.IsNullOrWhiteSpace(item.Name) ||
                 item.ContentIdentity is not { Length: 64 } ||
                 !item.ContentIdentity.All(Uri.IsHexDigit)) ||
             dependencies.Select(item => item.Id).Distinct().Count() != dependencies.Length ||
@@ -171,7 +175,19 @@ public static class XelibMetadataReader
         if (!string.Equals(actualIdentity, manifest.ContentIdentity, StringComparison.Ordinal))
             throw new XelibFormatException(XelibErrorCode.ContentIdentityMismatch,
                 "content digest does not match the manifest identity", path);
-        return new XelibMetadata(manifest, dependencies);
+        var configuration = XelibJson.Deserialize<XelibBuildConfiguration>(
+            container.GetRequiredSection(XelibSectionKind.BuildConfiguration).AsSpan(), path);
+        try
+        {
+            if (configuration.Defines.IsDefault || configuration.TargetTriple is null)
+                throw new ArgumentException("missing target or build define set");
+            var validated = new ConditionalCompilationOptions(configuration.Defines, configuration.TargetTriple);
+            if (validated.TargetTriple != configuration.TargetTriple || !validated.UserDefines.SequenceEqual(configuration.Defines))
+                throw new ArgumentException("XELIB target and build defines must be canonical, sorted and unique");
+        }
+        catch (ArgumentException error)
+        { throw new XelibFormatException(XelibErrorCode.InvalidRecord, error.Message, path, error); }
+        return new XelibMetadata(manifest, dependencies, configuration);
     }
 }
 
@@ -183,6 +199,7 @@ internal static class XelibJson
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault,
         NumberHandling = JsonNumberHandling.Strict,
+        MaxDepth = 1024,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
     };
     private static readonly XelibJsonSerializerContext Context = new(Options);
@@ -226,6 +243,8 @@ internal static class XelibJson
 [JsonSerializable(typeof(ImmutableArray<XelibGenericImplementation>))]
 [JsonSerializable(typeof(XelibBodyRecord))]
 [JsonSerializable(typeof(XelibManifest))]
+[JsonSerializable(typeof(XelibBuildConfiguration))]
+[JsonSerializable(typeof(XelibIrPayload))]
 internal sealed partial class XelibJsonSerializerContext : JsonSerializerContext;
 
 internal sealed record XelibIrPayload(

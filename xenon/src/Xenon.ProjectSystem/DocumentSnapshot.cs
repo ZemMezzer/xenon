@@ -1,3 +1,4 @@
+using Xenon.Compiler;
 using System.Collections.Immutable;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
@@ -10,7 +11,7 @@ public sealed class DocumentSnapshot
     internal DocumentSnapshot(DocumentId id, string? physicalPath, SourceText? diskText,
         SourceText? overlayText, DocumentVersion version, SyntaxTree? reusableTree = null,
         CancellationToken cancellationToken = default,
-        BackingVersion backingVersion = default)
+        BackingVersion backingVersion = default, ConditionalCompilationOptions? conditionalOptions = null)
     {
         if (id.ProjectId == default) throw new ArgumentException("A document must belong to a project.", nameof(id));
         if (diskText is null && overlayText is null)
@@ -23,7 +24,9 @@ public sealed class DocumentSnapshot
         Version = version;
         BackingVersion = backingVersion;
         SourceText effective = overlayText ?? diskText!;
+        conditionalOptions ??= reusableTree?.ConditionalOptions ?? ConditionalCompilationOptions.Default;
         bool canReuseTree = reusableTree is not null &&
+            reusableTree.ConditionalOptions.Equals(conditionalOptions) &&
             reusableTree.Source.FileId == effective.FileId &&
             reusableTree.Source.Path == effective.Path &&
             reusableTree.Source.Text == effective.Text;
@@ -36,10 +39,14 @@ public sealed class DocumentSnapshot
         DiskText = diskText;
         OverlayText = overlayText;
         EffectiveText = effective;
-        SyntaxTree = canReuseTree ? reusableTree! : SyntaxTree.Parse(EffectiveText, cancellationToken);
+        SyntaxTree = canReuseTree ? reusableTree! : SyntaxTree.Parse(EffectiveText, cancellationToken, conditionalOptions);
         DeclarationFingerprint = Xenon.ProjectSystem.DeclarationFingerprint.Create(SyntaxTree,
             cancellationToken);
     }
+
+    internal DocumentSnapshot WithConditionalOptions(ConditionalCompilationOptions options) =>
+        SyntaxTree.ConditionalOptions.Equals(options) ? this : new DocumentSnapshot(Id, PhysicalPath,
+            DiskText, OverlayText, Version, backingVersion: BackingVersion, conditionalOptions: options);
 
     public DocumentId Id { get; }
     public ProjectId ProjectId { get; }
@@ -66,7 +73,7 @@ public sealed class DocumentSnapshot
             throw new ArgumentException("A document requires effective source text.");
         bool sameText = effective.Text == EffectiveText.Text && effective.Path == EffectiveText.Path;
         var snapshot = new DocumentSnapshot(Id, PhysicalPath, diskText, overlayText, version,
-            sameText ? SyntaxTree : null, cancellationToken, BackingVersion);
+            sameText ? SyntaxTree : null, cancellationToken, BackingVersion, SyntaxTree.ConditionalOptions);
         return (snapshot, ClassifyChange(snapshot, sameText));
     }
 
@@ -80,7 +87,7 @@ public sealed class DocumentSnapshot
         SourceText overlay = EffectiveText.WithText(editorText);
         bool sameText = overlay.Text == EffectiveText.Text && overlay.Path == EffectiveText.Path;
         var snapshot = new DocumentSnapshot(Id, PhysicalPath, DiskText, overlay, version,
-            sameText ? SyntaxTree : null, cancellationToken, BackingVersion);
+            sameText ? SyntaxTree : null, cancellationToken, BackingVersion, SyntaxTree.ConditionalOptions);
         return (snapshot, ClassifyChange(snapshot, sameText));
     }
 
@@ -94,7 +101,7 @@ public sealed class DocumentSnapshot
             throw new InvalidOperationException("An untitled document has no disk state to close to.");
         bool sameText = disk.Text == EffectiveText.Text && disk.Path == EffectiveText.Path;
         var snapshot = new DocumentSnapshot(Id, PhysicalPath, disk, null, Version,
-            sameText ? SyntaxTree : null, cancellationToken, BackingVersion);
+            sameText ? SyntaxTree : null, cancellationToken, BackingVersion, SyntaxTree.ConditionalOptions);
         return (snapshot, ClassifyChange(snapshot, sameText));
     }
 
@@ -107,7 +114,7 @@ public sealed class DocumentSnapshot
         bool sameText = effective.Text == EffectiveText.Text && effective.Path == EffectiveText.Path;
         var backingVersion = new BackingVersion(checked(BackingVersion.Value + 1));
         var snapshot = new DocumentSnapshot(Id, PhysicalPath, diskText, overlayText, Version,
-            sameText ? SyntaxTree : null, cancellationToken, backingVersion);
+            sameText ? SyntaxTree : null, cancellationToken, backingVersion, SyntaxTree.ConditionalOptions);
         return (snapshot, ClassifyChange(snapshot, sameText));
     }
 

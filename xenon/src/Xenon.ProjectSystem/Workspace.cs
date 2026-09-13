@@ -12,6 +12,7 @@ public sealed class Workspace : IDisposable
 {
     private readonly object _updateGate = new();
     private readonly string _profileName;
+    private readonly string _targetTriple;
     private readonly IWorkspaceFileSystem _fileSystem;
     private readonly IWorkspaceSaveObserver _saveObserver;
     private WorkspaceSnapshot _currentSnapshot;
@@ -20,41 +21,43 @@ public sealed class Workspace : IDisposable
 
     private Workspace(WorkspaceSnapshot initialSnapshot, string profileName,
         IWorkspaceFileSystem fileSystem, IWorkspaceSaveObserver saveObserver,
-        WorkspaceConfiguration? configuration = null)
+        WorkspaceConfiguration? configuration = null, string? targetTriple = null)
     {
         _currentSnapshot = initialSnapshot;
         _profileName = profileName;
+        _targetTriple = CompilationTarget.Normalize(targetTriple ?? CompilationTarget.DefaultTriple);
         _fileSystem = fileSystem;
         _saveObserver = saveObserver;
         Configuration = configuration;
     }
 
     public WorkspaceSnapshot CurrentSnapshot => Volatile.Read(ref _currentSnapshot);
+    public string TargetTriple => _targetTriple;
     public WorkspaceId Id => CurrentSnapshot.Id;
     public WorkspaceConfiguration? Configuration { get; }
 
     public static Workspace Create(string inputPath, string profileName = "debug",
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? targetTriple = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
         if (string.Equals(Path.GetExtension(inputPath), ".xws", StringComparison.OrdinalIgnoreCase))
-            return Create(XenonWorkspaceLoader.Load(inputPath), profileName, cancellationToken);
-        return Create(XenonProjectGraph.Load(inputPath), profileName, cancellationToken);
+            return Create(XenonWorkspaceLoader.Load(inputPath), profileName, cancellationToken, targetTriple);
+        return Create(XenonProjectGraph.Load(inputPath), profileName, cancellationToken, targetTriple);
     }
 
     public static Workspace Create(WorkspaceConfiguration configuration,
-        string profileName = "debug", CancellationToken cancellationToken = default)
+        string profileName = "debug", CancellationToken cancellationToken = default, string? targetTriple = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         return CreateCore(configuration.Graph, configuration.Id, profileName,
             cancellationToken, PhysicalWorkspaceFileSystem.Instance,
-            NullWorkspaceSaveObserver.Instance, configuration);
+            NullWorkspaceSaveObserver.Instance, configuration, targetTriple);
     }
 
     public static Workspace Create(XenonProjectGraph graph, string profileName = "debug",
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? targetTriple = null)
         => CreateCore(graph, WorkspaceId.CreateNew(), profileName, cancellationToken,
-            PhysicalWorkspaceFileSystem.Instance, NullWorkspaceSaveObserver.Instance, null);
+            PhysicalWorkspaceFileSystem.Instance, NullWorkspaceSaveObserver.Instance, null, targetTriple);
 
     /// <summary>
     /// Creates an ad-hoc semantic Workspace for an editor-owned physical document. The file may
@@ -63,7 +66,7 @@ public sealed class Workspace : IDisposable
     /// </summary>
     public static Workspace CreateOpenLooseDocument(string physicalPath, string overlayText,
         DocumentVersion version, string profileName = "debug",
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? targetTriple = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(physicalPath);
         ArgumentNullException.ThrowIfNull(overlayText);
@@ -73,7 +76,7 @@ public sealed class Workspace : IDisposable
         var project = new XenonProject(name, XenonProjectType.Executable, null, directory,
             directory, null, [], [], [], [], XenonBuildProfile.Debug, XenonBuildProfile.Release);
         Workspace workspace = Create(XenonProjectGraph.Create(project, [project]), profileName,
-            cancellationToken);
+            cancellationToken, targetTriple);
         try
         {
             workspace.AddDocument(DocumentId.CreateNew(workspace.CurrentSnapshot.RootProjectId),
@@ -96,7 +99,7 @@ public sealed class Workspace : IDisposable
     private static Workspace CreateCore(XenonProjectGraph graph, WorkspaceId workspaceId,
         string profileName, CancellationToken cancellationToken,
         IWorkspaceFileSystem fileSystem, IWorkspaceSaveObserver saveObserver,
-        WorkspaceConfiguration? configuration)
+        WorkspaceConfiguration? configuration, string? targetTriple = null)
     {
         ArgumentNullException.ThrowIfNull(graph);
         ArgumentNullException.ThrowIfNull(fileSystem);
@@ -126,8 +129,8 @@ public sealed class Workspace : IDisposable
         }
 
         WorkspaceSnapshot snapshot = BuildInitialSnapshot(workspaceId, graph, idsByIdentity,
-            documents.ToImmutable(), profileName, cancellationToken);
-        return new Workspace(snapshot, profileName, fileSystem, saveObserver, configuration);
+            documents.ToImmutable(), profileName, cancellationToken, targetTriple);
+        return new Workspace(snapshot, profileName, fileSystem, saveObserver, configuration, targetTriple);
     }
 
     public WorkspaceSnapshot OpenDocument(DocumentId documentId, string editorText,
@@ -538,6 +541,8 @@ public sealed class Workspace : IDisposable
             ImmutableHashSet<DocumentId> symbolDocuments = kind is DocumentChangeKind.Declaration or DocumentChangeKind.BodyOnly
                 ? (mutation?.ChangedDocuments ?? []).Intersect(projectDocuments.Select(item => item.Id)).ToImmutableHashSet()
                 : [];
+            if (mutation is { ConfigurationChanged: true })
+                symbolDocuments = projectDocuments.Select(item => item.Id).ToImmutableHashSet();
             if (oldSymbols is null || !symbolDocuments.IsEmpty) symbolRebuilt++;
             symbolDocumentsReused += oldSymbols is null ? 0 : projectDocuments.Length - symbolDocuments.Count;
 
@@ -556,7 +561,7 @@ public sealed class Workspace : IDisposable
 
             built.Add(id, new ProjectSnapshot(id, new ProjectVersion(old.Version.Value + 1),
                 configuration, projectDocuments, references, _profileName, sourceMap,
-                reusableCompilation, oldSymbols, oldReferences, symbolDocuments, referenceDocuments));
+                reusableCompilation, oldSymbols, oldReferences, symbolDocuments, referenceDocuments, _targetTriple));
         }
 
         ImmutableArray<ProjectSnapshot> projects = built.Values.OrderBy(project => project.Id).ToImmutableArray();
@@ -594,7 +599,7 @@ public sealed class Workspace : IDisposable
         XenonProjectGraph graph,
         ImmutableDictionary<string, ProjectId> idsByIdentity,
         ImmutableDictionary<ProjectId, ImmutableArray<DocumentSnapshot>> documents,
-        string profileName, CancellationToken cancellationToken)
+        string profileName, CancellationToken cancellationToken, string? targetTriple)
     {
         var sourceMap = documents.SelectMany(pair => pair.Value.Select(document =>
                 new KeyValuePair<SourceFileId, (ProjectId, DocumentId)>(document.SourceFileId,
@@ -608,7 +613,7 @@ public sealed class Workspace : IDisposable
             ImmutableArray<ProjectSnapshot> references = configuration.ProjectReferences
                 .Select(identity => built[idsByIdentity[identity]]).ToImmutableArray();
             built[id] = new ProjectSnapshot(id, ProjectVersion.Initial, configuration,
-                documents[id], references, profileName, sourceMap);
+                documents[id], references, profileName, sourceMap, targetTriple: targetTriple);
         }
         ImmutableArray<ProjectSnapshot> projects = built.Values.OrderBy(project => project.Id).ToImmutableArray();
         int documentCount = projects.Sum(project => project.Documents.Length);

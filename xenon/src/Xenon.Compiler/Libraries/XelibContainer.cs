@@ -6,7 +6,7 @@ namespace Xenon.Compiler.Libraries;
 public static class XelibVersions
 {
     public const ushort Container = 1;
-    public const ushort LibraryIr = 1;
+    public const ushort LibraryIr = 2;
     public const ushort Language = 1;
 }
 
@@ -35,6 +35,7 @@ public enum XelibSectionKind : uint
     Documentation = 7,
     Bodies = 8,
     GenericImplementations = 9,
+    BuildConfiguration = 12,
 }
 
 public enum XelibErrorCode
@@ -60,6 +61,7 @@ public enum XelibErrorCode
     ContentIdentityMismatch,
     DependencyMissing,
     DependencyIdentityMismatch,
+    TargetMismatch,
     DependencyCycle,
     DuplicateLibraryIdentity,
     FeatureNotRepresentable,
@@ -303,7 +305,7 @@ public sealed class XelibContainer
                 $"unsupported container version {header.ContainerVersion}; expected {XelibVersions.Container}", path);
         if (header.LibraryIrVersion != XelibVersions.LibraryIr)
             throw Error(XelibErrorCode.UnsupportedLibraryIrVersion,
-                $"unsupported Library IR version {header.LibraryIrVersion}; expected {XelibVersions.LibraryIr}", path);
+                $"unsupported Library IR version {header.LibraryIrVersion}; expected {XelibVersions.LibraryIr}; rebuild the library", path);
         if (header.LanguageVersion != XelibVersions.Language)
             throw Error(XelibErrorCode.UnsupportedLanguageVersion,
                 $"unsupported language version {header.LanguageVersion}; expected {XelibVersions.Language}", path);

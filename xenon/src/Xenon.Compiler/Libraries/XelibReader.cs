@@ -29,7 +29,7 @@ public static class XelibReader
         XelibMetadata metadata = XelibMetadataReader.Read(container, path);
         ImmutableArray<string> strings = ReadSection<ImmutableArray<string>>(
             container, XelibSectionKind.Strings, path);
-        if (strings.Any(string.IsNullOrEmpty) ||
+        if (strings.IsDefault || strings.Any(string.IsNullOrEmpty) ||
             strings.Distinct(StringComparer.Ordinal).Count() != strings.Length)
             throw new XelibFormatException(XelibErrorCode.InvalidRecord,
                 "string table contains an empty or duplicate value", path);
@@ -46,6 +46,9 @@ public static class XelibReader
                 matches[0].LibraryIdentity.Version != dependency.Version)
                 throw new XelibFormatException(XelibErrorCode.DependencyIdentityMismatch,
                     $"dependency identity mismatch for '{dependency.Name}'", path);
+            if (matches[0].TargetTriple != metadata.Configuration.TargetTriple)
+                throw new XelibFormatException(XelibErrorCode.TargetMismatch,
+                    $"XELIB target mismatch: dependency '{dependency.Name}' targets '{matches[0].TargetTriple}'; library '{metadata.Manifest.Name}' targets '{metadata.Configuration.TargetTriple}'", path);
             dependencies.Add(dependency.Id, matches[0]);
         }
 
@@ -76,11 +79,11 @@ public static class XelibReader
                     : ReadSection<ImmutableArray<XelibBodyRecord>>(container, XelibSectionKind.Bodies, path);
                 reconstruction.ReconstructBodies(bodies, generics, includeOrdinaryBodies: !metadataOnly);
             }
-            return reconstruction.CreateReference(path);
+            return reconstruction.CreateReference(path, metadata.Configuration);
         }
         catch (XelibFormatException) { throw; }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or
-            InvalidCastException or IndexOutOfRangeException or KeyNotFoundException or OverflowException)
+            InvalidCastException or IndexOutOfRangeException or KeyNotFoundException or OverflowException or NullReferenceException)
         {
             throw new XelibFormatException(XelibErrorCode.InvalidReference,
                 $"invalid semantic graph: {exception.Message}", path, exception);
@@ -156,7 +159,7 @@ public static class XelibReader
         throw Invalid("unterminated body record", path);
     }
 
-    private static void ValidateIds(ImmutableArray<XelibTypeRecord> types,
+    internal static void ValidateIds(ImmutableArray<XelibTypeRecord> types,
         ImmutableArray<XelibSymbolRecord> symbols, ImmutableArray<XelibExport> exports,
         ImmutableArray<XelibDocumentation> documentation, string? path)
     {
@@ -332,7 +335,7 @@ internal sealed class XelibSemanticReconstruction
         _genericImplementations = implementations.ToImmutable();
     }
 
-    public LibraryCompilationReference CreateReference(string? path)
+    public LibraryCompilationReference CreateReference(string? path, XelibBuildConfiguration configuration)
     {
         var exports = ImmutableDictionary.CreateBuilder<string, Symbol>(StringComparer.Ordinal);
         foreach (XelibExport export in _exportRecords)
@@ -340,7 +343,7 @@ internal sealed class XelibSemanticReconstruction
         return new LibraryCompilationReference(
             new XelibLibraryIdentity(_manifest.Name, _manifest.Version, _manifest.ContentIdentity),
             _globalNamespace, _genericImplementations, _functions, exports.ToImmutable(),
-            _dependencies.OrderBy(item => item.Key).Select(item => item.Value).ToImmutableArray(), path);
+            _dependencies.OrderBy(item => item.Key).Select(item => item.Value).ToImmutableArray(), path, configuration);
     }
 
     private void CreateNamespaces()

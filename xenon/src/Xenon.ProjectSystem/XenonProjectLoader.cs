@@ -7,6 +7,7 @@ namespace Xenon.ProjectSystem;
 public static class XenonProjectLoader
 {
     private static readonly ImmutableHashSet<string> SupportedSettings = ImmutableHashSet.Create(StringComparer.Ordinal,
+        "build.defines",
         "project.name",
         "project.type",
         "project.version",
@@ -168,6 +169,13 @@ public static class XenonProjectLoader
             .Order(ProjectPath.Comparer)
             .ToImmutableArray();
 
+        ImmutableArray<string> defines = GetOptionalStringArray(settings, "build.defines", fullPath);
+        try
+        {
+            foreach (string define in defines) Xenon.Compiler.ConditionalCompilationOptions.ValidateUserDefine(define);
+        }
+        catch (ArgumentException error) { throw new ProjectSystemException($"{fullPath}: {error.Message}"); }
+
         return new XenonProject(
             name,
             type,
@@ -180,7 +188,7 @@ public static class XenonProjectLoader
             libraryPaths,
             projectReferences,
             debugProfile,
-            releaseProfile);
+            releaseProfile, defines);
     }
 
     private static XenonProject CreateSingleFileProject(string sourceFile)

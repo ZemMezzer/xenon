@@ -1262,6 +1262,9 @@ internal sealed class SemanticAnalyzer
             return false;
         }
 
+        // Imported constants already carry bound values and have no source declaration.
+        if (constant.EvaluationState != ConstantEvaluationState.Unresolved)
+            return true;
         return EvaluateConstantCore(constant, constant.Initializer, constant.IdentifierToken.Location);
     }
 

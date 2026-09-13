@@ -1,3 +1,7 @@
+using Xenon.Compiler;
+using System.Security.Cryptography;
+using System.Text;
+
 namespace Xenon.ProjectSystem;
 
 public static class XenonBuildPaths
@@ -8,7 +12,7 @@ public static class XenonBuildPaths
         XenonProjectType.Executable => GetExecutablePath(rootDirectory, projectName, profileName, targetTriple),
         XenonProjectType.StaticLibrary => GetStaticLibraryPath(rootDirectory, projectName, profileName, targetTriple),
         XenonProjectType.SharedLibrary => GetSharedLibraryPath(rootDirectory, projectName, profileName, targetTriple),
-        XenonProjectType.XenonLibrary => GetXenonLibraryPath(rootDirectory, projectName, profileName),
+        XenonProjectType.XenonLibrary => GetXenonLibraryPath(rootDirectory, projectName, profileName, targetTriple),
         _ => throw new ArgumentOutOfRangeException(nameof(type)),
     };
 
@@ -102,15 +106,22 @@ public static class XenonBuildPaths
             : null;
 
     public static string GetXenonLibraryPath(
-        string rootDirectory,
-        string projectName,
-        string profileName)
+        string rootDirectory, string projectName, string profileName,
+        string? targetTriple = null, IEnumerable<string>? defines = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(projectName);
         ArgumentException.ThrowIfNullOrWhiteSpace(profileName);
-        return Path.Combine(rootDirectory, "build", SanitizePathSegment(profileName),
-            $"{SanitizePathSegment(projectName)}.xelib");
+        var configuration = new ConditionalCompilationOptions(defines,
+            targetTriple ?? CompilationTarget.DefaultTriple, allowProfileDefines: false);
+        string directory = Path.Combine(rootDirectory, "build", configuration.TargetTriple!);
+        if (configuration.UserDefines.Count != 0)
+        {
+            string fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                string.Join("\n", configuration.UserDefines)))).ToLowerInvariant();
+            directory = Path.Combine(directory, "defines-" + fingerprint);
+        }
+        return Path.Combine(directory, $"{SanitizePathSegment(projectName)}.xelib");
     }
 
     private static string GetBuildArtifactPath(

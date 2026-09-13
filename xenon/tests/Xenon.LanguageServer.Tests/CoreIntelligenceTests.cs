@@ -428,6 +428,81 @@ public sealed class CoreIntelligenceTests
         Assert.Equal(new[] { "9:10", "8:25", "8:0", "5:11", "3:7" }, renamedLines);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiagnosticsUseConfiguredLibraryTarget(bool matchingTarget)
+    {
+        string function = CompilationTarget.GetOperatingSystem(CompilationTarget.DefaultTriple) == 1 ? "Value" : "Other";
+        if (matchingTarget) function = function == "Value" ? "Other" : "Value";
+        string source = $"using Library; namespace App; int Main() {{ return {function}(); }}";
+        using var directory = new TestDirectory();
+        string file = directory.Write("src/main.xe", source);
+        string projectPath = directory.Write("App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            [libraries]
+            libraries = ["Library.xelib"]
+            """);
+        string target = CompilationTarget.GetOperatingSystem(CompilationTarget.DefaultTriple) == 1
+            ? "aarch64-apple-darwin" : "x86_64-pc-windows-msvc";
+        Compilation library = Compilation.Create(
+            new CompilationOptions(ConditionalCompilation: new(targetTriple: target)), [],
+            SourceText.From("""
+                namespace Library;
+                #if XENON_WINDOWS
+                public int Value() { return 1; }
+                #else
+                public int Other() { return 2; }
+                #endif
+                """, "library.xe"));
+        File.WriteAllBytes(directory.PathOf("Library.xelib"),
+            XelibWriter.Write(library, new XelibWriteOptions("Library")));
+
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        var published = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = new LanguageServerSession((method, value) =>
+        {
+            if (method == "textDocument/publishDiagnostics")
+            {
+                JsonElement notification = Result(value);
+                if (notification.TryGetProperty("version", out JsonElement version) && version.GetInt32() == 1)
+                    published.TrySetResult(notification);
+            }
+            return Task.CompletedTask;
+        }, diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new
+        {
+            initializationOptions = new { workspacePath = projectPath, targetTriple = matchingTarget ? target : CompilationTarget.DefaultTriple },
+        }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        {
+            textDocument = new { uri, version = 1, text = source },
+        }), default);
+
+        JsonElement result = await published.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(uri, result.GetProperty("uri").GetString());
+        if (matchingTarget)
+        {
+            Assert.Empty(result.GetProperty("diagnostics").EnumerateArray());
+            Assert.Equal(target, Assert.Single(session.Workspaces).TargetTriple);
+            File.AppendAllText(projectPath, "\n# trigger configuration reload\n");
+            await session.HandleNotificationAsync("workspace/didChangeWatchedFiles", LspTestProtocol.Json(new
+            {
+                changes = new[] { new { uri = DocumentUri.FromPath(projectPath).AbsoluteUri, type = 2 } },
+            }), default);
+            Assert.Equal(target, Assert.Single(session.Workspaces).TargetTriple);
+            Assert.False((await session.Workspaces[0].CurrentSnapshot.RootProject.GetCompilationAsync()).HasErrors);
+        }
+        else
+            Assert.Contains(result.GetProperty("diagnostics").EnumerateArray(), diagnostic =>
+                diagnostic.GetProperty("code").GetString() == "XE1101");
+    }
+
     [Fact]
     public async Task DiagnosticsPublishStableCompilerCodeAndCurrentVersion()
     {

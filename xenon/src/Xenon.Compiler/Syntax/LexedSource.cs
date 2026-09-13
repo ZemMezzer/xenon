@@ -9,11 +9,13 @@ public sealed class LexedSource
     private LexedSource(
         SourceText source,
         ImmutableArray<SyntaxToken> tokens,
-        ImmutableArray<Diagnostic> diagnostics)
+        ImmutableArray<Diagnostic> diagnostics, bool targetDependent, bool hasDirectives)
     {
         Source = source;
         Tokens = tokens;
         Diagnostics = diagnostics;
+        IsTargetDependent = targetDependent;
+        HasConditionalDirectives = hasDirectives;
     }
 
     public SourceText Source { get; }
@@ -22,9 +24,14 @@ public sealed class LexedSource
 
     public ImmutableArray<Diagnostic> Diagnostics { get; }
 
-    public static LexedSource Lex(SourceText source)
+    public bool IsTargetDependent { get; }
+    public bool HasConditionalDirectives { get; }
+
+    public static LexedSource Lex(SourceText source, ConditionalCompilationOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
-        var lexer = new Lexer(source);
+        var filtered = ConditionalSource.Filter(source, options ?? ConditionalCompilationOptions.Default, cancellationToken);
+        var lexer = new Lexer(source, filtered.Text);
         var tokens = ImmutableArray.CreateBuilder<SyntaxToken>();
 
         SyntaxToken token;
@@ -35,6 +42,6 @@ public sealed class LexedSource
         }
         while (token.Kind != SyntaxKind.EndOfFileToken);
 
-        return new LexedSource(source, tokens.ToImmutable(), [.. lexer.Diagnostics]);
+        return new LexedSource(source, tokens.ToImmutable(), [.. filtered.Diagnostics, .. lexer.Diagnostics], filtered.TargetDependent, filtered.HasDirectives);
     }
 }

@@ -22,6 +22,15 @@ public sealed class Compilation
         CancellationToken cancellationToken)
     {
         ValidateTrees(syntaxTrees);
+        syntaxTrees = syntaxTrees.Select(tree => !tree.HasConditionalDirectives || tree.ConditionalOptions.Equals(options.ConditionalOptions) ? tree :
+            SyntaxTree.Parse(tree.Source, cancellationToken, options.ConditionalOptions)).ToImmutableArray();
+        ValidateReferences(references);
+        var closure = references.ToBuilder();
+        for (int index = 0; index < closure.Count; index++)
+            if (closure[index] is LibraryCompilationReference library)
+                foreach (LibraryCompilationReference dependency in library.Dependencies)
+                    if (!closure.Contains(dependency)) closure.Add(dependency);
+        references = closure.ToImmutable();
         ValidateReferences(references);
         SyntaxTrees = syntaxTrees;
         Options = options;
@@ -29,10 +38,25 @@ public sealed class Compilation
         TargetLayout = targetLayout;
         cancellationToken.ThrowIfCancellationRequested();
         TypeFactory = new TypeFactory();
-        SemanticModel = SemanticAnalyzer.Analyze(syntaxTrees, TypeFactory,
-            references.Select(reference => reference.GlobalNamespace).ToImmutableArray(),
-            references.Select(reference => reference.GenericImplementations).ToImmutableArray(),
-            targetLayout, cancellationToken);
+        var targetDiagnostics = new DiagnosticBag();
+        string target = options.ConditionalOptions.TargetTriple ?? CompilationTarget.DefaultTriple;
+        foreach (CompilationReference reference in references)
+        {
+            if (reference.TargetTriple is { } required && required != target)
+            {
+                SourceText source = syntaxTrees.FirstOrDefault()?.Source ?? SourceText.From("");
+                string name = reference is LibraryCompilationReference library ? library.Path ?? library.LibraryIdentity.Name : "source project";
+                targetDiagnostics.Report(new TextLocation(source, new TextSpan(0, 0)),
+                    $"XELIB/project target mismatch: '{name}' targets '{required}'; current compilation targets '{target}'", "XE1101");
+            }
+        }
+        // Never bind source against an incompatible imported ABI.
+        SemanticModel = targetDiagnostics.Count != 0
+            ? SemanticAnalyzer.Analyze([], TypeFactory).WithAdditionalDiagnostics([.. targetDiagnostics])
+            : SemanticAnalyzer.Analyze(syntaxTrees, TypeFactory,
+                references.Select(reference => reference.GlobalNamespace).ToImmutableArray(),
+                references.Select(reference => reference.GenericImplementations).ToImmutableArray(),
+                targetLayout, cancellationToken);
         Diagnostics = SemanticModel.Diagnostics;
     }
 
@@ -65,7 +89,7 @@ public sealed class Compilation
         ArgumentNullException.ThrowIfNull(sources);
         cancellationToken.ThrowIfCancellationRequested();
         return new Compilation(
-            sources.Select(source => SyntaxTree.Parse(source, cancellationToken)).ToImmutableArray(),
+            sources.Select(source => SyntaxTree.Parse(source, cancellationToken, options.ConditionalOptions)).ToImmutableArray(),
             options, references?.ToImmutableArray() ?? [], null, cancellationToken);
     }
 
@@ -81,7 +105,13 @@ public sealed class Compilation
     public Compilation WithOptions(CompilationOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        return options == Options ? this : Derive(SyntaxTrees, options, References, TargetLayout, cancellationToken);
+        if (options == Options) return this;
+        // A changed target must not bind newly included source using the old ABI layout.
+        ITargetTypeLayout? layout = (options.ConditionalOptions.TargetTriple == Options.ConditionalOptions.TargetTriple ||
+            (Options.ConditionalOptions.TargetTriple is null &&
+             options.ConditionalOptions.TargetTriple == CompilationTarget.DefaultTriple))
+            ? TargetLayout : null;
+        return Derive(SyntaxTrees, options, References, layout, cancellationToken);
     }
 
     public Compilation WithReferences(IEnumerable<CompilationReference> references,
@@ -117,7 +147,7 @@ public sealed class Compilation
             throw new ArgumentException("The syntax tree does not belong to this compilation.", nameof(oldTree));
         if (ReferenceEquals(oldTree, newTree)) return this;
         SyntaxTree replacement = newTree.SourceFileId == oldTree.SourceFileId ? newTree :
-            SyntaxTree.Parse(SourceText.From(newTree.Source.Text, newTree.Source.Path, oldTree.SourceFileId), cancellationToken);
+            SyntaxTree.Parse(SourceText.From(newTree.Source.Text, newTree.Source.Path, oldTree.SourceFileId), cancellationToken, Options.ConditionalOptions);
         if (SyntaxTrees.Where((_, candidateIndex) => candidateIndex != index)
             .Any(tree => tree.SourceFileId == replacement.SourceFileId))
             throw new ArgumentException("A syntax tree with the replacement source identity already belongs to this compilation.", nameof(newTree));
@@ -153,6 +183,9 @@ public sealed class Compilation
     public Compilation WithTargetLayout(ITargetTypeLayout targetLayout, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(targetLayout);
+        if (targetLayout.TargetTriple is { } layoutTarget &&
+            layoutTarget != (Options.ConditionalOptions.TargetTriple ?? CompilationTarget.DefaultTriple))
+            throw new ArgumentException($"Target layout '{layoutTarget}' does not match the compilation target. Select the target before binding layout.", nameof(targetLayout));
         return ReferenceEquals(TargetLayout, targetLayout) ? this :
             Derive(SyntaxTrees, Options, References, targetLayout, cancellationToken);
     }

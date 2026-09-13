@@ -6,7 +6,11 @@ public enum CompilationOutputKind
     Library,
 }
 
-/// <summary>Immutable target-independent options that affect a compilation snapshot.</summary>
+/// <summary>Immutable options that affect a compilation snapshot.</summary>
 public sealed record CompilationOptions(
     CompilationOutputKind OutputKind = CompilationOutputKind.Library,
-    bool EnableRuntimeChecks = true);
+    bool EnableRuntimeChecks = true,
+    ConditionalCompilationOptions? ConditionalCompilation = null)
+{
+    public ConditionalCompilationOptions ConditionalOptions => ConditionalCompilation ?? ConditionalCompilationOptions.Default;
+}

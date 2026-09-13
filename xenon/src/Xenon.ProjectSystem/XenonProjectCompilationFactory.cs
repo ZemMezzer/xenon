@@ -8,13 +8,19 @@ namespace Xenon.ProjectSystem;
 /// <summary>Shared project-configuration to compiler-snapshot projection for build and tooling.</summary>
 public static class XenonProjectCompilationFactory
 {
+    public static ConditionalCompilationOptions GetConditionalOptions(XenonProject project, string profileName,
+        string? targetTriple = null, IEnumerable<string>? defines = null) =>
+        new(defines, targetTriple ?? CompilationTarget.DefaultTriple,
+            project.Type == XenonProjectType.XenonLibrary ? "debug" : profileName, project.Defines,
+            allowProfileDefines: project.Type != XenonProjectType.XenonLibrary);
+
     public static Compilation Create(
         XenonProject project,
         string profileName,
         IReadOnlyDictionary<string, Compilation>? dependencyCompilations = null,
         CancellationToken cancellationToken = default,
         IReadOnlyDictionary<string, LibraryCompilationReference>? dependencyLibraries = null,
-        bool metadataOnlyXelib = false)
+        bool metadataOnlyXelib = false, string? targetTriple = null, IEnumerable<string>? defines = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         SourceText[] sources = project.SourceFiles.Select(path =>
@@ -23,7 +29,7 @@ public static class XenonProjectCompilationFactory
             return SourceText.From(File.ReadAllText(path), path);
         }).ToArray();
         return Create(project, profileName, sources, dependencyCompilations, cancellationToken,
-            dependencyLibraries, metadataOnlyXelib);
+            dependencyLibraries, metadataOnlyXelib, targetTriple, defines);
     }
 
     public static Compilation Create(
@@ -33,7 +39,7 @@ public static class XenonProjectCompilationFactory
         IReadOnlyDictionary<string, Compilation>? dependencyCompilations = null,
         CancellationToken cancellationToken = default,
         IReadOnlyDictionary<string, LibraryCompilationReference>? dependencyLibraries = null,
-        bool metadataOnlyXelib = false)
+        bool metadataOnlyXelib = false, string? targetTriple = null, IEnumerable<string>? defines = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(sources);
@@ -74,7 +80,7 @@ public static class XenonProjectCompilationFactory
         var options = new CompilationOptions(
             project.Type == XenonProjectType.Executable
                 ? CompilationOutputKind.Executable : CompilationOutputKind.Library,
-            profile.EnableChecks);
+            profile.EnableChecks, GetConditionalOptions(project, profileName, targetTriple, defines));
         return Compilation.Create(options, references, cancellationToken, sources.ToArray());
     }
 
@@ -86,7 +92,7 @@ public static class XenonProjectCompilationFactory
         IReadOnlyDictionary<string, Compilation>? dependencyCompilations = null,
         CancellationToken cancellationToken = default,
         IReadOnlyDictionary<string, LibraryCompilationReference>? dependencyLibraries = null,
-        bool metadataOnlyXelib = false)
+        bool metadataOnlyXelib = false, string? targetTriple = null, IEnumerable<string>? defines = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(syntaxTrees);
@@ -127,7 +133,7 @@ public static class XenonProjectCompilationFactory
         XenonBuildProfile profile = project.GetProfile(profileName);
         var options = new CompilationOptions(project.Type == XenonProjectType.Executable
             ? CompilationOutputKind.Executable : CompilationOutputKind.Library,
-            profile.EnableChecks);
+            profile.EnableChecks, GetConditionalOptions(project, profileName, targetTriple, defines));
         return Compilation.Create(syntaxTrees, options, references, cancellationToken);
     }
 }

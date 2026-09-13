@@ -9,11 +9,13 @@ namespace Xenon.Compiler.Syntax;
 internal sealed class Lexer
 {
     private readonly SourceText _source;
+    private readonly string _text;
     private int _position;
 
-    public Lexer(SourceText source)
+    public Lexer(SourceText source, string? filteredText = null)
     {
         _source = source;
+        _text = filteredText ?? source.Text;
     }
 
     public DiagnosticBag Diagnostics { get; } = new();
@@ -453,7 +455,7 @@ internal sealed class Lexer
     private char Peek(int offset)
     {
         int index = _position + offset;
-        return index >= _source.Length ? '\0' : _source[index];
+        return index >= _text.Length ? '\0' : _text[index];
     }
 
     private static bool IsDigitForBase(char character, int numberBase) => numberBase switch

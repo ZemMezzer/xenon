@@ -79,8 +79,9 @@ public sealed class LlvmIrGenerator
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentNullException.ThrowIfNull(targetOptions);
         ArgumentException.ThrowIfNullOrWhiteSpace(moduleName);
-        ThrowIfCompilationHasErrors(compilation);
         BeginInvocation();
+        compilation = SelectConditionalTarget(compilation, targetOptions.Triple);
+        ThrowIfCompilationHasErrors(compilation);
 
         using NativeTargetMachine targetMachine = NativeTargetMachine.Create(targetOptions);
         return GenerateModuleCore(
@@ -96,6 +97,7 @@ public sealed class LlvmIrGenerator
     {
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentNullException.ThrowIfNull(targetOptions);
+        compilation = SelectConditionalTarget(compilation, targetOptions.Triple);
         if (compilation.HasErrors) return compilation;
         using NativeTargetMachine target = NativeTargetMachine.Create(targetOptions);
         return BindForTarget(compilation, target);
@@ -206,10 +208,14 @@ public sealed class LlvmIrGenerator
         return false;
     }
 
+    private static Compilation SelectConditionalTarget(Compilation compilation, string triple) =>
+        compilation.WithOptions(compilation.Options with
+        { ConditionalCompilation = compilation.Options.ConditionalOptions.WithTarget(triple) });
+
     private static Compilation BindForTarget(Compilation compilation, NativeTargetMachine target)
     {
         LlvmTypeLayout layout = LlvmTypeLayout.Create(target);
-        return compilation.WithTargetLayout(layout);
+        return SelectConditionalTarget(compilation, target.Triple).WithTargetLayout(layout);
     }
 
     internal TResult GenerateModule<TResult>(
@@ -222,8 +228,9 @@ public sealed class LlvmIrGenerator
         ArgumentNullException.ThrowIfNull(compilation);
         ArgumentException.ThrowIfNullOrWhiteSpace(moduleName);
         ArgumentNullException.ThrowIfNull(resultFactory);
-        ThrowIfCompilationHasErrors(compilation);
         BeginInvocation();
+        if (targetMachine is not null) compilation = SelectConditionalTarget(compilation, targetMachine.Triple);
+        ThrowIfCompilationHasErrors(compilation);
 
         return GenerateModuleCore(
             compilation,
@@ -3846,6 +3853,16 @@ public sealed class LlvmIrGenerator
         private void EmitIf(BoundIfStatement statement)
         {
             LLVMValueRef condition = EmitExpression(statement.Condition);
+            // Ordinary constant conditions select a branch even at O0.
+            // Unreachable calls need no native symbol references.
+            if (condition.IsAConstantInt.Handle != IntPtr.Zero)
+            {
+                if (condition.ConstIntZExt != 0)
+                    EmitEmbeddedStatement(statement.ThenStatement);
+                else if (statement.ElseStatement is not null)
+                    EmitEmbeddedStatement(statement.ElseStatement);
+                return;
+            }
             LLVMBasicBlockRef thenBlock = _llvmFunction.AppendBasicBlock("if.then");
 
             if (statement.ElseStatement is null)

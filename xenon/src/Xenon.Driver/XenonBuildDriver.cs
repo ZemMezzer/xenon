@@ -15,7 +15,8 @@ public enum BuildFailureKind { Compiler, NativeTool, Environment }
 public sealed record XenonBuildRequest(
     string InputPath, string Profile = "debug", string? OutputRoot = null,
     string? TargetTriple = null, bool CompileOnly = false, TimeSpan? ToolTimeout = null,
-    bool SkipLink = false, LlvmTargetCpuMode CpuMode = LlvmTargetCpuMode.Portable);
+    bool SkipLink = false, LlvmTargetCpuMode CpuMode = LlvmTargetCpuMode.Portable,
+    ImmutableArray<string> Defines = default);
 
 public sealed class XenonBuildResult
 {
@@ -47,11 +48,12 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
         var result = new XenonBuildResult();
         try
         {
+            var invocationDefines = new ConditionalCompilationOptions(request.Defines.IsDefault ? [] : request.Defines).UserDefines;
             XenonProjectGraph graph = XenonProjectGraph.Load(request.InputPath);
             result.ProjectGraph = graph;
             result.Project = graph.Root;
             string outputRoot = Path.GetFullPath(request.OutputRoot ?? graph.Root.RootDirectory);
-            string triple = request.TargetTriple ?? LlvmTargetPlatform.HostTriple;
+            string triple = CompilationTarget.Normalize(request.TargetTriple ?? LlvmTargetPlatform.HostTriple);
             bool canLinkForHost = string.Equals(
                 triple, LlvmTargetPlatform.HostTriple, StringComparison.OrdinalIgnoreCase);
             result.TargetTriple = triple;
@@ -65,7 +67,8 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 XenonBuildProfile profile = project.GetProfile(request.Profile);
                 result.Stage = BuildStage.Compilation;
                 Compilation compilation = XenonProjectCompilationFactory.Create(
-                    project, request.Profile, compilations, dependencyLibraries: libraryReferences);
+                    project, request.Profile, compilations, dependencyLibraries: libraryReferences,
+                    targetTriple: triple, defines: invocationDefines);
                 if (compilation.HasErrors)
                 {
                     result.Diagnostics = compilation.Diagnostics;
@@ -74,16 +77,15 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                 }
 
                 LlvmTargetOptions? target = null;
-                if (project.Type != XenonProjectType.XenonLibrary &&
-                    (!request.CompileOnly || compilation.RequiresTargetLayout))
+                if (project.Type == XenonProjectType.XenonLibrary || !request.CompileOnly || compilation.RequiresTargetLayout)
                 {
-                    bool nativeCpu = request.CpuMode == LlvmTargetCpuMode.Native;
+                    bool nativeCpu = project.Type != XenonProjectType.XenonLibrary && request.CpuMode == LlvmTargetCpuMode.Native;
                     if (nativeCpu && !canLinkForHost)
                         return Fail(result, BuildFailureKind.Compiler,
                             "Native CPU mode requires the host target triple.");
                     target = new LlvmTargetOptions(
                         triple,
-                        profile.OptimizationLevel,
+                        project.Type == XenonProjectType.XenonLibrary ? 0 : profile.OptimizationLevel,
                         nativeCpu ? LlvmTargetPlatform.HostCpuName : string.Empty,
                         nativeCpu ? LlvmTargetPlatform.HostCpuFeatures : string.Empty,
                         RequiresPositionIndependentCode(project.Type, triple));
@@ -115,7 +117,8 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
                     if (!request.CompileOnly)
                     {
                         string xelibArtifactPath = XenonBuildPaths.GetXenonLibraryPath(
-                            outputRoot, project.Name, request.Profile);
+                            outputRoot, project.Name, request.Profile, triple,
+                            compilation.Options.ConditionalOptions.UserDefines);
                         Directory.CreateDirectory(Path.GetDirectoryName(xelibArtifactPath)!);
                         File.WriteAllBytes(xelibArtifactPath, image);
                         if (new FileInfo(xelibArtifactPath).Length == 0)
@@ -227,6 +230,10 @@ public sealed class XenonBuildDriver(INativeProcessRunner? processRunner = null)
             result.Success = true;
             result.Stage = BuildStage.Complete;
             return result;
+        }
+        catch (ArgumentException exception)
+        {
+            return Fail(result, BuildFailureKind.Compiler, exception.Message);
         }
         catch (LinkerException exception)
         {

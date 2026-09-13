@@ -14,10 +14,10 @@ public static class WorkspaceDiscovery
     public const int MaximumParentTraversal = 32;
 
     public static WorkspaceDiscoveryResult Discover(string? explicitPath, string? rootUri,
-        string? rootPath, CancellationToken cancellationToken = default)
+        string? rootPath, CancellationToken cancellationToken = default, string? targetTriple = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
-            return LoadExplicit(explicitPath, cancellationToken);
+            return LoadExplicit(explicitPath, cancellationToken, targetTriple);
 
         string? suppliedRoot = !string.IsNullOrWhiteSpace(rootUri)
             ? DocumentUri.ToNormalizedPath(rootUri) : rootPath;
@@ -30,10 +30,10 @@ public static class WorkspaceDiscovery
             string extension = Path.GetExtension(normalized);
             if (extension.Equals(".xws", StringComparison.OrdinalIgnoreCase) ||
                 extension.Equals(".xeproj", StringComparison.OrdinalIgnoreCase))
-                return LoadExplicit(normalized, cancellationToken);
+                return LoadExplicit(normalized, cancellationToken, targetTriple);
             if (extension.Equals(".xe", StringComparison.OrdinalIgnoreCase))
                 return new WorkspaceDiscoveryResult(
-                    Xenon.ProjectSystem.Workspace.Create(normalized, cancellationToken: cancellationToken),
+                    Xenon.ProjectSystem.Workspace.Create(normalized, cancellationToken: cancellationToken, targetTriple: targetTriple),
                     normalized, Path.GetDirectoryName(normalized)!, IsLoose: true);
             throw new ProjectSystemException($"initialization path '{normalized}' has an unsupported file type");
         }
@@ -47,42 +47,42 @@ public static class WorkspaceDiscovery
             if (workspaceFile is not null)
                 return new WorkspaceDiscoveryResult(
                     Xenon.ProjectSystem.Workspace.Create(workspaceFile,
-                        cancellationToken: cancellationToken),
+                        cancellationToken: cancellationToken, targetTriple: targetTriple),
                     workspaceFile, normalized, IsLoose: false);
 
             string? projectFile = FindUnique(directory, "*.xeproj", "project");
             if (projectFile is not null)
                 return new WorkspaceDiscoveryResult(
                     Xenon.ProjectSystem.Workspace.Create(projectFile,
-                        cancellationToken: cancellationToken),
+                        cancellationToken: cancellationToken, targetTriple: targetTriple),
                     projectFile, normalized, IsLoose: false);
         }
 
         // Reuse ProjectSystem's recursive implicit-directory source discovery. A real editor
         // folder is one coherent project; only files without an applicable folder remain loose.
         return new WorkspaceDiscoveryResult(
-            Xenon.ProjectSystem.Workspace.Create(normalized, cancellationToken: cancellationToken),
+            Xenon.ProjectSystem.Workspace.Create(normalized, cancellationToken: cancellationToken, targetTriple: targetTriple),
             null, normalized, IsLoose: false);
     }
 
     public static Xenon.ProjectSystem.Workspace CreateLooseFile(string path,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? targetTriple = null)
     {
         string normalized = DocumentUri.NormalizePath(path);
         if (!File.Exists(normalized))
             throw new ProjectSystemException($"loose Xenon source '{normalized}' does not exist");
         if (!Path.GetExtension(normalized).Equals(".xe", StringComparison.OrdinalIgnoreCase))
             throw new ProjectSystemException($"loose source '{normalized}' must use the .xe extension");
-        return Xenon.ProjectSystem.Workspace.Create(normalized, cancellationToken: cancellationToken);
+        return Xenon.ProjectSystem.Workspace.Create(normalized, cancellationToken: cancellationToken, targetTriple: targetTriple);
     }
 
-    private static WorkspaceDiscoveryResult LoadExplicit(string path, CancellationToken cancellationToken)
+    private static WorkspaceDiscoveryResult LoadExplicit(string path, CancellationToken cancellationToken, string? targetTriple)
     {
         string normalized = DocumentUri.NormalizePath(path);
         if (!File.Exists(normalized) && !Directory.Exists(normalized))
             throw new ProjectSystemException($"explicit initialization path '{normalized}' does not exist");
         var workspace = Xenon.ProjectSystem.Workspace.Create(normalized,
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken, targetTriple: targetTriple);
         bool loose = File.Exists(normalized) &&
             Path.GetExtension(normalized).Equals(".xe", StringComparison.OrdinalIgnoreCase);
         return new WorkspaceDiscoveryResult(workspace, normalized,

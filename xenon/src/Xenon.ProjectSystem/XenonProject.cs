@@ -35,7 +35,7 @@ public class ProjectConfiguration
         ImmutableArray<string> libraryPaths,
         ImmutableArray<string> projectReferences,
         XenonBuildProfile debugProfile,
-        XenonBuildProfile releaseProfile)
+        XenonBuildProfile releaseProfile, ImmutableArray<string> defines = default)
     {
         Name = name;
         Type = type;
@@ -49,7 +49,10 @@ public class ProjectConfiguration
         ProjectReferences = projectReferences;
         DebugProfile = debugProfile;
         ReleaseProfile = releaseProfile;
+        Defines = new Xenon.Compiler.ConditionalCompilationOptions(defines.IsDefault ? [] : defines).UserDefines.ToImmutableArray();
     }
+
+    public ImmutableArray<string> Defines { get; }
 
     public string Name { get; }
 
@@ -102,9 +105,9 @@ public sealed class XenonProject : ProjectConfiguration
         string sourceRoot, string? projectFilePath, ImmutableArray<string> sourceFiles,
         ImmutableArray<string> libraries, ImmutableArray<string> libraryPaths,
         ImmutableArray<string> projectReferences, XenonBuildProfile debugProfile,
-        XenonBuildProfile releaseProfile)
+        XenonBuildProfile releaseProfile, ImmutableArray<string> defines = default)
         : base(name, type, version, rootDirectory, sourceRoot, projectFilePath, sourceFiles,
-            libraries, libraryPaths, projectReferences, debugProfile, releaseProfile)
+            libraries, libraryPaths, projectReferences, debugProfile, releaseProfile, defines)
     {
     }
 }

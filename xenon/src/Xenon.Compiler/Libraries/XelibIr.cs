@@ -8,6 +8,9 @@ public sealed record XelibLibraryIdentity(string Name, string? Version, string C
         $"{Name}/{Version}@{ContentIdentity}";
 }
 
+/// <summary>ABI compatibility and canonical semantic build inputs; no CPU tuning or optimization profile.</summary>
+public sealed record XelibBuildConfiguration(string TargetTriple, ImmutableArray<string> Defines);
+
 public sealed record XelibManifest(
     string Name,
     string? Version,

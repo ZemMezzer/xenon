@@ -52,12 +52,17 @@ internal static class Program
         string? targetTriple = null;
         bool nativeCpu = false;
         var inputs = new List<string>();
+        var defines = new List<string>();
 
         while (argumentIndex < args.Length)
         {
             string argument = args[argumentIndex++];
             switch (argument)
             {
+                case "--define":
+                    if (argumentIndex == args.Length) return WriteUsageError("option '--define' requires a name");
+                    defines.Add(args[argumentIndex++]);
+                    break;
                 case "--dump-tokens":
                     dumpTokens = true;
                     break;
@@ -90,7 +95,15 @@ internal static class Program
                     targetTriple = args[argumentIndex++];
                     break;
                 default:
-                    if (argument.StartsWith("--profile=", StringComparison.Ordinal))
+                    if (argument.StartsWith("-D", StringComparison.Ordinal))
+                    {
+                        defines.Add(argument[2..]);
+                    }
+                    else if (argument.StartsWith("--define=", StringComparison.Ordinal))
+                    {
+                        defines.Add(argument[9..]);
+                    }
+                    else if (argument.StartsWith("--profile=", StringComparison.Ordinal))
                     {
                         profileName = argument["--profile=".Length..];
                     }
@@ -110,6 +123,9 @@ internal static class Program
                     break;
             }
         }
+
+        try { foreach (string define in defines) ConditionalCompilationOptions.ValidateUserDefine(define); }
+        catch (ArgumentException error) { return WriteUsageError(error.Message); }
 
         if (profileName is not "debug" and not "release")
         {
@@ -150,7 +166,7 @@ internal static class Program
         if (projectCommand)
         {
             return RunProjectCommand(inputs[0], profileName, targetTriple, runCommand, dumpTokens,
-                nativeCpu: nativeCpu);
+                nativeCpu: nativeCpu, defines: defines);
         }
 
         // A project file or directory always goes through the graph-aware driver,
@@ -159,7 +175,7 @@ internal static class Program
         {
             bool compileOnly = !emitObject && !emitLlvm;
             return RunProjectCommand(inputs[0], profileName, targetTriple, run: false, dumpTokens,
-                compileOnly, skipLink: true, nativeCpu: nativeCpu);
+                compileOnly, skipLink: true, nativeCpu: nativeCpu, defines: defines);
         }
 
         CompilationInput input;
@@ -188,7 +204,8 @@ internal static class Program
         }
 
         Compilation compilation = Compilation.Create(
-            new CompilationOptions(CompilationOutputKind.Executable, input.Profile.EnableChecks),
+            new CompilationOptions(CompilationOutputKind.Executable, input.Profile.EnableChecks,
+                new ConditionalCompilationOptions(defines, targetTriple ?? LlvmTargetPlatform.HostTriple, profileName)),
             references: null,
             [.. sources]);
 
@@ -368,10 +385,10 @@ internal static class Program
 
     private static int RunProjectCommand(string inputPath, string profileName, string? targetTriple,
         bool run, bool dumpTokens, bool compileOnly = false, bool skipLink = false,
-        bool nativeCpu = false)
+        bool nativeCpu = false, IEnumerable<string>? defines = null)
     {
         XenonBuildResult result = new XenonBuildDriver().Build(CreateProjectBuildRequest(
-            inputPath, profileName, targetTriple, compileOnly, skipLink, nativeCpu));
+            inputPath, profileName, targetTriple, compileOnly, skipLink, nativeCpu, defines));
         foreach (Diagnostic diagnostic in result.Diagnostics)
             DiagnosticWriter.Write(Console.Error, diagnostic);
         if (!result.Success)
@@ -399,9 +416,10 @@ internal static class Program
     }
 
     internal static XenonBuildRequest CreateProjectBuildRequest(string inputPath, string profileName,
-        string? targetTriple, bool compileOnly, bool skipLink, bool nativeCpu = false) =>
+        string? targetTriple, bool compileOnly, bool skipLink, bool nativeCpu = false, IEnumerable<string>? defines = null) =>
         new(inputPath, profileName, TargetTriple: targetTriple, CompileOnly: compileOnly,
-            SkipLink: skipLink, CpuMode: nativeCpu ? LlvmTargetCpuMode.Native : LlvmTargetCpuMode.Portable);
+            SkipLink: skipLink, CpuMode: nativeCpu ? LlvmTargetCpuMode.Native : LlvmTargetCpuMode.Portable,
+            Defines: defines?.ToImmutableArray() ?? []);
 
     internal static bool IsProjectShapedInput(IReadOnlyList<string> inputs) =>
         inputs.Count == 1 &&
@@ -462,6 +480,7 @@ internal static class Program
         Console.WriteLine("  xenon run [path] [--profile debug|release] [--native-cpu]");
         Console.WriteLine("  xenon lsp");
         Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] [--emit-object] [--native-cpu] <source.xe> [additional.xe ...]");
+        Console.WriteLine("  Defines: -DNAME, --define NAME, --define=NAME (boolean symbols; XENON_ is reserved)");
         Console.WriteLine("  xenon --version");
         Console.WriteLine("  xenon --help");
         Console.WriteLine();

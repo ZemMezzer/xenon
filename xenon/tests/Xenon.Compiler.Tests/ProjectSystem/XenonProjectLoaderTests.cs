@@ -212,7 +212,7 @@ public sealed class XenonProjectLoaderTests
     }
 
     [Fact]
-    public void LoaderRecognizesPortableXelibProjectAndResolvesOnlyXelibPaths()
+    public void LoaderRecognizesTargetSpecificXelibProjectAndResolvesOnlyXelibPaths()
     {
         using var directory = new TemporaryDirectory();
         directory.Write("Library.xeproj", """
@@ -234,9 +234,9 @@ public sealed class XenonProjectLoaderTests
         Assert.Equal(Path.GetFullPath(directory.PathOf("../artifacts/Base.xelib")),
             Assert.Single(project.XenonLibraries));
         Assert.Equal("sqlite3", Assert.Single(project.NativeLibraries));
-        Assert.Equal(Path.Combine(directory.Root, "build", "release", "libsample.xelib"),
+        Assert.Equal(Path.Combine(directory.Root, "build", "x86_64-pc-windows-msvc", "libsample.xelib"),
             XenonBuildPaths.GetArtifactPath(directory.Root, project.Name, project.Type,
-                "release", "ignored-target"));
+                "release", "x86_64-pc-windows-msvc"));
     }
 
     private sealed class TemporaryDirectory : IDisposable

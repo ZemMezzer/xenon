@@ -45,7 +45,7 @@ public sealed record LlvmObjectFile(
 
 public static class LlvmTargetPlatform
 {
-    public static string HostTriple => NativeTargetMachine.GetHostTriple();
+    public static string HostTriple => Xenon.Compiler.CompilationTarget.DefaultTriple;
     public static string HostCpuName => NativeTargetMachine.GetHostCpuName();
     public static string HostCpuFeatures => NativeTargetMachine.GetHostCpuFeatures();
 
@@ -123,6 +123,7 @@ internal sealed unsafe class NativeTargetMachine : IDisposable
 
         try
         {
+            options = options with { Triple = Xenon.Compiler.CompilationTarget.Normalize(options.Triple) };
             LLVMTargetRef target = LLVMTargetRef.GetTargetFromTriple(options.Triple);
             LLVMTargetMachineRef machine = target.CreateTargetMachine(
                 options.Triple,

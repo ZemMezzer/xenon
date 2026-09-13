@@ -127,7 +127,7 @@ public sealed class XenonProjectGraph
                 if (project.Type == XenonProjectType.XenonLibrary &&
                     dependency.Type != XenonProjectType.XenonLibrary)
                     throw new ProjectSystemException(
-                        $"portable XELIB project '{project.Name}' cannot reference native project '{dependency.Name}'");
+                        $"XELIB project '{project.Name}' cannot reference native project '{dependency.Name}'");
                 direct.Add(dependency.Identity);
                 Visit(dependency);
             }

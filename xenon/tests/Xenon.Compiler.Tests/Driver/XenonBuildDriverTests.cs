@@ -1531,7 +1531,7 @@ public sealed class XenonBuildDriverTests
     }
 
     [Fact]
-    public void XenonLibraryBuildWritesPortableArtifactWithoutNativePipeline()
+    public void XenonLibraryBuildWritesSeparateTargetArtifactsWithoutNativePipeline()
     {
         using var directory = new TemporaryProject();
         directory.WriteProject("Portable", "xenon-library",
@@ -1548,8 +1548,9 @@ public sealed class XenonBuildDriverTests
 
         Assert.True(first.Success, first.Failure);
         Assert.True(second.Success, second.Failure);
-        Assert.Equal(firstBytes, File.ReadAllBytes(second.ArtifactPath!));
-        Assert.EndsWith(Path.Combine("build", "debug", "Portable.xelib"), first.ArtifactPath,
+        Assert.NotEqual(firstBytes, File.ReadAllBytes(second.ArtifactPath!));
+        Assert.Equal(firstBytes, File.ReadAllBytes(first.ArtifactPath!));
+        Assert.EndsWith(Path.Combine("build", "aarch64-unknown-linux-gnu", "Portable.xelib"), first.ArtifactPath,
             StringComparison.OrdinalIgnoreCase);
         Assert.Null(first.ObjectPath);
         Assert.Null(first.LlvmIrPath);

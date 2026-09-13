@@ -14,6 +14,7 @@ public abstract class CompilationReference : IEquatable<CompilationReference>
     protected CompilationReference(Guid identity) => Identity = identity;
 
     public Guid Identity { get; }
+    public virtual string? TargetTriple => null;
 
     /// <summary>The immutable semantic namespace surface imported by a consuming compilation.</summary>
     public abstract NamespaceSymbol GlobalNamespace { get; }
@@ -39,13 +40,16 @@ public sealed class SourceCompilationReference : CompilationReference
     }
 
     public Compilation Compilation { get; }
+    // A reference freezes a semantic snapshot, including ABI facts inherited from its imports.
+    public override string TargetTriple => Compilation.Options.ConditionalOptions.TargetTriple ??
+        Compilation.TargetLayout?.TargetTriple ?? CompilationTarget.DefaultTriple;
 
     public override NamespaceSymbol GlobalNamespace => Compilation.SemanticModel.GlobalNamespace;
 
     public override GenericImplementationStore GenericImplementations => Compilation.GenericImplementations;
 }
 
-/// <summary>A source-less, portable XELIB semantic and implementation snapshot.</summary>
+/// <summary>A source-less, target-specific XELIB semantic and implementation snapshot.</summary>
 public sealed class LibraryCompilationReference : CompilationReference
 {
     private readonly ImmutableDictionary<string, Symbol> _exports;
@@ -54,9 +58,11 @@ public sealed class LibraryCompilationReference : CompilationReference
         NamespaceSymbol globalNamespace, GenericImplementationStore genericImplementations,
         ImmutableArray<BoundFunction> implementationFunctions,
         ImmutableDictionary<string, Symbol> exports,
-        ImmutableArray<LibraryCompilationReference> dependencies, string? path)
+        ImmutableArray<LibraryCompilationReference> dependencies, string? path,
+        XelibBuildConfiguration configuration)
         : base(CreateIdentity(libraryIdentity.ContentIdentity))
     {
+        Configuration = configuration;
         LibraryIdentity = libraryIdentity;
         GlobalNamespace = globalNamespace;
         GenericImplementations = genericImplementations;
@@ -66,6 +72,8 @@ public sealed class LibraryCompilationReference : CompilationReference
         Path = path;
     }
 
+    public XelibBuildConfiguration Configuration { get; }
+    public override string TargetTriple => Configuration.TargetTriple;
     public XelibLibraryIdentity LibraryIdentity { get; }
     public override NamespaceSymbol GlobalNamespace { get; }
     public override GenericImplementationStore GenericImplementations { get; }

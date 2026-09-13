@@ -41,6 +41,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
     private readonly LanguageServerRuntimeHooks? _runtimeHooks;
     private Xenon.ProjectSystem.Workspace? _primaryWorkspace;
     private string? _configurationPath;
+    private string _targetTriple = Xenon.Compiler.CompilationTarget.DefaultTriple;
     private string? _workspaceDiscoveryRoot;
     private int _knownUriCount;
     private long _workspaceSetGeneration;
@@ -320,14 +321,24 @@ public sealed class LanguageServerSession : IAsyncDisposable
         string? explicitPath = null;
         if (value.TryGetProperty("initializationOptions", out JsonElement options) &&
             options.ValueKind == JsonValueKind.Object)
+        {
             explicitPath = GetOptionalString(options, "workspacePath") ??
                 GetOptionalString(options, "projectPath");
+            if (GetOptionalString(options, "targetTriple") is { } target)
+            {
+                try { _targetTriple = Xenon.Compiler.CompilationTarget.Normalize(target); }
+                catch (ArgumentException exception)
+                {
+                    throw new JsonRpcException(LspErrorCodes.InvalidParams, exception.Message);
+                }
+            }
+        }
 
         WorkspaceDiscoveryResult? discovery = null;
         try
         {
             discovery = WorkspaceDiscovery.Discover(explicitPath, rootUri,
-                rootPath, cancellationToken);
+                rootPath, cancellationToken, _targetTriple);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -495,7 +506,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
         if (contexts.Count == 0)
         {
             string path = DocumentUri.ToNormalizedPath(uri);
-            var loose = WorkspaceDiscovery.CreateLooseFile(path, cancellationToken);
+            var loose = WorkspaceDiscovery.CreateLooseFile(path, cancellationToken, _targetTriple);
             try
             {
                 DocumentContext[] looseContexts = _resolver.ResolveAll(loose.CurrentSnapshot, uri)
@@ -708,11 +719,11 @@ public sealed class LanguageServerSession : IAsyncDisposable
                 : CaptureReferencedXelibStamps(previous);
             Dictionary<string, OpenDocumentState> overlays = CaptureOpenDocumentStates(published);
             WorkspaceDiscoveryResult? rediscovery = discoveryRoot is null ? null :
-                WorkspaceDiscovery.Discover(null, null, discoveryRoot, cancellationToken);
+                WorkspaceDiscovery.Discover(null, null, discoveryRoot, cancellationToken, _targetTriple);
             Xenon.ProjectSystem.Workspace? candidate = rediscovery?.Workspace;
             if (candidate is null && configurationPath is not null)
                 candidate = Xenon.ProjectSystem.Workspace.Create(configurationPath,
-                    cancellationToken: cancellationToken);
+                    cancellationToken: cancellationToken, targetTriple: _targetTriple);
             if (candidate is null)
                 throw new ProjectSystemException(
                     $"workspace root '{discoveryRoot}' did not produce a Workspace");
@@ -738,7 +749,7 @@ public sealed class LanguageServerSession : IAsyncDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 unpublished.Add(Xenon.ProjectSystem.Workspace.CreateOpenLooseDocument(path,
-                    overlay.OverlayText, overlay.Version, cancellationToken: cancellationToken));
+                    overlay.OverlayText, overlay.Version, cancellationToken: cancellationToken, targetTriple: _targetTriple));
             }
 
             _runtimeHooks?.ReloadCandidatesPrepared?.Invoke(unpublished);

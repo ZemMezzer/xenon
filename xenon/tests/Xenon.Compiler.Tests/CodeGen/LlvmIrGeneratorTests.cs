@@ -2634,7 +2634,7 @@ public sealed class LlvmIrGeneratorTests
         SyntaxTree replacementTree = SyntaxTree.Parse(oldTree.Source.WithText(oldTree.Source.Text +
             Environment.NewLine + "int Identity(int value) { return value; }"));
         Compilation replaced = target.ReplaceSyntaxTree(oldTree, replacementTree);
-        Compilation withOptions = target.WithOptions(new CompilationOptions(CompilationOutputKind.Executable));
+        Compilation withOptions = target.WithOptions(target.Options with { OutputKind = CompilationOutputKind.Executable });
         Compilation withReferences = target.WithReferences([new SourceCompilationReference(reference)]);
         SyntaxTree addedTree = SyntaxTree.Parse(SourceText.From(
             "namespace Extra; struct Marker { public nint Value; }", "extra.xe"));

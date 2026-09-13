@@ -10,13 +10,17 @@ public sealed class SyntaxTree
         SourceText source,
         CompilationUnitSyntax root,
         ImmutableArray<SyntaxToken> tokens,
-        ImmutableArray<Diagnostic> diagnostics)
+        ImmutableArray<Diagnostic> diagnostics, ConditionalCompilationOptions conditionalOptions, bool targetDependent, bool hasDirectives)
     {
         Source = source;
         Root = root;
         Tokens = tokens;
         Diagnostics = diagnostics;
+        ConditionalOptions = conditionalOptions;
+        IsTargetDependent = targetDependent;
+        HasConditionalDirectives = hasDirectives;
     }
+
 
     public SourceText Source { get; }
 
@@ -28,10 +32,16 @@ public sealed class SyntaxTree
 
     public ImmutableArray<Diagnostic> Diagnostics { get; }
 
-    public static SyntaxTree Parse(SourceText source, CancellationToken cancellationToken = default)
+    public ConditionalCompilationOptions ConditionalOptions { get; }
+    public bool IsTargetDependent { get; }
+    public bool HasConditionalDirectives { get; }
+
+    public static SyntaxTree Parse(SourceText source, CancellationToken cancellationToken = default,
+        ConditionalCompilationOptions? conditionalOptions = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        LexedSource lexed = LexedSource.Lex(source);
+        conditionalOptions ??= ConditionalCompilationOptions.Default;
+        LexedSource lexed = LexedSource.Lex(source, conditionalOptions, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         var parser = new Parser(lexed.Tokens);
         CompilationUnitSyntax root = parser.ParseCompilationUnit();
@@ -39,6 +49,6 @@ public sealed class SyntaxTree
         diagnostics.AddRange(lexed.Diagnostics);
         diagnostics.AddRange(parser.Diagnostics);
 
-        return new SyntaxTree(source, root, lexed.Tokens, diagnostics.ToImmutable());
+        return new SyntaxTree(source, root, lexed.Tokens, diagnostics.ToImmutable(), conditionalOptions, lexed.IsTargetDependent, lexed.HasConditionalDirectives);
     }
 }

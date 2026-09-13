@@ -378,6 +378,9 @@ public sealed class NativeLinker
             arguments.Add(GetUnixLibraryArgument(library));
         }
 
+        // Math is part of the default native runtime, as with the Windows CRT.
+        if (!OperatingSystem.IsMacOS()) arguments.Add("-lm");
+
         if (options.RequiresThreadingRuntime)
         {
             arguments.Add("-pthread");

@@ -395,7 +395,7 @@ public sealed class XelibContainerTests
     public void HeaderAndSectionsRoundTrip()
     {
         Assert.Equal((ushort)1, XelibVersions.Container);
-        Assert.Equal((ushort)1, XelibVersions.LibraryIr);
+        Assert.Equal((ushort)2, XelibVersions.LibraryIr);
         Assert.Equal((ushort)1, XelibVersions.Language);
         byte[] bytes = XelibContainer.Write([
             new XelibSection(XelibSectionKind.Manifest, XelibSectionFlags.Required,
@@ -690,7 +690,7 @@ public sealed class XelibContainerTests
     }
 
     [Fact]
-    public void SemanticBytesIgnoreAbsoluteSourcePathAndTargetChoice()
+    public void SemanticBytesIgnoreAbsoluteSourcePath()
     {
         const string text = "namespace Stable; public int Value() { return 42; }";
         Compilation first = Compilation.Create(SourceText.From(text, "C:/one/value.xe"));
@@ -704,31 +704,30 @@ public sealed class XelibContainerTests
         Assert.DoesNotContain("D:/two", Encoding.UTF8.GetString(right), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void TargetLayoutInLibraryBodyBindsOnlyForEachConsumerTarget()
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", 4)]
+    [InlineData("x86_64-pc-windows-msvc", 8)]
+    public void TargetLayoutInLibraryBodyUsesLibraryTarget(string triple, int expected)
     {
         Compilation library = Compilation.Create(SourceText.From(
             "namespace PortableLayout; public nuint PointerBytes() { return sizeof(int*); }",
             "library.xe"));
+        library = LlvmIrGenerator.BindForTarget(library, new(triple));
         byte[] bytes = XelibWriter.Write(library, new XelibWriteOptions("PortableLayout"));
         LibraryCompilationReference reference = XelibReader.Read(bytes);
-        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From(
+        Compilation app = Compilation.Create(new CompilationOptions(ConditionalCompilation: new(targetTriple: triple)), [reference], SourceText.From(
             "using PortableLayout; namespace App; int Main() { return cast<int>(PointerBytes()); }",
             "app.xe"));
-        var narrowTarget = new LlvmTargetOptions("i686-pc-windows-msvc");
-        var wideTarget = new LlvmTargetOptions("x86_64-pc-windows-msvc");
+        var target = new LlvmTargetOptions(triple);
+        string ir = new LlvmIrGenerator().GenerateForTarget(LlvmIrGenerator.BindForTarget(app, target), target);
+        Assert.Contains($"ret i{expected * 8} {expected}", ir, StringComparison.Ordinal);
 
-        Compilation narrow = LlvmIrGenerator.BindForTarget(app, narrowTarget);
-        Compilation wide = LlvmIrGenerator.BindForTarget(app, wideTarget);
-        string narrowIr = new LlvmIrGenerator().GenerateForTarget(narrow, narrowTarget);
-        string wideIr = new LlvmIrGenerator().GenerateForTarget(wide, wideTarget);
-
-        Assert.Contains("ret i32 4", narrowIr, StringComparison.Ordinal);
-        Assert.Contains("ret i64 8", wideIr, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void GenericLayoutConstantsRemainDeferredAndBindForEachConsumerTarget()
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", 8)]
+    [InlineData("x86_64-pc-windows-msvc", 16)]
+    public void GenericLayoutConstantsSpecializeWithinLibraryTarget(string triple, int expected)
     {
         Compilation library = Compilation.Create(SourceText.From("""
             namespace GenericLayout;
@@ -737,6 +736,7 @@ public sealed class XelibContainerTests
                 const nuint Alignment = alignof(T);
             }
             """, "library.xe"));
+        library = LlvmIrGenerator.BindForTarget(library, new(triple));
         byte[] bytes = XelibWriter.Write(library, new XelibWriteOptions("GenericLayout"));
         XelibContainer container = XelibContainer.Read(bytes);
         ImmutableArray<XelibSymbolRecord> symbols = XelibJson.Deserialize<ImmutableArray<XelibSymbolRecord>>(
@@ -748,23 +748,16 @@ public sealed class XelibContainerTests
             Assert.True(ContainsOpcode(constant.ConstantExpression!, XelibBodyOpcode.TypeLayout)));
 
         LibraryCompilationReference reference = XelibReader.Read(bytes);
-        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+        Compilation app = Compilation.Create(new CompilationOptions(ConditionalCompilation: new(targetTriple: triple)), [reference], SourceText.From("""
             namespace App;
             int Main() {
                 return cast<int>(GenericLayout.State<int*>.Width +
                     GenericLayout.State<int*>.Alignment);
             }
             """, "app.xe"));
-        var narrowTarget = new LlvmTargetOptions("i686-pc-windows-msvc");
-        var wideTarget = new LlvmTargetOptions("x86_64-pc-windows-msvc");
-
-        string narrowIr = new LlvmIrGenerator().GenerateForTarget(
-            LlvmIrGenerator.BindForTarget(app, narrowTarget), narrowTarget);
-        string wideIr = new LlvmIrGenerator().GenerateForTarget(
-            LlvmIrGenerator.BindForTarget(app, wideTarget), wideTarget);
-
-        Assert.Contains("ret i32 8", narrowIr, StringComparison.Ordinal);
-        Assert.Contains("ret i32 16", wideIr, StringComparison.Ordinal);
+        var target = new LlvmTargetOptions(triple);
+        string ir = new LlvmIrGenerator().GenerateForTarget(LlvmIrGenerator.BindForTarget(app, target), target);
+        Assert.Contains($"ret i32 {expected}", ir, StringComparison.Ordinal);
 
         static bool ContainsOpcode(XelibBodyNode node, XelibBodyOpcode opcode) =>
             node.Opcode == opcode || node.Children.Any(child => ContainsOpcode(child, opcode));
@@ -805,8 +798,10 @@ public sealed class XelibContainerTests
             diagnostic.Id == Xenon.Compiler.Diagnostics.DiagnosticIds.InaccessibleSymbol));
     }
 
-    [Fact]
-    public void OrdinaryLayoutConstantsAndLibraryFunctionsBindForEachConsumerTarget()
+    [Theory]
+    [InlineData("i686-pc-windows-msvc", 8)]
+    [InlineData("x86_64-pc-windows-msvc", 16)]
+    public void OrdinaryLayoutConstantsUseLibraryTarget(string triple, int expected)
     {
         Compilation library = Compilation.Create(SourceText.From("""
             namespace OrdinaryLayout;
@@ -815,32 +810,25 @@ public sealed class XelibContainerTests
             public int LibraryMetric() { return cast<int>(Width + Alignment); }
             """, "library.xe"));
         Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        library = LlvmIrGenerator.BindForTarget(library, new(triple));
         byte[] bytes = XelibWriter.Write(library, new XelibWriteOptions("OrdinaryLayout"));
         XelibContainer container = XelibContainer.Read(bytes);
         ImmutableArray<XelibSymbolRecord> symbols = XelibJson.Deserialize<ImmutableArray<XelibSymbolRecord>>(
             container.GetRequiredSection(XelibSectionKind.Symbols).AsSpan(), null);
-        Assert.Equal(2, symbols.Count(symbol => symbol.Kind == XelibSymbolKind.Constant &&
-            symbol.ConstantExpression is { Opcode: XelibBodyOpcode.TypeLayout }));
+        Assert.Equal(2, symbols.Count(symbol => symbol.Kind == XelibSymbolKind.Constant));
 
         LibraryCompilationReference reference = XelibReader.Read(bytes);
-        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+        Compilation app = Compilation.Create(new CompilationOptions(ConditionalCompilation: new(targetTriple: triple)), [reference], SourceText.From("""
             using OrdinaryLayout;
             namespace App;
             int Main() { return cast<int>(Width + Alignment) + LibraryMetric(); }
             """, "app.xe"));
         Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
-        var narrowTarget = new LlvmTargetOptions("i686-pc-windows-msvc");
-        var wideTarget = new LlvmTargetOptions("x86_64-pc-windows-msvc");
+        var target = new LlvmTargetOptions(triple);
+        string ir = new LlvmIrGenerator().GenerateForTarget(LlvmIrGenerator.BindForTarget(app, target), target);
+        Assert.Contains($"ret i32 {expected}", ir, StringComparison.Ordinal);
+        Assert.Contains($"add i32 {expected}", ir, StringComparison.Ordinal);
 
-        string narrowIr = new LlvmIrGenerator().GenerateForTarget(
-            LlvmIrGenerator.BindForTarget(app, narrowTarget), narrowTarget);
-        string wideIr = new LlvmIrGenerator().GenerateForTarget(
-            LlvmIrGenerator.BindForTarget(app, wideTarget), wideTarget);
-
-        Assert.Contains("ret i32 8", narrowIr, StringComparison.Ordinal);
-        Assert.Contains("add i32 8", narrowIr, StringComparison.Ordinal);
-        Assert.Contains("ret i32 16", wideIr, StringComparison.Ordinal);
-        Assert.Contains("add i32 16", wideIr, StringComparison.Ordinal);
     }
 
     [Fact]
