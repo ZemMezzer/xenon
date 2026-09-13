@@ -114,6 +114,8 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                     value = construction.Arguments.SelectMany(Evaluate)
                         .ToHashSet(ReferenceEqualityComparer.Instance);
                 StoreValue(storage, value, construction.ValueType);
+                if (construction.Storage is BoundVariableExpression { Variable: LocalVariableSymbol local })
+                    RegisterScalarCleanup(local);
                 return [];
             }
             case BoundExplicitDestructExpression destruction:
@@ -123,6 +125,14 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 if (destruction.Destructor is { } destructor)
                     ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), storage, destruction);
                 StoreValue(storage, [], destruction.ValueType);
+                return [];
+            }
+            case BoundStorageDestructionExpression destruction:
+            {
+                CheckWrite(_context.Receiver, destruction);
+                if (destruction.ElementDestructor is { } destructor)
+                    ContextualDispatch(destructor, Array.Empty<HashSet<object>>(), _context.Receiver, destruction);
+                StoreValue(_context.Receiver, [], destruction.StorageType.ElementType);
                 return [];
             }
             case BoundStorageMoveExpression move:
@@ -745,6 +755,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private HashSet<object> Read(IEnumerable<object> storage, TypeSymbol type)
     {
+        type = UnwrapValueStorage(type);
         HashSet<object> result = new(ReferenceEqualityComparer.Instance);
         // Aggregate values retain their field shape. StoreValue performs the
         // field-by-field copy; pointer/reference reads still load capabilities.
@@ -809,6 +820,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private void StoreValue(HashSet<object> storage, HashSet<object> values, TypeSymbol type, HashSet<TypeSymbol> path)
     {
+        type = UnwrapValueStorage(type);
         if (type is not IFieldStorageTypeSymbol structure)
         {
             if (ContainsAccess(type)) Store(storage, values, strong: true);
@@ -826,6 +838,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
 
     private void StoreUnknown(HashSet<object> storage, HashSet<object> capabilities, TypeSymbol type, HashSet<TypeSymbol> path)
     {
+        type = UnwrapValueStorage(type);
         ForgetReceiverTypes(storage);
         if (!ContainsAccess(type)) return;
         if (type is not IFieldStorageTypeSymbol structure)
@@ -842,6 +855,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private void CollectReachableStorage(HashSet<object> storage, TypeSymbol type, HashSet<object> result,
         HashSet<(object, TypeSymbol)> visited, HashSet<TypeSymbol>? valuePath = null)
     {
+        type = UnwrapValueStorage(type);
         HashSet<object> local = [];
         foreach (object origin in storage)
         {
@@ -976,6 +990,7 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private bool HasHiddenAccess(HashSet<object> origins, TypeSymbol type,
         HashSet<(object, TypeSymbol)> visited, HashSet<TypeSymbol> valuePath)
     {
+        type = UnwrapValueStorage(type);
         if (!ExposesWritableAccess(type)) return false;
         if (origins.Contains(_hidden)) return true;
         HashSet<object> fresh = new(origins.Where(origin => visited.Add((origin, type))));
@@ -1035,20 +1050,34 @@ internal sealed partial class ReadonlyEffectAnalyzer(
     private static bool IsMutableParameter(TypeSymbol type) =>
         type is PointerTypeSymbol { IsReadonly: false } or ReferenceTypeSymbol { IsReadonly: false };
 
+    // Lifetime wrappers keep the element in the same logical storage. Their
+    // payload must retain its field shape and pointer origins across value moves.
+    private static TypeSymbol UnwrapValueStorage(TypeSymbol type)
+    {
+        while (type is LifetimeModifierTypeSymbol modifier) type = modifier.ElementType;
+        return type;
+    }
+
     private static bool ContainsAccess(TypeSymbol type) => ContainsAccess(type, []);
 
-    private static bool ContainsAccess(TypeSymbol type, HashSet<TypeSymbol> visited) => type switch
+    private static bool ContainsAccess(TypeSymbol type, HashSet<TypeSymbol> visited)
     {
-        PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol or
-            InterfaceTypeSymbol or FunctionValueTypeSymbol => true,
-        IFieldStorageTypeSymbol structure when visited.Add(type) => structure.AllInstanceFields.Any(field => ContainsAccess(field.Type, visited)),
-        _ => false,
-    };
+        type = UnwrapValueStorage(type);
+        return type switch
+        {
+            PointerTypeSymbol or ReferenceTypeSymbol or ArrayTypeSymbol or OwnershipTypeSymbol or
+                InterfaceTypeSymbol or FunctionValueTypeSymbol => true,
+            IFieldStorageTypeSymbol structure when visited.Add(type) =>
+                structure.AllInstanceFields.Any(field => ContainsAccess(field.Type, visited)),
+            _ => false,
+        };
+    }
 
     private static bool ExposesWritableAccess(TypeSymbol type) => ExposesWritableAccess(type, []);
 
     private static bool ExposesWritableAccess(TypeSymbol type, HashSet<TypeSymbol> visited)
     {
+        type = UnwrapValueStorage(type);
         if (!visited.Add(type)) return false;
         return type switch
         {

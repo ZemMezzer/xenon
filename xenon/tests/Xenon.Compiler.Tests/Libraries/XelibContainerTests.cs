@@ -15,6 +15,53 @@ namespace Xenon.Compiler.Tests.Libraries;
 
 public sealed class XelibContainerTests
 {
+    [Theory]
+    [InlineData("", true)]
+    [InlineData("public ReadonlyView(T* data) { _data = data; }", false)]
+    public void GenericConstructionPreservesSelectedPointerConstructor(string overload, bool readonlyParameter)
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace Views;
+            public struct ReadonlyView<T>
+            {
+                private readonly T* _data;
+                public ReadonlyView(readonly T* data) { _data = data; }
+                public readonly T* readonly Data { get { return _data; } }
+            }
+            public struct View<T>
+            {
+                private T* _data;
+                public View(T* data) { _data = data; }
+                public ReadonlyView<T> readonly AsReadonly() { return ReadonlyView<T>(_data); }
+            }
+            public ReadonlyView<T> Make<T>(T* data) { return ReadonlyView<T>(data); }
+            """.Replace("private readonly T* _data;", "private readonly T* _data; " + overload), "views.xe"));
+        Assert.False(library.HasErrors, string.Join(Environment.NewLine, library.Diagnostics));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Views")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using Views;
+            namespace App;
+            int Main()
+            {
+                int value = 42;
+                View<int> view = View<int>(&value);
+                ReadonlyView<int> result = view.AsReadonly();
+                ReadonlyView<int> second = Make<int>(&value);
+                return *result.Data + *second.Data;
+            }
+            """, "app.xe"));
+        Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
+        BoundFunction[] reachable = app.GetStaticImplementationFunctions().ToArray();
+        Assert.Contains(reachable, body => body.Symbol.FunctionKind == FunctionKind.Constructor &&
+            body.Symbol.ContainingStruct?.GenericDefinition?.Name == "ReadonlyView" &&
+            body.Symbol.Parameters[0].Type is PointerTypeSymbol pointer && pointer.IsReadonly == readonlyParameter);
+        LlvmTargetOptions target = LlvmTargetOptions.CreateHost();
+        Compilation targeted = LlvmIrGenerator.BindForTarget(app, target);
+        Assert.False(targeted.HasErrors, string.Join(Environment.NewLine, targeted.Diagnostics));
+        _ = new LlvmIrGenerator().GenerateForTarget(targeted, target);
+    }
+
     [Fact]
     public void ReadonlyLibraryMethodCanBeCalledThroughStaticReadonlyField()
     {

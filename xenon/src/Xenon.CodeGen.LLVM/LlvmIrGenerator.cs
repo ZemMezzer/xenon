@@ -5363,6 +5363,9 @@ public sealed class LlvmIrGenerator
                 SyntaxKind.BangToken or SyntaxKind.TildeToken => _builder.BuildNot(operand, "not"),
                 SyntaxKind.StarToken when expression.Operand.Type is PointerTypeSymbol pointer =>
                     _builder.BuildLoad2(_mapType(pointer.ElementType), operand, "deref"),
+                // An owned array stores the array handle itself, not a pointer to
+                // a separate handle slot as an owned scalar/struct would require.
+                SyntaxKind.StarToken when expression.Operand.Type is OwnershipTypeSymbol { ElementType: ArrayTypeSymbol } => operand,
                 SyntaxKind.StarToken when expression.Operand.Type is OwnershipTypeSymbol ownership =>
                     _builder.BuildLoad2(_mapType(ownership.ElementType), operand, "ownership.deref"),
                 _ => throw new LlvmCodeGenerationException($"Unary operator '{expression.OperatorKind}' is not supported."),

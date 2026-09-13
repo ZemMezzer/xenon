@@ -7606,9 +7606,10 @@ internal sealed partial class FunctionBodyBinder
         }
         arguments = ValidateFunctionArguments(constructor, arguments, syntax.Arguments,
             name.IdentifierToken.Location, incomplete ? completedArgumentCount : null);
-        if (structure is { IsOpenGenericType: true, GenericDefinition: { } genericDefinition })
+        if (structure is { IsOpenGenericType: true, GenericDefinition: not null })
             return new BoundDeferredGenericOperationExpression(BoundDeferredGenericOperationKind.Construction,
-                null, genericDefinition, arguments, null, SyntaxKind.EqualsToken, false, structure);
+                null, _fileScope.GenericStructSpecializer!.GetFunctionDefinition(constructor), arguments, null,
+                SyntaxKind.EqualsToken, false, structure);
         return new BoundConstructorCallExpression(structure, constructor, arguments);
     }
 
@@ -7877,6 +7878,17 @@ internal sealed partial class FunctionBodyBinder
 
         if (functionCandidates.Length == 0)
         {
+            // A namespace-qualified static field begins a value receiver chain.
+            // Let normal member binding resolve the rest and enforce accessibility
+            // and readonly rules instead of treating every segment as a namespace.
+            for (ExpressionSyntax receiver = target;
+                 receiver is MemberAccessExpressionSyntax member;
+                 receiver = member.Receiver)
+                if (TryResolveStaticTypeReceiver(member, out TypeSymbol? owner) &&
+                    owner is DeclaredTypeSymbol declared &&
+                    declared.FindStaticField(member.MemberToken.Text) is not null)
+                    return null;
+
             _diagnostics.Report(
                 target.MemberToken.Location,
                 $"unknown function or struct '{string.Join('.', parts)}'",

@@ -21,6 +21,27 @@ public sealed class NativeLinkerTests
     [DllImport("kernel32.dll")]
     private static extern uint SetErrorMode(uint mode);
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void DereferencingUniqueArrayPreservesArrayHandle(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            int Read(int[] values) { if (values.Length != 2) return 0; return values[1]; }
+            int Main()
+            {
+                unique<int[]> owned = new int[2];
+                owned[1] = 77;
+                if (Read(*owned) != 77) return 1;
+                int[] borrowed = *owned;
+                borrowed[0] = 42;
+                if (owned[0] != 42) return 2;
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
     [Fact]
     public void ExceptionCapableArtifactRequiresExplicitProcessRuntimeLibrary()
     {

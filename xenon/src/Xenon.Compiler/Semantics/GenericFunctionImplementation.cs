@@ -373,7 +373,15 @@ internal sealed class LibraryGenericFunctionImplementation(
                 _ => null,
             };
             if (structure is null) throw InvalidGenericOperation(operation, requirement, resultType);
-            FunctionSymbol? constructor = FindConstructor(structure, arguments);
+            // The source binder already selected this overload. Argument types may differ
+            // from parameter types for implicit conversions such as T* to readonly T*.
+            FunctionSymbol? constructor = requirement is FunctionSymbol
+                { FunctionKind: FunctionKind.Constructor } selected
+                ? structure.Constructors.FirstOrDefault(candidate => ReferenceEquals(candidate, selected)) ??
+                    specializer.StructSpecializer.FindSpecializedFunction(
+                        specializer.StructSpecializer.GetFunctionDefinition(selected), structure) ??
+                    throw InvalidGenericOperation(operation, requirement, resultType)
+                : FindConstructor(structure, arguments);
             if (constructor is null && !arguments.IsEmpty)
                 throw InvalidGenericOperation(operation, requirement, resultType);
             if (operation == BoundDeferredGenericOperationKind.Construction)
