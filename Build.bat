@@ -5,10 +5,19 @@ for %%I in ("%~dp0.") do set "ROOT=%%~fI"
 set "XENON_PLATFORM_ID=%~1"
 
 if "%XENON_PLATFORM_ID%"=="" (
-  if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
+  if /I "%PROCESSOR_ARCHITEW6432%"=="ARM64" (
     set "XENON_PLATFORM_ID=win_arm64"
-  ) else (
+  ) else if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
+    set "XENON_PLATFORM_ID=win_arm64"
+  ) else if /I "%PROCESSOR_ARCHITEW6432%"=="AMD64" (
+    set "XENON_PLATFORM_ID=win_x64"
+  ) else if /I "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
+    set "XENON_PLATFORM_ID=win_x64"
+  ) else if /I "%PROCESSOR_ARCHITECTURE%"=="x86" (
     set "XENON_PLATFORM_ID=win_x86"
+  ) else (
+    echo Unsupported Windows host architecture: %PROCESSOR_ARCHITECTURE%
+    exit /b 1
   )
 ) else (
   if not "%~2"=="" (
@@ -19,10 +28,12 @@ if "%XENON_PLATFORM_ID%"=="" (
 
 if /I "%XENON_PLATFORM_ID%"=="win_arm64" (
   set "CMAKE_ARCH=ARM64"
+) else if /I "%XENON_PLATFORM_ID%"=="win_x64" (
+  set "CMAKE_ARCH=x64"
 ) else if /I "%XENON_PLATFORM_ID%"=="win_x86" (
   set "CMAKE_ARCH=Win32"
 ) else (
-  echo Unsupported Xenon build platform: %XENON_PLATFORM_ID%
+  echo Unsupported Xenon build platform: %XENON_PLATFORM_ID%. Supported: win_x64, win_arm64, win_x86.
   exit /b 1
 )
 

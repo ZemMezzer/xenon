@@ -25,7 +25,7 @@ The repository contains the compiler, LLVM code generator, build driver, project
 
 Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)** and add the extracted `xenon` executable to your `PATH`.
 
-Release archives are Native AOT distributions for Windows x86/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
+Release archives are NativeAOT distributions for Windows x64/x86/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
 
 Xenon uses LLVM 20 for code generation. Release executables contain the required LLVM code through static linkage; no adjacent `LLVM-C.dll`, `libLLVM.dll`, `libLLVM.dylib`, or `libLLVM.so` is required. Xenon also produces native binaries, so a host linker is required:
 
@@ -130,15 +130,22 @@ CMake at the repository root owns the complete build graph: it builds the pinned
 - Visual Studio 2022 Build Tools with the Desktop development with C++ workload and a Windows SDK on Windows;
 - Xcode Command Line Tools on Apple Silicon macOS.
 
-Clone and build on Windows:
+Clone and build on an AMD64 Windows host (the default is `win_x64`):
 
 ```console
 git clone --recurse-submodules https://github.com/ZemMezzer/xenon.git
 cd xenon
-Build.bat win_x86
+Build.bat
 ```
 
-Use `Build.bat win_arm64` on Windows Arm64. On Apple Silicon macOS:
+`Build.bat win_x64` selects the same platform explicitly. Use `Build.bat win_x86` for a 32-bit build, or `Build.bat win_arm64` for Windows Arm64. For a direct Visual Studio CMake configure, select both the Xenon platform and generator architecture:
+
+```console
+cmake -S . -B build/win_x64/cmake -G "Visual Studio 17 2022" -A x64 -DXENON_PLATFORM=win_x64
+cmake --build build/win_x64/cmake --config Release --target xenon-native
+```
+
+On Apple Silicon macOS:
 
 ```console
 git clone --recurse-submodules https://github.com/ZemMezzer/xenon.git
@@ -146,12 +153,25 @@ cd xenon
 ./Build.sh
 ```
 
-For an existing clone, initialize LLVM with `git submodule update --init --recursive`. Supported platform/RID pairs are `win_x86` / `win-x86`, `win_arm64` / `win-arm64`, and `darwin_arm64` / `osx-arm64`.
+For an existing clone, initialize LLVM with `git submodule update --init --recursive`. The platform matrix is:
 
-All generated CMake, LLVM, MSBuild, and NativeAOT files live under `build/<platform>/`. The final executable is written to `build/<platform>/xenon/publish/`; deleting root `build/` performs a complete clean. The `check` target additionally runs the statically linked LLVM C++ smoke test, `xenon --version`, compiles and runs a minimal Xenon program, and checks source-tree cleanliness:
+| Xenon platform | .NET RID | Binary architecture | Visual Studio `-A` |
+| --- | --- | --- | --- |
+| `win_x64` | `win-x64` | x86-64 | `x64` |
+| `win_x86` | `win-x86` | x86 | `Win32` |
+| `win_arm64` | `win-arm64` | Arm64 | `ARM64` |
+| `darwin_arm64` | `osx-arm64` | Arm64 | — |
+
+The superbuild keeps LLVM as a static dependency with X86 and AArch64 code-generation backends, then publishes Xenon through NativeAOT. All generated CMake, LLVM, MSBuild, and NativeAOT files live under `build/<platform>/`: CMake under `cmake/`, LLVM under `llvm/`, and the final executable under `xenon/publish/`. Deleting root `build/` performs a complete clean. The `check` target runs the statically linked LLVM C++ smoke test, `xenon --version`, compiles and runs a minimal Xenon program, checks build-system mappings, and verifies source-tree cleanliness:
 
 ```console
-cmake --build build/win_x86/cmake --config Release --target check
+cmake --build build/win_x64/cmake --config Release --target check
+```
+
+You can run the platform and XML checks without building LLVM:
+
+```console
+cmake -P cmake/tests/BuildSystemChecks.cmake
 ```
 
 Run the complete managed and end-to-end suite through CMake with `--target xenon-tests`. The .NET solution remains available at `xenon/Xenon.sln`; direct restore/build/test commands also redirect outputs to `build/local/`, so they do not create `bin/` or `obj/` directories in the source tree.

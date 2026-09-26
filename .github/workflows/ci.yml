@@ -26,6 +26,9 @@ jobs:
         with:
           global-json-file: xenon/global.json
 
+      - name: Check platform mapping and XML escaping
+        run: cmake -P cmake/tests/BuildSystemChecks.cmake
+
       - name: Build and test moved solution
         run: dotnet test xenon/Xenon.sln --configuration Release
 
@@ -45,6 +48,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - platform: win_x64
+            runner: windows-2022
           - platform: win_x86
             runner: windows-2022
           - platform: win_arm64
@@ -75,7 +80,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/${{ matrix.platform }}/llvm
-          key: llvm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/WriteLlvmNativeProps.cmake') }}
+          key: llvm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/*.cmake') }}
 
       - name: Build on Windows
         if: runner.os == 'Windows'

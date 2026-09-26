@@ -4,44 +4,33 @@ project(XenonSuperbuild LANGUAGES NONE)
 
 include(ExternalProject)
 
-set(XENON_PLATFORM "" CACHE STRING "Xenon target platform: darwin_arm64, win_arm64, or win_x86")
-set_property(CACHE XENON_PLATFORM PROPERTY STRINGS darwin_arm64 win_arm64 win_x86)
+include("${CMAKE_SOURCE_DIR}/cmake/XenonPlatform.cmake")
+
+set(XENON_PLATFORM "" CACHE STRING "Xenon target platform: ${XENON_SUPPORTED_PLATFORMS}")
+set_property(CACHE XENON_PLATFORM PROPERTY STRINGS ${XENON_SUPPORTED_PLATFORMS})
 set(XENON_VERSION "" CACHE STRING "Optional Xenon release version override")
 
 if(NOT XENON_PLATFORM)
-  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _xenon_host_processor)
-  if(APPLE AND _xenon_host_processor MATCHES "^(arm64|aarch64)$")
-    set(XENON_PLATFORM darwin_arm64)
-  elseif(WIN32 AND _xenon_host_processor MATCHES "^(arm64|aarch64)$")
-    set(XENON_PLATFORM win_arm64)
-  elseif(WIN32 AND CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
-    set(XENON_PLATFORM win_x86)
-  elseif(WIN32)
-    set(_xenon_detected_platform win_x64)
-  elseif(APPLE)
-    set(_xenon_detected_platform darwin_x86_64)
-  else()
-    set(_xenon_detected_platform "${CMAKE_HOST_SYSTEM_NAME}_${_xenon_host_processor}")
-    string(TOLOWER "${_xenon_detected_platform}" _xenon_detected_platform)
+  xenon_detect_platform(_xenon_detected_platform
+    "${CMAKE_HOST_SYSTEM_NAME}" "${CMAKE_HOST_SYSTEM_PROCESSOR}"
+    "${CMAKE_GENERATOR_PLATFORM}" "${CMAKE_VS_PLATFORM_NAME}")
+  if(NOT _xenon_detected_platform IN_LIST XENON_SUPPORTED_PLATFORMS)
+    message(FATAL_ERROR
+      "Unsupported Xenon build platform: host=${CMAKE_HOST_SYSTEM_NAME}/${CMAKE_HOST_SYSTEM_PROCESSOR}, "
+      "generator=${CMAKE_GENERATOR}, generator platform=${CMAKE_GENERATOR_PLATFORM}, "
+      "detected=${_xenon_detected_platform}. Supported: ${XENON_SUPPORTED_PLATFORMS}. "
+      "Pass -DXENON_PLATFORM=<platform> (and -A <architecture> for Visual Studio) explicitly.")
   endif()
-  if(NOT XENON_PLATFORM)
-    message(FATAL_ERROR "Unsupported Xenon build platform: ${_xenon_detected_platform}")
-  endif()
+  set(XENON_PLATFORM "${_xenon_detected_platform}")
 endif()
 
-# Keep the complete platform -> RID mapping in one place.
-if(XENON_PLATFORM STREQUAL "darwin_arm64")
-  set(XENON_DOTNET_RID osx-arm64)
-  set(XENON_EXECUTABLE_NAME xenon)
-elseif(XENON_PLATFORM STREQUAL "win_arm64")
-  set(XENON_DOTNET_RID win-arm64)
-  set(XENON_EXECUTABLE_NAME xenon.exe)
-elseif(XENON_PLATFORM STREQUAL "win_x86")
-  set(XENON_DOTNET_RID win-x86)
-  set(XENON_EXECUTABLE_NAME xenon.exe)
-else()
-  message(FATAL_ERROR "Unsupported Xenon build platform: ${XENON_PLATFORM}")
+if(NOT XENON_PLATFORM IN_LIST XENON_SUPPORTED_PLATFORMS)
+  message(FATAL_ERROR
+    "Unsupported Xenon build platform: ${XENON_PLATFORM}. Supported: ${XENON_SUPPORTED_PLATFORMS}. "
+    "Pass -DXENON_PLATFORM=<platform> explicitly.")
 endif()
+xenon_platform_properties("${XENON_PLATFORM}" XENON_DOTNET_RID
+  XENON_ARCHITECTURE XENON_GENERATOR_PLATFORM XENON_EXECUTABLE_NAME)
 
 include("${CMAKE_SOURCE_DIR}/pipelines/${XENON_PLATFORM}/platform.cmake")
 
@@ -105,6 +94,9 @@ ExternalProject_Add(llvm-static
   INSTALL_COMMAND ""
   LIST_SEPARATOR |
   CMAKE_ARGS ${_xenon_llvm_cmake_args}
+  # LLVM is a local, editable source checkout. ExternalProject stamps do not
+  # track its source changes; always invoke the backend build so its own
+  # incremental dependency graph can rebuild changed LLVM objects.
   BUILD_ALWAYS TRUE
   BUILD_COMMAND
     "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --target llvm-config
@@ -206,14 +198,19 @@ ExternalProject_Add(llvm-static-smoke
   DEPENDS llvm-static
   USES_TERMINAL_BUILD TRUE)
 
-add_custom_target(check-source-clean
+add_custom_target(check-source-tree
   COMMAND "${CMAKE_COMMAND}" "-DREPOSITORY_ROOT=${CMAKE_SOURCE_DIR}"
-    -P "${CMAKE_SOURCE_DIR}/cmake/CheckSourceClean.cmake"
-  COMMENT "Checking that generated artifacts stayed under build/"
+    -P "${CMAKE_SOURCE_DIR}/cmake/CheckSourceTree.cmake"
+  COMMENT "Checking source artifacts and LLVM checkout cleanliness"
+  VERBATIM)
+
+add_custom_target(check-build-system
+  COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_SOURCE_DIR}/cmake/tests/BuildSystemChecks.cmake"
+  COMMENT "Checking platform mapping and XML escaping"
   VERBATIM)
 
 add_custom_target(check
-  DEPENDS xenon-smoke xenon-compile-smoke llvm-static-smoke check-source-clean)
+  DEPENDS xenon-smoke xenon-compile-smoke llvm-static-smoke check-source-tree check-build-system)
 
 message(STATUS "Xenon platform: ${XENON_PLATFORM}")
 message(STATUS "Xenon .NET RID: ${XENON_DOTNET_RID}")

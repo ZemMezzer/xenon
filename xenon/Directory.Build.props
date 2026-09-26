@@ -9,12 +9,12 @@
     <Deterministic>true</Deterministic>
     <!-- Root CMake passes build/<platform>. The fallback keeps direct dotnet
          invocations source-clean as well. -->
-    <XenonRootBuildDirectory Condition="'$(XenonRootBuildDirectory)' == ''">$(MSBuildThisFileDirectory)..\build\local\</XenonRootBuildDirectory>
+    <XenonRootBuildDirectory Condition="'$(XenonRootBuildDirectory)' == ''">$(MSBuildThisFileDirectory)../build/local/</XenonRootBuildDirectory>
     <XenonRootBuildDirectoryNormalized>$([MSBuild]::EnsureTrailingSlash($([System.IO.Path]::GetFullPath('$(XenonRootBuildDirectory)'))))</XenonRootBuildDirectoryNormalized>
-    <XenonBinDirectory>$(XenonRootBuildDirectoryNormalized)xenon\bin\</XenonBinDirectory>
-    <XenonObjDirectory>$(XenonRootBuildDirectoryNormalized)xenon\obj\</XenonObjDirectory>
-    <BaseOutputPath>$(XenonBinDirectory)$(MSBuildProjectName)\</BaseOutputPath>
-    <BaseIntermediateOutputPath>$(XenonObjDirectory)$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <XenonBinDirectory>$(XenonRootBuildDirectoryNormalized)xenon/bin/</XenonBinDirectory>
+    <XenonObjDirectory>$(XenonRootBuildDirectoryNormalized)xenon/obj/</XenonObjDirectory>
+    <BaseOutputPath>$(XenonBinDirectory)$(MSBuildProjectName)/</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(XenonObjDirectory)$(MSBuildProjectName)/</BaseIntermediateOutputPath>
     <!-- Keep artifacts produced with the SDK defaults out of implicit Compile items.
          This matters after switching to the repository-wide output paths above. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);**/bin/**;**/obj/**;**/CMakeFiles/**</DefaultItemExcludes>
