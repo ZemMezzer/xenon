@@ -705,7 +705,7 @@ public sealed class XelibContainerTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", 4)]
+    [InlineData("i686-unknown-linux-gnu", 4)]
     [InlineData("x86_64-pc-windows-msvc", 8)]
     public void TargetLayoutInLibraryBodyUsesLibraryTarget(string triple, int expected)
     {
@@ -725,7 +725,7 @@ public sealed class XelibContainerTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", 8)]
+    [InlineData("i686-unknown-linux-gnu", 8)]
     [InlineData("x86_64-pc-windows-msvc", 16)]
     public void GenericLayoutConstantsSpecializeWithinLibraryTarget(string triple, int expected)
     {
@@ -799,7 +799,7 @@ public sealed class XelibContainerTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", 8)]
+    [InlineData("i686-unknown-linux-gnu", 8)]
     [InlineData("x86_64-pc-windows-msvc", 16)]
     public void OrdinaryLayoutConstantsUseLibraryTarget(string triple, int expected)
     {

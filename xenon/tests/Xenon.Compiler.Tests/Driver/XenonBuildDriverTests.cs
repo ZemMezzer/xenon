@@ -3477,4 +3477,101 @@ public sealed class XenonBuildDriverTests
             if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
         }
     }
+    [Fact]
+    public async Task SupplementaryIdentifierCompilesAndRuns()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("UnicodeIdentifier", "executable", """
+            namespace UnicodeIdentifier;
+            int Main() { int 𐐀value = 42; return 𐐀value; }
+            """);
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
+            result.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
+        Assert.Null(process.StartError);
+        Assert.False(process.TimedOut);
+        Assert.Equal(42, process.ExitCode);
+    }
+
+    [Fact]
+    public void NulBeforeInvalidTailIsReportedByBuildDriver()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("NulTail", "executable",
+            "namespace NulTail; int Main() { return 0; }\0@@");
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.InvalidCharacter &&
+            diagnostic.Message == "unexpected character U+0000");
+        Assert.True(result.Diagnostics.Count(diagnostic =>
+            diagnostic.Id == DiagnosticIds.InvalidCharacter) >= 3);
+    }
+
+    [Fact]
+    public async Task XenonSharedLibraryCatchPreservesCppHostTerminateHandler()
+    {
+        using var directory = new TemporaryProject();
+        directory.WriteProject("HostVisibleException", "shared-library", """
+            namespace HostVisibleException;
+            export int Probe()
+            {
+                try { throw 40; }
+                catch (readonly int& value) { return value + 2; }
+                return 1;
+            }
+            """);
+        XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
+            directory.ProjectFile, OutputRoot: directory.OutputRoot));
+        Assert.True(result.Success, result.Failure ?? string.Join(Environment.NewLine, result.Diagnostics));
+        string artifactDirectory = Path.GetDirectoryName(result.ArtifactPath!)!;
+        string importLibrary = result.ImportLibraryPath ?? result.ArtifactPath!;
+
+        string hostDirectory = Path.Combine(directory.Root, "host");
+        Directory.CreateDirectory(hostDirectory);
+        File.WriteAllText(Path.Combine(hostDirectory, "host.cpp"), """
+            #include <cstdlib>
+            #include <exception>
+            extern "C" int HostVisibleException_Probe();
+            [[noreturn]] void host_handler() { std::_Exit(73); }
+            int main()
+            {
+                auto previous = std::set_terminate(host_handler);
+                for (int i = 0; i < 3; ++i)
+                    if (HostVisibleException_Probe() != 42 ||
+                        std::get_terminate() != host_handler) return 1;
+                std::set_terminate(previous);
+                return 42;
+            }
+            """);
+        File.WriteAllText(Path.Combine(hostDirectory, "CMakeLists.txt"), $"""
+            cmake_minimum_required(VERSION 3.24)
+            project(XenonCppHost LANGUAGES CXX)
+            set(CMAKE_CXX_STANDARD 17)
+            set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "{artifactDirectory.Replace(Path.DirectorySeparatorChar, '/')}")
+            set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "{artifactDirectory.Replace(Path.DirectorySeparatorChar, '/')}")
+            add_executable(host host.cpp)
+            target_link_libraries(host PRIVATE "{importLibrary.Replace(Path.DirectorySeparatorChar, '/')}")
+            """);
+        string hostBuild = Path.Combine(hostDirectory, "build");
+        async Task RunCMake(params string[] arguments)
+        {
+            NativeProcessResult command = await new NativeProcessRunner().RunAsync(
+                new NativeProcessRequest("cmake", arguments, hostDirectory, TimeSpan.FromMinutes(3)));
+            Assert.True(command.StartError is null && !command.TimedOut && command.ExitCode == 0,
+                $"CMake host failed: {command.StartError}; {command.Stdout}\n{command.Stderr}");
+        }
+        await RunCMake("-S", hostDirectory, "-B", hostBuild);
+        await RunCMake("--build", hostBuild, "--config", "Release", "--target", "host");
+        string host = Path.Combine(artifactDirectory, OperatingSystem.IsWindows() ? "host.exe" : "host");
+        NativeProcessResult process = await new NativeProcessRunner().RunAsync(
+            new NativeProcessRequest(host, [], artifactDirectory, TimeSpan.FromSeconds(15)));
+        Assert.True(process.StartError is null && !process.TimedOut && process.ExitCode == 42,
+            $"C++ host failed: {process.StartError}; exit={process.ExitCode}; " +
+            $"stdout={process.Stdout}; stderr={process.Stderr}");
+    }
+
 }

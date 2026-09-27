@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Text.Json;
+using Xenon.Compiler;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Symbols;
@@ -808,9 +809,9 @@ internal static class LspCoreIntelligence
     private static int Compare(LspPosition left, LspPosition right) =>
         left.Line != right.Line ? left.Line.CompareTo(right.Line) : left.Character.CompareTo(right.Character);
 
-    private static bool IsIdentifier(string text) => !string.IsNullOrEmpty(text) &&
-        SyntaxFacts.GetKeywordKind(text) == SyntaxKind.IdentifierToken &&
-        (char.IsLetter(text[0]) || text[0] == '_') && text.Skip(1).All(character => char.IsLetterOrDigit(character) || character == '_');
+    private static bool IsIdentifier(string text) =>
+        ConditionalCompilationOptions.IsIdentifier(text) &&
+        SyntaxFacts.GetKeywordKind(text) == SyntaxKind.IdentifierToken;
 
     private static JsonElement RequireObject(JsonElement value, string name) =>
         value.TryGetProperty(name, out JsonElement property) && property.ValueKind == JsonValueKind.Object

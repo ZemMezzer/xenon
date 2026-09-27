@@ -10,7 +10,6 @@ function(assert_equal actual expected description)
 endfunction()
 
 foreach(_case IN ITEMS
-    "win_x86|win-x86|x86|Win32|xenon.exe"
     "win_x64|win-x64|x86_64|x64|xenon.exe"
     "win_arm64|win-arm64|arm64|ARM64|xenon.exe"
     "darwin_arm64|osx-arm64|arm64||xenon")
@@ -31,10 +30,10 @@ endforeach()
 
 foreach(_case IN ITEMS
     "Windows|AMD64||x64|win_x64"
-    "Windows|AMD64|Win32|x64|win_x86"
+    "Windows|AMD64|Win32|x64|windows_x86"
     "Windows|AMD64|ARM64|x64|win_arm64"
     "Windows|ARM64|||win_arm64"
-    "Windows|x86|||win_x86"
+    "Windows|x86|||windows_x86"
     "Darwin|arm64|||darwin_arm64")
   string(REPLACE "|" ";" _fields "${_case}")
   list(LENGTH _fields _field_count)
@@ -47,6 +46,9 @@ foreach(_case IN ITEMS
   xenon_detect_platform(_detected "${_host}" "${_processor}" "${_generator}" "${_vs_platform}")
   assert_equal("${_detected}" "${_expected}" "${_case} detection")
 endforeach()
+
+list(FIND XENON_SUPPORTED_PLATFORMS win_x86 _win_x86_index)
+assert_equal("${_win_x86_index}" "-1" "Windows x86 is not a supported build platform")
 
 xenon_xml_escape(_escaped "A&B<C>D\"E'F")
 assert_equal("${_escaped}" "A&amp;B&lt;C&gt;D&quot;E&apos;F" "XML attribute escaping")

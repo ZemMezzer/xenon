@@ -239,10 +239,11 @@ internal sealed class ConditionalSource
                 }
                 Space();
                 int start = _position;
-                if (_position < text.Length && (char.IsLetter(text[_position]) || text[_position] == '_'))
+                if (IdentifierFacts.TryGetStart(text, _position, out int width))
                 {
-                    _position++;
-                    while (_position < text.Length && (char.IsLetterOrDigit(text[_position]) || text[_position] == '_')) _position++;
+                    _position += width;
+                    while (IdentifierFacts.TryGetContinue(text, _position, out width))
+                        _position += width;
                     string name = text[start.._position];
                     UsesTarget |= CompilationTarget.IsTargetDefine(name);
                     return ConditionalExpression.Named(name);

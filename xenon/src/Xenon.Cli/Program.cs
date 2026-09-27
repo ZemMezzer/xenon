@@ -142,6 +142,9 @@ internal static class Program
             return WriteUsageError("option '--target' requires 'build', '--emit-object', or '--emit-llvm'");
         }
 
+        try { _ = CompilationTarget.Normalize(targetTriple ?? LlvmTargetPlatform.HostTriple); }
+        catch (ArgumentException error) { return WriteUsageError(error.Message); }
+
         if (projectCommand)
         {
             if (inputs.Count > 1)

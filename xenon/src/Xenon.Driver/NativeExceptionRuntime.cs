@@ -104,7 +104,6 @@ internal static class NativeExceptionRuntime
 
         extern "C" [[noreturn]] void __xenon_eh_throw(void* opaque) {
             __xenon_eh_activate(opaque);
-            std::set_terminate(terminate_current);
             throw XenonNativeException{};
         }
 
@@ -176,7 +175,6 @@ internal static class NativeExceptionRuntime
         extern "C" [[noreturn]] void __xenon_eh_rethrow() {
             if (!current_exception) terminate_current();
             current_exception->caught = false;
-            std::set_terminate(terminate_current);
             throw XenonNativeException{};
         }
 

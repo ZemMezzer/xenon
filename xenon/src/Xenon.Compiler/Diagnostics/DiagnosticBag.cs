@@ -41,7 +41,8 @@ public sealed class DiagnosticBag : IReadOnlyCollection<Diagnostic>
     }
 
     public void ReportInvalidCharacter(TextLocation location, char character) =>
-        Report(location, $"invalid character '{character}'", DiagnosticIds.InvalidCharacter);
+        Report(location, character == '\0' ? "unexpected character U+0000" :
+            $"invalid character '{character}'", DiagnosticIds.InvalidCharacter);
 
     public void ReportInvalidNumber(TextLocation location, string text, string expectedType) =>
         Report(location, $"'{text}' is not a valid {expectedType} literal", DiagnosticIds.InvalidNumber);

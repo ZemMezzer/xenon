@@ -26,7 +26,7 @@ public sealed class StableLayoutTests
         """;
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc")]
+    [InlineData("i686-unknown-linux-gnu")]
     [InlineData("x86_64-pc-windows-msvc")]
     [InlineData("x86_64-unknown-linux-gnu")]
     public void Layout_IsIndependentOfDescendantsAndSourceOrder(string triple)

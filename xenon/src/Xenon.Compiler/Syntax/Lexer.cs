@@ -20,9 +20,16 @@ internal sealed class Lexer
 
     public DiagnosticBag Diagnostics { get; } = new();
 
+    private bool IsAtEnd => _position >= _text.Length;
+
     private char Current => Peek(0);
 
     private char Lookahead => Peek(1);
+
+    private bool IsAtLineBreak => Current is '\r' or '\n';
+
+    // Count CRLF once, when the LF is consumed.
+    private bool CompletesLineBreak => Current == '\n' || (Current == '\r' && Lookahead != '\n');
 
     public SyntaxToken Lex()
     {
@@ -30,12 +37,12 @@ internal sealed class Lexer
 
         int start = _position;
 
-        if (Current == '\0')
+        if (IsAtEnd)
         {
             return MakeToken(SyntaxKind.EndOfFileToken, start, leadingDocumentation: leadingDocumentation);
         }
 
-        if (char.IsLetter(Current) || Current == '_')
+        if (IdentifierFacts.TryGetStart(_text, _position, out _))
         {
             return LexIdentifierOrKeyword(leadingDocumentation);
         }
@@ -112,12 +119,23 @@ internal sealed class Lexer
             ? 3
             : IsTwoCharacterToken(kind) ? 2 : 1;
 
+        if (kind == SyntaxKind.BadToken && char.IsHighSurrogate(Current) &&
+            Rune.DecodeFromUtf16(_text.AsSpan(_position), out _, out int scalarWidth) == OperationStatus.Done)
+            width = scalarWidth;
+
         _position += width;
         SyntaxToken token = MakeToken(kind, start, leadingDocumentation: leadingDocumentation);
 
         if (kind == SyntaxKind.BadToken)
         {
-            Diagnostics.ReportInvalidCharacter(token.Location, token.Text[0]);
+            OperationStatus status = Rune.DecodeFromUtf16(token.Text, out Rune rune, out int decodedWidth);
+            if (status != OperationStatus.Done && char.IsSurrogate(token.Text[0]))
+                Diagnostics.ReportInvalidUnicodeScalar(token.Location);
+            else if (decodedWidth == 2)
+                Diagnostics.Report(token.Location, $"invalid character U+{rune.Value:X4}",
+                    DiagnosticIds.InvalidCharacter);
+            else
+                Diagnostics.ReportInvalidCharacter(token.Location, token.Text[0]);
         }
 
         return token;
@@ -127,9 +145,9 @@ internal sealed class Lexer
     {
         int start = _position;
 
-        while (char.IsLetterOrDigit(Current) || Current == '_')
+        while (IdentifierFacts.TryGetContinue(_text, _position, out int width))
         {
-            _position++;
+            _position += width;
         }
 
         string text = _source.Text[start.._position];
@@ -250,13 +268,20 @@ internal sealed class Lexer
         var value = new StringBuilder();
         bool terminated = false;
 
-        while (Current is not '\0' and not '\r' and not '\n')
+        while (!IsAtEnd && !IsAtLineBreak)
         {
             if (Current == '"')
             {
                 _position++;
                 terminated = true;
                 break;
+            }
+
+            if (Current == '\0')
+            {
+                ReportInvalidNul();
+                _position++;
+                continue;
             }
 
             if (Current != '\\')
@@ -267,9 +292,16 @@ internal sealed class Lexer
             }
 
             int escapeStart = _position++;
-            if (Current is '\0' or '\r' or '\n')
+            if (IsAtEnd || IsAtLineBreak)
             {
                 break;
+            }
+
+            if (Current == '\0')
+            {
+                ReportInvalidNul();
+                _position++;
+                continue;
             }
 
             char escaped = Current;
@@ -310,7 +342,7 @@ internal sealed class Lexer
         int scalarCount = 0;
         bool terminated = false;
 
-        while (Current is not '\0' and not '\r' and not '\n')
+        while (!IsAtEnd && !IsAtLineBreak)
         {
             if (Current == '\'')
             {
@@ -319,11 +351,27 @@ internal sealed class Lexer
                 break;
             }
 
+            if (Current == '\0')
+            {
+                ReportInvalidNul();
+                _position++;
+                scalarCount++;
+                continue;
+            }
+
             Rune rune;
             if (Current == '\\')
             {
                 int escapeStart = _position++;
-                if (Current is '\0' or '\r' or '\n') break;
+                if (IsAtEnd || IsAtLineBreak) break;
+
+                if (Current == '\0')
+                {
+                    ReportInvalidNul();
+                    _position++;
+                    scalarCount++;
+                    continue;
+                }
 
                 char escaped = Current;
                 _position++;
@@ -387,7 +435,8 @@ internal sealed class Lexer
         {
             if (char.IsWhiteSpace(Current))
             {
-                if (Current == '\n') lineBreaksAfterDocumentation++;
+                if (CompletesLineBreak)
+                    lineBreaksAfterDocumentation++;
                 _position++;
                 if (documentation.Count > 0 && lineBreaksAfterDocumentation > 1)
                     documentation.Clear();
@@ -399,8 +448,9 @@ internal sealed class Lexer
                 bool isDocumentation = Peek(2) == '/';
                 _position += isDocumentation ? 3 : 2;
                 int contentStart = _position;
-                while (Current is not '\0' and not '\r' and not '\n')
+                while (!IsAtEnd && !IsAtLineBreak)
                 {
+                    if (Current == '\0') ReportInvalidNul();
                     _position++;
                 }
 
@@ -423,12 +473,13 @@ internal sealed class Lexer
                 int start = _position;
                 _position += 2;
 
-                while (Current != '\0' && !(Current == '*' && Lookahead == '/'))
+                while (!IsAtEnd && !(Current == '*' && Lookahead == '/'))
                 {
+                    if (Current == '\0') ReportInvalidNul();
                     _position++;
                 }
 
-                if (Current == '\0')
+                if (IsAtEnd)
                 {
                     Diagnostics.ReportUnterminatedBlockComment(
                         new TextLocation(_source, TextSpan.FromBounds(start, _position)));
@@ -443,6 +494,9 @@ internal sealed class Lexer
             return documentation.Count == 0 ? null : string.Join('\n', documentation);
         }
     }
+
+    private void ReportInvalidNul() =>
+        Diagnostics.ReportInvalidCharacter(new TextLocation(_source, new TextSpan(_position, 1)), '\0');
 
     private SyntaxToken MakeToken(SyntaxKind kind, int start, object? value = null,
         string? leadingDocumentation = null)

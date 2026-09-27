@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
+using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler;
 
@@ -48,8 +49,16 @@ public sealed class ConditionalCompilationOptions : IEquatable<ConditionalCompil
     public override bool Equals(object? obj) => obj is ConditionalCompilationOptions other && Equals(other);
     public override int GetHashCode() => StringComparer.Ordinal.GetHashCode(Identity);
 
-    public static bool IsIdentifier(string? name) => !string.IsNullOrEmpty(name) &&
-        (char.IsLetter(name[0]) || name[0] == '_') && name.Skip(1).All(c => char.IsLetterOrDigit(c) || c == '_');
+    public static bool IsIdentifier(string? name)
+    {
+        if (string.IsNullOrEmpty(name) || !IdentifierFacts.TryGetStart(name, 0, out int width))
+            return false;
+        for (int index = width; index < name.Length; index += width)
+            if (!IdentifierFacts.TryGetContinue(name, index, out width))
+                return false;
+        return true;
+    }
+
     public static void ValidateUserDefine(string name)
     {
         if (!IsIdentifier(name))
@@ -70,6 +79,7 @@ public static class CompilationTarget
         {
             "windows-x64" => "x86_64-pc-windows-msvc",
             "windows-arm64" => "aarch64-pc-windows-msvc",
+            "windows-x86" => "i686-pc-windows-msvc",
             "linux-x64" => "x86_64-unknown-linux-gnu",
             "linux-arm64" => "aarch64-unknown-linux-gnu",
             "macos-x64" => "x86_64-apple-darwin",
@@ -80,7 +90,11 @@ public static class CompilationTarget
         if (parts.Length < 3 || parts.Any(part => part.Length == 0 || part.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('.' or '_'))))
             throw new ArgumentException($"invalid target triple '{triple}'");
         parts[0] = parts[0] switch { "amd64" => "x86_64", "arm64" => "aarch64", _ => parts[0] };
-        return string.Join('-', parts);
+        string normalized = string.Join('-', parts);
+        if (GetOperatingSystem(normalized) == 1 && GetArchitecture(normalized) == 3)
+            throw new ArgumentException(
+                $"Windows x86 (32-bit) target '{triple}' is not supported; use windows-x64 or windows-arm64.");
+        return normalized;
     }
 
     // Used only when no target was selected. Explicit targets never consult host facts.

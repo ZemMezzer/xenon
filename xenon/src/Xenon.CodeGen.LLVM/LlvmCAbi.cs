@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using LLVMSharp.Interop;
 using LLVMApi = LLVMSharp.Interop.LLVM;
+using Xenon.Compiler;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Symbols;
 

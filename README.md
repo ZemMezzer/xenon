@@ -138,7 +138,7 @@ cd xenon
 Build.bat
 ```
 
-`Build.bat win_x64` selects the same platform explicitly. Use `Build.bat win_x86` for a 32-bit build, or `Build.bat win_arm64` for Windows Arm64. For a direct Visual Studio CMake configure, select both the Xenon platform and generator architecture:
+`Build.bat win_x64` selects the same platform explicitly; use `Build.bat win_arm64` for Windows Arm64. For a direct Visual Studio CMake configure, select both the Xenon platform and generator architecture:
 
 ```console
 cmake -S . -B build/win_x64/cmake -G "Visual Studio 17 2022" -A x64 -DXENON_PLATFORM=win_x64
@@ -158,9 +158,20 @@ For an existing clone, initialize LLVM with `git submodule update --init --recur
 | Xenon platform | .NET RID | Binary architecture | Visual Studio `-A` |
 | --- | --- | --- | --- |
 | `win_x64` | `win-x64` | x86-64 | `x64` |
-| `win_x86` | `win-x86` | x86 | `Win32` |
 | `win_arm64` | `win-arm64` | Arm64 | `ARM64` |
 | `darwin_arm64` | `osx-arm64` | Arm64 | — |
+
+### C ABI support
+
+For C-compatible `extern`, `export`, and raw C function pointer signatures:
+
+| Target | Scalar / pointer C ABI | Struct parameters by value | Struct returns by value |
+| --- | --- | --- | --- |
+| `win_x64` | Supported | Supported | Supported |
+| `win_arm64` | Supported | Supported | Supported |
+| `darwin_arm64` | Supported | Supported | Supported |
+
+Windows x86 (32-bit) is not a supported build or compiler target; use `win_x64` or `win_arm64` instead.
 
 The superbuild keeps LLVM as a static dependency with X86 and AArch64 code-generation backends, then publishes Xenon through NativeAOT. All generated CMake, LLVM, MSBuild, and NativeAOT files live under `build/<platform>/`: CMake under `cmake/`, LLVM under `llvm/`, and the final executable under `xenon/publish/`. Deleting root `build/` performs a complete clean. The `check` target runs the statically linked LLVM C++ smoke test, `xenon --version`, compiles and runs a minimal Xenon program, checks build-system mappings, and verifies source-tree cleanliness:
 

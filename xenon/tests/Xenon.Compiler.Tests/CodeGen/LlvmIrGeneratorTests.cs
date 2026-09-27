@@ -477,7 +477,7 @@ public sealed class LlvmIrGeneratorTests
 
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", "i32", "i32")]
+    [InlineData("i686-unknown-linux-gnu", "i32", "i32")]
     [InlineData("x86_64-pc-windows-msvc", "i64", "i32")]
     [InlineData("x86_64-unknown-linux-gnu", "i64", "i64")]
     public void Generator_VerifiesTargetSizedArithmetic(string triple, string nativeType, string cLongType)
@@ -795,22 +795,6 @@ public sealed class LlvmIrGeneratorTests
             StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Generator_RejectsStructValueBoundariesOnUnimplementedTargetsOnlyWhenUsed()
-    {
-        Compilation compilation = CreateCompilation("""
-            namespace Example;
-            struct Value { public int Data; }
-            export Value Echo(Value value) { return value; }
-            """);
-
-        LlvmCodeGenerationException exception = Assert.Throws<LlvmCodeGenerationException>(() =>
-            new LlvmIrGenerator().GenerateForTarget(
-                compilation,
-                new LlvmTargetOptions("i686-pc-windows-msvc")));
-
-        Assert.Contains("Unsupported C ABI target", exception.Message, StringComparison.Ordinal);
-    }
 
     [Fact]
     public void Generator_ChecksAllHeapAllocationsBeforeInitialization()
@@ -868,7 +852,7 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", false)]
+    [InlineData("i686-unknown-linux-gnu", false)]
     [InlineData("x86_64-pc-windows-msvc", true)]
     public void Generator_ValidatesExternAbiAfterTargetSelection(string triple, bool errors)
     {
@@ -2411,7 +2395,7 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", 32)]
+    [InlineData("i686-unknown-linux-gnu", 32)]
     [InlineData("x86_64-pc-windows-msvc", 64)]
     [InlineData("aarch64-unknown-linux-gnu", 64)]
     public void Generator_VerifiesArrayMetadataAndCheckedArithmeticAcrossTargets(string triple, int pointerBits)
@@ -2535,12 +2519,12 @@ public sealed class LlvmIrGeneratorTests
     {
         Compilation compilation = CreateCompilation("namespace Example; enum E : nint { Large = 4294967296 }");
         Assert.False(compilation.HasErrors);
-        Assert.Throws<LlvmCodeGenerationException>(() => new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions("i686-pc-windows-msvc")));
+        Assert.Throws<LlvmCodeGenerationException>(() => new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions("i686-unknown-linux-gnu")));
         new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", 4, 4)]
+    [InlineData("i686-unknown-linux-gnu", 4, 4)]
     [InlineData("x86_64-pc-windows-msvc", 8, 4)]
     [InlineData("x86_64-unknown-linux-gnu", 8, 8)]
     [InlineData("aarch64-unknown-linux-gnu", 8, 8)]
@@ -2600,7 +2584,7 @@ public sealed class LlvmIrGeneratorTests
             """);
         Assert.False(original.HasErrors);
         Compilation wide = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
-        Compilation narrow = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions("i686-pc-windows-msvc"));
+        Compilation narrow = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions("i686-unknown-linux-gnu"));
         Compilation wideAgain = LlvmIrGenerator.BindForTarget(original, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
         Assert.False(wide.HasErrors, string.Join(Environment.NewLine, wide.Diagnostics));
         Assert.False(wideAgain.HasErrors);
@@ -2662,11 +2646,11 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Theory]
-    [InlineData("enum E : byte { A = cast<int>(sizeof(nint)) * 32 - 1, B }", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "out of range")]
-    [InlineData("enum E { A = 1 / (cast<int>(sizeof(nint)) - 4) }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "valid operations")]
-    [InlineData("void M(nuint x) { switch(x) { case sizeof(nint): break; case cast<nuint>(4): break; } }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "duplicate case")]
-    [InlineData("void M(int x) { switch(x) { case 1 / (cast<int>(sizeof(nint)) - 4): break; } }", "i686-pc-windows-msvc", "x86_64-pc-windows-msvc", "compile-time constant")]
-    [InlineData("void M() { int[] a = new int[1]; a.GetLength(cast<int>(sizeof(nint)) - 4); delete(a); }", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "dimension must be")]
+    [InlineData("enum E : byte { A = cast<int>(sizeof(nint)) * 32 - 1, B }", "x86_64-pc-windows-msvc", "i686-unknown-linux-gnu", "out of range")]
+    [InlineData("enum E { A = 1 / (cast<int>(sizeof(nint)) - 4) }", "i686-unknown-linux-gnu", "x86_64-pc-windows-msvc", "valid operations")]
+    [InlineData("void M(nuint x) { switch(x) { case sizeof(nint): break; case cast<nuint>(4): break; } }", "i686-unknown-linux-gnu", "x86_64-pc-windows-msvc", "duplicate case")]
+    [InlineData("void M(int x) { switch(x) { case 1 / (cast<int>(sizeof(nint)) - 4): break; } }", "i686-unknown-linux-gnu", "x86_64-pc-windows-msvc", "compile-time constant")]
+    [InlineData("void M() { int[] a = new int[1]; a.GetLength(cast<int>(sizeof(nint)) - 4); delete(a); }", "x86_64-pc-windows-msvc", "i686-unknown-linux-gnu", "dimension must be")]
     public void Generator_ReportsTargetDependentErrorsInSemanticPass(string source, string invalidTarget, string validTarget, string diagnostic)
     {
         Compilation original = CreateCompilation("namespace Example; " + source);
@@ -2692,7 +2676,7 @@ public sealed class LlvmIrGeneratorTests
             enum Layout { DerivedSize = cast<int>(sizeof(Derived)), TailOffset = cast<int>(offsetof(Derived, Tail)), InterfaceSize = cast<int>(sizeof(IValue)) }
             """);
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
-        foreach (var (triple, pointer) in new[] { ("i686-pc-windows-msvc", 4), ("x86_64-pc-windows-msvc", 8) })
+        foreach (var (triple, pointer) in new[] { ("i686-unknown-linux-gnu", 4), ("x86_64-pc-windows-msvc", 8) })
         {
             Compilation bound = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions(triple));
             Assert.False(bound.HasErrors, string.Join(Environment.NewLine, bound.Diagnostics));
@@ -2724,7 +2708,7 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", 2147483648UL)]
+    [InlineData("i686-unknown-linux-gnu", 2147483648UL)]
     [InlineData("x86_64-pc-windows-msvc", 9223372036854775808UL)]
     public void Generator_FoldsNativeShiftsWithIntegerCountUsingTargetWidth(string triple, ulong expected)
     {
@@ -2746,14 +2730,14 @@ public sealed class LlvmIrGeneratorTests
     {
         Compilation compilation = CreateCompilation("namespace Example; enum E : ulong { A = cast<ulong>(cast<nuint>(1) << 32) }");
         Assert.False(compilation.HasErrors);
-        Compilation narrow = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions("i686-pc-windows-msvc"));
+        Compilation narrow = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions("i686-unknown-linux-gnu"));
         Compilation wide = LlvmIrGenerator.BindForTarget(compilation, new LlvmTargetOptions("x86_64-pc-windows-msvc"));
         Assert.True(narrow.HasErrors);
         Assert.False(wide.HasErrors, string.Join(Environment.NewLine, wide.Diagnostics));
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc")]
+    [InlineData("i686-unknown-linux-gnu")]
     [InlineData("x86_64-pc-windows-msvc")]
     [InlineData("x86_64-unknown-linux-gnu")]
     [InlineData("aarch64-unknown-linux-gnu")]
@@ -2794,7 +2778,7 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc", 32, 32)]
+    [InlineData("i686-unknown-linux-gnu", 32, 32)]
     [InlineData("x86_64-pc-windows-msvc", 64, 32)]
     [InlineData("x86_64-unknown-linux-gnu", 64, 64)]
     public void Generator_UsesCheckedFloatingCastBoundariesForEveryTargetWidth(string triple, int nativeWidth, int cLongWidth)

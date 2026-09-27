@@ -166,7 +166,7 @@ public sealed class CharPrimitiveTests
     }
 
     [Theory]
-    [InlineData("i686-pc-windows-msvc")]
+    [InlineData("i686-unknown-linux-gnu")]
     [InlineData("x86_64-pc-windows-msvc")]
     [InlineData("x86_64-unknown-linux-gnu")]
     [InlineData("aarch64-unknown-linux-gnu")]

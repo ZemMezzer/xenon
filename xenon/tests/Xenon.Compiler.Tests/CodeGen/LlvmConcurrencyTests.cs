@@ -561,13 +561,14 @@ public sealed class LlvmConcurrencyTests
     [Fact]
     public async Task ParallelTargetLayouts_DoNotUseGlobalContext()
     {
-        (LlvmTargetOptions Options, int PointerBytes, int CLongBytes)[] targets =
+        (LlvmTargetOptions Options, int PointerBytes, int CLongBytes, int WideAlignment)[] targets =
         [
-            (LlvmTargetOptions.CreateHost(), IntPtr.Size, OperatingSystem.IsWindows() ? 4 : IntPtr.Size),
-            (new LlvmTargetOptions("i686-pc-windows-msvc"), 4, 4),
-            (new LlvmTargetOptions("x86_64-pc-windows-msvc"), 8, 4),
-            (new LlvmTargetOptions("x86_64-unknown-linux-gnu"), 8, 8),
-            (new LlvmTargetOptions("aarch64-unknown-linux-gnu"), 8, 8),
+            (LlvmTargetOptions.CreateHost(), IntPtr.Size, OperatingSystem.IsWindows() ? 4 : IntPtr.Size,
+                IntPtr.Size == 4 && !OperatingSystem.IsWindows() ? 4 : 8),
+            (new LlvmTargetOptions("i686-unknown-linux-gnu"), 4, 4, 4),
+            (new LlvmTargetOptions("x86_64-pc-windows-msvc"), 8, 4, 8),
+            (new LlvmTargetOptions("x86_64-unknown-linux-gnu"), 8, 8, 8),
+            (new LlvmTargetOptions("aarch64-unknown-linux-gnu"), 8, 8, 8),
         ];
 
         Task[] workers = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
@@ -585,7 +586,7 @@ public sealed class LlvmConcurrencyTests
                     Assert.Single(bound.SemanticModel.GlobalNamespace.Namespaces).Enums);
                 Assert.Equal(
                     [target.PointerBytes, target.PointerBytes, target.CLongBytes,
-                        1, 1, 2, 2, 4, 4, 8, 8, 4, 4, 8, 8],
+                        1, 1, 2, 2, 4, 4, 8, target.WideAlignment, 4, 4, 8, target.WideAlignment],
                     layout.Members.Select(member => (int)member.Value!).ToArray());
             }
         })).ToArray();

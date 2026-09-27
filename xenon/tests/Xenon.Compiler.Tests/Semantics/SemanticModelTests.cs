@@ -1144,4 +1144,22 @@ public sealed class SemanticModelTests
 
     private static Compilation Create(params string[] sources) => Compilation.Create(
         sources.Select((source, index) => SourceText.From(source, $"test{index}.xe")).ToArray());
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    [InlineData("\r")]
+    public void DocumentationAttachmentIsIndependentOfLineEnding(string newline)
+    {
+        Compilation attached = Create("namespace Example;" + newline +
+            "/// <summary>Attached.</summary>" + newline + "public void Value() {}");
+        Compilation separated = Create("namespace Example;" + newline +
+            "/// <summary>Detached.</summary>" + newline + newline + "public void Value() {}");
+        FunctionSymbol attachedFunction = attached.SemanticModel.GlobalNamespace.Namespaces.Single()
+            .Functions.Single(function => function.Name == "Value");
+        FunctionSymbol separatedFunction = separated.SemanticModel.GlobalNamespace.Namespaces.Single()
+            .Functions.Single(function => function.Name == "Value");
+        Assert.Equal("Attached.", attachedFunction.Documentation.Summary);
+        Assert.True(separatedFunction.Documentation.IsEmpty);
+    }
+
 }

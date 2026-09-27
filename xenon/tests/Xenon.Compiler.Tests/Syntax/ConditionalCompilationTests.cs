@@ -238,4 +238,16 @@ public sealed class ConditionalCompilationTests
         Assert.False(app.HasErrors);
         Assert.Contains("ret i32 42", new LlvmIrGenerator().GenerateForTarget(app, new("x86_64-pc-windows-msvc")));
     }
+    [Fact]
+    public void SupplementaryIdentifierWorksInConditionalDefines()
+    {
+        const string name = "\U00010400FEATURE";
+        Compilation result = Compile("namespace Probe;\n#if " + name +
+            "\nint Selected() { return 1; }\n#else\nint Other() { return 0; }\n#endif", [name]);
+        Assert.Empty(result.Diagnostics);
+        Assert.Equal(["Selected"], Names(result));
+        Assert.True(ConditionalCompilationOptions.IsIdentifier("A\U00010400B"));
+        Assert.False(ConditionalCompilationOptions.IsIdentifier("A\uD800B"));
+    }
+
 }

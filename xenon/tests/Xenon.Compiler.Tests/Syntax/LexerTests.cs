@@ -1,3 +1,4 @@
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xunit;
@@ -179,4 +180,85 @@ public sealed class LexerTests
         Assert.Equal("main.xe", diagnostic.Location.Source.Path);
         Assert.Equal(new LinePosition(1, 0), diagnostic.Location.Start);
     }
+    [Theory]
+    [InlineData("\0int later;", "later")]
+    [InlineData("int\0 value;", "value")]
+    [InlineData("alpha\0beta", "beta")]
+    [InlineData("// hidden\0text\nint after;", "after")]
+    [InlineData("/* hidden\0text */ int after;", "after")]
+    public void Lexer_ReportsPhysicalNulWithoutEndingSource(string source, string laterIdentifier)
+    {
+        LexedSource tree = LexedSource.Lex(SourceText.From(source));
+        Assert.Contains(tree.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.InvalidCharacter &&
+            diagnostic.Message == "unexpected character U+0000");
+        Assert.Contains(tree.Tokens, token =>
+            token.Kind == SyntaxKind.IdentifierToken && token.Text == laterIdentifier);
+        Assert.Equal(source.Length, tree.Tokens[^1].Location.Span.Start);
+    }
+
+    [Fact]
+    public void Lexer_DoesNotHideInvalidTailAfterNul()
+    {
+        const string source = "int Main() { return 0; }\0@@";
+        LexedSource tree = LexedSource.Lex(SourceText.From(source));
+        Assert.Equal(3, tree.Diagnostics.Count(diagnostic => diagnostic.Id == DiagnosticIds.InvalidCharacter));
+        Assert.Equal(3, tree.Tokens.Count(token => token.Kind == SyntaxKind.BadToken));
+        Assert.Equal(source.Length, tree.Tokens[^1].Location.Span.Start);
+    }
+
+    [Fact]
+    public void Lexer_ReportsPhysicalNulInsideStringAndContinues()
+    {
+        LexedSource tree = LexedSource.Lex(SourceText.From("\"a\0b\" tail"));
+        Assert.Contains(tree.Diagnostics, diagnostic =>
+            diagnostic.Id == DiagnosticIds.InvalidCharacter &&
+            diagnostic.Message == "unexpected character U+0000");
+        Assert.Equal("ab", tree.Tokens[0].Value);
+        Assert.Contains(tree.Tokens, token => token.Text == "tail");
+    }
+
+    [Theory]
+    [InlineData("alpha")]
+    [InlineData("Привет")]
+    [InlineData("λ")]
+    [InlineData("漢字")]
+    [InlineData("\U00010400value")]
+    [InlineData("A\U00010400B")]
+    public void Lexer_RecognizesUnicodeScalarIdentifiersWithUtf16Spans(string identifier)
+    {
+        LexedSource tree = LexedSource.Lex(SourceText.From(identifier));
+        Assert.Empty(tree.Diagnostics);
+        SyntaxToken token = tree.Tokens[0];
+        Assert.Equal(SyntaxKind.IdentifierToken, token.Kind);
+        Assert.Equal(identifier, token.Text);
+        Assert.Equal(identifier.Length, token.Location.Span.Length);
+    }
+
+    [Theory]
+    [InlineData("\uD800name", 0)]
+    [InlineData("ab\uD800cd", 2)]
+    [InlineData("\U0001F600name", 0)]
+    public void Lexer_RejectsInvalidIdentifierScalarsWithoutLosingTheTail(string source, int invalidStart)
+    {
+        LexedSource tree = LexedSource.Lex(SourceText.From(source));
+        Assert.Contains(tree.Diagnostics, diagnostic => diagnostic.Location.Span.Start == invalidStart);
+        Assert.Contains(tree.Tokens, token =>
+            token.Kind == SyntaxKind.IdentifierToken &&
+            (token.Text.EndsWith("name", StringComparison.Ordinal) || token.Text == "cd"));
+        Assert.Equal(source.Length, tree.Tokens[^1].Location.Span.Start);
+    }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    [InlineData("\r")]
+    public void DocumentationTriviaHandlesEveryLineEnding(string newline)
+    {
+        LexedSource attached = LexedSource.Lex(SourceText.From("/// docs" + newline + "int value;"));
+        LexedSource separated = LexedSource.Lex(SourceText.From("/// docs" + newline + newline + "int value;"));
+        Assert.Equal("docs", attached.Tokens[0].LeadingDocumentation);
+        Assert.Null(separated.Tokens[0].LeadingDocumentation);
+    }
+
 }

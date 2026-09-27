@@ -575,7 +575,6 @@ public sealed class NativeLinker
         return architecture switch
         {
             "x86_64" or "amd64" => "x64",
-            "i386" or "i486" or "i586" or "i686" => "x86",
             "aarch64" or "arm64" => "arm64",
             _ => throw new LinkerException(
                 $"target architecture '{architecture}' is not supported by the MSVC linker driver"),
