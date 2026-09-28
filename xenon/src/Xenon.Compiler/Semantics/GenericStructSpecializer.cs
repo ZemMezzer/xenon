@@ -439,6 +439,10 @@ internal sealed class GenericStructSpecializer
         specialized.SetOriginalDefinition(source);
         specialized.SetReceiverMoveEffects(source.ReceiverMoveEffects);
         specialized.SetReferenceReturnOrigins(source.ReferenceReturnOrigins);
+        specialized.ResultLifetimeDependencies = source.ResultLifetimeDependencies;
+        specialized.LifetimeStores = source.LifetimeStores;
+        specialized.ReturnsResumableOperation = source.ReturnsResumableOperation;
+        specialized.CreatesResumableOperation = source.CreatesResumableOperation;
         specialized.SetSharedReturnOrigins(source.SharedReturnOrigins);
         specialized.SetReferenceFieldOrigins(source.ReferenceFieldOrigins);
         return specialized;

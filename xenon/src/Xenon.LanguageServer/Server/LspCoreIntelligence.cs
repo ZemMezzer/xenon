@@ -380,7 +380,7 @@ internal static class LspCoreIntelligence
         foreach (CallExpressionSyntax call in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
                      .OfType<CallExpressionSyntax>())
             if (call.TypeArguments is null && call.Target is NameExpressionSyntax name &&
-                name.IdentifierToken.Text is "malloc" or "calloc" or "delete" or "destruct")
+                name.IdentifierToken.Text is "malloc" or "calloc" or "delete" or "destruct" or "resolve" or "reject")
                 tokens.Add((name.IdentifierToken.Location.Span, 18, 0, 3));
     }
 
@@ -401,7 +401,7 @@ internal static class LspCoreIntelligence
         SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
             SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword or SyntaxKind.AtomicKeyword or
             SyntaxKind.FunctionKeyword => 16,
-        SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword => 17,
+        SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword or SyntaxKind.AwaitKeyword => 17,
         SyntaxKind.FreeKeyword => 18,
         SyntaxKind.SwitchKeyword or SyntaxKind.CaseKeyword or SyntaxKind.DefaultKeyword or
             SyntaxKind.IfKeyword or SyntaxKind.ElseKeyword or SyntaxKind.WhileKeyword or
@@ -430,7 +430,8 @@ internal static class LspCoreIntelligence
         {
             "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" or "function" =>
                 "type-forming keyword",
-            "new" or "move" or "lock" => "value-forming keyword",
+            "new" or "move" or "lock" or "await" => "value-forming keyword",
+            "resolve" or "reject" => "completion operator",
             "malloc" or "calloc" or "free" or "delete" or "destruct" => "lifetime operation keyword",
             "true" or "false" or "null" => "literal keyword",
             _ => "keyword",

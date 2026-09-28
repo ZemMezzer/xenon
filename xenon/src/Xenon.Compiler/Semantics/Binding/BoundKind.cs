@@ -68,6 +68,7 @@ public enum BoundKind
     DeleteExpression,
     RawAllocationExpression,
     ErrorExpression,
+    AwaitExpression,
     DeferredConstantExpression,
     DeferredGenericMethodCallExpression,
     DeferredGenericOperationExpression,

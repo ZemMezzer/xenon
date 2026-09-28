@@ -682,6 +682,7 @@ internal sealed partial class FunctionBodyBinder
     public BoundBlockStatement BindBody(BlockStatementSyntax body)
     {
         _cancellationToken.ThrowIfCancellationRequested();
+        BeginResumableBinding(body);
         foreach (ParameterSymbol parameter in _function.Parameters)
             if (TypeFacts.GetCompleteDestructor(parameter.Type) is not null)
                 ValidateDestructorAccessibility(parameter.Type, body.OpenBraceToken.Location);
@@ -878,6 +879,8 @@ internal sealed partial class FunctionBodyBinder
             // own fields in reverse declaration order, then the complete base destructor.
             boundBody = boundBody with { ExitCleanup = new BoundDestroyFieldsExpression(destroyedType) };
         }
+
+        if (_resumableResult is not null) return FinishResumableBinding(boundBody, body);
 
         if (!TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Void) && !AlwaysReturns(boundBody))
         {
@@ -1913,6 +1916,7 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundReturnStatement BindReturnStatement(ReturnStatementSyntax syntax)
     {
+        if (_resumableResult is not null) return BindResumableReturn(syntax);
         int? contextualCallableConversionCost = null;
         bool hasContextualCallableConversion = false;
         if (_isLambdaCompatibilityProbe && syntax.Expression is { } returnExpression)
@@ -2115,6 +2119,8 @@ internal sealed partial class FunctionBodyBinder
     {
         switch (expression)
         {
+            case BoundAwaitExpression awaiting:
+                return GetReferenceSources(awaiting.Operand);
             case BoundReferenceConversionExpression conversion:
                 return GetReferenceSources(conversion.Source);
             case BoundCopyExpression copy:
@@ -2157,6 +2163,8 @@ internal sealed partial class FunctionBodyBinder
                     : [new ReferenceSource(ReferenceSourceKind.Local, local, [])];
             case BoundVariableExpression { Variable: ParameterSymbol parameter }:
                 return [new ReferenceSource(ReferenceSourceKind.Parameter, parameter, [])];
+            case BoundVariableExpression { Variable: CaptureVariableSymbol capture }:
+                return [new ReferenceSource(capture.IsBorrow ? ReferenceSourceKind.Unknown : ReferenceSourceKind.Local, capture, [])];
             case BoundFunctionValueExpression functionValue:
                 return functionValue.Captures
                     .Where(capture => ContainsValueReferenceStorage(capture.Variable.StorageType))
@@ -2242,6 +2250,12 @@ internal sealed partial class FunctionBodyBinder
             return transferred;
         switch (expression)
         {
+            // The await protocol supplies an owning compiler-generated continuation.
+            // Its environment contains no user borrows and can be retained by the library.
+            case BoundVariableExpression { Variable: ParameterSymbol parameter }
+                when _function.OperatorKind == OperatorKind.Await &&
+                     ReferenceEquals(parameter, _function.Parameters[^1]):
+                return [];
             case BoundCopyExpression copy:
                 return GetValueReferenceMetadata(copy.Source, type);
             case BoundMoveExpression move:
@@ -2844,6 +2858,7 @@ internal sealed partial class FunctionBodyBinder
                 NameExpressionSyntax name => BindNameExpression(name),
                 ThisExpressionSyntax @this => BindThisExpression(@this),
                 ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
+                AwaitExpressionSyntax awaitExpression => BindAwaitExpression(awaitExpression),
                 MoveExpressionSyntax move => BindMoveExpression(move),
                 LockExpressionSyntax @lock => BindLockExpression(@lock),
                 UnaryExpressionSyntax unary => BindUnaryExpression(unary),
@@ -6552,6 +6567,9 @@ internal sealed partial class FunctionBodyBinder
                     return BindExpressionWithExpectedType(argument, expectedType);
                 return BindExpression(argument);
             });
+        if (coreOperation is "resolve" or "reject")
+            return BindCompletionOperator(coreOperation == "resolve" ? OperatorKind.Resolve : OperatorKind.Reject,
+                arguments, syntax.Arguments, syntax, GetLocation(syntax));
         if (syntax.TypeArguments is { } typeArguments)
             return BindExplicitGenericCall(syntax, typeArguments, arguments);
         bool incomplete = syntax.CloseParenthesisToken.IsMissing;
@@ -7122,7 +7140,7 @@ internal sealed partial class FunctionBodyBinder
                 arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
                 valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
-            if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+            if (GetArrayStorage(argument) == ArrayStorageKind.Stack && parameterType is not ReferenceTypeSymbol)
             {
                 valid = false;
                 _diagnostics.Report(GetLocation(argumentSyntax[index]),
@@ -7443,7 +7461,7 @@ internal sealed partial class FunctionBodyBinder
                 arguments[index] is BoundUnboundLambdaExpression or BoundUnboundFunctionExpression)
                 valid = false;
             SetConvertedType(argumentSyntax[index], argument.Type);
-            if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+            if (GetArrayStorage(argument) == ArrayStorageKind.Stack && parameterType is not ReferenceTypeSymbol)
             {
                 valid = false;
                 _diagnostics.Report(GetLocation(argumentSyntax[index]),
@@ -9166,7 +9184,7 @@ internal sealed partial class FunctionBodyBinder
                 valid = false;
             if (!argumentSyntax.IsEmpty) SetConvertedType(argumentSyntax[index], argument.Type);
 
-            if (GetArrayStorage(argument) == ArrayStorageKind.Stack)
+            if (GetArrayStorage(argument) == ArrayStorageKind.Stack && parameterType is not ReferenceTypeSymbol)
             {
                 valid = false;
                 _diagnostics.Report((argumentSyntax.IsEmpty ? location : GetLocation(argumentSyntax[index])), "stack array cannot be passed to another function",
@@ -9831,6 +9849,9 @@ internal sealed partial class FunctionBodyBinder
 
         switch (expression)
         {
+            case BoundAwaitExpression awaitExpression:
+                Visit(awaitExpression.Operand);
+                break;
             case BoundFullExpression full:
                 Visit(full.Expression, consumed);
                 break;
@@ -9996,6 +10017,7 @@ internal sealed partial class FunctionBodyBinder
     private static bool IsTemporaryValue(BoundExpression expression) => expression is
         BoundCapturedPlaceExpression { OwnsValue: true } or
         BoundMoveExpression or
+        BoundAwaitExpression or
         BoundCopyExpression or
         BoundUniqueAdoptionExpression or
         BoundSharedAdoptionExpression or
@@ -10408,6 +10430,7 @@ internal sealed partial class FunctionBodyBinder
         NameExpressionSyntax name => name.IdentifierToken.Location,
         ThisExpressionSyntax @this => @this.ThisKeyword.Location,
         ParenthesizedExpressionSyntax parenthesized => parenthesized.OpenParenthesisToken.Location,
+        AwaitExpressionSyntax awaitExpression => awaitExpression.AwaitKeyword.Location,
         MoveExpressionSyntax move => move.MoveKeyword.Location,
         LockExpressionSyntax @lock => @lock.LockKeyword.Location,
         UnaryExpressionSyntax unary => unary.OperatorToken.Location,

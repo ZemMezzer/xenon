@@ -60,10 +60,9 @@ public static class XelibReader
             container, XelibSectionKind.Exports, path);
         ImmutableArray<XelibDocumentation> documentation = ReadSection<ImmutableArray<XelibDocumentation>>(
             container, XelibSectionKind.Documentation, path);
-        ValidateIds(types, symbols, exports, documentation, path);
-
         try
         {
+            ValidateIds(types, symbols, exports, documentation, path);
             var reconstruction = new XelibSemanticReconstruction(metadata.Manifest, types, symbols,
                 exports, documentation, dependencies, path);
             reconstruction.ReconstructMetadata();
@@ -167,6 +166,23 @@ public static class XelibReader
             throw Invalid("type IDs must be positive and unique", path);
         if (symbols.Any(item => item.Id <= 0) || symbols.Select(item => item.Id).Distinct().Count() != symbols.Length)
             throw Invalid("symbol IDs must be positive and unique", path);
+        foreach (XelibSymbolRecord symbol in symbols)
+        {
+            if (symbol.ResultLifetimeDependencies.IsDefault || symbol.LifetimeStores.IsDefault)
+                throw Invalid("missing value lifetime contract", path);
+            static bool ValidPath(string? value) => value is not null && (value.Length == 0 || value == "*" ||
+                value.Split('/').All(part => int.TryParse(part, out int ordinal) && ordinal >= 0));
+            bool ValidLifetime(XelibLifetimeDependencyRecord? source) => source is not null && ValidPath(source.FieldPath) && ((LifetimeDependencyKind)source.Kind switch
+            {
+                LifetimeDependencyKind.ParameterValue or LifetimeDependencyKind.ParameterBorrow => source.Ordinal >= 0 && source.Ordinal < symbol.ParameterIds.Length,
+                LifetimeDependencyKind.ReceiverValue or LifetimeDependencyKind.ReceiverBorrow => source.Ordinal == -1 && (symbol.Flags & XelibSymbolFlags.Static) == 0,
+                LifetimeDependencyKind.CaptureValue or LifetimeDependencyKind.CaptureBorrow => source.Ordinal >= 0 && source.Ordinal < symbol.Captures.Length,
+                _ => false,
+            });
+            if (symbol.ResultLifetimeDependencies.Any(source => !ValidLifetime(source)) ||
+                symbol.LifetimeStores.Any(store => store is null || store.Destination < -2 || store.Destination >= symbol.ParameterIds.Length || !ValidPath(store.FieldPath) || !ValidLifetime(store.Source)))
+                throw Invalid("invalid value lifetime contract", path);
+        }
         var symbolIds = symbols.Select(item => item.Id).ToHashSet();
         if (exports.Any(item => !symbolIds.Contains(item.SymbolId)) ||
             exports.Select(item => item.Key).Distinct(StringComparer.Ordinal).Count() != exports.Length)
@@ -557,6 +573,12 @@ internal sealed class XelibSemanticReconstruction
                     new ReferenceReturnOrigin(XelibStableMappings.FromXelib(item.Origin.Kind),
                         item.Origin.ParameterOrdinal, item.Origin.FieldOrdinals),
                     item.IsReadonly)).ToImmutableArray());
+            created.ResultLifetimeDependencies = record.ResultLifetimeDependencies.Select(item =>
+                new LifetimeDependency((LifetimeDependencyKind)item.Kind, item.Ordinal, item.FieldPath)).ToImmutableArray();
+            created.LifetimeStores = record.LifetimeStores.Select(item => new LifetimeStore(item.Destination,
+                new LifetimeDependency((LifetimeDependencyKind)item.Source.Kind, item.Source.Ordinal, item.Source.FieldPath), item.FieldPath)).ToImmutableArray();
+            created.ReturnsResumableOperation = record.ReturnsResumableOperation;
+            created.CreatesResumableOperation = record.CreatesResumableOperation;
             _symbols.Add(record.Id, created);
             MapOwnedParameters(record, created);
         }

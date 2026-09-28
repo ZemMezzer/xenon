@@ -542,3 +542,14 @@ public sealed record BoundDeferredGenericOperationExpression(
 {
     public override BoundKind Kind => BoundKind.DeferredGenericOperationExpression;
 }
+
+/// <summary>A suspension point. The operand is evaluated once; Operation is retried on resume.</summary>
+public sealed record BoundAwaitExpression(
+    BoundExpression Operand,
+    BoundExpression Operation,
+    LocalVariableSymbol? ResultStorage,
+    LocalVariableSymbol Continuation,
+    TypeSymbol ResultType) : BoundExpression(ResultType)
+{
+    public override BoundKind Kind => BoundKind.AwaitExpression;
+}

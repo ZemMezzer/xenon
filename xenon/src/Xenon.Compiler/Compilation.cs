@@ -57,6 +57,8 @@ public sealed class Compilation
                 references.Select(reference => reference.GlobalNamespace).ToImmutableArray(),
                 references.Select(reference => reference.GenericImplementations).ToImmutableArray(),
                 targetLayout, cancellationToken);
+        if (!SemanticModel.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+            SemanticModel = SemanticModel.WithAdditionalDiagnostics(ResumableExceptionAnalyzer.Analyze(this, cancellationToken));
         Diagnostics = SemanticModel.Diagnostics;
     }
 

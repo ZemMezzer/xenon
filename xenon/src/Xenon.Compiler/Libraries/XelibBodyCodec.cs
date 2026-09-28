@@ -15,6 +15,12 @@ public static class XelibBodyCodec
         if (node is BoundExpression expression) addType(expression.Type);
         switch (node)
         {
+            case BoundAwaitExpression value:
+                if (TypeFacts.GetCompleteDestructor(value.Continuation.Type) is { } continuationDestructor)
+                    addSymbol(continuationDestructor);
+                if (value.ResultStorage is { } storage && TypeFacts.GetCompleteDestructor(storage.Type) is { } resultDestructor)
+                    addSymbol(resultDestructor);
+                break;
             case BoundTryStatement value:
                 foreach (BoundCatchClause handler in value.Catches)
                 {
@@ -211,11 +217,15 @@ public static class XelibBodyCodec
         };
         switch (node)
         {
+            case BoundAwaitExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.Await, TypeId = typeId(value.Type),
+                    LocalId = locals[value.Continuation], Integer = value.ResultStorage is null ? 0 : locals[value.ResultStorage],
+                    Children = [E(value.Operand), E(value.Operation)] };
             case BoundCapturedPlaceExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.CapturedPlace, TypeId = typeId(value.Type), Flag1 = value.OwnsValue };
             case BoundBlockStatement value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Block,
-                    Flag1 = value.ExitCleanup is not null, Flag2 = value.RetainsStackStorage,
+                    Flag1 = value.ExitCleanup is not null, Flag2 = value.RetainsStackStorage, Flag3 = value.IsResumable,
                     Children = EAll(value.Statements.Cast<BoundNode>().Concat(
                         value.ExitCleanup is null ? [] : [value.ExitCleanup])) };
             case BoundVariableDeclarationStatement value:
@@ -524,6 +534,10 @@ public static class XelibBodyCodec
         EnsureChildren(node);
         switch (node.Opcode)
         {
+            case XelibBodyOpcode.Await:
+                return new BoundAwaitExpression(E(0), E(1), node.Integer == 0 ? null :
+                    locals.GetValueOrDefault(node.Integer) ?? throw Invalid("unknown await storage"),
+                    locals.GetValueOrDefault(node.LocalId) ?? throw Invalid("unknown await continuation"), type(node.TypeId));
             case XelibBodyOpcode.Block:
             {
                 int statementCount = node.Children.Length - (node.Flag1 ? 1 : 0);
@@ -531,6 +545,7 @@ public static class XelibBodyCodec
                 {
                     ExitCleanup = node.Flag1 ? E(statementCount) : null,
                     RetainsStackStorage = node.Flag2,
+                    IsResumable = node.Flag3,
                 };
                 return result;
             }
@@ -841,7 +856,7 @@ public static class XelibBodyCodec
             XelibBodyOpcode.ReferenceDereference or XelibBodyOpcode.LifetimeValue or
             XelibBodyOpcode.ExplicitDestruct or XelibBodyOpcode.StorageMove or XelibBodyOpcode.Free or
             XelibBodyOpcode.Delete or XelibBodyOpcode.RawAllocation => 1,
-            XelibBodyOpcode.If or XelibBodyOpcode.Binary or XelibBodyOpcode.Assignment or
+            XelibBodyOpcode.Await or XelibBodyOpcode.If or XelibBodyOpcode.Binary or XelibBodyOpcode.Assignment or
             XelibBodyOpcode.Swap or XelibBodyOpcode.PropertySet or XelibBodyOpcode.InterfacePropertySet => 2,
             XelibBodyOpcode.CompareExchange => 3,
             XelibBodyOpcode.Switch or XelibBodyOpcode.MethodCall or XelibBodyOpcode.DeferredGenericMethodCall or

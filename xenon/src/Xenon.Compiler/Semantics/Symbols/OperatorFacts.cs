@@ -10,6 +10,7 @@ public enum OperatorKind
     BitwiseAnd, BitwiseOr, BitwiseXor, ShiftLeft, ShiftRight,
     Equal, NotEqual, Less, Greater, LessEqual, GreaterEqual,
     ImplicitConversion, ExplicitConversion,
+    Await, Resolve, Reject,
 }
 
 public static class OperatorFacts
@@ -17,12 +18,21 @@ public static class OperatorFacts
     public static bool IsConversion(OperatorKind? kind) =>
         kind is OperatorKind.ImplicitConversion or OperatorKind.ExplicitConversion;
 
-    public static bool IsAllowed(OperatorKind kind, int arity) => kind != OperatorKind.Invalid &&
-        arity == (kind is OperatorKind.UnaryPlus or OperatorKind.UnaryNegation or
-            OperatorKind.LogicalNot or OperatorKind.BitwiseNot || IsConversion(kind) ? 1 : 2);
+    public static bool IsAllowed(OperatorKind kind, int arity) => kind switch
+    {
+        OperatorKind.Invalid => false,
+        OperatorKind.Await => arity is 2 or 3,
+        OperatorKind.Resolve => arity is 1 or 2,
+        OperatorKind.Reject => arity == 2,
+        _ => arity == (kind is OperatorKind.UnaryPlus or OperatorKind.UnaryNegation or
+            OperatorKind.LogicalNot or OperatorKind.BitwiseNot || IsConversion(kind) ? 1 : 2),
+    };
 
     public static OperatorKind FromSource(string spelling, int arity) => (spelling, arity) switch
     {
+        ("await", _) => OperatorKind.Await,
+        ("resolve", _) => OperatorKind.Resolve,
+        ("reject", _) => OperatorKind.Reject,
         ("+", 1) => OperatorKind.UnaryPlus, ("-", 1) => OperatorKind.UnaryNegation,
         ("!", 1) => OperatorKind.LogicalNot, ("~", 1) => OperatorKind.BitwiseNot,
         ("+", 2) => OperatorKind.Add, ("-", 2) => OperatorKind.Subtract,
@@ -38,6 +48,7 @@ public static class OperatorFacts
 
     public static OperatorKind FromSyntax(SyntaxKind kind, int arity) => FromSource(kind switch
     {
+        SyntaxKind.AwaitKeyword => "await",
         SyntaxKind.PlusToken => "+", SyntaxKind.MinusToken => "-",
         SyntaxKind.BangToken => "!", SyntaxKind.TildeToken => "~",
         SyntaxKind.StarToken => "*", SyntaxKind.SlashToken => "/", SyntaxKind.PercentToken => "%",
@@ -51,6 +62,7 @@ public static class OperatorFacts
 
     public static string GetSpelling(OperatorKind kind) => kind switch
     {
+        OperatorKind.Await => "await", OperatorKind.Resolve => "resolve", OperatorKind.Reject => "reject",
         OperatorKind.UnaryPlus or OperatorKind.Add => "+",
         OperatorKind.UnaryNegation or OperatorKind.Subtract => "-",
         OperatorKind.LogicalNot => "!", OperatorKind.BitwiseNot => "~",
@@ -66,6 +78,7 @@ public static class OperatorFacts
 
     public static string GetNativeName(OperatorKind kind) => kind switch
     {
+        OperatorKind.Await => "op_await", OperatorKind.Resolve => "op_resolve", OperatorKind.Reject => "op_reject",
         OperatorKind.UnaryPlus => "op_unary_plus", OperatorKind.UnaryNegation => "op_unary_minus",
         OperatorKind.LogicalNot => "op_logical_not", OperatorKind.BitwiseNot => "op_bitwise_not",
         OperatorKind.Add => "op_add", OperatorKind.Subtract => "op_subtract",
@@ -78,6 +91,34 @@ public static class OperatorFacts
         OperatorKind.ImplicitConversion => "op_implicit_conversion", OperatorKind.ExplicitConversion => "op_explicit_conversion",
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
+
+    public static string? ProtocolSignatureError(FunctionSymbol method)
+    {
+        if (method.OperatorKind == OperatorKind.Await)
+        {
+            if (!TypeIdentity.AreSame(method.ReturnType, BuiltinTypes.Bool))
+                return "operator await must return bool";
+            if (method.Parameters.Length is not (2 or 3))
+                return "operator await requires an operand, optional writable storage<T>&, and function void() continuation";
+            if (method.Parameters.Length == 3 && method.Parameters[1].Type is not
+                ReferenceTypeSymbol { IsReadonly: false, ElementType: StorageTypeSymbol })
+                return "operator await result parameter must be writable storage<T>&";
+            if (method.Parameters[^1].Type is not FunctionValueTypeSymbol continuation ||
+                !TypeIdentity.AreSame(continuation.ReturnType, BuiltinTypes.Void) || !continuation.ParameterTypes.IsEmpty)
+                return "operator await continuation parameter must be function void()";
+        }
+        if (method.OperatorKind is OperatorKind.Resolve or OperatorKind.Reject)
+        {
+            if (!TypeIdentity.AreSame(method.ReturnType, BuiltinTypes.Void))
+                return $"operator {GetSpelling(method.OperatorKind.Value)} must return void";
+            if (method.Parameters.IsEmpty || method.Parameters[0].Type is not ReferenceTypeSymbol { IsReadonly: false })
+                return $"operator {GetSpelling(method.OperatorKind.Value)} target must be a writable reference";
+        }
+        if (method.OperatorKind == OperatorKind.Reject && method.Parameters.Length == 2 &&
+            !TypeFacts.IsThrowableType(ValueType(method.Parameters[1].Type)))
+            return "operator reject error parameter must use a throwable Xenon value type";
+        return null;
+    }
 
     public static TypeSymbol ValueType(TypeSymbol type) =>
         type is ReferenceTypeSymbol reference ? reference.ElementType : type;

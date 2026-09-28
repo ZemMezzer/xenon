@@ -83,9 +83,10 @@ public static class SyntaxFacts
             ["catch"] = SyntaxKind.CatchKeyword,
             ["finally"] = SyntaxKind.FinallyKeyword,
             ["throw"] = SyntaxKind.ThrowKeyword,
+            ["await"] = SyntaxKind.AwaitKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
     private static readonly FrozenSet<SyntaxKind> KeywordKinds = Keywords.Values.ToFrozenSet();
-    private static readonly string[] ContextualEditorKeywords = ["calloc", "delete", "destruct", "malloc"];
+    private static readonly string[] ContextualEditorKeywords = ["calloc", "delete", "destruct", "malloc", "resolve", "reject"];
 
     public static SyntaxKind GetKeywordKind(string text) =>
         Keywords.TryGetValue(text, out SyntaxKind kind) ? kind : SyntaxKind.IdentifierToken;

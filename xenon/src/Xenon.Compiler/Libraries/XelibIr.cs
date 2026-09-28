@@ -251,6 +251,10 @@ public sealed record XelibSymbolRecord
     public ImmutableArray<XelibReferenceReturnOriginRecord> ReferenceReturnOrigins { get; init; } = [];
     public ImmutableArray<XelibSharedReturnOriginRecord> SharedReturnOrigins { get; init; } = [];
     public ImmutableArray<XelibReferenceFieldOriginRecord> ReferenceFieldOrigins { get; init; } = [];
+    public ImmutableArray<XelibLifetimeDependencyRecord> ResultLifetimeDependencies { get; init; } = [];
+    public ImmutableArray<XelibLifetimeStoreRecord> LifetimeStores { get; init; } = [];
+    public bool ReturnsResumableOperation { get; init; }
+    public bool CreatesResumableOperation { get; init; }
     public ImmutableArray<XelibCaptureRecord> Captures { get; init; } = [];
 }
 
@@ -361,6 +365,7 @@ public enum XelibBodyOpcode : ushort
     FunctionValueDestruction = 83,
     Delete = 84,
     RawAllocation = 85,
+    Await = 86,
 }
 
 public enum XelibOperator : ushort
@@ -453,3 +458,6 @@ public sealed record XelibGenericImplementation(
 public sealed record XelibGenericFieldInitializer(int FieldSymbolId, int BodyId);
 
 public sealed record XelibGenericConstantImplementation(int ConstantSymbolId, XelibBodyNode Expression);
+
+public sealed record XelibLifetimeDependencyRecord(byte Kind, int Ordinal, string FieldPath = "");
+public sealed record XelibLifetimeStoreRecord(int Destination, XelibLifetimeDependencyRecord Source, string FieldPath = "");

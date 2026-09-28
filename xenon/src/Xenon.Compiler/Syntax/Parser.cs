@@ -1197,6 +1197,8 @@ internal sealed class Parser
             type = new ReferenceTypeSyntax(type, NextToken());
         if (allowArraySuffix)
             type = ParseArrayTypeSuffixes(type, allocation: false);
+        if (type is ArrayTypeSyntax && Current.Kind == SyntaxKind.AmpersandToken)
+            type = new ReferenceTypeSyntax(type, NextToken());
         if (constKeyword is not null) type = new QualifiedTypeSyntax(type, constKeyword);
         if (readonlyKeyword is not null) type = new QualifiedTypeSyntax(type, readonlyKeyword);
         return type;
@@ -1664,7 +1666,12 @@ internal sealed class Parser
         ExpressionSyntax left;
         int unaryPrecedence = SyntaxFacts.GetUnaryOperatorPrecedence(Current.Kind);
 
-        if (Current.Kind == SyntaxKind.MoveKeyword && 12 >= parentPrecedence)
+        if (Current.Kind == SyntaxKind.AwaitKeyword && 12 >= parentPrecedence)
+        {
+            SyntaxToken keyword = NextToken();
+            left = new AwaitExpressionSyntax(keyword, ParseBinaryExpression(12));
+        }
+        else if (Current.Kind == SyntaxKind.MoveKeyword && 12 >= parentPrecedence)
         {
             SyntaxToken moveKeyword = NextToken();
             ExpressionSyntax operand = ParseBinaryExpression(12);
@@ -2158,6 +2165,7 @@ internal sealed class Parser
             offset++;
         }
 
+        if (Peek(offset).Kind == SyntaxKind.AmpersandToken) offset++;
         return Peek(offset).Kind == SyntaxKind.IdentifierToken;
     }
 

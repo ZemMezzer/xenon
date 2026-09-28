@@ -238,4 +238,11 @@ public static class DiagnosticIds
     public const string LambdaCaptureNotSupported = "XE2276";
     public const string UnsupportedNativeFunctionValue = "XE2277";
     public const string InvalidLambdaCapture = "XE2278";
+    public const string MissingAwaitOperator = "XE2279";
+    public const string InvalidResumableReturn = "XE2280";
+    public const string MissingCompletionOperator = "XE2281";
+    public const string InvalidAwaitContext = "XE2282";
+    public const string BorrowAcrossAwait = "XE2283";
+    public const string ValueLifetimeEscape = "XE2284";
+    public const string PendingBorrowedOperation = "XE2285";
 }

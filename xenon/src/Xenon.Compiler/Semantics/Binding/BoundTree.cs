@@ -26,6 +26,7 @@ internal static class BoundTree
         BoundTryStatement value => new BoundNode[] { value.Body }
             .Concat(value.Catches.Select(handler => handler.Body)).Concat(Optional(value.FinallyBody)),
         BoundThrowStatement value => Optional(value.Expression),
+        BoundAwaitExpression value => new BoundNode[] { value.Operand, value.Operation },
         BoundUnaryExpression value => [value.Operand],
         BoundMoveExpression value => [value.Source],
         BoundCopyExpression value => [value.Source],

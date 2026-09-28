@@ -188,6 +188,10 @@ internal sealed class SemanticAnalyzer
                     body.OpenBraceToken.Location, bodies, types, _cancellationToken).Analyze(bodies[symbol]);
         }
 
+        if (!_diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+            ValueLifetimeAnalyzer.Analyze(functions.ToImmutable(), _genericImplementations.ToImmutable(),
+                _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+
         RecordDeclarations(_globalNamespace);
         return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), _diagnostics.ToImmutableArray(),
             _syntaxTrees, _semanticInfo, _genericImplementations.ToImmutable(), _constants.RequiresTargetLayout);
@@ -274,6 +278,10 @@ internal sealed class SemanticAnalyzer
         {
             entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
             entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+            entry.Specialized.ResultLifetimeDependencies = entry.Definition.ResultLifetimeDependencies;
+            entry.Specialized.LifetimeStores = entry.Definition.LifetimeStores;
+            entry.Specialized.ReturnsResumableOperation = entry.Definition.ReturnsResumableOperation;
+            entry.Specialized.CreatesResumableOperation = entry.Definition.CreatesResumableOperation;
             entry.Specialized.SetSharedReturnOrigins(entry.Definition.SharedReturnOrigins);
             entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
         }
@@ -483,6 +491,10 @@ internal sealed class SemanticAnalyzer
             {
                 entry.Specialized.SetReceiverMoveEffects(entry.Definition.ReceiverMoveEffects);
                 entry.Specialized.SetReferenceReturnOrigins(entry.Definition.ReferenceReturnOrigins);
+                entry.Specialized.ResultLifetimeDependencies = entry.Definition.ResultLifetimeDependencies;
+                entry.Specialized.LifetimeStores = entry.Definition.LifetimeStores;
+                entry.Specialized.ReturnsResumableOperation = entry.Definition.ReturnsResumableOperation;
+                entry.Specialized.CreatesResumableOperation = entry.Definition.CreatesResumableOperation;
                 entry.Specialized.SetSharedReturnOrigins(entry.Definition.SharedReturnOrigins);
                 entry.Specialized.SetReferenceFieldOrigins(entry.Definition.ReferenceFieldOrigins);
             }
@@ -2666,6 +2678,8 @@ internal sealed class SemanticAnalyzer
             error = $"operator '{syntax.IdentifierToken.Text}' cannot be overloaded with {method.Parameters.Length} parameter(s)";
         else if (method.IsVirtual || method.IsOverride || method.IsAbstract)
             error = "operator declarations cannot have instance method modifiers";
+        else if (OperatorFacts.ProtocolSignatureError(method) is { } protocolError)
+            error = protocolError;
         else if (method.IsConversionOperator)
         {
             TypeSymbol source = OperatorFacts.ValueType(method.Parameters[0].Type);

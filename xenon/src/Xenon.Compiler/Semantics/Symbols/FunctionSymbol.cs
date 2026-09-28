@@ -12,6 +12,10 @@ public sealed class FunctionSymbol : Symbol
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
     public bool DelegatesToThisConstructor { get; }
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
+    public ImmutableArray<LifetimeDependency> ResultLifetimeDependencies { get; internal set; } = [];
+    public ImmutableArray<LifetimeStore> LifetimeStores { get; internal set; } = [];
+    public bool ReturnsResumableOperation { get; internal set; }
+    public bool CreatesResumableOperation { get; internal set; }
     public ImmutableArray<ReferenceReturnOrigin> ReferenceReturnOrigins { get; private set; } = [];
     public ImmutableArray<SharedReturnOrigin> SharedReturnOrigins { get; private set; } = [];
     public ImmutableArray<ReferenceFieldOrigin> ReferenceFieldOrigins { get; private set; } = [];

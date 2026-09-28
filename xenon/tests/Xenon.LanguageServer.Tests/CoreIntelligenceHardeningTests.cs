@@ -519,8 +519,9 @@ public sealed class CoreIntelligenceHardeningTests
         JsonElement[] keywordItems = keywordCompletion.GetProperty("items").EnumerateArray().ToArray();
         AssertKeywordDetails(keywordItems, ["unique", "shared", "weak", "storage", "pin", "atomic", "function"],
             "type-forming keyword");
-        AssertKeywordDetails(keywordItems, ["new", "move", "lock"], "value-forming keyword");
+        AssertKeywordDetails(keywordItems, ["new", "move", "lock", "await"], "value-forming keyword");
         AssertKeywordDetails(keywordItems, ["malloc", "calloc", "free", "delete", "destruct"], "lifetime operation keyword");
+        AssertKeywordDetails(keywordItems, ["resolve", "reject"], "completion operator");
         AssertKeywordDetails(keywordItems, ["true", "false", "null"], "literal keyword");
         AssertKeywordDetails(keywordItems,
             ["void", "bool", "byte", "char", "sbyte", "short", "ushort", "int", "uint", "long", "ulong",

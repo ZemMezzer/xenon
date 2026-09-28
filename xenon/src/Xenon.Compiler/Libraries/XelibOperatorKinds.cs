@@ -7,6 +7,7 @@ internal static class XelibOperatorKinds
 {
     private static readonly IReadOnlyDictionary<string, OperatorKind> Kinds = new Dictionary<string, OperatorKind>(StringComparer.Ordinal)
     {
+        ["await"] = OperatorKind.Await, ["resolve"] = OperatorKind.Resolve, ["reject"] = OperatorKind.Reject,
         ["unary_plus"] = OperatorKind.UnaryPlus, ["unary_negation"] = OperatorKind.UnaryNegation,
         ["logical_not"] = OperatorKind.LogicalNot, ["bitwise_not"] = OperatorKind.BitwiseNot,
         ["add"] = OperatorKind.Add, ["subtract"] = OperatorKind.Subtract,

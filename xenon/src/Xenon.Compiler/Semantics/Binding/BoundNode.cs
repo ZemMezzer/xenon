@@ -9,4 +9,7 @@ public abstract record BoundNode
 
 public abstract record BoundStatement : BoundNode;
 
-public abstract record BoundExpression(TypeSymbol Type) : BoundNode;
+public abstract record BoundExpression(TypeSymbol Type) : BoundNode
+{
+    public ValueLifetimeDependencies LifetimeDependencies => ValueLifetimeAnalyzer.GetDependencies(this);
+}

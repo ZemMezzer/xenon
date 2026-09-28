@@ -230,3 +230,9 @@ public sealed record CastExpressionSyntax(
 {
     public override SyntaxKind Kind => SyntaxKind.CastExpression;
 }
+
+public sealed record AwaitExpressionSyntax(
+    SyntaxToken AwaitKeyword, ExpressionSyntax Operand) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.AwaitExpression;
+}
