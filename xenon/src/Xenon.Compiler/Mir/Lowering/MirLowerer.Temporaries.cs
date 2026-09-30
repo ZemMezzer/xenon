@@ -23,6 +23,7 @@ public sealed partial class MirLowerer
     private Dictionary<BoundExpression, TemporaryGuard> _temporaryGuards = new(ReferenceEqualityComparer.Instance);
     private HashSet<BoundMoveExpression> _deferredArgumentMoves = new(ReferenceEqualityComparer.Instance);
     private List<MirPlace> _pendingMoves = [];
+    private List<(MirPlace Place, TypeSymbol Type)> _pendingStorageMoves = [];
     private readonly Dictionary<BoundMoveExpression, MirPlace> _movedPlaces = new(ReferenceEqualityComparer.Instance);
 
     private MirOperand? Expression(BoundExpression expression)
@@ -103,6 +104,8 @@ public sealed partial class MirLowerer
     {
         HashSet<BoundMoveExpression> previousMoves = _deferredArgumentMoves;
         List<MirPlace> previousPending = _pendingMoves;
+        var previousStorage = _pendingStorageMoves;
+        _pendingStorageMoves = [];
         _deferredArgumentMoves = new(ReferenceEqualityComparer.Instance);
         _pendingMoves = [];
         foreach (BoundExpression argument in arguments)
@@ -111,12 +114,13 @@ public sealed partial class MirLowerer
         {
             ImmutableArray<MirOperand> values = [.. arguments.Select(argument => Snapshot(Value(argument), Source(argument)))];
             foreach (MirPlace place in _pendingMoves) Forget(place, _functionSource);
+            foreach (var moved in _pendingStorageMoves) EmptyMovedStorage(moved.Place, moved.Type, _functionSource);
             foreach (BoundExpression argument in arguments)
                 if (_temporaryGuards.TryGetValue(Unwrap(argument), out TemporaryGuard? guard))
                     SetFlag(guard.Active, false, Source(argument));
             return values;
         }
-        finally { _deferredArgumentMoves = previousMoves; _pendingMoves = previousPending; }
+        finally { _deferredArgumentMoves = previousMoves; _pendingMoves = previousPending; _pendingStorageMoves = previousStorage; }
     }
 
     private static BoundExpression Unwrap(BoundExpression expression) => expression is BoundFullExpression full ? Unwrap(full.Expression) : expression;

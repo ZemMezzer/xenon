@@ -1,4 +1,6 @@
 using Xenon.Compiler;
+using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics.Binding;
@@ -27,13 +29,28 @@ public sealed class ExceptionFrontendTests
         string ir = new LlvmIrGenerator().GenerateForTarget(
             compilation, LlvmTargetOptions.CreateHost());
 
-        Assert.Contains("assignment.array.length", ir, StringComparison.Ordinal);
-        Assert.Contains("allocation.guard.active", ir, StringComparison.Ordinal);
-        int guardActivation = ir.IndexOf(
-            "store i1 true, ptr %allocation.guard.active", StringComparison.Ordinal);
-        int destinationDestruction = ir.IndexOf(
-            "array.destination.destroy", StringComparison.Ordinal);
-        Assert.True(guardActivation >= 0 && destinationDestruction > guardActivation);
+        MirFunction mir = MirLowerer.Lower(compilation.SemanticModel.Functions.Single(f => f.Symbol.Name == "Test"),
+            compilation.SemanticModel.TypeFactory);
+        var graph = new MirControlFlow(mir);
+        MirDrop[] elementDrops = mir.Blocks.Where(block => graph.Reachable.Contains(block.Id))
+            .Select(block => block.Terminator).OfType<MirDrop>().ToArray();
+        Assert.NotEmpty(elementDrops);
+        Assert.Contains(elementDrops, drop => CanReachFree(drop.Unwind));
+        Assert.Contains("invoke void", ir, StringComparison.Ordinal);
+
+        bool CanReachFree(MirBlockId entry)
+        {
+            var pending = new Stack<MirBlockId>();
+            var visited = new HashSet<MirBlockId>();
+            pending.Push(entry);
+            while (pending.TryPop(out MirBlockId current))
+            {
+                if (!visited.Add(current)) continue;
+                if (graph.Blocks[current].Terminator is MirIntrinsicCall { Intrinsic: MirIntrinsicKind.Free }) return true;
+                foreach (MirEdge edge in graph.Successors[current]) pending.Push(edge.Target);
+            }
+            return false;
+        }
     }
 
     [Fact]

@@ -14,6 +14,21 @@ public sealed partial class MirLowerer
         public ExitTarget[] Continues { get; init; } = [];
     }
     private readonly List<ExitAction> _exits = [];
+    private sealed record PendingException(MirOperand Record, MirPlace Active, int ProtectedDepth);
+    private readonly List<PendingException> _pendingExceptions = [];
+    private int _protectedDepth;
+
+    private void AbandonPending(PendingException pending)
+    {
+        Block release = NewBlock(), after = NewBlock();
+        End(new MirSwitch(new MirCopy(pending.Active, BuiltinTypes.Bool),
+            [new(new(true, BuiltinTypes.Bool), release.Id)], after.Id, _functionSource));
+        _current = release;
+        SetFlag(pending.Active, false, _functionSource);
+        _current.Statements.Add(new MirReleaseException(pending.Record, true, _functionSource));
+        Jump(after);
+        _current = after;
+    }
 
     private void Transfer(ExitTarget target)
     {
@@ -84,7 +99,9 @@ public sealed partial class MirLowerer
             _exits.Add(new(finalizer, null, false, outerUnwind, outerRethrow) { Breaks = _breaks.ToArray(), Continues = _continues.ToArray() });
 
         _unwindTarget = _rethrowTarget = dispatch;
-        Statement(region.Body);
+        _protectedDepth++;
+        try { Statement(region.Body); }
+        finally { _protectedDepth--; }
         if (_current.Terminator is null) { ExitActions(depth); Jump(end); }
 
         // Handler bodies throw past sibling handlers; only the protected body
@@ -101,8 +118,14 @@ public sealed partial class MirLowerer
                 End(new MirSwitch(matches, [new(new(true, BuiltinTypes.Bool), body.Id)], next.Id, _functionSource));
             }
             Block abandoned = NewBlock();
-            abandoned.Statements.Add(new MirReleaseException(record, true, _functionSource));
-            abandoned.Terminator = new MirGoto(exceptionalExit.Id, _functionSource);
+            _current = abandoned;
+            // A replacement escaping a finalizer suppresses its original record
+            // before abandoning the nested catch record. Track the exact record
+            // and flag so the outer exceptional exit cannot release it twice.
+            foreach (PendingException pendingException in _pendingExceptions.AsEnumerable().Reverse())
+                if (_protectedDepth <= pendingException.ProtectedDepth) AbandonPending(pendingException);
+            _current.Statements.Add(new MirReleaseException(record, true, _functionSource));
+            Jump(exceptionalExit);
             _current = body;
             if (handler.Variable is { } variable)
             {
@@ -128,16 +151,21 @@ public sealed partial class MirLowerer
         if (region.FinallyBody is { } exceptionalFinalizer)
         {
             MirOperand pending = CurrentException();
-            Block replaced = NewBlock();
-            replaced.Statements.Add(new MirReleaseException(pending, true, _functionSource));
-            replaced.Terminator = new MirGoto(outerUnwind.Id, _functionSource);
+            var pendingScope = new PendingException(pending, Temporary(BuiltinTypes.Bool, _functionSource), _protectedDepth);
+            SetFlag(pendingScope.Active, true, _functionSource);
+            Block finalizerEntry = _current, replaced = NewBlock();
+            _current = replaced;
+            AbandonPending(pendingScope);
+            Jump(outerUnwind);
+            _current = finalizerEntry;
             _unwindTarget = replaced;
+            _pendingExceptions.Add(pendingScope);
             // A return/break/continue suppresses the propagating exception. A
             // normal finalizer completion preserves it for the outer handler.
             _exits.Add(new(null, pending, true, outerUnwind, outerRethrow));
             _exceptionalFinalizerDepth++;
             try { Statement(exceptionalFinalizer); }
-            finally { _exceptionalFinalizerDepth--; }
+            finally { _exceptionalFinalizerDepth--; _pendingExceptions.RemoveAt(_pendingExceptions.Count - 1); }
             _exits.RemoveAt(_exits.Count - 1);
         }
         if (_current.Terminator is null) End(new MirGoto(outerUnwind.Id, _functionSource));

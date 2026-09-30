@@ -122,7 +122,7 @@ public static class MirPrinter
         MirIntrinsicCall call => $"{(call.Destination is null ? "" : Place(call.Destination) + " = ")}intrinsic {call.Intrinsic}" +
                         $"({string.Join(", ", call.Arguments.Select(Operand))})" +
             $"{(call.Function is null ? "" : " fn " + call.Function.FullName)}{(call.SubjectType is null ? "" : " type " + call.SubjectType)}" +
-            $"{(call.Operator is null ? "" : " op " + call.Operator)}{(call.ReturnsOldValue ? " old" : "")} -> {call.Normal} unwind {call.Unwind}",
+            $"{(call.Field is null ? "" : " field " + call.Field.Name)}{(call.FixedArrayLength is null ? "" : " length " + call.FixedArrayLength.Value.ToString(CultureInfo.InvariantCulture))}{(call.Operator is null ? "" : " op " + call.Operator)}{(call.ReturnsOldValue ? " old" : "")} -> {call.Normal} unwind {call.Unwind}",
         MirCall call => $"{(call.Destination is null ? "" : Place(call.Destination) + " = ")}call {Operand(call.Callee)}" +
             $"({string.Join(", ", call.Arguments.Select(Operand))}){(call.Receiver is null ? "" : " receiver " + Operand(call.Receiver))}{(call.IsVirtual ? " virtual" : "")}{(call.InterfaceType is null ? "" : " interface " + call.InterfaceType)} -> {call.Normal} unwind {call.Unwind}",
         MirReturn ret => ret.Value is null ? "return" : $"return {Operand(ret.Value)}",
@@ -131,7 +131,7 @@ public static class MirPrinter
         MirSuspend suspend => $"suspend{(suspend.Payload is null ? "" : " " + Operand(suspend.Payload))} resume {suspend.Resume}",
         MirAbort => "abort",
         MirUnreachable => "unreachable",
-        MirDrop drop => $"drop {Place(drop.Place)}{(drop.Destructor is null ? "" : " via " + drop.Destructor.FullName)} -> {drop.Normal} unwind {drop.Unwind}",
+        MirDrop drop => $"drop{(drop.IsVirtual ? " virtual" : "")} {Place(drop.Place)}{(drop.Destructor is null ? "" : " via " + drop.Destructor.FullName)} -> {drop.Normal} unwind {drop.Unwind}",
         _ => throw new NotSupportedException($"Unknown MIR terminator {terminator.GetType().Name}."),
     };
 }

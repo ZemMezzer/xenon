@@ -67,6 +67,13 @@ public sealed partial class MirVerifier
         foreach (MirBasicBlock block in _function.Blocks)
             if (block.Id.Value < 0 || !_blocks.Add(block.Id)) Error($"invalid or duplicate block {block.Id}");
         if (!_blocks.Contains(_function.Entry)) Error($"entry {_function.Entry} does not exist");
+        if (_function.Resumable is { } resumable)
+        {
+            Same(Local(resumable.Result), _function.Symbol.ReturnType, "resumable result storage");
+            Same(resumable.Initialization.ReturnType, _function.Symbol.ReturnType, "resumable initializer result");
+            if (resumable.Initialization.Resumable is not null) Error("resumable initializer cannot suspend");
+            else _errors.AddRange(Verify(resumable.Initialization));
+        }
         foreach (MirBasicBlock block in _function.Blocks)
         {
             _block = block.Id;
@@ -122,7 +129,7 @@ public sealed partial class MirVerifier
                 case MirFieldProjection field:
                     if (type is not null && (type is not IFieldStorageTypeSymbol structure ||
                         !structure.AllInstanceFields.Contains(field.Field)))
-                        Error($"field {field.Field.Name} is not an instance field of {type}");
+                        Error($"field {field.Field.Name} ({field.Field.ContainingType}, {field.Field.Type}) is not an instance field of {type}; owner identity: {TypeIdentity.AreSame(type, field.Field.ContainingType)}");
                     type = field.Field.Type;
                     break;
                 case MirAtomicStorageProjection:
@@ -187,7 +194,10 @@ public sealed partial class MirVerifier
         switch (operand)
         {
             case MirCopy copy: Same(Place(copy.Place), copy.Type, "copy operand"); break;
-            case MirMove move: Same(Place(move.Place), move.Type, "move operand"); break;
+            case MirMove move:
+                Same(Place(move.Place), move.Type, "move operand");
+                if (move.OwnershipPlace is { } ownership) Place(ownership);
+                break;
             case MirConstant: break;
             case MirFunctionOperand function:
                 if (function.Type is not FunctionPointerTypeSymbol signature) Error("function operand requires a function pointer type");
@@ -225,13 +235,18 @@ public sealed partial class MirVerifier
                 bool pointerOffset = binary.Left.Type is PointerTypeSymbol &&
                     binary.Right.Type is PrimitiveTypeSymbol { IsInteger: true } &&
                     binary.Operator is MirBinaryOperator.Add or MirBinaryOperator.Subtract;
+                bool reversedPointerOffset = binary.Right.Type is PointerTypeSymbol &&
+                    binary.Left.Type is PrimitiveTypeSymbol { IsInteger: true } && binary.Operator == MirBinaryOperator.Add;
                 bool pointerDifference = binary.Left.Type is PointerTypeSymbol && binary.Right.Type is PointerTypeSymbol &&
                     binary.Operator == MirBinaryOperator.Subtract;
-                if (!pointerOffset && binary.Operator is not (MirBinaryOperator.ShiftLeft or MirBinaryOperator.ShiftRight))
+                bool pointerViews = binary.Left.Type is PointerTypeSymbol leftPointer && binary.Right.Type is PointerTypeSymbol rightPointer &&
+                    TypeIdentity.AreSame(leftPointer.ElementType, rightPointer.ElementType) &&
+                    binary.Operator is MirBinaryOperator.Equal or MirBinaryOperator.NotEqual or MirBinaryOperator.Subtract;
+                if (!pointerOffset && !reversedPointerOffset && !pointerViews && binary.Operator is not (MirBinaryOperator.ShiftLeft or MirBinaryOperator.ShiftRight))
                     Same(binary.Right.Type, binary.Left.Type, "binary operand");
                 bool comparison = binary.Operator is MirBinaryOperator.Equal or MirBinaryOperator.NotEqual or
                     MirBinaryOperator.Less or MirBinaryOperator.LessOrEqual or MirBinaryOperator.Greater or MirBinaryOperator.GreaterOrEqual;
-                if (pointerDifference) { if (binary.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("pointer difference must be integral"); } else Same(binary.Type, comparison ? BuiltinTypes.Bool : binary.Left.Type, "binary result");
+                if (pointerDifference) { if (binary.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("pointer difference must be integral"); } else Same(binary.Type, comparison ? BuiltinTypes.Bool : reversedPointerOffset ? binary.Right.Type : binary.Left.Type, "binary result");
                 break;
             case MirCast cast: Operand(cast.Operand); break;
             case MirBorrow borrow:
@@ -338,7 +353,10 @@ public sealed partial class MirVerifier
             case MirThrow: break;
             case MirSuspend { Payload: { } payload }: Operand(payload); break;
             case MirSuspend: break;
-            case MirDrop drop: Place(drop.Place); break;
+            case MirDrop drop:
+                Place(drop.Place);
+                if (drop.IsVirtual && drop.Destructor?.VTableSlot is null) Error("virtual drop requires a virtual destructor slot");
+                break;
             default: Error($"unknown terminator {terminator.GetType().Name}"); break;
         }
     }

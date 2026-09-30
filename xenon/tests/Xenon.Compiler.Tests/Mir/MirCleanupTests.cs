@@ -43,6 +43,26 @@ public sealed class MirCleanupTests
     }
 
     [Fact]
+    public void FailedArrayReplacementDestroysIncomingAndRemainingOldElements()
+    {
+        MirFunction[] functions = MirFeatureLoweringTests.Lower(Types +
+            "int Main() { try { B[] values = B[3]; values = new B[3]; } catch (...) { return 7; } return 0; }");
+        var machine = new Machine(functions) { ThrowAtDrop = 2 };
+        Assert.Equal(7, machine.Run(functions.Single(f => f.Symbol.Name == "Main"), []));
+        Assert.Equal(6, machine.Drops.Count);
+        Assert.Equal(1, machine.FreedBuffers);
+    }
+
+    [Fact]
+    public void StorageWrapperRemainsLiveWhenAnAliasReconstructsItsPayload()
+    {
+        MirFunction[] functions = MirFeatureLoweringTests.Lower(Types +
+            "int Main() { storage<A> slot; storage<A>& alias = slot; alias = A(); destruct(alias); alias = A(); return 0; }");
+        var machine = new Machine(functions);
+        Assert.Equal(0, machine.Run(functions.Single(f => f.Symbol.Name == "Main"), []));
+        Assert.Equal(["A", "A"], machine.Drops);
+    }
+    [Fact]
     public void ByValueParameterOwnsCommittedMove()
     {
         MirFunction[] functions = MirFeatureLoweringTests.Lower(Types +
@@ -158,6 +178,16 @@ public sealed class MirCleanupTests
         Assert.Equal(0, machine.Run(functions.Single(f => f.Symbol.Name == "Main"), []));
         Assert.Equal(["A"], machine.Drops);
     }
+    [Fact]
+    public void StorageWritesItsPayloadAfterTheInitializerCallReturns()
+    {
+        MirFunction[] functions = MirFeatureLoweringTests.Lower(Types +
+            "A Make() { return A(); } int Main() { storage<A> slot; slot = Make(); return 0; }");
+        var machine = new Machine(functions);
+        Assert.Equal(0, machine.Run(functions.Single(f => f.Symbol.Name == "Main"), []));
+        Assert.Equal(["A"], machine.Drops);
+    }
+
     // Executes the lowered graph, including guards and unwind edges. It deliberately
     // knows nothing about source scopes, implicit drops, or ownership inference.
     private sealed class Machine(MirFunction[] functions)

@@ -4,6 +4,8 @@ using System.Text;
 using LLVMSharp.Interop;
 using LLVMApi = LLVMSharp.Interop.LLVM;
 using Xenon.Compiler;
+using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
@@ -365,7 +367,7 @@ public sealed partial class LlvmIrGenerator
             foreach (FieldSymbol field in _referencedStaticFields) DeclareStaticField(field);
             DeclareThreadLocalHelpers();
             EmitClosureEnvironmentDestructors();
-            EmitFunctionBodies(implementationFunctions);
+            EmitFunctionBodies([.. implementationFunctions.Select(function => MirLowerer.Lower(function, compilation.SemanticModel.TypeFactory, compilation.SemanticModel.ExpressionLocations))]);
             EmitCAbiThunks();
             if (compilation.Options.OutputKind == CompilationOutputKind.Executable)
             {
@@ -1841,9 +1843,9 @@ public sealed partial class LlvmIrGenerator
         return adapterValue;
     }
 
-    private void EmitFunctionBodies(ImmutableArray<BoundFunction> functions)
+    private void EmitFunctionBodies(ImmutableArray<MirFunction> functions)
     {
-        foreach (BoundFunction function in functions)
+        foreach (MirFunction function in functions)
         {
             LlvmFunction declaration = _functions[function.Symbol];
             using LLVMBuilderRef builder = _context.CreateBuilder();
@@ -1881,8 +1883,8 @@ public sealed partial class LlvmIrGenerator
                 _compilation.Options.EnableRuntimeChecks,
                 IsWindowsTarget(),
                 _exceptionsEnabled);
-            if (function.Body.RequiresSuspensionStateMachine) emitter.EmitResumableWrapper(function.Body);
-            else emitter.Emit(function.Body);
+            if (function.Resumable is not null) emitter.EmitMirResumable(function);
+            else emitter.EmitMir(function);
         }
     }
 
@@ -2112,8 +2114,12 @@ public sealed partial class LlvmIrGenerator
             return LLVMTypeRef.CreatePointer(MapType(reference.ElementType), 0);
         }
 
-        if (type is StructTypeSymbol structType && _structTypes.TryGetValue(structType, out LLVMTypeRef llvmStruct))
+        if (type is StructTypeSymbol structType)
         {
+            if (_structTypes.TryGetValue(structType, out LLVMTypeRef llvmStruct)) return llvmStruct;
+            llvmStruct = _context.CreateNamedStruct(structType.FullName);
+            _structTypes.Add(structType, llvmStruct);
+            llvmStruct.StructSetBody(LlvmStructLayout.Elements(structType, MapType, LLVMTypeRef.CreatePointer(_context.Int8Type, 0)), false);
             return llvmStruct;
         }
 
@@ -3487,6 +3493,7 @@ public sealed partial class LlvmIrGenerator
             LLVMValueRef[] arguments,
             string name)
         {
+            if (_mir is not null) return MirInvoke(functionType, function, arguments, name);
             if (!_exceptionsEnabled ||
                 _exceptionTargets.Count == 0 && _finalizerScopes.Count == 0 &&
                 !_function.HasScopeCleanup && _allocationGuards.Count == 0 &&

@@ -14,7 +14,7 @@ public sealed partial class MirLowerer
     {
         MirOperand instance = pointer ? Snapshot(Value(receiver), source) : Address(Place(receiver), receiver.Type, source);
         ImmutableArray<MirOperand> inputs = Arguments(arguments.Add(value));
-        _ = CallValues(Callee(setter), inputs, source, instance, interfaceType, setter.IsVirtual);
+        _ = CallValues(Callee(setter), inputs, source, instance, interfaceType, setter.VTableSlot is not null);
         return inputs[^1];
     }
 
@@ -35,7 +35,7 @@ public sealed partial class MirLowerer
             if (GuardValue(copy, source) is { } guard) copyGuards.Add(guard);
         }
         foreach (TemporaryGuard guard in copyGuards) EndValueGuard(guard, source);
-        MirOperand current = CallValues(Callee(expression.Getter), copies.ToImmutable(), source, receiver, expression.InterfaceType, expression.Getter.IsVirtual)!;
+        MirOperand current = CallValues(Callee(expression.Getter), copies.ToImmutable(), source, receiver, expression.InterfaceType, expression.Getter.VTableSlot is not null)!;
         MirPlace? previous = _capturedPlace;
         _capturedPlace = ((MirCopy)Snapshot(current, source)).Place;
         MirOperand next;
@@ -46,7 +46,7 @@ public sealed partial class MirLowerer
         }
         finally { _capturedPlace = previous; }
         foreach (TemporaryGuard guard in originalGuards) EndValueGuard(guard, source);
-        _ = CallValues(Callee(expression.Setter), arguments.Add(next), source, receiver, expression.InterfaceType, expression.Setter.IsVirtual);
+        _ = CallValues(Callee(expression.Setter), arguments.Add(next), source, receiver, expression.InterfaceType, expression.Setter.VTableSlot is not null);
         return next;
     }
 }

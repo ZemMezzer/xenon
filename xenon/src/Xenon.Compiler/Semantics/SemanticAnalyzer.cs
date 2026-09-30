@@ -194,7 +194,7 @@ internal sealed class SemanticAnalyzer
 
         RecordDeclarations(_globalNamespace);
         return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), _diagnostics.ToImmutableArray(),
-            _syntaxTrees, _semanticInfo, _genericImplementations.ToImmutable(), _constants.RequiresTargetLayout);
+            _syntaxTrees, _semanticInfo, _genericImplementations.ToImmutable(), _constants.RequiresTargetLayout, expressionLocations: _expressionLocations);
     }
 
     private void StabilizeCallableSummaries()

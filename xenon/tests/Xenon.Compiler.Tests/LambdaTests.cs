@@ -1,4 +1,6 @@
 using Xenon.CodeGen.LLVM;
+using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics.Symbols;
@@ -475,7 +477,10 @@ public sealed class LambdaTests
         Assert.Empty(compilation.Diagnostics);
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
         Assert.True(ir.Split("function.copy.control", StringSplitOptions.None).Length > 2);
-        Assert.Contains("compound.argument.0.guard", ir);
+        Assert.Contains(compilation.SemanticModel.Functions
+            .SelectMany(function => MirLowerer.Lower(function, compilation.SemanticModel.TypeFactory).Blocks)
+            .Select(block => block.Terminator).OfType<MirDrop>(),
+            drop => drop.Destructor?.FunctionKind == FunctionKind.FunctionValueDestructor);
     }
 
     [Fact]
@@ -1588,7 +1593,7 @@ public sealed class LambdaTests
         Assert.Empty(compilation.Diagnostics);
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
         Assert.Contains("closure.environment", ir);
-        Assert.Contains("function.call.closure", ir);
+        Assert.Contains("function.closure", ir);
     }
 
     [Fact]

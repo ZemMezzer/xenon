@@ -31,15 +31,19 @@ public sealed partial class MirLowerer
                 DeleteValue(Save(new MirUse(new MirCopy(owner, destruction.OwnershipType.StorageType)), source), destruction.ElementDestructor, source);
                 return null;
             case BoundOwnershipDestructionExpression destruction:
-                return Intrinsic(MirIntrinsicKind.DestroyOwner, [ThisAddress(destruction.OwnershipType)], BuiltinTypes.Void, source,
-                    destruction.ElementDestructor, destruction.OwnershipType);
+                DestroySharedOrWeak(destruction, source);
+                return null;
             case BoundStorageDestructionExpression destruction:
                 MirPlace wrapper = ((MirCopy)ThisAddress(destruction.StorageType)).Place.Project(new MirDerefProjection());
                 DestroyStorage(wrapper, destruction.StorageType, destruction.ElementDestructor, source);
                 return null;
             case BoundFunctionValueDestructionExpression destruction:
-                return Intrinsic(MirIntrinsicKind.DestroyCallable, [ThisAddress(destruction.FunctionValueType)], BuiltinTypes.Void, source,
-                    subjectType: destruction.FunctionValueType);
+                MirOperand callableValue = Save(new MirUse(new MirCopy(
+                    ((MirCopy)ThisAddress(destruction.FunctionValueType)).Place.Project(new MirDerefProjection()),
+                    destruction.FunctionValueType)), source);
+                DestroyCallableControl(Intrinsic(MirIntrinsicKind.CallableControl, [callableValue],
+                    _types.PointerTo(BuiltinTypes.Byte), source)!, source);
+                return null;
             case BoundInterfaceConversionExpression conversion:
                 return Save(new MirInterfaceView(Address(Place(conversion.Source), conversion.Source.Type, source), conversion.SourceType, conversion.InterfaceType), source);
             case BoundTypeLayoutExpression layout:
@@ -76,9 +80,12 @@ public sealed partial class MirLowerer
                     _current.Statements.Add(new MirSetStorageState(place, false, source));
                     place = place.Project(new MirLifetimeProjection());
                 }
-                Forget(destruction.TrackedVariable is { } variable
-                    ? new MirPlace(Variable(variable).Local, [.. destruction.TrackedPath.Select(field => (MirProjection)new MirFieldProjection(field))])
-                    : tracked, source);
+                // Destroying T empties storage<T>; the wrapper remains live and
+                // can be initialized again through an alias.
+                if (type is not StorageTypeSymbol)
+                    Forget(destruction.TrackedVariable is { } variable
+                        ? new MirPlace(Variable(variable).Local, [.. destruction.TrackedPath.Select(field => (MirProjection)new MirFieldProjection(field))])
+                        : tracked, source);
                 Block after = NewBlock();
                 End(new MirDrop(place, destruction.Destructor, after.Id, GuardedUnwind(_unwindTarget, source).Id, source));
                 _current = after;
@@ -95,9 +102,7 @@ public sealed partial class MirLowerer
                 return SetAccessor(setter.Receiver, setter.Indexer.Setter!, setter.Arguments, setter.Value, false, setter.InterfaceType, source);
             case BoundCompoundAccessorAssignmentExpression compound: return CompoundAccessor(compound, source);
             case BoundCompareExchangeExpression exchange:
-                return Intrinsic(MirIntrinsicKind.CompareExchange,
-                    [Address(Place(exchange.Target), exchange.Target.Type, source), Snapshot(Value(exchange.Expected), source), Value(exchange.Desired)],
-                    BuiltinTypes.Bool, source);
+                return CompareExchange(exchange, source);
             case BoundSwapExpression swap:
                 return Intrinsic(MirIntrinsicKind.Swap, [Address(Place(swap.Left), swap.Left.Type, source), Address(Place(swap.Right), swap.Right.Type, source)],
                     BuiltinTypes.Void, source);

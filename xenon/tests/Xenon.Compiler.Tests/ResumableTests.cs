@@ -1,4 +1,6 @@
 using Xenon.CodeGen.LLVM;
+using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Libraries;
 using Xenon.Compiler.Semantics;
@@ -44,7 +46,11 @@ public sealed class ResumableTests
         Assert.Empty(compilation.Diagnostics);
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
         Assert.Contains(".resumable.resume", ir);
-        Assert.Contains("await.retry", ir);
+        MirFunction mir = MirLowerer.Lower(compilation.SemanticModel.Functions.Single(f => f.Symbol.Name == "Use"),
+            compilation.SemanticModel.TypeFactory);
+        MirSuspend suspend = Assert.Single(mir.Blocks.Select(block => block.Terminator).OfType<MirSuspend>());
+        MirBasicBlock retry = mir.Blocks.Single(block => block.Id == suspend.Resume);
+        Assert.Equal(MirIntrinsicKind.CreateContinuation, Assert.IsType<MirIntrinsicCall>(retry.Terminator).Intrinsic);
         Assert.DoesNotContain("call i8 @llvm.coro.suspend", ir);
     }
 

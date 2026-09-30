@@ -36,7 +36,8 @@ public sealed partial class MirLowerer
         TemporaryGuard? guard = _arrayCreations.GetValueOrDefault(creation);
         if (guard is not null) PushArrayHistory(guard, source);
         MirOperand array = Intrinsic(creation.Storage == ArrayStorageKind.Stack ? MirIntrinsicKind.AllocateStackArray : MirIntrinsicKind.AllocateHeapArray,
-            [.. creation.Dimensions.Select(d => Snapshot(Value(d), Source(d)))], creation.Type, source)!;
+            [.. creation.Dimensions.Select(d => Snapshot(Value(d), Source(d)))], creation.Type, source,
+            fixedArrayLength: Xenon.Compiler.Semantics.ResumableFrameAnalysis.TryGetConstantLength(creation, out ulong fixedLength) ? fixedLength : null)!;
         if (creation.Storage == ArrayStorageKind.Heap)
         {
             guard = new(((MirCopy)array).Place, Temporary(BuiltinTypes.Bool, source), TypeFacts.GetCompleteDestructor(creation.ElementType))
@@ -152,7 +153,7 @@ public sealed partial class MirLowerer
                 abort.Terminator = new MirAbort(source);
                 freed.Terminator = FreeBuffer(normal, unwind);
                 exceptionalFree.Terminator = FreeBuffer(unwind, abort);
-                drop.Terminator = new MirDrop(guard.Place, guard.Destructor, freed.Id, exceptionalFree.Id, source);
+                drop.Terminator = new MirDrop(guard.Place, guard.Destructor, freed.Id, exceptionalFree.Id, source) { IsVirtual = guard.Destructor.VTableSlot is not null };
             }
             return drop;
         }

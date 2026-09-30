@@ -15,12 +15,12 @@ public sealed partial class MirLowerer
 
     private MirOperand? Intrinsic(MirIntrinsicKind intrinsic, ImmutableArray<MirOperand> arguments,
         TypeSymbol type, MirSourceInfo source, FunctionSymbol? function = null, TypeSymbol? subjectType = null,
-        ImmutableArray<CaptureVariableSymbol> captures = default, MirBinaryOperator? op = null, bool returnsOldValue = false)
+        ImmutableArray<CaptureVariableSymbol> captures = default, MirBinaryOperator? op = null, bool returnsOldValue = false, ulong? fixedArrayLength = null, FieldSymbol? field = null)
     {
         MirPlace? result = TypeIdentity.AreSame(type, BuiltinTypes.Void) ? null : Temporary(type, source);
         Block next = NewBlock();
         End(new MirIntrinsicCall(intrinsic, arguments, type, result, next.Id, GuardedUnwind(_unwindTarget, source).Id, source)
-        { Function = function, SubjectType = subjectType, Captures = captures.IsDefault ? [] : captures, Operator = op, ReturnsOldValue = returnsOldValue });
+        { Function = function, SubjectType = subjectType, Captures = captures.IsDefault ? [] : captures, Operator = op, ReturnsOldValue = returnsOldValue, FixedArrayLength = fixedArrayLength, Field = field });
         _current = next;
         return result is null ? null : new MirCopy(result, type);
     }
@@ -30,7 +30,7 @@ public sealed partial class MirLowerer
     {
         MirOperand instance = pointerAccess ? Snapshot(Value(receiver), source) : Address(Place(receiver), receiver.Type, source);
         var callee = new MirFunctionOperand(method, _types.FunctionPointer(method.ReturnType, method.Parameters.Select(p => p.Type)));
-        MirOperand? result = Call(callee, arguments, source, instance, interfaceType, method.IsVirtual);
+        MirOperand? result = Call(callee, arguments, source, instance, interfaceType, method.VTableSlot is not null);
         ApplyReceiverMoves(receiver, method, source);
         return result;
     }

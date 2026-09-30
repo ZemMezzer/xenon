@@ -31,10 +31,10 @@ public sealed class LlvmConcurrencyTests
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         string ir = new LlvmIrGenerator().GenerateForTarget(
             compilation, LlvmTargetOptions.CreateHost(), "atomic-initialization");
-        Assert.DoesNotContain("atomic.replace.previous", ir, StringComparison.Ordinal);
+        Assert.DoesNotContain("atomic.exchange.previous", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("atomic.store.lock.attempt", ir, StringComparison.Ordinal);
         Assert.Contains("store i8 0", ir, StringComparison.Ordinal);
-        Assert.Contains("local.cleanup.register", ir, StringComparison.Ordinal);
+        Assert.Contains("store i1 true", ir, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -57,11 +57,11 @@ public sealed class LlvmConcurrencyTests
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         string ir = new LlvmIrGenerator().GenerateForTarget(
             compilation, LlvmTargetOptions.CreateHost(), "constructor-atomic-replacement");
-        string constructor = GetIrFunctionContaining(ir, "atomic.replace.previous");
+        string constructor = GetIrFunctionContaining(ir, "atomic.exchange.previous");
 
         Assert.Equal(1, constructor.Split("store i8 0", StringSplitOptions.None).Length - 1);
-        Assert.Contains("atomic.replace.previous = load", constructor, StringComparison.Ordinal);
-        Assert.Contains("atomic.replace.lock.attempt", constructor, StringComparison.Ordinal);
+        Assert.Contains("atomic.exchange.previous = load", constructor, StringComparison.Ordinal);
+        Assert.Contains("atomic.exchange.lock.attempt", constructor, StringComparison.Ordinal);
         Assert.Contains("store atomic i8 0", constructor, StringComparison.Ordinal);
     }
 
@@ -270,7 +270,7 @@ public sealed class LlvmConcurrencyTests
             LlvmTargetOptions.CreateHost(),
             "atomic-arrays");
 
-        Assert.Contains("array.initialize.element", ir, StringComparison.Ordinal);
+        Assert.Contains("element.address", ir, StringComparison.Ordinal);
         Assert.Contains("atomic.value.address", ir, StringComparison.Ordinal);
         Assert.Contains("load atomic ptr", ir, StringComparison.Ordinal);
         Assert.Contains("store atomic ptr", ir, StringComparison.Ordinal);
@@ -316,7 +316,7 @@ public sealed class LlvmConcurrencyTests
         Assert.Contains("%__xenon.atomic.", ir, StringComparison.Ordinal);
         Assert.Contains("shared.retain.count", ir, StringComparison.Ordinal);
         Assert.Contains("weak.retain.count", ir, StringComparison.Ordinal);
-        Assert.Contains("atomic.replace.previous", ir, StringComparison.Ordinal);
+        Assert.Contains("atomic.exchange.previous", ir, StringComparison.Ordinal);
         Assert.Contains("store atomic i8 0", ir, StringComparison.Ordinal);
         Assert.Contains(" release", ir, StringComparison.Ordinal);
     }
@@ -429,7 +429,7 @@ public sealed class LlvmConcurrencyTests
         Assert.Contains("cmpxchg ptr", ir, StringComparison.Ordinal);
         Assert.Contains("seq_cst seq_cst", ir, StringComparison.Ordinal);
         Assert.Contains("extractvalue", ir, StringComparison.Ordinal);
-        Assert.Contains("cmpxchg.expected.bool.storage", ir, StringComparison.Ordinal);
+        Assert.Contains("expected.bool", ir, StringComparison.Ordinal);
         Assert.Contains("value.equal.float = fcmp oeq", ir, StringComparison.Ordinal);
         Assert.Contains("cmpxchg.float.current.bits", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("cmpxchg weak", ir, StringComparison.Ordinal);

@@ -33,7 +33,10 @@ public sealed record MirFunction(FunctionSymbol Symbol, ImmutableArray<MirLocal>
 {
     // The executable result can differ from a resumable function's public handle type.
     public TypeSymbol ReturnType { get; init; } = Symbol.ReturnType;
+    public MirResumableBody? Resumable { get; init; }
 }
+
+public sealed record MirResumableBody(MirFunction Initialization, MirLocalId Result);
 
 /// <summary>Exactly one terminator; execution cannot implicitly fall through.</summary>
 public sealed record MirBasicBlock(MirBlockId Id, ImmutableArray<MirStatement> Statements,
@@ -195,5 +198,6 @@ public sealed record MirUnreachable(MirSourceInfo Source) : MirTerminator(Source
 public sealed record MirDrop(MirPlace Place, FunctionSymbol? Destructor,
     MirBlockId Normal, MirBlockId Unwind, MirSourceInfo Source) : MirTerminator(Source)
 {
+    public bool IsVirtual { get; init; }
     public override IEnumerable<MirEdge> Successors => [new(Normal, MirEdgeKind.Normal), new(Unwind, MirEdgeKind.Unwind)];
 }

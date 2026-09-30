@@ -36,6 +36,7 @@ public sealed partial class MirLowerer
     private Block _rethrowTarget;
     private MirPlace? _receiver;
     private MirPlace? _capturedPlace;
+    private LocalVariableSymbol? _resumableResultInput;
 
     private MirLowerer(BoundFunction function, TypeFactory types,
         IReadOnlyDictionary<BoundExpression, TextLocation>? locations, CancellationToken cancellation)
@@ -57,6 +58,18 @@ public sealed partial class MirLowerer
         IReadOnlyDictionary<BoundExpression, TextLocation>? locations = null, CancellationToken cancellation = default)
     {
         var lowering = new MirLowerer(function, types, locations, cancellation);
+        MirFunction? initialization = null;
+        if (function.Body.RequiresSuspensionStateMachine)
+        {
+            var declaration = (BoundVariableDeclarationStatement)function.Body.Statements[0];
+            var initializer = new MirLowerer(function, types, locations, cancellation);
+            initializer.Statement(declaration);
+            initializer.End(new MirReturn(new MirCopy(initializer.Variable(declaration.Variable), declaration.Variable.Type), initializer._functionSource));
+            initialization = new(function.Symbol, [.. initializer._locals],
+                [.. initializer._blocks.Select(block => new MirBasicBlock(block.Id, [.. block.Statements],
+                    block.Terminator ?? new MirUnreachable(initializer._functionSource)))], new(0), initializer._functionSource);
+            lowering._resumableResultInput = declaration.Variable;
+        }
         lowering.InitializeLifecycle();
         lowering.Statement(function.Body);
         if (lowering._current.Terminator is null)
@@ -65,6 +78,8 @@ public sealed partial class MirLowerer
         MirFunction result = new(function.Symbol, [.. lowering._locals],
             [.. lowering._blocks.Select(block => new MirBasicBlock(block.Id, [.. block.Statements],
                 block.Terminator ?? new MirUnreachable(lowering._functionSource)))], new(0), lowering._functionSource);
+        if (initialization is not null)
+            result = result with { ReturnType = BuiltinTypes.Void, Resumable = new(initialization, lowering.Variable(lowering._resumableResultInput!).Local) };
         MirVerifier.VerifyOrThrow(result);
         return result;
     }
@@ -130,6 +145,7 @@ public sealed partial class MirLowerer
             case BoundVariableDeclarationStatement declaration:
                 MirPlace local = Variable(declaration.Variable);
                 _current.Statements.Add(new MirStorageLive(local.Local, _functionSource));
+                if (ReferenceEquals(declaration.Variable, _resumableResultInput)) break;
                 if (IsStorage(declaration.Variable.Type))
                     Store(new MirAssign(local, new MirDefault(declaration.Variable.Type), _functionSource));
                 if (declaration.Initializer is { } voidInitializer && TypeIdentity.AreSame(voidInitializer.Type, BuiltinTypes.Void))
@@ -266,10 +282,12 @@ public sealed partial class MirLowerer
                 if (_deferredArgumentMoves.Contains(move))
                 {
                     _pendingMoves.Add(ownership ?? movedPlace);
+                    _pendingStorageMoves.Add((movedPlace, move.Type));
                     return Save(new MirUse(new MirCopy(movedPlace, move.Type)), source);
                 }
                 MirOperand moved = Save(new MirUse(new MirMove(movedPlace, move.Type) { OwnershipPlace = ownership }), source);
                 Activate(ownership ?? movedPlace, false, source);
+                EmptyMovedStorage(movedPlace, move.Type, source);
                 return moved;
             case BoundCopyExpression copy:
                 return TypeFacts.RequiresDestruction(copy.Type)
@@ -283,7 +301,15 @@ public sealed partial class MirLowerer
                 return Save(new MirAtomicValue(Value(cast.Expression), atomic), source);
             case BoundCastExpression cast: return Save(new MirCast(Value(cast.Expression), cast.Type), source);
             case BoundReferenceConversionExpression reference:
-                                return ConvertValue(Save(new MirBorrow(Place(reference.Source),
+                if (reference.Source.Type is StructTypeSymbol referenceStructure &&
+                    reference.ReferenceType.ElementType is InterfaceTypeSymbol referenceInterface)
+                {
+                    MirOperand view = Save(new MirInterfaceView(Address(Place(reference.Source), reference.Source.Type, source),
+                        referenceStructure, referenceInterface), source);
+                    return Save(new MirBorrow(((MirCopy)view).Place,
+                        reference.ReferenceType.IsReadonly ? MirBorrowKind.Shared : MirBorrowKind.Exclusive, reference.ReferenceType), source);
+                }
+                return ConvertValue(Save(new MirBorrow(Place(reference.Source),
                     reference.ReferenceType.IsReadonly ? MirBorrowKind.Shared : MirBorrowKind.Exclusive,
                     _types.ReferenceTo(reference.Source.Type, reference.ReferenceType.IsReadonly)), source), reference.Type, source);
             case BoundBinaryExpression binary when binary.OperatorKind is SyntaxKind.AmpersandAmpersandToken or SyntaxKind.PipePipeToken:
@@ -302,7 +328,22 @@ public sealed partial class MirLowerer
             case BoundCallExpression call:
                 return Call(new MirFunctionOperand(call.Function, _types.FunctionPointer(call.Type, call.Function.Parameters.Select(p => p.Type))), call.Arguments, source);
             case BoundIndirectCallExpression call: return Call(Snapshot(Value(call.Target), source), call.Arguments, source);
-            case BoundFunctionValueCallExpression call: return Call(Snapshot(Value(call.Target), source), call.Arguments, source);
+            case BoundFunctionValueCallExpression call:
+            {
+                MirOperand callable = Intrinsic(MirIntrinsicKind.CloneValue, [Snapshot(Value(call.Target), source)], call.Target.Type, source)!;
+                TemporaryGuard? callGuard = GuardValue(callable, source);
+                MirOperand? result = Call(callable, call.Arguments, source);
+                if (callGuard is not null)
+                {
+                    TemporaryGuard? resultGuard = result is null ? null : GuardValue(result, source);
+                    Block afterCall = NewBlock();
+                    Jump(CleanupChain([callGuard], afterCall, GuardedUnwind(_unwindTarget, source), false, source));
+                    _current = afterCall;
+                    EndValueGuard(callGuard, source);
+                    EndValueGuard(resultGuard, source);
+                }
+                return result;
+            }
             case BoundMethodCallExpression method:
                 return MethodCall(method.Method, method.Receiver, method.Arguments, method.IsPointerAccess, null, source);
             case BoundInterfaceMethodCallExpression method:
@@ -380,9 +421,14 @@ public sealed partial class MirLowerer
                 MirPlace parent = field.IsPointerAccess ? PointerStorage(field.Receiver).Project(new MirDerefProjection()) : Place(field.Receiver);
                 return parent.Project(new MirFieldProjection(field.Field));
             case BoundStaticFieldExpression field:
+                if (field.Field.IsThreadLocal && !ReferenceEquals(_bound.Symbol.ThreadLocalField, field.Field))
+                    _ = Intrinsic(MirIntrinsicKind.EnsureThreadLocal, [], BuiltinTypes.Void, Source(field), field: field.Field);
                 return ((MirCopy)Save(new MirStaticFieldAddress(field.Field, _types.PointerTo(field.Type)), Source(field))).Place.Project(new MirDerefProjection());
             case BoundLifetimeValueExpression lifetime:
-                return Place(lifetime.Source).Project(new MirLifetimeProjection());
+                MirPlace lifetimeStorage = Place(lifetime.Source);
+                if (lifetime.ModifierType is StorageTypeSymbol storageType)
+                    _ = Intrinsic(MirIntrinsicKind.CheckStorageInitialized, [Address(lifetimeStorage, storageType, Source(lifetime))], BuiltinTypes.Void, Source(lifetime));
+                return lifetimeStorage.Project(new MirLifetimeProjection());
             case BoundReferenceDereferenceExpression reference:
                 return Materialize(reference.Reference).Project(new MirDerefProjection());
             case BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } dereference:
@@ -439,7 +485,11 @@ public sealed partial class MirLowerer
         switch (expression.OperatorKind)
         {
             case SyntaxKind.AmpersandToken:
-                return Save(new MirBorrow(Place(expression.Operand), MirBorrowKind.Raw, expression.Type), source);
+                (MirPlace addressed, TypeSymbol addressedType) = Unpin(Place(expression.Operand), expression.Operand.Type);
+                if (addressedType is StorageTypeSymbol && expression.Type is PointerTypeSymbol pointer &&
+                    !TypeIdentity.AreSame(pointer.ElementType, addressedType))
+                    addressed = addressed.Project(new MirLifetimeProjection());
+                return Save(new MirBorrow(addressed, MirBorrowKind.Raw, expression.Type), source);
             case SyntaxKind.StarToken:
                 return Save(new MirUse(new MirCopy(Place(expression), expression.Type)), source);
             case SyntaxKind.PlusPlusToken or SyntaxKind.MinusMinusToken:
@@ -483,6 +533,17 @@ public sealed partial class MirLowerer
             if (previous is not null)
                 value = Save(new MirBinary(BinaryOperator(expression.OperatorKind), previous, value, expression.Type), source);
             value = Snapshot(ConvertValue(value, expression.Type, source), source);
+            TemporaryGuard? incomingArray = null;
+            if (Unwrap(expression.Expression) is BoundArrayCreationExpression { Storage: ArrayStorageKind.Heap } allocation &&
+                OwnedUnits(target).Any(guard => guard.Count is not null))
+            {
+                incomingArray = new(((MirCopy)value).Place, Temporary(BuiltinTypes.Bool, source),
+                    TypeFacts.GetCompleteDestructor(allocation.ElementType))
+                { Count = Temporary(BuiltinTypes.Int, source), FreeAllocation = true, Allocation = value };
+                MirOperand length = Intrinsic(MirIntrinsicKind.ArrayLength, [value], BuiltinTypes.Int, source)!;
+                _current.Statements.Add(new MirAssign(incomingArray.Count, new MirUse(length), source));
+                SetFlag(incomingArray.Active, true, source);
+            }
             Store(new MirAssign(target, new MirUse(value), source)
             {
                 WriteKind = expression.IsRawPlacement ? MirWriteKind.RawPlacement : expression.IsInitialization ? MirWriteKind.Initialize : MirWriteKind.Replace,
@@ -496,7 +557,8 @@ public sealed partial class MirLowerer
                 },
                 ConstructorField = expression.ConstructorField,
                 RequiresRuntimeInitializationCheck = expression.RequiresRuntimeInitializationCheck,
-            }, _bound.Symbol.FunctionKind is FunctionKind.Method or FunctionKind.Destructor && IsThisRooted(expression.Target));
+            }, _bound.Symbol.FunctionKind is FunctionKind.Method or FunctionKind.Destructor && IsThisRooted(expression.Target), incomingArray);
+            EndValueGuard(incomingArray, source);
             TransferArray(target, expression.Expression, source);
             return value;
         }

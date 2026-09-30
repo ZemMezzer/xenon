@@ -49,7 +49,7 @@ public sealed partial class MirLowerer
     private void ScopedBlock(BoundBlockStatement block)
     {
         Block outer = _unwindTarget, outerRethrow = _rethrowTarget;
-        MirOperand? stack = _bound.Symbol.HasStackArrays && !block.RetainsStackStorage ? Save(new MirStackSave(_types.PointerTo(BuiltinTypes.Byte)), _functionSource) : null;
+        MirOperand? stack = _bound.Symbol.HasStackArrays && !_bound.Body.RequiresSuspensionStateMachine && !block.RetainsStackStorage ? Save(new MirStackSave(_types.PointerTo(BuiltinTypes.Byte)), _functionSource) : null;
         var previousPlaces = _ownedPlaces.ToArray();
         var previousArrays = _arrayCreations.ToArray();
         int depth = _exits.Count;
@@ -255,7 +255,7 @@ public sealed partial class MirLowerer
         _ => false,
     };
 
-    private void Store(MirAssign assign, bool strongReceiverReplacement = false)
+    private void Store(MirAssign assign, bool strongReceiverReplacement = false, TemporaryGuard? incomingArray = null)
     {
         if ((assign.WriteKind == MirWriteKind.Replace || assign.RequiresRuntimeInitializationCheck) && assign.PreviousValueState != MirPreviousValueState.DefinitelyMoved)
         {
@@ -283,7 +283,16 @@ public sealed partial class MirLowerer
             {
                 TemporaryGuard? incoming = assign.Value is MirUse use ? GuardValue(use.Operand, assign.Source) : null;
                 Block after = NewBlock();
-                Jump(CleanupChain(guards, after, GuardedUnwind(_unwindTarget, assign.Source), false, assign.Source));
+                if (incomingArray is not null && guards is [var arrayGuard] && arrayGuard.Count is not null)
+                {
+                    Block outer = GuardedUnwind(_unwindTarget, assign.Source);
+                    Block remaining = CleanupChain(guards, outer, outer, true, assign.Source);
+                    Block discardNew = CleanupChain([incomingArray], remaining, remaining, true, assign.Source);
+                    Block destroyOld = DropGuard(arrayGuard, after, discardNew, assign.Source);
+                    End(new MirSwitch(new MirCopy(arrayGuard.Active, BuiltinTypes.Bool),
+                        [new(new(true, BuiltinTypes.Bool), destroyOld.Id)], after.Id, assign.Source));
+                }
+                else Jump(CleanupChain(guards, after, GuardedUnwind(_unwindTarget, assign.Source), false, assign.Source));
                 _current = after;
                 EndValueGuard(incoming, assign.Source);
             }

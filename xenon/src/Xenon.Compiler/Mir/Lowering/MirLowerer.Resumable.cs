@@ -37,9 +37,22 @@ public sealed partial class MirLowerer
             _unwindTarget = failed;
             _ = CallValues(Callee(call.Function), arguments, Source(call));
             if (postponed is not null) _current.Statements.AddRange(postponed);
-            _unwindTarget = outer;
             LocalVariableSymbol result = ((BoundVariableDeclarationStatement)_bound.Body.Statements[0]).Variable;
-            End(new MirReturn(new MirCopy(Variable(result), result.Type), Source(call)));
+            if (_bound.Body.RequiresSuspensionStateMachine)
+            {
+                if (TypeFacts.GetCompleteDestructor(result.Type) is { } destructor)
+                {
+                    Block done = NewBlock();
+                    End(new MirDrop(Variable(result), destructor, done.Id, failed.Id, Source(call)));
+                    _current = done;
+                }
+                if (_bound.Symbol.IsCapturingLambda)
+                    DestroyCallableControl(Intrinsic(MirIntrinsicKind.ClosureControl, [],
+                        _types.PointerTo(BuiltinTypes.Byte), Source(call))!, Source(call));
+                End(new MirReturn(null, Source(call)));
+            }
+            else End(new MirReturn(new MirCopy(Variable(result), result.Type), Source(call)));
+            _unwindTarget = outer;
         }
         finally
         {

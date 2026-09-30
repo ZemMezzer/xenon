@@ -12,6 +12,25 @@ public sealed partial class MirLowerer
         _ => place,
     };
 
+    private void EmptyMovedStorage(MirPlace place, TypeSymbol type, MirSourceInfo source)
+    {
+        switch (type)
+        {
+            case StorageTypeSymbol:
+                _current.Statements.Add(new MirSetStorageState(place, false, source));
+                break;
+            case PinTypeSymbol pin:
+                EmptyMovedStorage(place.Project(new MirLifetimeProjection()), pin.ElementType, source);
+                break;
+            case StructTypeSymbol structure:
+                if (structure.BaseType is { } baseType)
+                    EmptyMovedStorage(place.Project(new MirBaseProjection(baseType)), baseType, source);
+                foreach (FieldSymbol field in structure.Fields)
+                    EmptyMovedStorage(place.Project(new MirFieldProjection(field)), field.Type, source);
+                break;
+        }
+    }
+
     private static bool IsStorage(TypeSymbol type) => type is StorageTypeSymbol ||
         type is PinTypeSymbol pin && IsStorage(pin.ElementType);
 
@@ -36,7 +55,10 @@ public sealed partial class MirLowerer
             target = target.Project(new MirLifetimeProjection());
         }
         if (construction.Value is { } value)
-            _current.Statements.Add(new MirAssign(target, new MirUse(Value(value)), source));
+        {
+            MirOperand initialized = Value(value);
+            _current.Statements.Add(new MirAssign(target, new MirUse(initialized), source));
+        }
         else if (construction.Constructor is { } constructor)
         {
             _current.Statements.Add(new MirAssign(target, new MirDefault(construction.ValueType), source));

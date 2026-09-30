@@ -23,13 +23,15 @@ public enum MirIntrinsicKind
     MoveStorage,
     ConstructStorage,
     DestroyStorage,
-    CreateContinuation,
+    CreateContinuation, ReleaseClosure, EnsureThreadLocal,
+    ReleaseStrong, SharedPayload, ReleaseWeak, CallableControl, ClosureControl,
+    ReleaseCallableCount, CallableEnvironment, CallableDestructor,
     CheckStorageEmpty,
     CheckStorageInitialized,
     AdoptUnique, AdoptShared, ConvertWeak, LockWeak,
     DestroyFields, DestroyOwner, DestroyCallable,
     Allocate, Malloc, AlignedMalloc, Calloc, Free, Delete,
-    MakeCallable, AtomicLoad, AtomicInitialize, AtomicStore, AtomicUpdate, CompareExchange, Swap,
+    CompareExchangeOwned, AtomicExchange, MakeCallable, AtomicLoad, AtomicInitialize, AtomicStore, AtomicUpdate, CompareExchange, Swap,
     MarkStorageInitialized,
 }
 
@@ -43,9 +45,11 @@ public sealed record MirIntrinsicCall(MirIntrinsicKind Intrinsic, ImmutableArray
 {
     public FunctionSymbol? Function { get; init; }
     public TypeSymbol? SubjectType { get; init; }
+    public FieldSymbol? Field { get; init; }
     public ImmutableArray<CaptureVariableSymbol> Captures { get; init; } = [];
     public MirBinaryOperator? Operator { get; init; }
     public bool ReturnsOldValue { get; init; }
+    public ulong? FixedArrayLength { get; init; }
     public override IEnumerable<MirEdge> Successors => [new(Normal, MirEdgeKind.Normal), new(Unwind, MirEdgeKind.Unwind)];
 }
 
