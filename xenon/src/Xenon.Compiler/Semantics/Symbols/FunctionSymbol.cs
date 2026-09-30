@@ -551,7 +551,7 @@ public sealed class FunctionSymbol : Symbol
     internal SyntaxNode? ImplementationDeclaration => Implementation is SourceSymbolImplementation source
         ? source.Declaration : GenericDefinition?.ImplementationDeclaration;
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
-        Origin.Kind != SymbolOriginKind.Source || Declaration is TypeDeclarationSyntax ||
+        Origin.Kind != SymbolOriginKind.Source || Declaration is null or TypeDeclarationSyntax ||
             FunctionKind is FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor
             ? base.DeclaringSyntaxReferences : [new(Declaration)];
 }

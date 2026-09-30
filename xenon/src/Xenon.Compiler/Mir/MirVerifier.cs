@@ -18,7 +18,7 @@ public sealed class MirVerificationException(ImmutableArray<MirVerificationError
 }
 
 /// <summary>Structural and type validation; flow-sensitive checks are separate MIR passes.</summary>
-public sealed class MirVerifier
+public sealed partial class MirVerifier
 {
     private readonly MirFunction _function;
     private readonly Dictionary<MirLocalId, MirLocal> _locals = [];
@@ -85,6 +85,9 @@ public sealed class MirVerifier
                         RValue(assign.Value);
                         if (destinationType is not null) Same(assign.Value.Type, destinationType, "assignment");
                         break;
+                    case MirInitializeDispatch dispatch: Same(Place(dispatch.Place), dispatch.Type, "dispatch initialization"); break;
+                    case MirReleaseException release: Operand(release.Record); break;
+                    case MirForget forget: Local(forget.Place.Local); break;
                     case MirStorageLive live: Local(live.Local); break;
                     case MirStorageDead dead: Local(dead.Local); break;
                     default: Error($"unknown statement {statement.GetType().Name}"); break;
@@ -120,6 +123,14 @@ public sealed class MirVerifier
                         Error($"field {field.Field.Name} is not an instance field of {type}");
                     type = field.Field.Type;
                     break;
+                case MirOwnerStorageProjection:
+                    if (type is OwnershipTypeSymbol owner) type = owner.StorageType;
+                    else { Error($"cannot unwrap ownership storage {type}"); type = null; }
+                    break;
+                case MirLifetimeProjection:
+                    if (type is LifetimeModifierTypeSymbol modifier) type = modifier.ElementType;
+                    else { Error($"cannot unwrap lifetime storage {type}"); type = null; }
+                    break;
                 case MirDerefProjection:
                     TypeSymbol? element = type switch
                     {
@@ -131,9 +142,14 @@ public sealed class MirVerifier
                     type = element;
                     break;
                 case MirIndexProjection index:
-                    Operand(index.Index);
-                    if (index.Index is not (MirCopy or MirConstant)) Error("place index must be a copy or constant");
-                    if (index.Index.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("place index must be an integer");
+                    foreach (MirOperand dimension in index.Indices)
+                    {
+                        Operand(dimension);
+                        if (dimension is not (MirCopy or MirConstant)) Error("place index must be a copy or constant");
+                        if (dimension.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("place index must be an integer");
+                    }
+                    int rank = type is ArrayTypeSymbol ranked ? ranked.Rank : 1;
+                    if (index.Indices.Length != rank) Error($"index rank mismatch: expected {rank}, got {index.Indices.Length}");
                     TypeSymbol? indexed = type switch
                     {
                         ArrayTypeSymbol array => array.ElementType,
@@ -176,6 +192,10 @@ public sealed class MirVerifier
     {
         switch (value)
         {
+            case MirAtomicValue atomic:
+                Operand(atomic.Value);
+                Same(atomic.Value.Type, atomic.AtomicType.ElementType, "atomic initializer");
+                break;
             case MirUse use: Operand(use.Operand); break;
             case MirUnary unary:
                 Operand(unary.Operand);
@@ -183,11 +203,16 @@ public sealed class MirVerifier
                 break;
             case MirBinary binary:
                 Operand(binary.Left); Operand(binary.Right);
-                if (binary.Operator is not (MirBinaryOperator.ShiftLeft or MirBinaryOperator.ShiftRight))
+                bool pointerOffset = binary.Left.Type is PointerTypeSymbol &&
+                    binary.Right.Type is PrimitiveTypeSymbol { IsInteger: true } &&
+                    binary.Operator is MirBinaryOperator.Add or MirBinaryOperator.Subtract;
+                bool pointerDifference = binary.Left.Type is PointerTypeSymbol && binary.Right.Type is PointerTypeSymbol &&
+                    binary.Operator == MirBinaryOperator.Subtract;
+                if (!pointerOffset && binary.Operator is not (MirBinaryOperator.ShiftLeft or MirBinaryOperator.ShiftRight))
                     Same(binary.Right.Type, binary.Left.Type, "binary operand");
                 bool comparison = binary.Operator is MirBinaryOperator.Equal or MirBinaryOperator.NotEqual or
                     MirBinaryOperator.Less or MirBinaryOperator.LessOrEqual or MirBinaryOperator.Greater or MirBinaryOperator.GreaterOrEqual;
-                Same(binary.Type, comparison ? BuiltinTypes.Bool : binary.Left.Type, "binary result");
+                if (pointerDifference) { if (binary.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("pointer difference must be integral"); } else Same(binary.Type, comparison ? BuiltinTypes.Bool : binary.Left.Type, "binary result");
                 break;
             case MirCast cast: Operand(cast.Operand); break;
             case MirBorrow borrow:
@@ -213,6 +238,20 @@ public sealed class MirVerifier
                 }
                 else Error("aggregate requires a field-storage type");
                 break;
+            case MirTypeLayout layout:
+                if (layout.Query == MirLayoutQuery.FieldOffset && layout.Field is null) Error("field offset requires a field");
+                break;
+            case MirInterfaceView view:
+                Operand(view.Address);
+                if (view.Address.Type is not PointerTypeSymbol) Error("interface view requires an address");
+                break;
+            case MirStaticFieldAddress address:
+                if (!address.Field.IsStatic) Error("static address requires a static field");
+                Same(address.PointerType.ElementType, address.Field.Type, "static field address");
+                break;
+            case MirCurrentException: break;
+            case MirExceptionMatches match: Operand(match.Record); break;
+            case MirExceptionReference exceptionReference: Operand(exceptionReference.Record); break;
             case MirDefault: break;
             default: Error($"unknown rvalue {value.GetType().Name}"); break;
         }
@@ -222,7 +261,7 @@ public sealed class MirVerifier
     {
         switch (terminator)
         {
-            case MirGoto or MirResumeUnwind or MirUnreachable: break;
+            case MirGoto or MirResumeUnwind or MirUnreachable or MirAbort: break;
             case MirSwitch selection:
                 Operand(selection.Value);
                 if (selection.Cases.IsDefault) { Error("switch cases must be initialized"); break; }
@@ -234,8 +273,19 @@ public sealed class MirVerifier
                     if (!values.Add(item.Value.Value)) Error("duplicate switch case");
                 }
                 break;
+            case MirIntrinsicCall intrinsic:
+                if (intrinsic.Arguments.IsDefault) { Error("intrinsic arguments must be initialized"); break; }
+                foreach (MirOperand argument in intrinsic.Arguments) Operand(argument);
+                Intrinsic(intrinsic);
+                if (intrinsic.Destination is not null) Same(Place(intrinsic.Destination), intrinsic.ResultType, "intrinsic destination");
+                if (TypeIdentity.AreSame(intrinsic.ResultType, BuiltinTypes.Void) && intrinsic.Destination is not null)
+                    Error("void intrinsic has a destination");
+                break;
             case MirCall call:
                 Operand(call.Callee);
+                if (call.Receiver is not null) Operand(call.Receiver);
+                if (call.Callee is MirFunctionOperand direct && direct.Function.HasImplicitThis && call.Receiver is null)
+                    Error("instance call requires a receiver");
                 if (call.Arguments.IsDefault) { Error("call arguments must be initialized"); break; }
                 foreach (MirOperand argument in call.Arguments) Operand(argument);
                 TypeSymbol? destination = call.Destination is null ? null : Place(call.Destination);

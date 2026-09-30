@@ -42,7 +42,19 @@ public sealed record MirBasicBlock(MirBlockId Id, ImmutableArray<MirStatement> S
 public abstract record MirProjection;
 public sealed record MirFieldProjection(FieldSymbol Field) : MirProjection;
 public sealed record MirDerefProjection : MirProjection;
-public sealed record MirIndexProjection(MirOperand Index) : MirProjection;
+public sealed record MirIndexProjection : MirProjection
+{
+    public MirIndexProjection(MirOperand index) : this([index]) { }
+    public MirIndexProjection(ImmutableArray<MirOperand> indices) => Indices = indices.IsDefault ? [] : indices;
+    public ImmutableArray<MirOperand> Indices { get; }
+    public bool Equals(MirIndexProjection? other) => other is not null && Indices.SequenceEqual(other.Indices);
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        foreach (MirOperand index in Indices) hash.Add(index);
+        return hash.ToHashCode();
+    }
+}
 
 /// <summary>
 /// A storage location, never a value computation. Structural equality is essential
@@ -78,7 +90,12 @@ public sealed class MirPlace : IEquatable<MirPlace>
 public abstract record MirOperand(TypeSymbol Type);
 public sealed record MirConstant(object? Value, TypeSymbol ConstantType) : MirOperand(ConstantType);
 public sealed record MirCopy(MirPlace Place, TypeSymbol ValueType) : MirOperand(ValueType);
-public sealed record MirMove(MirPlace Place, TypeSymbol ValueType) : MirOperand(ValueType);
+public sealed record MirMove(MirPlace Place, TypeSymbol ValueType) : MirOperand(ValueType)
+{
+    // A reference-dereferenced value can transfer responsibility from a distinct
+    // semantic place. Preserve the binder's ownership identity for drop elaboration.
+    public MirPlace? OwnershipPlace { get; init; }
+}
 public sealed record MirFunctionOperand(FunctionSymbol Function, TypeSymbol CallableType) : MirOperand(CallableType);
 
 public enum MirUnaryOperator { Negate, Not, BitwiseNot }
@@ -101,7 +118,15 @@ public sealed record MirAggregate(TypeSymbol AggregateType, ImmutableArray<MirOp
 public sealed record MirDefault(TypeSymbol ValueType) : MirRValue(ValueType);
 
 public abstract record MirStatement(MirSourceInfo Source);
-public sealed record MirAssign(MirPlace Destination, MirRValue Value, MirSourceInfo Source) : MirStatement(Source);
+public enum MirWriteKind { Initialize, Replace, RawPlacement }
+public enum MirPreviousValueState { Live, DefinitelyMoved, MaybeMoved }
+public sealed record MirAssign(MirPlace Destination, MirRValue Value, MirSourceInfo Source) : MirStatement(Source)
+{
+    public MirWriteKind WriteKind { get; init; } = MirWriteKind.Initialize;
+    public MirPreviousValueState PreviousValueState { get; init; }
+    public FieldSymbol? ConstructorField { get; init; }
+    public bool RequiresRuntimeInitializationCheck { get; init; }
+}
 public sealed record MirStorageLive(MirLocalId Local, MirSourceInfo Source) : MirStatement(Source);
 public sealed record MirStorageDead(MirLocalId Local, MirSourceInfo Source) : MirStatement(Source);
 
@@ -130,6 +155,10 @@ public sealed record MirSwitch(MirOperand Value, ImmutableArray<MirSwitchCase> C
 public sealed record MirCall(MirOperand Callee, ImmutableArray<MirOperand> Arguments,
     MirPlace? Destination, MirBlockId Normal, MirBlockId Unwind, MirSourceInfo Source) : MirTerminator(Source)
 {
+    public MirOperand? Receiver { get; init; }
+    public InterfaceTypeSymbol? InterfaceType { get; init; }
+    public bool IsVirtual { get; init; }
+
     public override IEnumerable<MirEdge> Successors => [new(Normal, MirEdgeKind.Normal), new(Unwind, MirEdgeKind.Unwind)];
 }
 

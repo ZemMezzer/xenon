@@ -153,6 +153,30 @@ public sealed class MirCoreTests
     }
 
     [Fact]
+    public void MultidimensionalProjectionEqualityAndRankAreValidated()
+    {
+        MirPlace first = new MirPlace(new(0)).Project(new MirIndexProjection([Int(1), Int(2)]));
+        MirPlace second = new MirPlace(new(0)).Project(new MirIndexProjection([Int(1), Int(2)]));
+        Assert.Equal(first, second);
+        Assert.Equal(first.GetHashCode(), second.GetHashCode());
+        MirFunction function = Body(Block(0, new MirReturn(new MirCopy(first, BuiltinTypes.Int), Source))) with
+        { Locals = [Local(0, new TypeFactory().ArrayOf(BuiltinTypes.Int, 2))] };
+        Assert.Empty(MirVerifier.Verify(function));
+        Assert.Contains(MirVerifier.Verify(function with { Locals = [Local(0, new TypeFactory().ArrayOf(BuiltinTypes.Int))] }), e => e.Message.Contains("rank mismatch"));
+    }
+
+    [Fact]
+    public void IntrinsicsRejectMalformedSignatures()
+    {
+        MirFunction function = Body(Block(0, new MirIntrinsicCall(MirIntrinsicKind.CloneValue, [], BuiltinTypes.Int, new(new(0)), new(1), new(2), Source)),
+            Block(1, Return()), Block(2, new MirResumeUnwind(Source)));
+        Assert.Contains(MirVerifier.Verify(function), e => e.Message.Contains("argument count"));
+        function = Body(Block(0, new MirIntrinsicCall(MirIntrinsicKind.ArrayLength, [Int(2)], BuiltinTypes.Int, new(new(0)), new(1), new(2), Source)),
+            Block(1, Return()), Block(2, new MirResumeUnwind(Source)));
+        Assert.Contains(MirVerifier.Verify(function), e => e.Message.Contains("requires an array"));
+    }
+
+    [Fact]
     public void ModelContainsNoExecutableBoundTreePayloads()
     {
         Type[] model = typeof(MirFunction).Assembly.GetTypes().Where(t => t.Namespace == typeof(MirFunction).Namespace).ToArray();
