@@ -43,8 +43,11 @@ public static class MirPrinter
             result = projection switch
             {
                 MirFieldProjection field => $"{result}.{field.Field.Name}",
+                MirAtomicStorageProjection => $"{result}.atomic_value",
                 MirOwnerStorageProjection => $"{result}.owner_storage",
                 MirLifetimeProjection => $"{result}.value",
+                MirBaseProjection parent => $"{result}.base<{parent.BaseType}>",
+                MirLinearIndexProjection linear => $"{result}.element[{Operand(linear.Index)}]",
                 MirDerefProjection => $"(*{result})",
                 MirIndexProjection index => $"{result}[{string.Join(", ", index.Indices.Select(Operand))}]",
                 _ => throw new NotSupportedException($"Unknown MIR projection {projection.GetType().Name}."),
@@ -74,6 +77,9 @@ public static class MirPrinter
     private static string RValue(MirRValue value) => value switch
     {
         MirAtomicValue atomic => $"atomic<{atomic.AtomicType}>({Operand(atomic.Value)})",
+        MirStackAllocation allocation => $"stack.alloc<{allocation.PointerType.ElementType}>",
+        MirStackSave => "stack.save",
+        MirStorageState state => $"storage.initialized {Place(state.Place)}",
         MirUse use => Operand(use.Operand),
         MirUnary unary => $"{unary.Operator.ToString().ToLowerInvariant()}({Operand(unary.Operand)})",
         MirBinary binary => $"{binary.Operator.ToString().ToLowerInvariant()}({Operand(binary.Left)}, {Operand(binary.Right)})",
@@ -98,6 +104,8 @@ public static class MirPrinter
                 $" [write {assign.WriteKind.ToString().ToLowerInvariant()}, previous {assign.PreviousValueState.ToString().ToLowerInvariant()}" +
                 $"{(assign.ConstructorField is null ? "" : ", field " + assign.ConstructorField.Name)}" +
                 $"{(assign.RequiresRuntimeInitializationCheck ? ", checked" : "")}]"),
+        MirStackRestore restore => $"stack.restore {Operand(restore.Token)}",
+        MirSetStorageState state => $"storage.state {Place(state.Place)} = {state.Initialized.ToString().ToLowerInvariant()}",
         MirForget forget => $"forget {Place(forget.Place)}",
         MirStorageLive live => $"storage.live {live.Local}",
         MirStorageDead dead => $"storage.dead {dead.Local}",

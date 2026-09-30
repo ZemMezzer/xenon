@@ -22,7 +22,20 @@ public sealed partial class MirLowerer
     {
         MirOperand receiver = expression.IsPointerAccess ? Snapshot(Value(expression.Receiver), source) : Address(Place(expression.Receiver), expression.Receiver.Type, source);
         ImmutableArray<MirOperand> arguments = Arguments(expression.Arguments);
-        MirOperand current = CallValues(Callee(expression.Getter), arguments, source, receiver, expression.InterfaceType, expression.Getter.IsVirtual)!;
+        var originalGuards = new List<TemporaryGuard>();
+        var copyGuards = new List<TemporaryGuard>();
+        foreach (MirOperand argument in arguments)
+            if (GuardValue(argument, source) is { } guard) originalGuards.Add(guard);
+        var copies = ImmutableArray.CreateBuilder<MirOperand>();
+        foreach (MirOperand argument in arguments)
+        {
+            MirOperand copy = TypeFacts.RequiresDestruction(argument.Type)
+                ? Intrinsic(MirIntrinsicKind.CloneValue, [argument], argument.Type, source)! : argument;
+            copies.Add(copy);
+            if (GuardValue(copy, source) is { } guard) copyGuards.Add(guard);
+        }
+        foreach (TemporaryGuard guard in copyGuards) EndValueGuard(guard, source);
+        MirOperand current = CallValues(Callee(expression.Getter), copies.ToImmutable(), source, receiver, expression.InterfaceType, expression.Getter.IsVirtual)!;
         MirPlace? previous = _capturedPlace;
         _capturedPlace = ((MirCopy)Snapshot(current, source)).Place;
         MirOperand next;
@@ -32,6 +45,7 @@ public sealed partial class MirLowerer
             next = expression.UsesUserOperator ? right : Save(new MirBinary(BinaryOperator(expression.OperatorKind), current, right, expression.Type), source);
         }
         finally { _capturedPlace = previous; }
+        foreach (TemporaryGuard guard in originalGuards) EndValueGuard(guard, source);
         _ = CallValues(Callee(expression.Setter), arguments.Add(next), source, receiver, expression.InterfaceType, expression.Setter.IsVirtual);
         return next;
     }

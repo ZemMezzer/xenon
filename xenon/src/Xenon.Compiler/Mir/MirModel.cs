@@ -42,6 +42,8 @@ public sealed record MirBasicBlock(MirBlockId Id, ImmutableArray<MirStatement> S
 public abstract record MirProjection;
 public sealed record MirFieldProjection(FieldSymbol Field) : MirProjection;
 public sealed record MirDerefProjection : MirProjection;
+public sealed record MirLinearIndexProjection(MirOperand Index) : MirProjection;
+public sealed record MirBaseProjection(StructTypeSymbol BaseType) : MirProjection;
 public sealed record MirIndexProjection : MirProjection
 {
     public MirIndexProjection(MirOperand index) : this([index]) { }

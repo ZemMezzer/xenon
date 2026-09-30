@@ -6,6 +6,7 @@ namespace Xenon.Compiler.Mir;
 /// <summary>Unwraps the value storage, preserving its identity and lifetime state.</summary>
 public sealed record MirLifetimeProjection : MirProjection;
 public sealed record MirOwnerStorageProjection : MirProjection;
+public sealed record MirAtomicStorageProjection : MirProjection;
 
 public sealed record MirStaticFieldAddress(FieldSymbol Field, PointerTypeSymbol PointerType) : MirRValue(PointerType);
 
@@ -14,8 +15,8 @@ public sealed record MirInitializeDispatch(MirPlace Place, StructTypeSymbol Type
 public enum MirIntrinsicKind
 {
     CloneValue,
-    CreateStackArray,
-    CreateHeapArray,
+    AllocateStackArray,
+    AllocateHeapArray,
     ArrayLength,
     ArrayRank,
     ArrayDimension,
@@ -28,7 +29,7 @@ public enum MirIntrinsicKind
     AdoptUnique, AdoptShared, ConvertWeak, LockWeak,
     DestroyFields, DestroyOwner, DestroyCallable,
     Allocate, Malloc, AlignedMalloc, Calloc, Free, Delete,
-    MakeCallable, AtomicLoad, AtomicStore, AtomicUpdate, CompareExchange, Swap,
+    MakeCallable, AtomicLoad, AtomicInitialize, AtomicStore, AtomicUpdate, CompareExchange, Swap,
     MarkStorageInitialized,
 }
 
@@ -50,4 +51,6 @@ public sealed record MirIntrinsicCall(MirIntrinsicKind Intrinsic, ImmutableArray
 
 public enum MirLayoutQuery { Size, Alignment, FieldOffset }
 public sealed record MirTypeLayout(MirLayoutQuery Query, TypeSymbol SubjectType, FieldSymbol? Field) : MirRValue(BuiltinTypes.NUInt);
-public sealed record MirInterfaceView(MirOperand Address, StructTypeSymbol SourceType, InterfaceTypeSymbol InterfaceType) : MirRValue(InterfaceType);public sealed record MirAtomicValue(MirOperand Value, AtomicTypeSymbol AtomicType) : MirRValue(AtomicType);
+public sealed record MirInterfaceView(MirOperand Address, StructTypeSymbol SourceType, InterfaceTypeSymbol InterfaceType) : MirRValue(InterfaceType);
+
+public sealed record MirAtomicValue(MirOperand Value, AtomicTypeSymbol AtomicType) : MirRValue(AtomicType);

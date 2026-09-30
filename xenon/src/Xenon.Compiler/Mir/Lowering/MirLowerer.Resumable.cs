@@ -8,6 +8,7 @@ public sealed partial class MirLowerer
 {
     private BoundCallExpression? _completionExpression;
     private ImmutableArray<MirOperand> _completionArguments;
+    private List<TemporaryGuard> _completionGuards = [];
 
     private void Complete(BoundReturnStatement statement)
     {
@@ -15,24 +16,39 @@ public sealed partial class MirLowerer
             throw new InvalidOperationException("An async return must invoke its bound completion operator.");
         BoundCallExpression? previous = _completionExpression;
         ImmutableArray<MirOperand> previousArguments = _completionArguments;
+        List<TemporaryGuard> previousCompletionGuards = _completionGuards;
+        List<TemporaryGuard> previousPendingGuards = _pendingReturnGuards;
         _completionExpression = call;
         _completionArguments = [];
+        _completionGuards = [];
+        _pendingReturnGuards = _completionGuards;
         try
         {
             _ = Expression(statement.Expression);
             ImmutableArray<MirOperand> arguments = _completionArguments;
-            ExitActions(0);
+            DiscardPending(previousPendingGuards, Source(call));
+            List<MirReleaseException>? postponed = call.Function.OperatorKind == OperatorKind.Reject ? [] : null;
+            ExitActions(0, postponed);
             if (_current.Terminator is not null) return;
+            foreach (TemporaryGuard guard in _completionGuards) EndValueGuard(guard, Source(call));
             Block outer = _unwindTarget;
             Block failed = NewBlock();
             failed.Terminator = new MirAbort(Source(call));
             _unwindTarget = failed;
             _ = CallValues(Callee(call.Function), arguments, Source(call));
+            if (postponed is not null) _current.Statements.AddRange(postponed);
             _unwindTarget = outer;
             LocalVariableSymbol result = ((BoundVariableDeclarationStatement)_bound.Body.Statements[0]).Variable;
             End(new MirReturn(new MirCopy(Variable(result), result.Type), Source(call)));
         }
-        finally { _completionExpression = previous; _completionArguments = previousArguments; }
+        finally
+        {
+            foreach (TemporaryGuard guard in _completionGuards) _valueGuards.Remove(guard);
+            _completionExpression = previous;
+            _completionArguments = previousArguments;
+            _completionGuards = previousCompletionGuards;
+            _pendingReturnGuards = previousPendingGuards;
+        }
     }
 
     private MirOperand? Await(BoundAwaitExpression expression)
@@ -54,12 +70,20 @@ public sealed partial class MirLowerer
                 SetFlag(guard.Active, true, source);
             }
         }
-        Block failure = CleanupChain(storageGuards, outer, outer, true, source);
+        Block storageDead = outer;
+        if (resultStorage is not null)
+        {
+            storageDead = NewBlock();
+            storageDead.Statements.Add(new MirStorageDead(resultStorage.Local, source));
+            storageDead.Terminator = new MirGoto(outer.Id, source);
+        }
+        Block failure = CleanupChain(storageGuards, storageDead, storageDead, true, source);
         _unwindTarget = failure;
         Block retry = NewBlock(), pending = NewBlock(), ready = NewBlock();
         Jump(retry);
         _current = retry;
         MirPlace continuation = Variable(expression.Continuation);
+        _current.Statements.Add(new MirStorageLive(continuation.Local, source));
         MirOperand callback = Intrinsic(MirIntrinsicKind.CreateContinuation, [], expression.Continuation.Type, source)!;
         _current.Statements.Add(new MirAssign(continuation, new MirUse(callback), source));
         var continuationGuard = new TemporaryGuard(continuation, Temporary(BuiltinTypes.Bool, source),
@@ -74,6 +98,7 @@ public sealed partial class MirLowerer
         Block check = NewBlock();
         Jump(CleanupChain([continuationGuard], check, failure, false, source));
         _current = check;
+        _current.Statements.Add(new MirStorageDead(continuation.Local, source));
         End(new MirSwitch(complete, [new(new(true, BuiltinTypes.Bool), ready.Id)], pending.Id, source));
         _current = pending;
         _unwindTarget = failure;
@@ -81,8 +106,8 @@ public sealed partial class MirLowerer
             _ = Intrinsic(MirIntrinsicKind.CheckStorageEmpty, [Address(resultStorage, expression.ResultStorage!.Type, source)], BuiltinTypes.Void, source);
         End(new MirSuspend(null, retry.Id, source));
         _current = ready;
-        MirOperand? result = resultStorage is null ? null : Intrinsic(MirIntrinsicKind.MoveStorage,
-            [Address(resultStorage, expression.ResultStorage!.Type, source)], expression.Type, source);
+        MirOperand? result = resultStorage is null ? null : MoveStorage(resultStorage, (StorageTypeSymbol)expression.ResultStorage!.Type, source);
+        if (resultStorage is not null) _current.Statements.Add(new MirStorageDead(resultStorage.Local, source));
         foreach (TemporaryGuard guard in storageGuards) SetFlag(guard.Active, false, source);
         _unwindTarget = outer;
         return result;

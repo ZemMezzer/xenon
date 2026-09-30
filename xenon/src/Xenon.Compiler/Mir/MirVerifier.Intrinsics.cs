@@ -8,11 +8,11 @@ public sealed partial class MirVerifier
     {
         int arity = operation.Intrinsic switch
         {
-            MirIntrinsicKind.CreateStackArray or MirIntrinsicKind.CreateHeapArray => operation.ResultType is ArrayTypeSymbol array ? array.Rank : -1,
+            MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray => operation.ResultType is ArrayTypeSymbol array ? array.Rank : -1,
             MirIntrinsicKind.ArrayDimension or MirIntrinsicKind.ConstructStorage => 2,
             MirIntrinsicKind.CreateContinuation or MirIntrinsicKind.Allocate => 0,
             MirIntrinsicKind.MakeCallable => operation.Captures.Length,
-            MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc or MirIntrinsicKind.Swap or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate => 2,
+            MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc or MirIntrinsicKind.Swap or MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate => 2,
             MirIntrinsicKind.CompareExchange => 3,
             _ => 1,
         };
@@ -23,7 +23,7 @@ public sealed partial class MirVerifier
             case MirIntrinsicKind.CloneValue:
                 Same(first!.Type, operation.ResultType, "clone value");
                 break;
-            case MirIntrinsicKind.CreateStackArray or MirIntrinsicKind.CreateHeapArray:
+            case MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray:
                 foreach (MirOperand dimension in operation.Arguments)
                     if (dimension.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("array dimension must be an integer");
                 break;
@@ -80,7 +80,7 @@ public sealed partial class MirVerifier
                 for (int index = 0; index < operation.Captures.Length; index++)
                     Same(operation.Arguments[index].Type, operation.Captures[index].Type, "capture initializer");
                 break;
-            case MirIntrinsicKind.AtomicLoad or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate:
+            case MirIntrinsicKind.AtomicLoad or MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate:
                 if (first!.Type is not PointerTypeSymbol { ElementType: AtomicTypeSymbol atomic }) { Error("atomic operation requires an atomic address"); break; }
                 Same(operation.ResultType, atomic.ElementType, "atomic result");
                 if (operation.Arguments.Length == 2) Same(operation.Arguments[1].Type, atomic.ElementType, "atomic value");

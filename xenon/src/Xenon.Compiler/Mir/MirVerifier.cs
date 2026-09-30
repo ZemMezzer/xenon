@@ -87,7 +87,9 @@ public sealed partial class MirVerifier
                         break;
                     case MirInitializeDispatch dispatch: Same(Place(dispatch.Place), dispatch.Type, "dispatch initialization"); break;
                     case MirReleaseException release: Operand(release.Record); break;
-                    case MirForget forget: Local(forget.Place.Local); break;
+                    case MirStackRestore restore: Operand(restore.Token); if (restore.Token.Type is not PointerTypeSymbol) Error("stack token requires a pointer"); break;
+                    case MirSetStorageState state: if (Place(state.Place) is not StorageTypeSymbol) Error("storage state requires a wrapper"); break;
+                    case MirForget forget: Place(forget.Place); break;
                     case MirStorageLive live: Local(live.Local); break;
                     case MirStorageDead dead: Local(dead.Local); break;
                     default: Error($"unknown statement {statement.GetType().Name}"); break;
@@ -123,6 +125,10 @@ public sealed partial class MirVerifier
                         Error($"field {field.Field.Name} is not an instance field of {type}");
                     type = field.Field.Type;
                     break;
+                case MirAtomicStorageProjection:
+                    if (type is AtomicTypeSymbol atomicStorage) type = atomicStorage.ElementType;
+                    else { Error("atomic storage projection requires an atomic wrapper"); type = null; }
+                    break;
                 case MirOwnerStorageProjection:
                     if (type is OwnershipTypeSymbol owner) type = owner.StorageType;
                     else { Error($"cannot unwrap ownership storage {type}"); type = null; }
@@ -130,6 +136,17 @@ public sealed partial class MirVerifier
                 case MirLifetimeProjection:
                     if (type is LifetimeModifierTypeSymbol modifier) type = modifier.ElementType;
                     else { Error($"cannot unwrap lifetime storage {type}"); type = null; }
+                    break;
+                case MirBaseProjection parent:
+                    if (type is not StructTypeSymbol derived || !TypeIdentity.AreSame(derived.BaseType, parent.BaseType))
+                        Error("base projection requires the immediate base subobject");
+                    type = parent.BaseType;
+                    break;
+                case MirLinearIndexProjection linear:
+                    Operand(linear.Index);
+                    if (type is ArrayTypeSymbol linearArray) type = linearArray.ElementType;
+                    else { Error("linear element projection requires an array"); type = null; }
+                    if (linear.Index.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("linear index must be integral");
                     break;
                 case MirDerefProjection:
                     TypeSymbol? element = type switch
@@ -196,6 +213,8 @@ public sealed partial class MirVerifier
                 Operand(atomic.Value);
                 Same(atomic.Value.Type, atomic.AtomicType.ElementType, "atomic initializer");
                 break;
+            case MirStackSave or MirStackAllocation: break;
+            case MirStorageState state: if (Place(state.Place) is not StorageTypeSymbol) Error("storage state requires a wrapper"); break;
             case MirUse use: Operand(use.Operand); break;
             case MirUnary unary:
                 Operand(unary.Operand);

@@ -10,3 +10,9 @@ public sealed record MirAbort(MirSourceInfo Source) : MirTerminator(Source)
 {
     public override IEnumerable<MirEdge> Successors => [];
 }
+
+public sealed record MirStorageState(MirPlace Place) : MirRValue(Xenon.Compiler.Semantics.Symbols.BuiltinTypes.Bool);
+public sealed record MirSetStorageState(MirPlace Place, bool Initialized, MirSourceInfo Source) : MirStatement(Source);
+public sealed record MirStackSave(Xenon.Compiler.Semantics.Symbols.PointerTypeSymbol PointerType) : MirRValue(PointerType);
+public sealed record MirStackRestore(MirOperand Token, MirSourceInfo Source) : MirStatement(Source);
+public sealed record MirStackAllocation(Xenon.Compiler.Semantics.Symbols.PointerTypeSymbol PointerType) : MirRValue(PointerType);

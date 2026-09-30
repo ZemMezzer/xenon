@@ -6,16 +6,24 @@ namespace Xenon.Compiler.Mir.Lowering;
 
 public sealed partial class MirLowerer
 {
-    private sealed class TemporaryGuard(MirPlace place, MirPlace active, FunctionSymbol destructor)
+    private sealed class TemporaryGuard(MirPlace place, MirPlace active, FunctionSymbol? destructor)
     {
         public MirPlace Place { get; } = place;
         public MirPlace Active { get; } = active;
-        public FunctionSymbol Destructor { get; } = destructor;
+        public FunctionSymbol? Destructor { get; } = destructor;
+        public bool FreeAllocation { get; init; }
+        public MirOperand? Allocation { get; init; }
         public bool Emitted { get; set; }
+        public MirPlace? Order { get; init; }
+        public MirPlace? Count { get; init; }
+        public MirPlace? History { get; set; }
+        public StructTypeSymbol? HistoryType { get; set; }
+        public MirPlace? Counter { get; init; }
     }
     private Dictionary<BoundExpression, TemporaryGuard> _temporaryGuards = new(ReferenceEqualityComparer.Instance);
     private HashSet<BoundMoveExpression> _deferredArgumentMoves = new(ReferenceEqualityComparer.Instance);
     private List<MirPlace> _pendingMoves = [];
+    private readonly Dictionary<BoundMoveExpression, MirPlace> _movedPlaces = new(ReferenceEqualityComparer.Instance);
 
     private MirOperand? Expression(BoundExpression expression)
     {
@@ -56,7 +64,7 @@ public sealed partial class MirLowerer
         {
             MirOperand? result = Expression(expression.Expression);
             Block after = NewBlock();
-            Jump(CleanupChain(guards, after, outerUnwind, exceptional: false, source));
+            Jump(CleanupChain(guards, after, GuardedUnwind(outerUnwind, source), exceptional: false, source));
             _current = after;
             foreach (TemporaryGuard guard in guards) _current.Statements.Add(new MirStorageDead(guard.Place.Local, source));
             return result;
@@ -69,6 +77,8 @@ public sealed partial class MirLowerer
     private Block CleanupChain(IReadOnlyList<TemporaryGuard> guards, Block normal, Block unwind,
         bool exceptional, MirSourceInfo source)
     {
+        if (guards.Any(guard => guard.Order is not null))
+            return OrderedCleanup(guards, normal, unwind, exceptional, source);
         Block next = normal;
         Block? abort = null;
         if (exceptional && guards.Count != 0)
@@ -79,12 +89,11 @@ public sealed partial class MirLowerer
         for (int index = 0; index < guards.Count; index++)
         {
             TemporaryGuard guard = guards[index];
-            Block test = NewBlock(), drop = NewBlock();
+            Block test = NewBlock();
+            Block failure = exceptional ? abort! : CleanupChain(guards.Take(index + (guard.Count is null ? 0 : 1)).ToArray(), unwind, unwind, true, source);
+            Block drop = DropGuard(guard, next, failure, source);
             test.Terminator = new MirSwitch(new MirCopy(guard.Active, BuiltinTypes.Bool),
                 [new(new(true, BuiltinTypes.Bool), drop.Id)], next.Id, source);
-            drop.Statements.Add(new MirAssign(guard.Active, new MirUse(new MirConstant(false, BuiltinTypes.Bool)), source));
-            Block failure = exceptional ? abort! : CleanupChain(guards.Take(index).ToArray(), unwind, unwind, true, source);
-            drop.Terminator = new MirDrop(guard.Place, guard.Destructor, next.Id, failure.Id, source);
             next = test;
         }
         return next;
@@ -101,7 +110,7 @@ public sealed partial class MirLowerer
         try
         {
             ImmutableArray<MirOperand> values = [.. arguments.Select(argument => Snapshot(Value(argument), Source(argument)))];
-            foreach (MirPlace place in _pendingMoves) _current.Statements.Add(new MirForget(place, _functionSource));
+            foreach (MirPlace place in _pendingMoves) Forget(place, _functionSource);
             foreach (BoundExpression argument in arguments)
                 if (_temporaryGuards.TryGetValue(Unwrap(argument), out TemporaryGuard? guard))
                     SetFlag(guard.Active, false, Source(argument));

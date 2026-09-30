@@ -9,6 +9,7 @@ public sealed partial class MirLowerer
     private sealed record ExitAction(BoundBlockStatement? Finally, MirOperand? Record,
         bool Abandon, Block Unwind, Block Rethrow)
     {
+        public LexicalCleanup? Cleanup { get; init; }
         public ExitTarget[] Breaks { get; init; } = [];
         public ExitTarget[] Continues { get; init; } = [];
     }
@@ -20,7 +21,7 @@ public sealed partial class MirLowerer
         if (_current.Terminator is null) End(new MirGoto(target.Block, _functionSource));
     }
 
-    private void ExitActions(int retainedDepth)
+    private void ExitActions(int retainedDepth, List<MirReleaseException>? postponedRecords = null)
     {
         ExitAction[] saved = _exits.ToArray();
         Block unwind = _unwindTarget, rethrow = _rethrowTarget;
@@ -32,8 +33,21 @@ public sealed partial class MirLowerer
                 _exits.RemoveAt(index);
                 _unwindTarget = action.Unwind;
                 _rethrowTarget = action.Rethrow;
+                if (action.Cleanup is { } cleanup)
+                {
+                    Block after = NewBlock();
+                    Jump(CleanupChain(cleanup.Guards, after, GuardedUnwind(action.Unwind, _functionSource), false, _functionSource));
+                    _current = after;
+                    foreach (MirLocalId local in cleanup.Locals)
+                        _current.Statements.Add(new MirStorageDead(local, _functionSource));
+                    if (cleanup.Stack is { } stack) _current.Statements.Add(new MirStackRestore(stack, _functionSource));
+                }
                 if (action.Record is { } record)
-                    _current.Statements.Add(new MirReleaseException(record, action.Abandon, _functionSource));
+                {
+                    var release = new MirReleaseException(record, action.Abandon, _functionSource);
+                    if (postponedRecords is not null && !action.Abandon) postponedRecords.Add(release);
+                    else _current.Statements.Add(release);
+                }
                 if (action.Finally is { } finalizer)
                 {
                     ExitTarget[] breaks = _breaks.ToArray(), continues = _continues.ToArray();
@@ -121,7 +135,9 @@ public sealed partial class MirLowerer
             // A return/break/continue suppresses the propagating exception. A
             // normal finalizer completion preserves it for the outer handler.
             _exits.Add(new(null, pending, true, outerUnwind, outerRethrow));
-            Statement(exceptionalFinalizer);
+            _exceptionalFinalizerDepth++;
+            try { Statement(exceptionalFinalizer); }
+            finally { _exceptionalFinalizerDepth--; }
             _exits.RemoveAt(_exits.Count - 1);
         }
         if (_current.Terminator is null) End(new MirGoto(outerUnwind.Id, _functionSource));

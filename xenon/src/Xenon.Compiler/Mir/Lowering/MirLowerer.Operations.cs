@@ -24,13 +24,19 @@ public sealed partial class MirLowerer
             case BoundLockExpression locked:
                 return Intrinsic(MirIntrinsicKind.LockWeak, [Value(locked.Weak)], locked.Type, source);
             case BoundDestroyFieldsExpression destruction:
-                return Intrinsic(MirIntrinsicKind.DestroyFields, [ThisAddress(destruction.StructType)], BuiltinTypes.Void, source, subjectType: destruction.StructType);
+                DestroyFields(source);
+                return null;
+            case BoundOwnershipDestructionExpression { OwnershipType: UniqueTypeSymbol } destruction:
+                MirPlace owner = ((MirCopy)ThisAddress(destruction.OwnershipType)).Place.Project(new MirDerefProjection()).Project(new MirOwnerStorageProjection());
+                DeleteValue(Save(new MirUse(new MirCopy(owner, destruction.OwnershipType.StorageType)), source), destruction.ElementDestructor, source);
+                return null;
             case BoundOwnershipDestructionExpression destruction:
                 return Intrinsic(MirIntrinsicKind.DestroyOwner, [ThisAddress(destruction.OwnershipType)], BuiltinTypes.Void, source,
                     destruction.ElementDestructor, destruction.OwnershipType);
             case BoundStorageDestructionExpression destruction:
-                return Intrinsic(MirIntrinsicKind.DestroyStorage, [ThisAddress(destruction.StorageType)], BuiltinTypes.Void, source,
-                    destruction.ElementDestructor, destruction.StorageType);
+                MirPlace wrapper = ((MirCopy)ThisAddress(destruction.StorageType)).Place.Project(new MirDerefProjection());
+                DestroyStorage(wrapper, destruction.StorageType, destruction.ElementDestructor, source);
+                return null;
             case BoundFunctionValueDestructionExpression destruction:
                 return Intrinsic(MirIntrinsicKind.DestroyCallable, [ThisAddress(destruction.FunctionValueType)], BuiltinTypes.Void, source,
                     subjectType: destruction.FunctionValueType);
@@ -55,28 +61,27 @@ public sealed partial class MirLowerer
             case BoundFreeExpression free:
                 return Intrinsic(MirIntrinsicKind.Free, [Value(free.Pointer)], BuiltinTypes.Void, source);
             case BoundDeleteExpression deletion:
-                return Intrinsic(MirIntrinsicKind.Delete, [Value(deletion.Pointer)], BuiltinTypes.Void, source, deletion.Destructor);
+                DeleteValue(Snapshot(Value(deletion.Pointer), source), deletion.Destructor, source);
+                return null;
             case BoundFunctionValueExpression callable:
                 return Intrinsic(MirIntrinsicKind.MakeCallable, Arguments([.. callable.Captures.Select(c => c.Initializer)]), callable.Type, source,
                     callable.InvokeFunction, captures: [.. callable.Captures.Select(c => c.Variable)]);
             case BoundExplicitDestructExpression destruction:
             {
-                MirPlace place = Place(destruction.Target);
+                MirPlace tracked = Place(destruction.Target);
+                (MirPlace place, TypeSymbol type) = Unpin(tracked, destruction.Target.Type);
+                if (type is StorageTypeSymbol)
+                {
+                    _ = Intrinsic(MirIntrinsicKind.CheckStorageInitialized, [Address(place, type, source)], BuiltinTypes.Void, source);
+                    _current.Statements.Add(new MirSetStorageState(place, false, source));
+                    place = place.Project(new MirLifetimeProjection());
+                }
+                Forget(destruction.TrackedVariable is { } variable
+                    ? new MirPlace(Variable(variable).Local, [.. destruction.TrackedPath.Select(field => (MirProjection)new MirFieldProjection(field))])
+                    : tracked, source);
                 Block after = NewBlock();
-                End(new MirDrop(place, destruction.Destructor, after.Id, _unwindTarget.Id, source));
+                End(new MirDrop(place, destruction.Destructor, after.Id, GuardedUnwind(_unwindTarget, source).Id, source));
                 _current = after;
-                _current.Statements.Add(new MirForget(place, source));
-                return null;
-            }
-            case BoundStorageConstructExpression storage:
-            {
-                MirPlace target = Place(storage.Storage);
-                MirOperand address = Address(target, storage.Storage.Type, source);
-                _ = Intrinsic(MirIntrinsicKind.CheckStorageEmpty, [address], BuiltinTypes.Void, source);
-                MirPlace element = target.Project(new MirLifetimeProjection());
-                _current.Statements.Add(new MirAssign(element, new MirDefault(storage.ValueType), source));
-                _ = Call(Callee(storage.Constructor!), storage.Arguments, source, Address(element, storage.ValueType, source));
-                _ = Intrinsic(MirIntrinsicKind.MarkStorageInitialized, [address], BuiltinTypes.Void, source);
                 return null;
             }
             case BoundNewExpression allocation: return Allocate(allocation, source);
