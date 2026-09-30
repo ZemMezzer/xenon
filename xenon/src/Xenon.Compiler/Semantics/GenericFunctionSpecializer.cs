@@ -127,6 +127,11 @@ internal sealed class GenericFunctionSpecializer
         specialized.SetGenericSpecialization(definition, typeArguments);
         specialized.SetReceiverMoveEffects(definition.ReceiverMoveEffects);
         specialized.SetReferenceReturnOrigins(definition.ReferenceReturnOrigins);
+        specialized.ResultLifetimeDependencies = definition.ResultLifetimeDependencies;
+        specialized.LifetimeStores = definition.LifetimeStores;
+        specialized.IsAsync = definition.IsAsync;
+        specialized.ReturnsResumableOperation = definition.ReturnsResumableOperation;
+        specialized.CreatesResumableOperation = definition.CreatesResumableOperation;
         specialized.SetSharedReturnOrigins(definition.SharedReturnOrigins);
         specialized.SetReferenceFieldOrigins(definition.ReferenceFieldOrigins);
         _symbols.Add(key, specialized);

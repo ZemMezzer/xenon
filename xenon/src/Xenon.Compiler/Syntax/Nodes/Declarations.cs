@@ -215,6 +215,8 @@ public sealed record MethodDeclarationSyntax(
     BlockStatementSyntax? Body,
     SyntaxToken? SemicolonToken) : TypeMemberDeclarationSyntax
 {
+    public SyntaxToken? AsyncKeyword { get; init; }
+    public bool IsAsync => AsyncKeyword is not null;
     public SyntaxToken? OperatorKeyword { get; init; }
     public bool IsOperator => OperatorKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.MethodDeclaration;
@@ -362,6 +364,8 @@ public sealed record InterfaceMethodDeclarationSyntax(
     SyntaxToken CloseParenthesisToken,
     SyntaxToken SemicolonToken) : TypeMemberDeclarationSyntax
 {
+    public SyntaxToken? AsyncKeyword { get; init; }
+    public bool IsAsync => AsyncKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.InterfaceMethodDeclaration;
     public bool IsReadonly => ReadonlyKeyword is not null;
 }
@@ -428,6 +432,8 @@ public sealed record FunctionDeclarationSyntax(
     BlockStatementSyntax? Body,
     SyntaxToken? SemicolonToken) : MemberDeclarationSyntax
 {
+    public SyntaxToken? AsyncKeyword { get; init; }
+    public bool IsAsync => AsyncKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.FunctionDeclaration;
 
     public SyntaxToken? ReadonlyKeyword { get; init; }

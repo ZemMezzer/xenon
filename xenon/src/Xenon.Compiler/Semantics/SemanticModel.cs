@@ -231,7 +231,7 @@ public sealed class SemanticModel
                 names.Add(group.Key);
             }
         }
-        return result.ToImmutable();
+        return result.Where(symbol => !EditorSymbolClassifier.HasReservedName(symbol)).ToImmutableArray();
     }
 
     public CompletionReceiverInfo GetCompletionReceiver(ExpressionSyntax receiver,
@@ -278,6 +278,7 @@ public sealed class SemanticModel
             SourceText? source = SyntaxNavigator.GetTokens(access).FirstOrDefault()?.Location.Source;
             if (source is not null && _semanticInfo.FileScopes.TryGetValue(source, out FileSymbolScope? fileScope))
                 return fileScope.GetNamespaceSymbolsForTooling(receiver.Namespace)
+                    .Where(symbol => !EditorSymbolClassifier.HasReservedName(symbol))
                     .OrderBy(symbol => symbol.Name, StringComparer.Ordinal)
                     .ThenBy(symbol => symbol.QualifiedName, StringComparer.Ordinal).ToImmutableArray();
             return [];
@@ -329,7 +330,7 @@ public sealed class SemanticModel
             AddVisibleGroups(containingType.GetMembers());
         if (_semanticInfo.FileScopes.TryGetValue(source, out FileSymbolScope? fileScope))
             AddVisibleGroups(fileScope.GetFileSymbols());
-        return result.ToImmutable();
+        return result.Where(symbol => !EditorSymbolClassifier.HasReservedName(symbol)).ToImmutableArray();
 
         void AddVisibleGroups(IEnumerable<Symbol> symbols)
         {
@@ -356,7 +357,7 @@ public sealed class SemanticModel
                 .OrderBy(member => member.Name, StringComparer.Ordinal).ToImmutableArray();
         if (receiverType is GenericParameterSymbol genericParameter)
             return GenericConstraintMemberLookup.GetMembers(genericParameter)
-                .Where(member => member.IsUserVisible)
+                .Where(member => member.IsUserVisible && !EditorSymbolClassifier.HasReservedName(member))
                 .Where(member => IsApplicableMember(member, options))
                 .Where(member => options.IncludeInaccessible || IsAccessible(member,
                     GetContainingTypeAtPosition(position), null))
@@ -378,7 +379,7 @@ public sealed class SemanticModel
         if (type is null) return [];
         DeclaredTypeSymbol? withinType = GetContainingTypeAtPosition(position);
         return AllMembers(type).Distinct()
-            .Where(member => member.IsUserVisible)
+            .Where(member => member.IsUserVisible && !EditorSymbolClassifier.HasReservedName(member))
             .Where(member => IsApplicableMember(member, options))
             .Where(member => options.IncludeInaccessible || IsAccessible(member, withinType, type))
             .OrderBy(member => member.Name, StringComparer.Ordinal)
@@ -473,6 +474,7 @@ public sealed class SemanticModel
 
     private static bool IsReferenceableSymbol(Symbol symbol)
     {
+        if (EditorSymbolClassifier.HasReservedName(symbol)) return false;
         Symbol sourceIdentity = symbol switch
         {
             FunctionSymbol { OriginalDefinition: not null } function => function.OriginalDefinition,

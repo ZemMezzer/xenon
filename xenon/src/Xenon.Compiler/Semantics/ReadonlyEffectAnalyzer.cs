@@ -242,6 +242,10 @@ internal sealed partial class ReadonlyEffectAnalyzer(
                 Evaluate(metadata.Receiver);
                 if (metadata.Dimension is { } dimension) Evaluate(dimension);
                 return [];
+            case BoundAwaitExpression awaiting:
+                Evaluate(awaiting.Operand);
+                Evaluate(awaiting.Operation);
+                return [Root(awaiting)];
             case BoundCallExpression call:
                 return IsAccessor(call.Function) && !call.Function.IsReadonly
                     ? ContextualDispatch(call.Function, call.Arguments, [], call)

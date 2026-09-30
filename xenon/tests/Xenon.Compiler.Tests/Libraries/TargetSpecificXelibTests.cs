@@ -211,11 +211,11 @@ public sealed class TargetSpecificXelibTests
     }
 
     [Fact]
-    public void OldFormatIsRejectedWithRebuildDiagnostic()
+    public void UnsupportedFormatIsRejectedWithRebuildDiagnostic()
     {
         byte[] bytes = Build("namespace Lib; public int Value() { return 1; }");
         // Header: magic[8], header size[2], container[2], library IR[2].
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(12, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(12, 2), (ushort)(XelibVersions.LibraryIr + 1));
         var error = Assert.Throws<XelibFormatException>(() => XelibReader.Read(bytes));
         Assert.Equal(XelibErrorCode.UnsupportedLibraryIrVersion, error.Code);
         Assert.Contains("rebuild", error.Message);

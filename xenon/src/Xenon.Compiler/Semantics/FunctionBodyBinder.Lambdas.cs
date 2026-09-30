@@ -216,9 +216,9 @@ internal sealed partial class FunctionBodyBinder
         var declaration = new FunctionDeclarationSyntax(null, null, returnSyntax,
             new SyntaxToken(SyntaxKind.IdentifierToken, syntax.IntroducerToken.Location, name), null,
             syntax.OpenParenthesisToken, syntax.Parameters, syntax.CommaTokens,
-            syntax.CloseParenthesisToken, [], syntax.Body, null);
+            syntax.CloseParenthesisToken, [], syntax.Body, null) { AsyncKeyword = syntax.AsyncKeyword };
         var function = new FunctionSymbol(name, _function.ContainingNamespace, returnType,
-            parameters.ToImmutable(), declaration) { IsLambda = true, IsCapturingLambda = !syntax.Captures.IsEmpty };
+            parameters.ToImmutable(), declaration) { IsAsync = syntax.IsAsync, IsLambda = true, IsCapturingLambda = !syntax.Captures.IsEmpty };
 
         ImmutableArray<PreparedLambdaCapture> preparedCaptures = PrepareLambdaCaptures(syntax);
         var boundCaptures = ImmutableArray.CreateBuilder<BoundFunctionValueCapture>(preparedCaptures.Length);
@@ -444,9 +444,9 @@ internal sealed partial class FunctionBodyBinder
         var declaration = new FunctionDeclarationSyntax(null, null, returnSyntax,
             new SyntaxToken(SyntaxKind.IdentifierToken, syntax.IntroducerToken.Location, name), null,
             syntax.OpenParenthesisToken, syntax.Parameters, syntax.CommaTokens,
-            syntax.CloseParenthesisToken, [], syntax.Body, null);
+            syntax.CloseParenthesisToken, [], syntax.Body, null) { AsyncKeyword = syntax.AsyncKeyword };
         var function = new FunctionSymbol(name, _function.ContainingNamespace, returnType,
-            parameters.ToImmutable(), declaration) { IsLambda = true, IsCapturingLambda = !syntax.Captures.IsEmpty };
+            parameters.ToImmutable(), declaration) { IsAsync = syntax.IsAsync, IsLambda = true, IsCapturingLambda = !syntax.Captures.IsEmpty };
 
         var captureSymbols = ImmutableArray.CreateBuilder<CaptureVariableSymbol>();
         var captureNames = new HashSet<string>(StringComparer.Ordinal);

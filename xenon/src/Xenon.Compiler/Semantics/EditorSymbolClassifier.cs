@@ -63,7 +63,15 @@ public static class EditorSymbolClassifier
     public static bool IsEditorVisible(Symbol symbol)
     {
         ArgumentNullException.ThrowIfNull(symbol);
+        if (HasReservedName(symbol)) return false;
         return symbol.IsUserVisible && (!symbol.IsCompilerGenerated || symbol is SyntheticMemberSymbol);
+    }
+
+    internal static bool HasReservedName(Symbol symbol)
+    {
+        for (Symbol? current = symbol; current is not null; current = current.ContainingSymbol)
+            if (RuntimeAbiNames.IsReservedIdentifier(current.Name)) return true;
+        return false;
     }
 
     public static bool CanRename(Symbol symbol)

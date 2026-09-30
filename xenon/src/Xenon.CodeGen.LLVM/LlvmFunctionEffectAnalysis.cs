@@ -166,6 +166,13 @@ internal static class LlvmFunctionEffectAnalysis
 
             switch (node)
             {
+                case BoundAwaitExpression:
+                    result.MayAllocate = true;
+                    result.MayFree = true;
+                    result.MayAccessMemory = true;
+                    result.MayThrow = true;
+                    result.HasLoopOrExceptionRegion = true;
+                    break;
                 case BoundThrowStatement:
                     result.MayThrow = true;
                     result.MayAccessMemory = true;

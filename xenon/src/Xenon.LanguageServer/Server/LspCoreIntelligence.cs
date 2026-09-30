@@ -262,7 +262,7 @@ internal static class LspCoreIntelligence
         IEnumerable<Symbol> symbols = access is null
             ? model.GetCompletionSymbols(context.Document.SyntaxTree, position, context.CancellationToken)
             : model.GetCompletionSymbols(access, position, context.CancellationToken);
-        var items = symbols.Where(symbol => symbol.Kind != SymbolKind.Error)
+        var items = symbols.Where(EditorSymbolClassifier.IsEditorVisible).Where(symbol => symbol.Kind != SymbolKind.Error)
             .DistinctBy(symbol => (symbol.Name, EditorSymbolClassifier.GetKind(symbol),
                 symbol.ToDisplayString(SymbolDisplayFormat.Signature)))
             .Select(symbol => CompletionItem(symbol)).ToList();
@@ -304,6 +304,7 @@ internal static class LspCoreIntelligence
         }
         var seenCandidates = new HashSet<Symbol>(ReferenceEqualityComparer.Instance);
         Symbol[] candidates = available.OfType<Symbol>()
+            .Where(EditorSymbolClassifier.IsEditorVisible)
             .Where(symbol => symbol is FunctionSymbol or IndexerSymbol or InterfaceIndexerSymbol or
                 SyntheticMemberSymbol { MemberKind: SyntheticMemberKind.Method })
             .Where(seenCandidates.Add).ToArray();
@@ -380,7 +381,7 @@ internal static class LspCoreIntelligence
         foreach (CallExpressionSyntax call in SyntaxNavigator.DescendantNodesAndSelf(tree.Root)
                      .OfType<CallExpressionSyntax>())
             if (call.TypeArguments is null && call.Target is NameExpressionSyntax name &&
-                name.IdentifierToken.Text is "malloc" or "calloc" or "delete" or "destruct")
+                name.IdentifierToken.Text is "malloc" or "calloc" or "delete" or "destruct" or "resolve" or "reject")
                 tokens.Add((name.IdentifierToken.Location.Span, 18, 0, 3));
     }
 
@@ -397,11 +398,11 @@ internal static class LspCoreIntelligence
             SyntaxKind.VirtualKeyword or SyntaxKind.OverrideKeyword or SyntaxKind.AbstractKeyword or
             SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword or SyntaxKind.PublicKeyword or
             SyntaxKind.PrivateKeyword or SyntaxKind.InternalKeyword or SyntaxKind.ProtectedKeyword or
-            SyntaxKind.SealedKeyword or SyntaxKind.OperatorKeyword => 14,
+            SyntaxKind.SealedKeyword or SyntaxKind.OperatorKeyword or SyntaxKind.AsyncKeyword => 14,
         SyntaxKind.UniqueKeyword or SyntaxKind.SharedKeyword or SyntaxKind.WeakKeyword or
             SyntaxKind.StorageKeyword or SyntaxKind.PinKeyword or SyntaxKind.AtomicKeyword or
             SyntaxKind.FunctionKeyword => 16,
-        SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword => 17,
+        SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword or SyntaxKind.AwaitKeyword => 17,
         SyntaxKind.FreeKeyword => 18,
         SyntaxKind.SwitchKeyword or SyntaxKind.CaseKeyword or SyntaxKind.DefaultKeyword or
             SyntaxKind.IfKeyword or SyntaxKind.ElseKeyword or SyntaxKind.WhileKeyword or
@@ -430,7 +431,9 @@ internal static class LspCoreIntelligence
         {
             "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" or "function" =>
                 "type-forming keyword",
-            "new" or "move" or "lock" => "value-forming keyword",
+            "new" or "move" or "lock" or "await" => "value-forming keyword",
+            "async" => "function completion modifier",
+            "resolve" or "reject" => "completion operator",
             "malloc" or "calloc" or "free" or "delete" or "destruct" => "lifetime operation keyword",
             "true" or "false" or "null" => "literal keyword",
             _ => "keyword",
@@ -577,7 +580,7 @@ internal static class LspCoreIntelligence
     {
         SymbolInfo info = model.GetSymbolInfoAtPosition(tree, position);
         if (info.Symbol is null && position > 0) info = model.GetSymbolInfoAtPosition(tree, position - 1);
-        return info.Symbol;
+        return info.Symbol is { } symbol && EditorSymbolClassifier.IsEditorVisible(symbol) ? symbol : null;
     }
 
     private static Symbol UnwrapAlias(Symbol symbol) => symbol is AliasSymbol alias ? alias.Target : symbol;
@@ -634,7 +637,7 @@ internal static class LspCoreIntelligence
         return new LspCompletionItem(
             symbol.Name,
             LspCompletionItemKindAdapter.ToCompletionItemKind(kind),
-            $"{symbol.ToDisplayString(SymbolDisplayFormat.Signature)} · " +
+            $"{symbol.ToDisplayString(SymbolDisplayFormat.Signature)} Р’В· " +
                 LspCompletionItemKindAdapter.XenonKindName(kind),
             symbol.Name,
             "0_" + symbol.Name,
@@ -810,7 +813,7 @@ internal static class LspCoreIntelligence
         left.Line != right.Line ? left.Line.CompareTo(right.Line) : left.Character.CompareTo(right.Character);
 
     private static bool IsIdentifier(string text) =>
-        ConditionalCompilationOptions.IsIdentifier(text) &&
+        !SyntaxFacts.IsReservedIdentifier(text) && ConditionalCompilationOptions.IsIdentifier(text) &&
         SyntaxFacts.GetKeywordKind(text) == SyntaxKind.IdentifierToken;
 
     private static JsonElement RequireObject(JsonElement value, string name) =>

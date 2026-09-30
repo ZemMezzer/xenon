@@ -4,6 +4,9 @@ namespace Xenon.Compiler.Syntax;
 
 public static class SyntaxFacts
 {
+    /// <summary>Whether a source identifier belongs to the reserved compiler/runtime namespace.</summary>
+    public static bool IsReservedIdentifier(string text) => RuntimeAbiNames.IsReservedIdentifier(text);
+
     private static readonly FrozenDictionary<string, SyntaxKind> Keywords =
         new Dictionary<string, SyntaxKind>(StringComparer.Ordinal)
         {
@@ -83,9 +86,11 @@ public static class SyntaxFacts
             ["catch"] = SyntaxKind.CatchKeyword,
             ["finally"] = SyntaxKind.FinallyKeyword,
             ["throw"] = SyntaxKind.ThrowKeyword,
+            ["async"] = SyntaxKind.AsyncKeyword,
+            ["await"] = SyntaxKind.AwaitKeyword,
         }.ToFrozenDictionary(StringComparer.Ordinal);
     private static readonly FrozenSet<SyntaxKind> KeywordKinds = Keywords.Values.ToFrozenSet();
-    private static readonly string[] ContextualEditorKeywords = ["calloc", "delete", "destruct", "malloc"];
+    private static readonly string[] ContextualEditorKeywords = ["calloc", "delete", "destruct", "malloc", "resolve", "reject"];
 
     public static SyntaxKind GetKeywordKind(string text) =>
         Keywords.TryGetValue(text, out SyntaxKind kind) ? kind : SyntaxKind.IdentifierToken;

@@ -60,10 +60,11 @@ public static class XelibReader
             container, XelibSectionKind.Exports, path);
         ImmutableArray<XelibDocumentation> documentation = ReadSection<ImmutableArray<XelibDocumentation>>(
             container, XelibSectionKind.Documentation, path);
-        ValidateIds(types, symbols, exports, documentation, path);
-
         try
         {
+            ValidateIds(types, symbols, exports, documentation, path);
+            ValidateBodyIdentifiers(container.GetRequiredSection(XelibSectionKind.Bodies).AsSpan(), path);
+            ValidateBodyIdentifiers(container.GetRequiredSection(XelibSectionKind.GenericImplementations).AsSpan(), path);
             var reconstruction = new XelibSemanticReconstruction(metadata.Manifest, types, symbols,
                 exports, documentation, dependencies, path);
             reconstruction.ReconstructMetadata();
@@ -167,6 +168,26 @@ public static class XelibReader
             throw Invalid("type IDs must be positive and unique", path);
         if (symbols.Any(item => item.Id <= 0) || symbols.Select(item => item.Id).Distinct().Count() != symbols.Length)
             throw Invalid("symbol IDs must be positive and unique", path);
+        foreach (XelibSymbolRecord symbol in symbols)
+        {
+            ValidateSourceIdentifier(symbol.Name, path);
+            foreach (XelibCaptureRecord capture in symbol.Captures)
+                ValidateSourceIdentifier(capture.Name, path);
+            if (symbol.ResultLifetimeDependencies.IsDefault || symbol.LifetimeStores.IsDefault)
+                throw Invalid("missing value lifetime contract", path);
+            static bool ValidPath(string? value) => value is not null && (value.Length == 0 || value == "*" ||
+                value.Split('/').All(part => int.TryParse(part, out int ordinal) && ordinal >= 0));
+            bool ValidLifetime(XelibLifetimeDependencyRecord? source) => source is not null && ValidPath(source.FieldPath) && ((LifetimeDependencyKind)source.Kind switch
+            {
+                LifetimeDependencyKind.ParameterValue or LifetimeDependencyKind.ParameterBorrow => source.Ordinal >= 0 && source.Ordinal < symbol.ParameterIds.Length,
+                LifetimeDependencyKind.ReceiverValue or LifetimeDependencyKind.ReceiverBorrow => source.Ordinal == -1 && (symbol.Flags & XelibSymbolFlags.Static) == 0,
+                LifetimeDependencyKind.CaptureValue or LifetimeDependencyKind.CaptureBorrow => source.Ordinal >= 0 && source.Ordinal < symbol.Captures.Length,
+                _ => false,
+            });
+            if (symbol.ResultLifetimeDependencies.Any(source => !ValidLifetime(source)) ||
+                symbol.LifetimeStores.Any(store => store is null || store.Destination < -2 || store.Destination >= symbol.ParameterIds.Length || !ValidPath(store.FieldPath) || !ValidLifetime(store.Source)))
+                throw Invalid("invalid value lifetime contract", path);
+        }
         var symbolIds = symbols.Select(item => item.Id).ToHashSet();
         if (exports.Any(item => !symbolIds.Contains(item.SymbolId)) ||
             exports.Select(item => item.Key).Distinct(StringComparer.Ordinal).Count() != exports.Length)
@@ -174,6 +195,33 @@ public static class XelibReader
         if (documentation.Any(item => !symbolIds.Contains(item.SymbolId)) ||
             documentation.Select(item => item.SymbolId).Distinct().Count() != documentation.Length)
             throw Invalid("documentation records contain an invalid or duplicate symbol ID", path);
+    }
+
+    // Generic implementations are decoded lazily, and tooling skips ordinary bodies.
+    // Validate local names without materializing those bodies or trusting deferred payloads.
+    private static void ValidateBodyIdentifiers(ReadOnlySpan<byte> bytes, string? path)
+    {
+        try
+        {
+            var reader = new Utf8JsonReader(bytes, new JsonReaderOptions { MaxDepth = 1024 });
+            while (reader.Read())
+            {
+                if (reader.TokenType != JsonTokenType.PropertyName || !reader.ValueTextEquals("name"u8)) continue;
+                if (!reader.Read() || reader.TokenType != JsonTokenType.String)
+                    throw Invalid("invalid local identifier", path);
+                ValidateSourceIdentifier(reader.GetString()!, path);
+            }
+        }
+        catch (JsonException exception)
+        {
+            throw Invalid($"invalid body payload: {exception.Message}", path);
+        }
+    }
+
+    internal static void ValidateSourceIdentifier(string name, string? path = null)
+    {
+        if (RuntimeAbiNames.IsReservedIdentifier(name))
+            throw Invalid($"identifier '{name}' uses reserved compiler/runtime prefix '{RuntimeAbiNames.Prefix}'", path);
     }
 
     internal static XelibFormatException Invalid(string message, string? path) =>
@@ -557,6 +605,13 @@ internal sealed class XelibSemanticReconstruction
                     new ReferenceReturnOrigin(XelibStableMappings.FromXelib(item.Origin.Kind),
                         item.Origin.ParameterOrdinal, item.Origin.FieldOrdinals),
                     item.IsReadonly)).ToImmutableArray());
+            created.ResultLifetimeDependencies = record.ResultLifetimeDependencies.Select(item =>
+                new LifetimeDependency((LifetimeDependencyKind)item.Kind, item.Ordinal, item.FieldPath)).ToImmutableArray();
+            created.LifetimeStores = record.LifetimeStores.Select(item => new LifetimeStore(item.Destination,
+                new LifetimeDependency((LifetimeDependencyKind)item.Source.Kind, item.Source.Ordinal, item.Source.FieldPath), item.FieldPath)).ToImmutableArray();
+            created.IsAsync = record.IsAsync;
+            created.ReturnsResumableOperation = record.ReturnsResumableOperation;
+            created.CreatesResumableOperation = record.CreatesResumableOperation;
             _symbols.Add(record.Id, created);
             MapOwnedParameters(record, created);
         }

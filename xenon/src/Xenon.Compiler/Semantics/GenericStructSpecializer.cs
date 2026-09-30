@@ -439,6 +439,11 @@ internal sealed class GenericStructSpecializer
         specialized.SetOriginalDefinition(source);
         specialized.SetReceiverMoveEffects(source.ReceiverMoveEffects);
         specialized.SetReferenceReturnOrigins(source.ReferenceReturnOrigins);
+        specialized.ResultLifetimeDependencies = source.ResultLifetimeDependencies;
+        specialized.LifetimeStores = source.LifetimeStores;
+        specialized.IsAsync = source.IsAsync;
+        specialized.ReturnsResumableOperation = source.ReturnsResumableOperation;
+        specialized.CreatesResumableOperation = source.CreatesResumableOperation;
         specialized.SetSharedReturnOrigins(source.SharedReturnOrigins);
         specialized.SetReferenceFieldOrigins(source.ReferenceFieldOrigins);
         return specialized;
@@ -626,7 +631,7 @@ internal sealed class GenericStructSpecializer
             source.IsOverride, source.IsAbstract, source.IsExtern, source.IsExport,
             source.IsDefinition, source.DelegatesToThisConstructor, origin: SymbolOrigin.CompilerGenerated,
             documentation: source.Documentation, implementation: source.Implementation,
-            accessorKind: source.AccessorKind, operatorKind: source.OperatorKind);
+            accessorKind: source.AccessorKind, operatorKind: source.OperatorKind) { IsAsync = source.IsAsync };
         return function;
     }
 

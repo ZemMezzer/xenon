@@ -136,6 +136,8 @@ public enum SyntaxKind
     CatchKeyword,
     FinallyKeyword,
     ThrowKeyword,
+    AsyncKeyword,
+    AwaitKeyword,
 
     CompilationUnit,
     UsingDirective,
@@ -207,4 +209,5 @@ public enum SyntaxKind
     MissingExpression,
     LambdaExpression,
     LambdaCapture,
+    AwaitExpression,
 }

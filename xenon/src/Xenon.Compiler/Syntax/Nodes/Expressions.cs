@@ -36,6 +36,8 @@ public sealed record LambdaExpressionSyntax(
     SyntaxToken? FatArrowToken,
     BlockStatementSyntax Body) : ExpressionSyntax
 {
+    public SyntaxToken? AsyncKeyword { get; init; }
+    public bool IsAsync => AsyncKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.LambdaExpression;
     public SyntaxToken IntroducerToken => FunctionKeyword ?? OpenBracketToken ?? OpenParenthesisToken;
 }
@@ -229,4 +231,10 @@ public sealed record CastExpressionSyntax(
     SyntaxToken CloseParenthesisToken) : ExpressionSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.CastExpression;
+}
+
+public sealed record AwaitExpressionSyntax(
+    SyntaxToken AwaitKeyword, ExpressionSyntax Operand) : ExpressionSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.AwaitExpression;
 }

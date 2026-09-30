@@ -248,7 +248,7 @@ public sealed class UserDefinedOperatorReviewTests
         Assert.Throws<XelibFormatException>(() => XelibOperatorKinds.Decode("future_unknown_kind", 2));
         Assert.Throws<XelibFormatException>(() => XelibOperatorKinds.Decode("add", 1));
         Assert.Equal((ushort)1, XelibVersions.Container);
-        Assert.Equal((ushort)2, XelibVersions.LibraryIr);
+        Assert.Equal((ushort)1, XelibVersions.LibraryIr);
         Assert.Equal((ushort)1, XelibVersions.Language);
     }
 

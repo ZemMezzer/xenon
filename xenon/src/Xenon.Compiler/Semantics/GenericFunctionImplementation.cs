@@ -313,6 +313,7 @@ internal sealed class LibraryGenericFunctionImplementation(
                 parameters, Accessibility.Private, isDefinition: true,
                 origin: SymbolOrigin.CompilerGenerated)
             {
+                IsAsync = source.IsAsync,
                 IsLambda = true,
                 IsCapturingLambda = source.IsCapturingLambda,
             };

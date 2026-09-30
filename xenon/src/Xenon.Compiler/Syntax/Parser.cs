@@ -121,8 +121,13 @@ internal sealed class Parser
             ValidateTopLevelAccessibility(topAccess, topSecondaryAccess, "type");
             return type with { AccessModifierToken = topAccess, SecondaryAccessModifierToken = topSecondaryAccess };
         }
-        ValidateTopLevelAccessibility(topAccess, topSecondaryAccess, "declaration",
-            allowPrivate: result is FunctionDeclarationSyntax);
+        if (result is FunctionDeclarationSyntax function)
+        {
+            ValidateTopLevelAccessibility(function.AccessModifierToken, function.SecondaryAccessModifierToken,
+                "declaration", allowPrivate: true);
+            return function;
+        }
+        ValidateTopLevelAccessibility(topAccess, topSecondaryAccess, "declaration");
         return result with { SecondaryAccessModifierToken = topSecondaryAccess };
     }
 
@@ -197,9 +202,9 @@ internal sealed class Parser
                 SyntaxKind.InternalKeyword or SyntaxKind.ProtectedKeyword or SyntaxKind.StaticKeyword or
                 SyntaxKind.ThreadLocalKeyword or SyntaxKind.ReadonlyKeyword)
             {
-                var (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly) =
+                var (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly, @async) =
                     ParseStructMemberModifiers();
-                SyntaxToken?[] modifiers = [access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly];
+                SyntaxToken?[] modifiers = [access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly, @async];
                 ValidateMemberModifiers("enum static field", modifiers,
                     SyntaxKind.PublicKeyword, SyntaxKind.PrivateKeyword, SyntaxKind.InternalKeyword,
                     SyntaxKind.StaticKeyword, SyntaxKind.ThreadLocalKeyword, SyntaxKind.ReadonlyKeyword);
@@ -255,8 +260,8 @@ internal sealed class Parser
                 members.Add(ParseStructConstantDeclaration());
                 continue;
             }
-            (SyntaxToken? accessModifier, SyntaxToken? secondaryAccess, SyntaxToken? @static, SyntaxToken? threadlocal, SyntaxToken? @virtual, SyntaxToken? @override, SyntaxToken? @abstract, SyntaxToken? @readonly) = ParseStructMemberModifiers();
-            SyntaxToken?[] modifiers = [accessModifier, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly];
+            (SyntaxToken? accessModifier, SyntaxToken? secondaryAccess, SyntaxToken? @static, SyntaxToken? threadlocal, SyntaxToken? @virtual, SyntaxToken? @override, SyntaxToken? @abstract, SyntaxToken? @readonly, SyntaxToken? @async) = ParseStructMemberModifiers();
+            SyntaxToken?[] modifiers = [accessModifier, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly, @async];
 
             if (Current.Kind == SyntaxKind.TildeToken)
             {
@@ -305,10 +310,10 @@ internal sealed class Parser
                 {
                     ValidateMemberModifiers("method", modifiers, SyntaxKind.PublicKeyword,
                         SyntaxKind.PrivateKeyword, SyntaxKind.StaticKeyword, SyntaxKind.VirtualKeyword,
-                        SyntaxKind.OverrideKeyword, SyntaxKind.AbstractKeyword, SyntaxKind.ReadonlyKeyword);
+                        SyntaxKind.OverrideKeyword, SyntaxKind.AbstractKeyword, SyntaxKind.ReadonlyKeyword, SyntaxKind.AsyncKeyword);
                     (type, trailingReadonly) = FinishMethodReturnType(type, @readonly, trailingReadonly);
                     members.Add(ParseMethodDeclaration(accessModifier, @static, @virtual, @override, @abstract, trailingReadonly, type, memberIdentifier) with
-                        { SecondaryAccessModifierToken = secondaryAccess });
+                        { SecondaryAccessModifierToken = secondaryAccess, AsyncKeyword = @async });
                 }
                 else if (Current.Kind == SyntaxKind.OpenBraceToken)
                 {
@@ -373,8 +378,8 @@ internal sealed class Parser
         while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
         {
             int start = _position;
-            var (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly) = ParseStructMemberModifiers();
-            SyntaxToken?[] modifiers = [access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly];
+            var (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly, @async) = ParseStructMemberModifiers();
+            SyntaxToken?[] modifiers = [access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly, @async];
 
             if (Current.Kind == SyntaxKind.IdentifierToken && Peek(1).Kind == SyntaxKind.OpenParenthesisToken)
             {
@@ -772,12 +777,13 @@ internal sealed class Parser
         var indexers = ImmutableArray.CreateBuilder<InterfaceIndexerDeclarationSyntax>();
         while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
         {
-            var (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, readonlyKeyword) = ParseStructMemberModifiers();
-            ValidateMemberModifiers("interface member", [access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, readonlyKeyword], SyntaxKind.ReadonlyKeyword);
+            var (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, readonlyKeyword, @async) = ParseStructMemberModifiers();
+            ValidateMemberModifiers("interface member", [access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, readonlyKeyword, @async], SyntaxKind.ReadonlyKeyword, SyntaxKind.AsyncKeyword);
             TypeSyntax returnType = ParseType();
             SyntaxToken? trailingReadonly = ParseCallableOrAccessorReadonlyKeyword();
             if (Current.Kind == SyntaxKind.ThisKeyword)
             {
+                ValidateMemberModifiers("interface indexer", [@async]);
                 (returnType, SyntaxToken? indexerReadonly) = FinishAccessorType(
                     returnType, readonlyKeyword, trailingReadonly, "indexer");
                 SyntaxToken thisKeyword = NextToken();
@@ -820,12 +826,13 @@ internal sealed class Parser
                 (ImmutableArray<ParameterSyntax> parameters, ImmutableArray<SyntaxToken> methodCommas) = ParseParameterList();
                 SyntaxToken close = MatchToken(SyntaxKind.CloseParenthesisToken);
                 SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
-                methods.Add(new InterfaceMethodDeclarationSyntax(trailingReadonly, returnType, name, open, parameters, methodCommas, close, semicolon));
+                methods.Add(new InterfaceMethodDeclarationSyntax(trailingReadonly, returnType, name, open, parameters, methodCommas, close, semicolon) { AsyncKeyword = @async });
             }
             else
             {
                 (returnType, SyntaxToken? propertyReadonly) = FinishAccessorType(
                     returnType, readonlyKeyword, trailingReadonly, "property");
+                ValidateMemberModifiers("interface property", [@async]);
                 SyntaxToken propertyOpen = MatchToken(SyntaxKind.OpenBraceToken);
                 var accessors = ImmutableArray.CreateBuilder<PropertyAccessorDeclarationSyntax>();
                 while (Current.Kind is not SyntaxKind.CloseBraceToken and not SyntaxKind.EndOfFileToken)
@@ -850,10 +857,10 @@ internal sealed class Parser
         return new InterfaceDeclarationSyntax(keyword, identifier, typeParameters, colon, bases, commas, openBrace, methods.ToImmutable(), properties.ToImmutable(), indexers.ToImmutable(), MatchToken(SyntaxKind.CloseBraceToken));
     }
 
-    private (SyntaxToken? Access, SyntaxToken? SecondaryAccess, SyntaxToken? Static, SyntaxToken? ThreadLocal, SyntaxToken? Virtual, SyntaxToken? Override, SyntaxToken? Abstract, SyntaxToken? Readonly) ParseStructMemberModifiers()
+    private (SyntaxToken? Access, SyntaxToken? SecondaryAccess, SyntaxToken? Static, SyntaxToken? ThreadLocal, SyntaxToken? Virtual, SyntaxToken? Override, SyntaxToken? Abstract, SyntaxToken? Readonly, SyntaxToken? Async) ParseStructMemberModifiers()
     {
-        SyntaxToken? access = null, secondaryAccess = null, @static = null, threadlocal = null, @virtual = null, @override = null, @abstract = null, @readonly = null;
-        while (Current.Kind is SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword or SyntaxKind.InternalKeyword or SyntaxKind.ProtectedKeyword or SyntaxKind.StaticKeyword or SyntaxKind.ThreadLocalKeyword or SyntaxKind.VirtualKeyword or SyntaxKind.OverrideKeyword or SyntaxKind.AbstractKeyword or SyntaxKind.ReadonlyKeyword)
+        SyntaxToken? access = null, secondaryAccess = null, @static = null, threadlocal = null, @virtual = null, @override = null, @abstract = null, @readonly = null, @async = null;
+        while (Current.Kind is SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword or SyntaxKind.InternalKeyword or SyntaxKind.ProtectedKeyword or SyntaxKind.StaticKeyword or SyntaxKind.ThreadLocalKeyword or SyntaxKind.VirtualKeyword or SyntaxKind.OverrideKeyword or SyntaxKind.AbstractKeyword or SyntaxKind.ReadonlyKeyword or SyntaxKind.AsyncKeyword)
         {
             if (Current.Kind == SyntaxKind.ReadonlyKeyword && @readonly is not null)
                 break;
@@ -862,6 +869,7 @@ internal sealed class Parser
             {
                 SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword or SyntaxKind.InternalKeyword or SyntaxKind.ProtectedKeyword =>
                     access is null || secondaryAccess is null && IsProtectedInternalPair(access.Kind, modifier.Kind) ? null : access,
+                SyntaxKind.AsyncKeyword => @async,
                 SyntaxKind.StaticKeyword => @static,
                 SyntaxKind.ThreadLocalKeyword => threadlocal,
                 SyntaxKind.VirtualKeyword => @virtual,
@@ -878,6 +886,7 @@ internal sealed class Parser
                     if (access is null) access = modifier;
                     else if (secondaryAccess is null && IsProtectedInternalPair(access.Kind, modifier.Kind)) secondaryAccess = modifier;
                     break;
+                case SyntaxKind.AsyncKeyword: @async ??= modifier; break;
                 case SyntaxKind.StaticKeyword: @static ??= modifier; break;
                 case SyntaxKind.ThreadLocalKeyword: threadlocal ??= modifier; break;
                 case SyntaxKind.VirtualKeyword: @virtual ??= modifier; break;
@@ -893,7 +902,7 @@ internal sealed class Parser
         if (@static is not null && dispatch.Length != 0)
             Diagnostics.Report(dispatch[0].Location, "static members cannot be virtual, override or abstract",
                 DiagnosticIds.StaticDispatchModifierNotAllowed);
-        return (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly);
+        return (access, secondaryAccess, @static, threadlocal, @virtual, @override, @abstract, @readonly, @async);
     }
 
     private void ValidateMemberModifiers(string declaration, SyntaxToken?[] modifiers, params SyntaxKind[] allowed)
@@ -967,15 +976,24 @@ internal sealed class Parser
     {
         SyntaxToken? accessModifier = initialAccess;
         SyntaxToken? secondaryAccessModifier = initialSecondaryAccess;
-        if (accessModifier is null)
-            (accessModifier, secondaryAccessModifier) = ParseAccessibilityModifiers();
-        SyntaxToken? abiModifier = Current.Kind is SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword
-            ? NextToken()
-            : null;
-
-        // Also accept `export public` / `extern public` for convenience.
-        if (accessModifier is null)
-            (accessModifier, secondaryAccessModifier) = ParseAccessibilityModifiers();
+        SyntaxToken? abiModifier = null, asyncKeyword = null;
+        while (Current.Kind is SyntaxKind.AsyncKeyword or SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword or
+               SyntaxKind.PublicKeyword or SyntaxKind.PrivateKeyword or SyntaxKind.InternalKeyword or SyntaxKind.ProtectedKeyword)
+        {
+            SyntaxToken modifier = NextToken();
+            bool duplicate = false;
+            if (modifier.Kind == SyntaxKind.AsyncKeyword)
+            { duplicate = asyncKeyword is not null; asyncKeyword ??= modifier; }
+            else if (modifier.Kind is SyntaxKind.ExternKeyword or SyntaxKind.ExportKeyword)
+            { duplicate = abiModifier is not null; abiModifier ??= modifier; }
+            else if (accessModifier is null) accessModifier = modifier;
+            else if (secondaryAccessModifier is null && IsProtectedInternalPair(accessModifier.Kind, modifier.Kind))
+                secondaryAccessModifier = modifier;
+            else duplicate = true;
+            if (duplicate) Diagnostics.Report(modifier.Location, $"duplicate or conflicting modifier '{modifier.Text}'", DiagnosticIds.DuplicateModifier);
+        }
+        if (asyncKeyword is not null && abiModifier?.Kind == SyntaxKind.ExternKeyword)
+            Diagnostics.Report(asyncKeyword.Location, "async is not allowed on an extern function", DiagnosticIds.ModifierNotAllowed);
 
         TypeSyntax returnType = ParseType();
         SyntaxToken? methodReadonly = ParseCallableOrAccessorReadonlyKeyword();
@@ -1010,7 +1028,7 @@ internal sealed class Parser
             closeParenthesis,
             whereClauses,
             body,
-            semicolon) { ReadonlyKeyword = methodReadonly, SecondaryAccessModifierToken = secondaryAccessModifier };
+            semicolon) { AsyncKeyword = asyncKeyword, ReadonlyKeyword = methodReadonly, SecondaryAccessModifierToken = secondaryAccessModifier };
     }
 
     private SyntaxToken? ParseCallableOrAccessorReadonlyKeyword()
@@ -1197,6 +1215,8 @@ internal sealed class Parser
             type = new ReferenceTypeSyntax(type, NextToken());
         if (allowArraySuffix)
             type = ParseArrayTypeSuffixes(type, allocation: false);
+        if (type is ArrayTypeSyntax && Current.Kind == SyntaxKind.AmpersandToken)
+            type = new ReferenceTypeSyntax(type, NextToken());
         if (constKeyword is not null) type = new QualifiedTypeSyntax(type, constKeyword);
         if (readonlyKeyword is not null) type = new QualifiedTypeSyntax(type, readonlyKeyword);
         return type;
@@ -1664,7 +1684,12 @@ internal sealed class Parser
         ExpressionSyntax left;
         int unaryPrecedence = SyntaxFacts.GetUnaryOperatorPrecedence(Current.Kind);
 
-        if (Current.Kind == SyntaxKind.MoveKeyword && 12 >= parentPrecedence)
+        if (Current.Kind == SyntaxKind.AwaitKeyword && 12 >= parentPrecedence)
+        {
+            SyntaxToken keyword = NextToken();
+            left = new AwaitExpressionSyntax(keyword, ParseBinaryExpression(12));
+        }
+        else if (Current.Kind == SyntaxKind.MoveKeyword && 12 >= parentPrecedence)
         {
             SyntaxToken moveKeyword = NextToken();
             ExpressionSyntax operand = ParseBinaryExpression(12);
@@ -1836,6 +1861,14 @@ internal sealed class Parser
 
     private ExpressionSyntax ParsePrimaryExpression()
     {
+        if (Current.Kind == SyntaxKind.AsyncKeyword)
+        {
+            SyntaxToken keyword = NextToken();
+            ExpressionSyntax expression = ParsePrimaryExpression();
+            if (expression is LambdaExpressionSyntax lambda) return lambda with { AsyncKeyword = keyword };
+            Diagnostics.Report(keyword.Location, "async must modify a function or lambda", DiagnosticIds.InvalidAwaitContext);
+            return expression;
+        }
         if (Current.Kind == SyntaxKind.FunctionKeyword)
         {
             SyntaxToken keyword = NextToken();
@@ -2158,6 +2191,7 @@ internal sealed class Parser
             offset++;
         }
 
+        if (Peek(offset).Kind == SyntaxKind.AmpersandToken) offset++;
         return Peek(offset).Kind == SyntaxKind.IdentifierToken;
     }
 

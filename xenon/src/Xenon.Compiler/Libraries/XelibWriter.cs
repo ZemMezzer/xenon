@@ -795,6 +795,13 @@ internal sealed class XelibIrBuilder
                         new XelibReferenceReturnOriginRecord(XelibStableMappings.ToXelib(origin.Origin.Kind),
                             origin.Origin.ParameterOrdinal, origin.Origin.FieldOrdinals),
                         origin.IsReadonly)).ToImmutableArray(),
+                ResultLifetimeDependencies = value.ResultLifetimeDependencies.Select(origin =>
+                    new XelibLifetimeDependencyRecord((byte)origin.Kind, origin.Ordinal, origin.FieldPath)).ToImmutableArray(),
+                LifetimeStores = value.LifetimeStores.Select(store => new XelibLifetimeStoreRecord(store.Destination,
+                    new XelibLifetimeDependencyRecord((byte)store.Source.Kind, store.Source.Ordinal, store.Source.FieldPath), store.FieldPath)).ToImmutableArray(),
+                IsAsync = value.IsAsync,
+                ReturnsResumableOperation = value.ReturnsResumableOperation,
+                CreatesResumableOperation = value.CreatesResumableOperation,
                 Captures = value.LambdaCaptures.Select(capture => new XelibCaptureRecord(
                     capture.Name, TypeId(capture.Type), TypeId(capture.StorageType),
                     XelibStableMappings.ToXelib(capture.CaptureKind), capture.Ordinal)).ToImmutableArray(),

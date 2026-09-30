@@ -12,6 +12,7 @@ public static class DiagnosticIds
     public const string EmptyCharacter = "XE0007";
     public const string MultiScalarCharacter = "XE0008";
     public const string InvalidUnicodeScalar = "XE0009";
+    public const string ReservedRuntimeIdentifier = "XE0010";
     public const string UnexpectedToken = "XE1001";
     public const string UsingDirectiveOrder = "XE1002";
     public const string DuplicateModifier = "XE1003";
@@ -238,4 +239,11 @@ public static class DiagnosticIds
     public const string LambdaCaptureNotSupported = "XE2276";
     public const string UnsupportedNativeFunctionValue = "XE2277";
     public const string InvalidLambdaCapture = "XE2278";
+    public const string MissingAwaitOperator = "XE2279";
+    public const string InvalidResumableReturn = "XE2280";
+    public const string MissingCompletionOperator = "XE2281";
+    public const string InvalidAwaitContext = "XE2282";
+    public const string BorrowAcrossAwait = "XE2283";
+    public const string ValueLifetimeEscape = "XE2284";
+    public const string PendingBorrowedOperation = "XE2285";
 }

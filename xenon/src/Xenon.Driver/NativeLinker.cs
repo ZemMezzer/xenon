@@ -88,7 +88,7 @@ public sealed class NativeLinker
                 NativeArtifactKind.SharedLibrary,
                 new NativeLinkOptions(
                     ExportedSymbols: NativeExceptionRuntime.ExportedSymbols,
-                    LinkCxxRuntime: true),
+                    RequiresThreadingRuntime: true, LinkCxxRuntime: true),
                 importLibraryPath);
         }
         finally
@@ -222,7 +222,7 @@ public sealed class NativeLinker
         if (compiler is null)
             throw new LinkerException("no host C++ compiler was found for the Xenon exception runtime");
         return new LinkerCommand(compiler,
-            ["-std=c++17", "-fexceptions", "-fPIC", "-O2", "-c", sourcePath, "-o", objectPath]);
+            ["-std=c++17", "-fexceptions", "-fPIC", "-pthread", "-O2", "-c", sourcePath, "-o", objectPath]);
     }
 
     private static LinkerCommand CreateHostCommand(
