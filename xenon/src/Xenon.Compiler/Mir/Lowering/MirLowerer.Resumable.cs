@@ -6,15 +6,23 @@ namespace Xenon.Compiler.Mir.Lowering;
 
 public sealed partial class MirLowerer
 {
-    private BoundCallExpression? _completionExpression;
+    private BoundExpression? _completionExpression;
     private ImmutableArray<MirOperand> _completionArguments;
     private List<TemporaryGuard> _completionGuards = [];
 
     private void Complete(BoundReturnStatement statement)
     {
-        if (statement.Expression is null || Unwrap(statement.Expression) is not BoundCallExpression call)
+        if (statement.Expression is null)
             throw new InvalidOperationException("An async return must invoke its bound completion operator.");
-        BoundCallExpression? previous = _completionExpression;
+        BoundExpression call = Unwrap(statement.Expression);
+        FunctionSymbol completion = call switch
+        {
+            BoundCallExpression direct => direct.Function,
+            BoundDeferredGenericOperationExpression { Requirement: FunctionSymbol requirement,
+                Operation: BoundDeferredGenericOperationKind.OperatorCall } => requirement,
+            _ => throw new InvalidOperationException("An async return must invoke its bound completion operator."),
+        };
+        BoundExpression? previous = _completionExpression;
         ImmutableArray<MirOperand> previousArguments = _completionArguments;
         List<TemporaryGuard> previousCompletionGuards = _completionGuards;
         List<TemporaryGuard> previousPendingGuards = _pendingReturnGuards;
@@ -27,7 +35,7 @@ public sealed partial class MirLowerer
             _ = Expression(statement.Expression);
             ImmutableArray<MirOperand> arguments = _completionArguments;
             DiscardPending(previousPendingGuards, Source(call));
-            List<MirReleaseException>? postponed = call.Function.OperatorKind == OperatorKind.Reject ? [] : null;
+            List<MirReleaseException>? postponed = completion.OperatorKind == OperatorKind.Reject ? [] : null;
             ExitActions(0, postponed);
             if (_current.Terminator is not null) return;
             foreach (TemporaryGuard guard in _completionGuards) EndValueGuard(guard, Source(call));
@@ -35,7 +43,9 @@ public sealed partial class MirLowerer
             Block failed = NewBlock();
             failed.Terminator = new MirAbort(Source(call));
             _unwindTarget = failed;
-            _ = CallValues(Callee(call.Function), arguments, Source(call));
+            MirOperand callee = call is BoundDeferredGenericOperationExpression deferred
+                ? GenericCallee(deferred, arguments) : Callee(completion);
+            _ = CallValues(callee, arguments, Source(call));
             if (postponed is not null) _current.Statements.AddRange(postponed);
             LocalVariableSymbol result = ((BoundVariableDeclarationStatement)_bound.Body.Statements[0]).Variable;
             if (_bound.Body.RequiresSuspensionStateMachine)

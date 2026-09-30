@@ -24,6 +24,7 @@ public sealed partial class MirLowerer
     private readonly TypeFactory _types;
     private readonly IReadOnlyDictionary<BoundExpression, TextLocation>? _locations;
     private readonly CancellationToken _cancellation;
+    private readonly IReadOnlyDictionary<BoundExpression, int>? _origins;
     private readonly List<MirLocal> _locals = [];
     private readonly List<Block> _blocks = [];
     private readonly Dictionary<VariableSymbol, MirLocalId> _variables = [];
@@ -39,11 +40,13 @@ public sealed partial class MirLowerer
     private LocalVariableSymbol? _resumableResultInput;
 
     private MirLowerer(BoundFunction function, TypeFactory types,
-        IReadOnlyDictionary<BoundExpression, TextLocation>? locations, CancellationToken cancellation)
+        IReadOnlyDictionary<BoundExpression, TextLocation>? locations, CancellationToken cancellation,
+        IReadOnlyDictionary<BoundExpression, int>? origins)
     {
         _bound = function;
         _types = types;
         _locations = locations;
+        _origins = origins;
         _cancellation = cancellation;
         _functionSource = new(function.Symbol.Locations.FirstOrDefault(TextLocation.None));
         _current = NewBlock();
@@ -55,14 +58,15 @@ public sealed partial class MirLowerer
     }
 
     public static MirFunction Lower(BoundFunction function, TypeFactory types,
-        IReadOnlyDictionary<BoundExpression, TextLocation>? locations = null, CancellationToken cancellation = default)
+        IReadOnlyDictionary<BoundExpression, TextLocation>? locations = null, CancellationToken cancellation = default,
+        IReadOnlyDictionary<BoundExpression, int>? origins = null)
     {
-        var lowering = new MirLowerer(function, types, locations, cancellation);
+        var lowering = new MirLowerer(function, types, locations, cancellation, origins);
         MirFunction? initialization = null;
         if (function.Body.RequiresSuspensionStateMachine)
         {
             var declaration = (BoundVariableDeclarationStatement)function.Body.Statements[0];
-            var initializer = new MirLowerer(function, types, locations, cancellation);
+            var initializer = new MirLowerer(function, types, locations, cancellation, origins);
             initializer.Statement(declaration);
             initializer.End(new MirReturn(new MirCopy(initializer.Variable(declaration.Variable), declaration.Variable.Type), initializer._functionSource));
             initialization = new(function.Symbol, [.. initializer._locals],
@@ -84,9 +88,10 @@ public sealed partial class MirLowerer
         return result;
     }
 
-    private MirSourceInfo Source(BoundExpression expression) =>
+    private MirSourceInfo Source(BoundExpression expression) => new(
         _locations is not null && _locations.TryGetValue(expression, out TextLocation location)
-            ? new(location) : _functionSource;
+            ? location : _functionSource.Location,
+        OriginId: _origins is not null && _origins.TryGetValue(expression, out int origin) ? origin : null);
     private Block NewBlock()
     {
         var block = new Block(new(_blocks.Count));
@@ -320,6 +325,24 @@ public sealed partial class MirLowerer
                 return Save(new MirBinary(BinaryOperator(binary.OperatorKind), left, right, binary.Type), source);
             case BoundUnaryExpression unary: return Unary(unary);
             case BoundAssignmentExpression assignment: return Assignment(assignment);
+            case BoundDeferredGenericOperationExpression call when ReferenceEquals(call, _completionExpression):
+                _completionArguments = Arguments(call.Arguments);
+                foreach (MirOperand argument in _completionArguments)
+                    if (GuardValue(argument, source) is { } guard) _completionGuards.Add(guard);
+                return null;
+            case BoundDeferredGenericOperationExpression deferred:
+                return GenericOperation(deferred);
+            case BoundDeferredGenericMethodCallExpression deferred:
+            {
+                MirOperand receiver = deferred.IsPointerAccess
+                    ? Snapshot(Value(deferred.Receiver), source)
+                    : Address(Place(deferred.Receiver), deferred.Receiver.Type, source);
+                ImmutableArray<MirOperand> arguments = Arguments(deferred.Arguments);
+                var callee = new MirRequirementOperand(deferred.Requirement, MirGenericOperation.MethodCall,
+                    _types.FunctionPointer(deferred.Type, arguments.Select(argument => argument.Type)), [],
+                    PointerAccess: deferred.IsPointerAccess);
+                return CallValues(callee, arguments, source, receiver);
+            }
             case BoundCallExpression call when ReferenceEquals(call, _completionExpression):
                 _completionArguments = Arguments(call.Arguments);
                 foreach (MirOperand argument in _completionArguments)

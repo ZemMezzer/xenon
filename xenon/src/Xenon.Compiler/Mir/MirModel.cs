@@ -15,7 +15,7 @@ public readonly record struct MirBlockId(int Value)
 }
 
 /// <summary>Source provenance survives lowering, cloning and transformations.</summary>
-public sealed record MirSourceInfo(TextLocation Location, int Scope = 0)
+public sealed record MirSourceInfo(TextLocation Location, int Scope = 0, int? OriginId = null)
 {
     public static MirSourceInfo Generated { get; } = new(TextLocation.None);
 }
@@ -102,6 +102,16 @@ public sealed record MirMove(MirPlace Place, TypeSymbol ValueType) : MirOperand(
     public MirPlace? OwnershipPlace { get; init; }
 }
 public sealed record MirFunctionOperand(FunctionSymbol Function, TypeSymbol CallableType) : MirOperand(CallableType);
+
+/// <summary>A validated structural requirement in an open generic body.</summary>
+public enum MirGenericOperation
+{
+    FunctionCall = 1, FieldGet, FieldSet, PropertyGet, PropertySet,
+    IndexerGet, IndexerSet, Construction, Allocation, OperatorCall, MethodCall,
+}
+public sealed record MirRequirementOperand(Symbol Requirement, MirGenericOperation Operation,
+    FunctionPointerTypeSymbol Signature, ImmutableArray<TypeSymbol> TypeArguments,
+    int OperatorToken = 0, bool PointerAccess = false) : MirOperand(Signature);
 
 public enum MirUnaryOperator { Negate, Not, BitwiseNot }
 public enum MirBinaryOperator

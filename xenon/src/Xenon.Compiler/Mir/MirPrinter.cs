@@ -61,6 +61,7 @@ public static class MirPrinter
         MirCopy copy => $"copy {Place(copy.Place)}",
         MirMove move => $"move {Place(move.Place)}{(move.OwnershipPlace is null ? "" : " owner " + Place(move.OwnershipPlace))}",
         MirFunctionOperand function => $"fn {function.Function.FullName}",
+        MirRequirementOperand requirement => $"requirement {requirement.Operation} {requirement.Requirement.Name}<{string.Join(", ", requirement.TypeArguments)}>",
         _ => throw new NotSupportedException($"Unknown MIR operand {operand.GetType().Name}."),
     };
 

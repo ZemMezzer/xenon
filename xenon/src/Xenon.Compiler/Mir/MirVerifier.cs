@@ -199,6 +199,10 @@ public sealed partial class MirVerifier
                 if (move.OwnershipPlace is { } ownership) Place(ownership);
                 break;
             case MirConstant: break;
+            case MirRequirementOperand requirement:
+                if (!Enum.IsDefined(requirement.Operation)) Error("unknown generic operation");
+                if (requirement.TypeArguments.IsDefault) Error("generic type arguments must be initialized");
+                break;
             case MirFunctionOperand function:
                 if (function.Type is not FunctionPointerTypeSymbol signature) Error("function operand requires a function pointer type");
                 else

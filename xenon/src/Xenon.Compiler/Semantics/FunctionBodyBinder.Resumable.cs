@@ -12,15 +12,7 @@ internal sealed partial class FunctionBodyBinder
     private LocalVariableSymbol? _resumableResult;
     private BoundExpression? _resumableConstruction;
     private int _suspensionIndex;
-    private void ValidateSuspensionLifetimes(BoundBlockStatement body)
-    {
-        ResumableFrameAnalysis analysis = ResumableFrameAnalysis.Analyze(_function, body, _fileScope.TypeFactory);
-        foreach (BoundArrayCreationExpression array in analysis.RetainedArrays)
-            if (array.Storage == ArrayStorageKind.Stack && !ResumableFrameAnalysis.TryGetConstantLength(array, out _))
-                _diagnostics.Report(_expressionLocations.GetValueOrDefault(array),
-                    "runtime-sized array backing storage is live across await and has no fixed inline frame layout; use owning heap storage or finish its lifetime before suspension",
-                    DiagnosticIds.BorrowAcrossAwait);
-    }
+
 
 
     private void BeginResumableBinding(BlockStatementSyntax body)
@@ -138,7 +130,7 @@ internal sealed partial class FunctionBodyBinder
                 [new BoundVariableExpression(_resumableResult!)], [], syntax, location);
             body = body with { Statements = body.Statements.Add(new BoundReturnStatement(completion)) };
         }
-        ValidateSuspensionLifetimes(body);
+
         var catches = ImmutableArray.CreateBuilder<BoundCatchClause>();
         FunctionSymbol[] rejects = DiscoverOperators([_function.ReturnType], OperatorKind.Reject)
             .Where(candidate => candidate.Parameters.Length == 2 && IsAccessible(candidate) &&
@@ -159,6 +151,7 @@ internal sealed partial class FunctionBodyBinder
             new BoundVariableDeclarationStatement(_resumableResult!, _resumableConstruction),
             new BoundTryStatement(body, catches.ToImmutable(), null)]) { IsResumable = true, RequiresSuspensionStateMachine = _suspensionIndex != 0 };
         FunctionCleanupAnalyzer.Recompute(_function, result);
+
         return result;
     }
 

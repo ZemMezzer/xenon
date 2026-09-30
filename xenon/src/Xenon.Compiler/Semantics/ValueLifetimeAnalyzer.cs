@@ -77,12 +77,12 @@ internal sealed class ValueLifetimeAnalyzer
 
     private ValueLifetimeAnalyzer(BoundFunction function, TypeFactory types, DiagnosticBag? diagnostics,
         IReadOnlyDictionary<BoundExpression, TextLocation> locations, CancellationToken cancellation,
-        IReadOnlyDictionary<FunctionSymbol, HashSet<TypeSymbol>> effects)
+        IReadOnlyDictionary<FunctionSymbol, HashSet<TypeSymbol>> effects, ResumableFrameAnalysis? frame)
     {
         _effects = effects;
         _function = function.Symbol; _body = function.Body; _diagnostics = diagnostics;
         _locations = locations; _cancellation = cancellation;
-        if (_body.IsResumable) _frame = ResumableFrameAnalysis.Analyze(_function, _body, types);
+        _frame = frame;
         Register(_body, new Region(null, 0));
         foreach (ParameterSymbol parameter in _function.Parameters)
         {
@@ -100,6 +100,16 @@ internal sealed class ValueLifetimeAnalyzer
     {
         BoundFunction[] bodies = functions.Concat(generics.Functions.Where(pair => pair.Key.IsSourceDefined && pair.Value.PortableBody is not null)
             .Select(pair => new BoundFunction(pair.Key, pair.Value.PortableBody!))).DistinctBy(function => function.Symbol).ToArray();
+        // Only finalized bodies enter MIR; preliminary summary binding can
+        // contain intentionally unresolved contextual/generic expressions.
+        var frames = bodies.Where(body => body.Body.IsResumable).ToDictionary(body => body.Symbol,
+            body => ResumableFrameAnalysis.Analyze(body.Symbol, body.Body, types));
+        foreach (var frame in frames.Values)
+            foreach (BoundArrayCreationExpression array in frame.RetainedArrays)
+                if (array.Storage == ArrayStorageKind.Stack && !ResumableFrameAnalysis.TryGetConstantLength(array, out _))
+                    diagnostics.Report(locations.GetValueOrDefault(array),
+                        "runtime-sized array backing storage is live across await and has no fixed inline frame layout; use owning heap storage or finish its lifetime before suspension",
+                        DiagnosticIds.BorrowAcrossAwait);
         var localFunctions = bodies.Select(body => body.Symbol).ToHashSet();
         IEnumerable<FunctionSymbol> BaseMethods(FunctionSymbol method) => method.IsOverride && method.ContainingSymbol is StructTypeSymbol { BaseType: { } parent }
             ? parent.FindMethods(method.Name).Where(method.Overrides) : [];
@@ -111,7 +121,7 @@ internal sealed class ValueLifetimeAnalyzer
             foreach (BoundFunction body in bodies)
             {
                 cancellation.ThrowIfCancellationRequested();
-                var analysis = new ValueLifetimeAnalyzer(body, types, null, locations, cancellation, effects);
+                var analysis = new ValueLifetimeAnalyzer(body, types, null, locations, cancellation, effects, frames.GetValueOrDefault(body.Symbol));
                 analysis.Run();
                 var returns = body.Symbol.ResultLifetimeDependencies.Union(analysis._returns).OrderBy(x => x.Kind).ThenBy(x => x.Ordinal).ThenBy(x => x.FieldPath).ToImmutableArray();
                 var stores = body.Symbol.LifetimeStores.Union(analysis._stores).OrderBy(x => x.Destination).ThenBy(x => x.Source.Kind).ThenBy(x => x.Source.Ordinal).ThenBy(x => x.Source.FieldPath).ThenBy(x => x.FieldPath).ToImmutableArray();
@@ -136,7 +146,7 @@ internal sealed class ValueLifetimeAnalyzer
         foreach (BoundFunction body in bodies)
         {
             cancellation.ThrowIfCancellationRequested();
-            var analysis = new ValueLifetimeAnalyzer(body, types, diagnostics, locations, cancellation, effects);
+            var analysis = new ValueLifetimeAnalyzer(body, types, diagnostics, locations, cancellation, effects, frames.GetValueOrDefault(body.Symbol));
             analysis.Run();
             foreach (FunctionSymbol inherited in BaseMethods(body.Symbol).Where(method => !localFunctions.Contains(method)))
                 if (body.Symbol.ResultLifetimeDependencies.Except(inherited.ResultLifetimeDependencies).Any() ||
