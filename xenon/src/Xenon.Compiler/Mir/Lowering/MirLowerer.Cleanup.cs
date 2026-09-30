@@ -9,6 +9,7 @@ public sealed partial class MirLowerer
     private readonly Dictionary<MirPlace, TemporaryGuard> _ownedPlaces = [];
     private readonly List<TemporaryGuard> _valueGuards = [];
     private bool _parametersRegistered;
+    private bool _hasDynamicCleanupOrder;
     private List<TemporaryGuard> _pendingReturnGuards = [];
 
     private void Return(BoundReturnStatement statement)
@@ -48,6 +49,15 @@ public sealed partial class MirLowerer
 
     private void ScopedBlock(BoundBlockStatement block)
     {
+        int parent = _scope;
+        _scope = _scopes.Count;
+        _scopes.Add(new(_scope, parent));
+        try { ScopedBlockCore(block); }
+        finally { _scope = parent; }
+    }
+
+    private void ScopedBlockCore(BoundBlockStatement block)
+    {
         Block outer = _unwindTarget, outerRethrow = _rethrowTarget;
         MirOperand? stack = _bound.Symbol.HasStackArrays && !_bound.Body.RequiresSuspensionStateMachine && !block.RetainsStackStorage ? Save(new MirStackSave(_types.PointerTo(BuiltinTypes.Byte)), _functionSource) : null;
         var previousPlaces = _ownedPlaces.ToArray();
@@ -61,7 +71,8 @@ public sealed partial class MirLowerer
             foreach (ParameterSymbol parameter in _bound.Symbol.Parameters)
                 Register(parameter, true);
         }
-        var declarations = block.Statements.OfType<BoundVariableDeclarationStatement>().ToArray();
+        var declarations = block.Statements.OfType<BoundVariableDeclarationStatement>()
+            .Where(declaration => !_diagnosticRecovery || (!TypeIdentity.AreSame(declaration.Variable.Type, BuiltinTypes.Error) && !TypeIdentity.AreSame(declaration.Variable.Type, BuiltinTypes.Void))).ToArray();
         foreach (BoundVariableDeclarationStatement declaration in declarations)
             if (!_bound.Body.IsResumable || !ReferenceEquals(declaration, _bound.Body.Statements[0]))
                 Register(declaration.Variable, false);
@@ -115,12 +126,12 @@ public sealed partial class MirLowerer
         {
             if (counter is null)
             {
-                counter = Temporary(BuiltinTypes.Long, _functionSource);
+                counter = CleanupControl(BuiltinTypes.Long, _functionSource);
                 _current.Statements.Add(new MirAssign(counter, new MirUse(new MirConstant(0L, BuiltinTypes.Long)), _functionSource));
             }
             var guard = new TemporaryGuard(place, Temporary(BuiltinTypes.Bool, _functionSource), destructor)
             {
-                Order = Temporary(BuiltinTypes.Long, _functionSource), Counter = counter,
+                Order = CleanupControl(BuiltinTypes.Long, _functionSource), Counter = counter,
                 Count = array ? Temporary(BuiltinTypes.Int, _functionSource) : null,
             };
             _ownedPlaces[place] = guard;
@@ -182,9 +193,10 @@ public sealed partial class MirLowerer
     private Block OrderedCleanup(IReadOnlyList<TemporaryGuard> guards, Block normal, Block unwind,
         bool exceptional, MirSourceInfo source)
     {
+        _hasDynamicCleanupOrder = true;
         Block saved = _current;
         Block start = NewBlock();
-        MirPlace selected = Temporary(BuiltinTypes.Int, source), latest = Temporary(BuiltinTypes.Long, source);
+        MirPlace selected = CleanupControl(BuiltinTypes.Int, source), latest = CleanupControl(BuiltinTypes.Long, source);
         _current = start;
         _current.Statements.Add(new MirAssign(selected, new MirUse(new MirConstant(-1, BuiltinTypes.Int)), source));
         _current.Statements.Add(new MirAssign(latest, new MirUse(new MirConstant(-1L, BuiltinTypes.Long)), source));

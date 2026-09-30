@@ -28,7 +28,8 @@ public sealed partial class MirLowerer
     private MirOperand? MethodCall(FunctionSymbol method, BoundExpression receiver,
         ImmutableArray<BoundExpression> arguments, bool pointerAccess, InterfaceTypeSymbol? interfaceType, MirSourceInfo source)
     {
-        MirOperand instance = pointerAccess ? Snapshot(Value(receiver), source) : Address(Place(receiver), receiver.Type, source);
+        MirOperand instance = pointerAccess ? Snapshot(Value(receiver), source) :
+            Save(new MirBorrow(Place(receiver), MirBorrowKind.Raw, _types.PointerTo(receiver.Type)), source, semanticRead: true);
         var callee = new MirFunctionOperand(method, _types.FunctionPointer(method.ReturnType, method.Parameters.Select(p => p.Type)));
         MirOperand? result = Call(callee, arguments, source, instance, interfaceType, method.VTableSlot is not null);
         ApplyReceiverMoves(receiver, method, source);

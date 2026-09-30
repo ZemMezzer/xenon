@@ -184,4 +184,13 @@ public sealed class MirCoreTests
             foreach (var property in type.GetProperties())
                 Assert.DoesNotContain("Semantics.Binding.Bound", property.PropertyType.ToString(), StringComparison.Ordinal);
     }
+    [Fact]
+    public void ScopeTreeRejectsCyclesAndMissingSourceScopes()
+    {
+        MirFunction function = Body(Block(0, Return()));
+        Assert.Contains(MirVerifier.Verify(function with { Scopes = [new(0, null), new(1, 2), new(2, 1)] }),
+            error => error.Message.Contains("scope cycle", StringComparison.Ordinal));
+        Assert.Contains(MirVerifier.Verify(function with { Locals = [Local(0) with { Source = Source with { Scope = 7 } }] }),
+            error => error.Message.Contains("missing scope 7", StringComparison.Ordinal));
+    }
 }

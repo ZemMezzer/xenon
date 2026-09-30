@@ -24,6 +24,28 @@ public sealed class NativeLinkerTests
     [Theory]
     [InlineData(0)]
     [InlineData(3)]
+    public void ClosureCopiesReferenceParameterInsteadOfBorrowingItsStackSlot(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Holder { public function void() Callback; }
+            Holder Wrap(int& value)
+            {
+                function void() callback = [value]() => { value += 2; };
+                return Holder { callback };
+            }
+            int Main()
+            {
+                int value = 40;
+                { Holder holder = Wrap(value); holder.Callback(); }
+                return value;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
     public void DereferencingUniqueArrayPreservesArrayHandle(int optimization)
     {
         int exit = RunIterationFourProgram("""

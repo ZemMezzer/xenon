@@ -34,10 +34,11 @@ public sealed class MirLiveness : IMirDataflowAnalysis<ImmutableHashSet<MirLocal
                 };
             case MirStorageLive live: return state.Remove(live.Local);
             case MirStorageDead dead: return state.Remove(dead.Local);
+            case MirCompleteOperation complete: return Use([complete.Operation], state);
             case MirForget: return state;
             case MirInitializeDispatch dispatch: return Use(dispatch.Place, state);
             case MirSetStorageState storage: return Use(storage.Place, state);
-            case MirReleaseException release: return Use([release.Record], state);
+            case MirReleaseException release: return Use(release.RestoredRecord is { } restored ? [release.Record, restored] : [release.Record], state);
             case MirStackRestore restore: return Use([restore.Token], state);
             default: throw new InvalidOperationException($"Unknown MIR statement {statement.GetType().Name}.");
         }

@@ -49,6 +49,9 @@ public sealed class MirStorageOrigins(MirFunction function) :
         Resolve(place, state, []).Select(target => state.GetValueOrDefault(target.Local, MirStorageOrigin.Empty))
             .Aggregate(MirStorageOrigin.Empty, (result, origin) => result.Union(origin));
 
+    public IEnumerable<MirPlace> Resolve(MirPlace place, ImmutableDictionary<MirLocalId, MirStorageOrigin> state) =>
+        Resolve(place, state, []);
+
     private IEnumerable<MirPlace> Resolve(MirPlace place, ImmutableDictionary<MirLocalId, MirStorageOrigin> state, HashSet<MirLocalId> seen)
     {
         int dereference = -1;
@@ -127,7 +130,9 @@ public sealed class MirStorageOrigins(MirFunction function) :
                 .Where(value => value.Type is ReferenceTypeSymbol { IsReadonly: false })
                 .Concat(called.Receiver is { } receiver ? [receiver] : []))
                 foreach (MirPlace address in Operand(argument, state).Addresses)
-                    state = Write(address, Read(address, state).Union(origin), state);
+                    // A mutation can retain any input owner, but its stored
+                    // pointer is not proven to be the address of an out parameter.
+                    state = Write(address, Read(address, state).Union(origin) with { Addresses = [] }, state);
         }
         if (edge.Kind == MirEdgeKind.Normal && destination is not null)
         {

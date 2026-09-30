@@ -12,4 +12,7 @@ public sealed record MirExceptionReference(MirOperand Record, ReferenceTypeSymbo
 /// record when another exception or an abrupt finalizer exit supersedes it.
 /// Neither operation hides a source-level control-flow region.
 /// </summary>
-public sealed record MirReleaseException(MirOperand Record, bool Abandon, MirSourceInfo Source) : MirStatement(Source);
+public sealed record MirReleaseException(MirOperand Record, bool Abandon, MirSourceInfo Source) : MirStatement(Source)
+{
+    public MirOperand? RestoredRecord { get; init; }
+}

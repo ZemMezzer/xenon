@@ -1,5 +1,8 @@
 using System.Collections.Immutable;
 using Xenon.Compiler.Diagnostics;
+using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Analysis;
+using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Text;
@@ -11,6 +14,7 @@ internal sealed class ResumableExceptionAnalyzer
 {
     private readonly Dictionary<FunctionSymbol, BoundBlockStatement> _bodies = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<FunctionSymbol, HashSet<TypeSymbol>> _effects = new(ReferenceEqualityComparer.Instance);
+    private MirExceptionEffects _analysis = null!;
 
     public static ImmutableArray<Diagnostic> Analyze(Compilation compilation, CancellationToken cancellationToken)
     {
@@ -18,7 +22,7 @@ internal sealed class ResumableExceptionAnalyzer
         if (resumable.Length == 0) return [];
         var analyzer = new ResumableExceptionAnalyzer();
         analyzer.AddCompilation(compilation);
-        analyzer.ComputeEffects(cancellationToken);
+        analyzer.ComputeEffects(compilation.TypeFactory, cancellationToken);
         var diagnostics = new DiagnosticBag();
         foreach (BoundFunction function in resumable)
         {
@@ -32,12 +36,9 @@ internal sealed class ResumableExceptionAnalyzer
                         diagnostics.Report(location, "runtime-sized array backing storage crosses suspension in specialized resumable function",
                             DiagnosticIds.BorrowAcrossAwait);
             }
-            var region = (BoundTryStatement)function.Body.Statements[1];
-            HashSet<TypeSymbol> escaping = analyzer.Visit(region.Body, [], completionReturns: true);
-            foreach (ParameterSymbol parameter in function.Symbol.Parameters)
-                analyzer.AddFunction(escaping, TypeFacts.GetCompleteDestructor(parameter.Type));
+            MirFunction mir = MirLowerer.Lower(function, compilation.TypeFactory, compilation.SemanticModel.ExpressionLocations, cancellationToken);
+            HashSet<TypeSymbol> escaping = analyzer._analysis.Escaping(mir with { Entry = mir.ResumableBodyEntry ?? mir.Entry });
             foreach (TypeSymbol error in escaping)
-                if (!region.Catches.Any(handler => Matches(error, handler.Type)))
                     diagnostics.Report(function.Symbol.Locations.IsEmpty
                             ? new TextLocation(compilation.SyntaxTrees[0].Source, new TextSpan(0, 0))
                             : function.Symbol.Locations[0],
@@ -50,37 +51,29 @@ internal sealed class ResumableExceptionAnalyzer
     }
 
     internal static IReadOnlyDictionary<FunctionSymbol, HashSet<TypeSymbol>> InferEffects(
-        IEnumerable<BoundFunction> functions, CancellationToken cancellationToken)
+        IEnumerable<BoundFunction> functions, TypeFactory types, CancellationToken cancellationToken)
     {
         var analyzer = new ResumableExceptionAnalyzer();
         foreach (var function in functions) analyzer._bodies[function.Symbol] = function.Body;
-        analyzer.ComputeEffects(cancellationToken);
+        analyzer.ComputeEffects(types, cancellationToken);
         return analyzer._effects;
     }
 
-    private void ComputeEffects(CancellationToken cancellationToken)
+    private void ComputeEffects(TypeFactory types, CancellationToken cancellationToken)
     {
-        foreach (FunctionSymbol function in _bodies.Keys) _effects[function] = NewSet();
-        bool changed;
-        do
+        var bodies = new List<MirFunction>();
+        foreach (var (symbol, body) in _bodies)
         {
-            changed = false;
-            foreach ((FunctionSymbol function, BoundBlockStatement body) in _bodies)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                // Calls to a resumable wrapper can throw during return-object construction.
-                // Exceptions from its running body are consumed by the completion protocol.
-                HashSet<TypeSymbol> effects = Visit(body.IsResumable ? body.Statements[0] : body, [], body.IsResumable);
-                if (!body.IsResumable)
-                    foreach (ParameterSymbol parameter in function.Parameters)
-                        AddFunction(effects, TypeFacts.GetCompleteDestructor(parameter.Type));
-                int before = _effects[function].Count;
-                _effects[function].UnionWith(effects);
-                changed |= before != _effects[function].Count;
-            }
-        } while (changed);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TypeIdentity.AreSame(symbol.ReturnType, BuiltinTypes.Error) ||
+                symbol.Parameters.Any(parameter => TypeIdentity.AreSame(parameter.Type, BuiltinTypes.Error) || TypeIdentity.AreSame(parameter.Type, BuiltinTypes.Void))) continue;
+            var function = new BoundFunction(symbol, body);
+            bodies.Add(body.IsResumable ? MirLowerer.LowerResumableInitialization(function, types, cancellation: cancellationToken) :
+                MirLowerer.Lower(function, types, cancellation: cancellationToken, diagnosticRecovery: true));
+        }
+        _analysis = new MirExceptionEffects(bodies, cancellationToken);
+        foreach (var (symbol, effects) in _analysis.Infer()) _effects[symbol] = effects;
     }
-
     private void AddCompilation(Compilation compilation)
     {
         foreach (BoundFunction function in compilation.SemanticModel.Functions) _bodies.TryAdd(function.Symbol, function.Body);
@@ -90,102 +83,4 @@ internal sealed class ResumableExceptionAnalyzer
                 foreach (BoundFunction function in library.ImplementationFunctions) _bodies.TryAdd(function.Symbol, function.Body);
     }
 
-    private static HashSet<TypeSymbol> NewSet() => new(TypeIdentity.Comparer);
-    private static bool Matches(TypeSymbol thrown, TypeSymbol? caught)
-    {
-        if (caught is null) return true;
-        for (TypeSymbol? type = thrown; type is not null; type = (type as StructTypeSymbol)?.BaseType)
-            if (TypeIdentity.Equals(type, caught)) return true;
-        return false;
-    }
-
-    private void AddFunction(HashSet<TypeSymbol> result, FunctionSymbol? function)
-    {
-        if (function is null || function.IsExtern) return;
-        if (_effects.TryGetValue(function, out HashSet<TypeSymbol>? effects)) result.UnionWith(effects);
-        else result.Add(BuiltinTypes.Error);
-    }
-
-    private void AddDynamic(HashSet<TypeSymbol> result, TypeSymbol returns, IEnumerable<TypeSymbol> parameters)
-    {
-        TypeSymbol[] signature = parameters.ToArray();
-        foreach (FunctionSymbol candidate in _bodies.Keys)
-            if (TypeIdentity.Equals(candidate.ReturnType, returns) &&
-                candidate.Parameters.Select(parameter => parameter.Type).SequenceEqual(signature, TypeIdentity.Comparer))
-                AddFunction(result, candidate);
-    }
-
-    private HashSet<TypeSymbol> Visit(BoundNode node, IEnumerable<TypeSymbol> active, bool completionReturns)
-    {
-        var result = NewSet();
-        if (node is BoundTryStatement region)
-        {
-            HashSet<TypeSymbol> pending = Visit(region.Body, active, completionReturns);
-            foreach (BoundCatchClause handler in region.Catches)
-            {
-                TypeSymbol[] caught = pending.Where(error => Matches(error, handler.Type)).ToArray();
-                pending.ExceptWith(caught);
-                result.UnionWith(Visit(handler.Body, caught, completionReturns));
-            }
-            result.UnionWith(pending);
-            if (region.FinallyBody is not null) result.UnionWith(Visit(region.FinallyBody, active, completionReturns));
-            return result;
-        }
-        // Completion itself is terminal, and a throwing completion operator terminates.
-        if (completionReturns && node is BoundReturnStatement { Expression: { } expression })
-        {
-            BoundExpression inner = expression is BoundFullExpression full ? full.Expression : expression;
-            if (inner is BoundCallExpression completion)
-            {
-                foreach (BoundExpression argument in completion.Arguments)
-                {
-                    result.UnionWith(Visit(argument, active, completionReturns));
-                    AddFunction(result, TypeFacts.GetCompleteDestructor(argument.Type));
-                }
-                if (expression is BoundFullExpression temporaries)
-                    foreach (BoundFullExpressionTemporary temporary in temporaries.Temporaries) AddFunction(result, temporary.Destructor);
-                return result;
-            }
-        }
-        foreach (BoundNode child in BoundTree.Children(node)) result.UnionWith(Visit(child, active, completionReturns));
-        switch (node)
-        {
-            case BoundThrowStatement { Expression: { } error }: result.Add(OperatorFacts.ValueType(error.Type)); break;
-            case BoundThrowStatement: result.UnionWith(active); break;
-            case BoundCallExpression call: AddFunction(result, call.Function); break;
-            case BoundMethodCallExpression call:
-                AddFunction(result, call.Method);
-                if (call.Method.IsVirtual || call.Method.IsOverride)
-                    foreach (FunctionSymbol candidate in _bodies.Keys.Where(candidate => candidate.Name == call.Method.Name && candidate.IsOverride))
-                        AddFunction(result, candidate);
-                break;
-            case BoundInterfaceMethodCallExpression call:
-                AddDynamic(result, call.Method.ReturnType, call.Method.Parameters.Select(parameter => parameter.Type)); break;
-            case BoundFunctionValueCallExpression call:
-                AddDynamic(result, call.Type, call.FunctionValueType.ParameterTypes); break;
-            case BoundIndirectCallExpression call:
-                AddDynamic(result, call.Type, call.FunctionPointerType.ParameterTypes); break;
-            case BoundConstructorCallExpression call: AddFunction(result, call.Constructor); break;
-            case BoundBaseLifecycleCallExpression call: AddFunction(result, call.Function); break;
-            case BoundNewExpression allocation: AddFunction(result, allocation.Constructor); break;
-            case BoundStorageConstructExpression construction: AddFunction(result, construction.Constructor); break;
-            case BoundExplicitDestructExpression destruction: AddFunction(result, destruction.Destructor); break;
-            case BoundDeleteExpression deletion: AddFunction(result, deletion.Destructor); break;
-            case BoundVariableDeclarationStatement variable: AddFunction(result, variable.Variable.Destructor); break;
-            case BoundFullExpression full:
-                foreach (BoundFullExpressionTemporary temporary in full.Temporaries) AddFunction(result, temporary.Destructor);
-                break;
-            case BoundOwnershipDestructionExpression destruction: AddFunction(result, destruction.ElementDestructor); break;
-            case BoundStorageDestructionExpression destruction: AddFunction(result, destruction.ElementDestructor); break;
-            case BoundDestroyFieldsExpression destruction:
-                foreach (FieldSymbol field in destruction.StructType.AllInstanceFields) AddFunction(result, TypeFacts.GetCompleteDestructor(field.Type));
-                if (destruction.StructType.BaseType is { } parent) AddFunction(result, TypeFacts.GetCompleteDestructor(parent));
-                break;
-            case BoundPropertySetExpression set: AddFunction(result, set.Property.Setter); break;
-            case BoundIndexerSetExpression set: AddFunction(result, set.Indexer.Setter); break;
-            case BoundCompoundAccessorAssignmentExpression assignment:
-                AddFunction(result, assignment.Getter); AddFunction(result, assignment.Setter); break;
-        }
-        return result;
-    }
 }

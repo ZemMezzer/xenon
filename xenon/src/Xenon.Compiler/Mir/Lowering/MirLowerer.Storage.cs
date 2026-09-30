@@ -47,6 +47,13 @@ public sealed partial class MirLowerer
     private void ConstructStorage(BoundStorageConstructExpression construction, MirSourceInfo source)
     {
         MirPlace tracked = Place(construction.Storage);
+        if (TypeFacts.IsPinned(construction.Storage.Type) && !IsStorage(construction.Storage.Type))
+        {
+            TypeSymbol pointerType = _types.PointerTo(construction.Storage.Type);
+            MirPlace check = Temporary(pointerType, source);
+            _current.Statements.Add(new MirAssign(check, new MirBorrow(tracked, MirBorrowKind.Raw, pointerType), source)
+                { IsPinnedInitializationCheck = true });
+        }
         (MirPlace target, TypeSymbol type) = Unpin(tracked, construction.Storage.Type);
         MirPlace? wrapper = type is StorageTypeSymbol ? target : null;
         if (wrapper is not null)

@@ -238,7 +238,7 @@ public sealed partial class LlvmIrGenerator
             switch (statement)
             {
                 case MirAssign assign: _builder.BuildStore(MirRValue(assign.Value), MirAddress(assign.Destination).Address); break;
-                case MirStorageLive or MirStorageDead or MirForget: break;
+                case MirStorageLive or MirStorageDead or MirForget or MirCompleteOperation: break;
                 case MirSetStorageState state:
                     var storage = MirAddress(state.Place);
                     _builder.BuildStore(LLVMValueRef.CreateConstInt(_context.Int1Type, state.Initialized ? 1UL : 0UL),

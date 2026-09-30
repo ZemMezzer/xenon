@@ -470,6 +470,7 @@ public sealed record BoundIndirectCallExpression(
 
 public sealed record BoundErrorExpression() : BoundExpression(BuiltinTypes.Error)
 {
+    public ImmutableArray<BoundExpression> RecoveryArguments { get; init; } = [];
     public override BoundKind Kind => BoundKind.ErrorExpression;
 }
 

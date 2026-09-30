@@ -59,7 +59,10 @@ public sealed partial class MirLowerer
                 }
                 if (action.Record is { } record)
                 {
-                    var release = new MirReleaseException(record, action.Abandon, _functionSource);
+                    var release = new MirReleaseException(record, action.Abandon, _functionSource)
+                    {
+                        RestoredRecord = action.Abandon ? null : saved.Take(index).LastOrDefault(exit => exit.Record is not null)?.Record,
+                    };
                     if (postponedRecords is not null && !action.Abandon) postponedRecords.Add(release);
                     else _current.Statements.Add(release);
                 }

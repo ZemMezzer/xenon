@@ -9,9 +9,12 @@ public sealed partial class MirLowerer
     private MirOperand AtomicAssignment(BoundAssignmentExpression expression, MirPlace target, AtomicTypeSymbol atomic, MirSourceInfo source)
     {
         MirOperand address = Address(target, atomic, source), value = Value(expression.Expression);
-        MirPlace? state = expression.ConstructorField is { } field ? _constructionStates.GetValueOrDefault(field) : null;
+        MirPlace? state = expression.Target is BoundMemberAccessExpression member && IsThisRooted(member)
+            ? _constructionStates.GetValueOrDefault(member.Field) : null;
+        RecordStore(expression, target);
+        AssignmentState ownership = Ownership(expression);
         MirOperand result;
-        if (expression.RequiresRuntimeInitializationCheck && state is not null)
+        if (ownership.RuntimeCheck && state is not null)
         {
             MirPlace merged = Temporary(atomic.ElementType, source);
             Block initialized = NewBlock(), empty = NewBlock(), after = NewBlock();
@@ -27,7 +30,7 @@ public sealed partial class MirLowerer
             _current = after;
             result = new MirCopy(merged, atomic.ElementType);
         }
-        else result = Write(expression.IsInitialization ? MirIntrinsicKind.AtomicInitialize :
+        else result = Write(ownership.Initialize ? MirIntrinsicKind.AtomicInitialize :
             expression.OperatorKind == SyntaxKind.EqualsToken ? MirIntrinsicKind.AtomicStore : MirIntrinsicKind.AtomicUpdate);
         if (state is not null) SetFlag(state, true, source);
         Activate(target, true, source);

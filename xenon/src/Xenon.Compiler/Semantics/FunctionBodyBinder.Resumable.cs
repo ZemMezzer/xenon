@@ -104,13 +104,7 @@ internal sealed partial class FunctionBodyBinder
         if (completedArguments.Length == 2)
         {
             BoundExpression value = completedArguments[1];
-            if (value.Type is ReferenceTypeSymbol)
-                ValidateReturnedReference(value, syntax.ReturnKeyword.Location);
-            else if (ContainsValueReferenceStorage(value.Type) &&
-                GetValueReferenceMetadata(value, value.Type).Any(reference => !IsSafeReferenceReturnSource(reference.Source)))
-                _diagnostics.Report(syntax.ReturnKeyword.Location,
-                    "resumable completion cannot retain a value borrowing storage owned by the completed frame",
-                    DiagnosticIds.AggregateReferenceEscape);
+
             if (HasCalleeStackBoundRuntimeStorage(value))
                 _diagnostics.Report(syntax.ReturnKeyword.Location,
                     "resumable completion cannot retain stack-backed array storage", DiagnosticIds.StackArrayReturn);

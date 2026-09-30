@@ -56,9 +56,35 @@ public sealed partial class MirVerifier
             Error("local and block tables must be initialized");
             return _errors.ToImmutable();
         }
+        var scopes = new Dictionary<int, MirScope>();
+        if (_function.Scopes.IsDefaultOrEmpty) Error("scope table must contain a root");
+        else foreach (MirScope scope in _function.Scopes)
+            if (scope.Id < 0 || !scopes.TryAdd(scope.Id, scope)) Error($"invalid or duplicate scope {scope.Id}");
+        if (!scopes.TryGetValue(0, out var root) || root.Parent is not null) Error("scope 0 must be the root");
+        foreach (MirScope scope in scopes.Values)
+        {
+            var seen = new HashSet<int>();
+            MirScope current = scope;
+            while (current.Parent is { } parent)
+            {
+                if (!seen.Add(current.Id)) { Error($"scope cycle at {scope.Id}"); break; }
+                if (!scopes.TryGetValue(parent, out var ancestor)) { Error($"scope {scope.Id} has missing parent {parent}"); break; }
+                current = ancestor;
+            }
+            if (current.Parent is null && current.Id != 0) Error($"scope {scope.Id} is disconnected from the root");
+        }
+        void Scope(MirSourceInfo source)
+        {
+            if (!scopes.ContainsKey(source.Scope)) Error($"source refers to missing scope {source.Scope}");
+        }
+        Scope(_function.Source);
         foreach (MirLocal local in _function.Locals)
         {
             _source = local.Source;
+            Scope(_source);
+            if (local.IsCleanupControl && !TypeIdentity.AreSame(local.Type, BuiltinTypes.Bool) &&
+                !TypeIdentity.AreSame(local.Type, BuiltinTypes.Int) && !TypeIdentity.AreSame(local.Type, BuiltinTypes.Long))
+                Error($"cleanup control {local.Id} must have a boolean or integer type");
             if (local.Id.Value < 0 || !_locals.TryAdd(local.Id, local)) Error($"invalid or duplicate local {local.Id}");
             if (TypeIdentity.AreSame(local.Type, BuiltinTypes.Void) || TypeIdentity.AreSame(local.Type, BuiltinTypes.Error))
                 Error($"local {local.Id} has non-storable type {local.Type}");
@@ -67,6 +93,8 @@ public sealed partial class MirVerifier
         foreach (MirBasicBlock block in _function.Blocks)
             if (block.Id.Value < 0 || !_blocks.Add(block.Id)) Error($"invalid or duplicate block {block.Id}");
         if (!_blocks.Contains(_function.Entry)) Error($"entry {_function.Entry} does not exist");
+        if (_function.UnwindExit is { } exit && !_blocks.Contains(exit)) Error($"unwind exit {exit} does not exist");
+        if (_function.ResumableBodyEntry is { } bodyEntry && !_blocks.Contains(bodyEntry)) Error($"resumable body entry {bodyEntry} does not exist");
         if (_function.Resumable is { } resumable)
         {
             Same(Local(resumable.Result), _function.Symbol.ReturnType, "resumable result storage");
@@ -85,17 +113,26 @@ public sealed partial class MirVerifier
                 _statement = index;
                 MirStatement statement = block.Statements[index];
                 _source = statement.Source;
+                Scope(_source);
                 switch (statement)
                 {
                     case MirAssign assign:
                         TypeSymbol? destinationType = Place(assign.Destination);
+                        if (assign.ReservedMove is { } reserved) Place(reserved);
                         RValue(assign.Value);
                         if (destinationType is not null) Same(assign.Value.Type, destinationType, "assignment");
                         break;
                     case MirInitializeDispatch dispatch: Same(Place(dispatch.Place), dispatch.Type, "dispatch initialization"); break;
-                    case MirReleaseException release: Operand(release.Record); break;
+                    case MirReleaseException release:
+                        Operand(release.Record);
+                        if (release.RestoredRecord is { } restored) Operand(restored);
+                        break;
                     case MirStackRestore restore: Operand(restore.Token); if (restore.Token.Type is not PointerTypeSymbol) Error("stack token requires a pointer"); break;
                     case MirSetStorageState state: if (Place(state.Place) is not StorageTypeSymbol) Error("storage state requires a wrapper"); break;
+                    case MirCompleteOperation complete:
+                        Operand(complete.Operation);
+                        if (complete.Result is { } result) Place(result);
+                        break;
                     case MirForget forget: Place(forget.Place); break;
                     case MirStorageLive live: Local(live.Local); break;
                     case MirStorageDead dead: Local(dead.Local); break;
@@ -105,6 +142,7 @@ public sealed partial class MirVerifier
             _statement = null;
             if (block.Terminator is null) { Error("block has no terminator"); continue; }
             _source = block.Terminator.Source;
+            Scope(_source);
             foreach (MirEdge successor in block.Terminator.Successors)
                 if (!_blocks.Contains(successor.Target)) Error($"successor {successor.Target} does not exist");
             Terminator(block.Terminator);
@@ -198,7 +236,7 @@ public sealed partial class MirVerifier
                 Same(Place(move.Place), move.Type, "move operand");
                 if (move.OwnershipPlace is { } ownership) Place(ownership);
                 break;
-            case MirConstant: break;
+            case MirConstant or MirDeferredConstant: break;
             case MirRequirementOperand requirement:
                 if (!Enum.IsDefined(requirement.Operation)) Error("unknown generic operation");
                 if (requirement.TypeArguments.IsDefault) Error("generic type arguments must be initialized");

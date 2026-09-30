@@ -42,10 +42,21 @@ public sealed partial class MirLowerer
         return new MirCopy(guard.Place, expression.Type);
     }
 
-    private void SetFlag(MirPlace flag, bool value, MirSourceInfo source) =>
-        _current.Statements.Add(new MirAssign(flag, new MirUse(new MirConstant(value, BuiltinTypes.Bool)), source));
+    private MirPlace CleanupControl(TypeSymbol type, MirSourceInfo source)
+    {
+        MirPlace place = Temporary(type, source);
+        _locals[place.Local.Value] = _locals[place.Local.Value] with { IsCleanupControl = true };
+        return place;
+    }
 
-    private MirOperand? FullExpression(BoundFullExpression expression)
+    private void SetFlag(MirPlace flag, bool value, MirSourceInfo source)
+    {
+        if (flag.Projections.IsEmpty)
+            _locals[flag.Local.Value] = _locals[flag.Local.Value] with { IsCleanupControl = true };
+        _current.Statements.Add(new MirAssign(flag, new MirUse(new MirConstant(value, BuiltinTypes.Bool)), source));
+    }
+
+    private MirOperand? FullExpression(BoundFullExpression expression, Block? yes = null, Block? no = null)
     {
         MirSourceInfo source = Source(expression);
         Dictionary<BoundExpression, TemporaryGuard> previous = _temporaryGuards;
@@ -63,6 +74,19 @@ public sealed partial class MirLowerer
         _unwindTarget = CleanupChain(guards, outerUnwind, outerUnwind, exceptional: true, source);
         try
         {
+            if (yes is not null && no is not null)
+            {
+                Block Exit(Block destination)
+                {
+                    Block dead = NewBlock();
+                    foreach (TemporaryGuard guard in guards)
+                        dead.Statements.Add(new MirStorageDead(guard.Place.Local, source));
+                    dead.Terminator = new MirGoto(destination.Id, source);
+                    return CleanupChain(guards, dead, GuardedUnwind(outerUnwind, source), exceptional: false, source);
+                }
+                Condition(expression.Expression, Exit(yes), Exit(no));
+                return null;
+            }
             MirOperand? result = Expression(expression.Expression);
             Block after = NewBlock();
             Jump(CleanupChain(guards, after, GuardedUnwind(outerUnwind, source), exceptional: false, source));

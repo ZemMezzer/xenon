@@ -6,6 +6,37 @@ namespace Xenon.Compiler.Mir.Lowering;
 
 public sealed partial class MirLowerer
 {
+    /// <summary>The public call executes handle initialization before the resumable body.</summary>
+    public static MirFunction LowerResumableInitialization(BoundFunction function, TypeFactory types,
+        IReadOnlyDictionary<BoundExpression, Xenon.Compiler.Text.TextLocation>? locations = null,
+        CancellationToken cancellation = default)
+    {
+        if (!function.Body.IsResumable) throw new ArgumentException("A resumable body is required.", nameof(function));
+        var builder = new MirLowerer(function, types, locations, cancellation, null, false, null, null);
+        return builder.Initialization((BoundVariableDeclarationStatement)function.Body.Statements[0]);
+    }
+
+    private MirFunction Initialization(BoundVariableDeclarationStatement declaration)
+    {
+        Statement(declaration);
+        End(new MirReturn(new MirCopy(Variable(declaration.Variable), declaration.Variable.Type), _functionSource));
+        var result = new MirFunction(_bound.Symbol, [.. _locals],
+            [.. _blocks.Select(block => new MirBasicBlock(block.Id, [.. block.Statements],
+                block.Terminator ?? new MirUnreachable(_functionSource)))], new(0), _functionSource)
+        { UnwindExit = _unwind.Id, Scopes = [.. _scopes], HasDynamicCleanupOrder = _hasDynamicCleanupOrder };
+        MirVerifier.VerifyOrThrow(result);
+        return result;
+    }
+
+    private MirBlockId? _resumableBodyEntry;
+    private void EnterResumableBody()
+    {
+        Block body = NewBlock();
+        Jump(body);
+        _current = body;
+        _resumableBodyEntry = body.Id;
+    }
+
     private BoundExpression? _completionExpression;
     private ImmutableArray<MirOperand> _completionArguments;
     private List<TemporaryGuard> _completionGuards = [];
@@ -130,6 +161,8 @@ public sealed partial class MirLowerer
         End(new MirSuspend(null, retry.Id, source));
         _current = ready;
         MirOperand? result = resultStorage is null ? null : MoveStorage(resultStorage, (StorageTypeSymbol)expression.ResultStorage!.Type, source);
+        _current.Statements.Add(new MirCompleteOperation(new MirCopy(operand, expression.Operand.Type),
+            (result as MirCopy)?.Place, source));
         if (resultStorage is not null) _current.Statements.Add(new MirStorageDead(resultStorage.Local, source));
         foreach (TemporaryGuard guard in storageGuards) SetFlag(guard.Active, false, source);
         _unwindTarget = outer;

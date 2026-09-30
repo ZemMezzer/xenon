@@ -20,12 +20,15 @@ public sealed record MirSourceInfo(TextLocation Location, int Scope = 0, int? Or
     public static MirSourceInfo Generated { get; } = new(TextLocation.None);
 }
 
+public sealed record MirScope(int Id, int? Parent);
+
 public enum MirLocalKind { Temporary, Variable, Parameter, Receiver, Capture, Return }
 
 public sealed record MirLocal(MirLocalId Id, string Name, TypeSymbol Type,
     MirLocalKind Kind, MirSourceInfo Source)
 {
     public VariableSymbol? Variable { get; init; }
+    public bool IsCleanupControl { get; init; }
 }
 
 public sealed record MirFunction(FunctionSymbol Symbol, ImmutableArray<MirLocal> Locals,
@@ -34,6 +37,10 @@ public sealed record MirFunction(FunctionSymbol Symbol, ImmutableArray<MirLocal>
     // The executable result can differ from a resumable function's public handle type.
     public TypeSymbol ReturnType { get; init; } = Symbol.ReturnType;
     public MirResumableBody? Resumable { get; init; }
+    public bool HasDynamicCleanupOrder { get; init; }
+    public MirBlockId? UnwindExit { get; init; }
+    public MirBlockId? ResumableBodyEntry { get; init; }
+    public ImmutableArray<MirScope> Scopes { get; init; } = [new(0, null)];
 }
 
 public sealed record MirResumableBody(MirFunction Initialization, MirLocalId Result);
@@ -101,6 +108,7 @@ public sealed record MirMove(MirPlace Place, TypeSymbol ValueType) : MirOperand(
     // semantic place. Preserve the binder's ownership identity for drop elaboration.
     public MirPlace? OwnershipPlace { get; init; }
 }
+public sealed record MirDeferredConstant(TypeSymbol ConstantType) : MirOperand(ConstantType);
 public sealed record MirFunctionOperand(FunctionSymbol Function, TypeSymbol CallableType) : MirOperand(CallableType);
 
 /// <summary>A validated structural requirement in an open generic body.</summary>
@@ -137,11 +145,26 @@ public enum MirWriteKind { Initialize, Replace, RawPlacement }
 public enum MirPreviousValueState { Live, DefinitelyMoved, MaybeMoved }
 public sealed record MirAssign(MirPlace Destination, MirRValue Value, MirSourceInfo Source) : MirStatement(Source)
 {
+    // A source value read, as distinct from cleanup bookkeeping and ABI copies.
+    public bool IsSemanticRead { get; init; }
+    public bool IsSemanticWrite { get; init; }
+    public bool IsDeclaration { get; init; }
+    public bool IsMoveRead { get; init; }
+    public bool IsProjectionBaseRead { get; init; }
+    // A replacement through an external place cannot test a local lifetime flag.
+    public bool IsUntrackedReplacementCheck { get; init; }
+    public bool IsPinnedInitializationCheck { get; init; }
+    public bool IsCompleteReceiverRead { get; init; }
+    // Ownership is reserved while later arguments evaluate, then committed by
+    // MirForget. An unwind before that commit cancels the reservation.
+    public MirPlace? ReservedMove { get; init; }
     public MirWriteKind WriteKind { get; init; } = MirWriteKind.Initialize;
     public MirPreviousValueState PreviousValueState { get; init; }
     public FieldSymbol? ConstructorField { get; init; }
     public bool RequiresRuntimeInitializationCheck { get; init; }
 }
+/// <summary>A successful wait discharges the operation's borrowed-lifetime obligations.</summary>
+public sealed record MirCompleteOperation(MirOperand Operation, MirPlace? Result, MirSourceInfo Source) : MirStatement(Source);
 public sealed record MirStorageLive(MirLocalId Local, MirSourceInfo Source) : MirStatement(Source);
 public sealed record MirStorageDead(MirLocalId Local, MirSourceInfo Source) : MirStatement(Source);
 

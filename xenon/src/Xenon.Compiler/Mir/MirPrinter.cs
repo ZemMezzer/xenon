@@ -12,6 +12,10 @@ public static class MirPrinter
         var output = new StringBuilder();
         output.Append("fn ").Append(function.Symbol.FullName).Append(" -> ").Append(function.ReturnType).Append(" {\n");
         output.Append("  entry ").Append(function.Entry).Append('\n');
+        if (includeSource)
+            foreach (MirScope scope in function.Scopes.OrderBy(scope => scope.Id))
+                output.Append("  scope ").Append(scope.Id.ToString(CultureInfo.InvariantCulture)).Append(" parent ")
+                    .Append(scope.Parent?.ToString(CultureInfo.InvariantCulture) ?? "root").Append('\n');
         foreach (MirLocal local in function.Locals.OrderBy(local => local.Id.Value))
             output.Append("  local ").Append(local.Id).Append(": ").Append(local.Type).Append(" [")
                 .Append(local.Kind.ToString().ToLowerInvariant()).Append("] ").Append(JsonSerializer.Serialize(local.Name)).Append('\n');
@@ -60,6 +64,7 @@ public static class MirPrinter
         MirConstant constant => $"const {Constant(constant.Value)}: {constant.Type}",
         MirCopy copy => $"copy {Place(copy.Place)}",
         MirMove move => $"move {Place(move.Place)}{(move.OwnershipPlace is null ? "" : " owner " + Place(move.OwnershipPlace))}",
+        MirDeferredConstant deferred => $"const deferred<{deferred.Type}>",
         MirFunctionOperand function => $"fn {function.Function.FullName}",
         MirRequirementOperand requirement => $"requirement {requirement.Operation} {requirement.Requirement.Name}<{string.Join(", ", requirement.TypeArguments)}>",
         _ => throw new NotSupportedException($"Unknown MIR operand {operand.GetType().Name}."),
@@ -100,6 +105,7 @@ public static class MirPrinter
     private static string Statement(MirStatement statement) => statement switch
     {
         MirAssign assign => $"{Place(assign.Destination)} = {RValue(assign.Value)}" +
+            (assign.ReservedMove is { } reserved ? $" [reserve {Place(reserved)}]" : "") +
             (assign.WriteKind == MirWriteKind.Initialize && assign.PreviousValueState == MirPreviousValueState.Live &&
                 assign.ConstructorField is null && !assign.RequiresRuntimeInitializationCheck ? "" :
                 $" [write {assign.WriteKind.ToString().ToLowerInvariant()}, previous {assign.PreviousValueState.ToString().ToLowerInvariant()}" +
@@ -107,11 +113,14 @@ public static class MirPrinter
                 $"{(assign.RequiresRuntimeInitializationCheck ? ", checked" : "")}]"),
         MirStackRestore restore => $"stack.restore {Operand(restore.Token)}",
         MirSetStorageState state => $"storage.state {Place(state.Place)} = {state.Initialized.ToString().ToLowerInvariant()}",
+        MirCompleteOperation complete => $"operation.complete {Operand(complete.Operation)}" +
+            (complete.Result is { } result ? $" -> {Place(result)}" : ""),
         MirForget forget => $"forget {Place(forget.Place)}",
         MirStorageLive live => $"storage.live {live.Local}",
         MirStorageDead dead => $"storage.dead {dead.Local}",
         MirInitializeDispatch dispatch => $"dispatch.init<{dispatch.Type}> {Place(dispatch.Place)}",
-        MirReleaseException release => $"exception.{(release.Abandon ? "abandon" : "handle")} {Operand(release.Record)}",
+        MirReleaseException release => $"exception.{(release.Abandon ? "abandon" : "handle")} {Operand(release.Record)}" +
+            (release.RestoredRecord is { } restored ? $" restore {Operand(restored)}" : ""),
         _ => throw new NotSupportedException($"Unknown MIR statement {statement.GetType().Name}."),
     };
 
