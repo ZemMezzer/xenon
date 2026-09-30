@@ -32,6 +32,57 @@ public sealed class ResumableLifetimeTests
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         _ = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
     }
+    [Theory]
+    [InlineData("int[] relocated; { int[] source = int[2]; relocated = move source; } Result task = ArrayBorrow(relocated); return await task;")]
+    [InlineData("int[] destination = int[1]; int[] source = int[2]; destination = move source; Result task = ArrayBorrow(destination); return await task;")]
+    [InlineData("int[] outer; { int[] middle; { int[] inner = int[2]; middle = move inner; } outer = move middle; } Result task = ArrayBorrow(outer); return await task;")]
+    public void RelocatedStackArrayCanBeBorrowedUntilItsNewOwnerDies(string body) =>
+        Valid(Compile("async Result Use() { " + body + " }"));
+
+    [Fact]
+    public void RelocatedArrayStillCannotEscapeThroughAnAsyncResult()
+    {
+        Compilation compilation = Compile("""
+            Result Escape()
+            {
+                int[] destination;
+                { int[] source = int[2]; destination = move source; }
+                return ArrayBorrow(destination);
+            }
+            """);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.ValueLifetimeEscape &&
+            diagnostic.Message.Contains("destination"));
+        Assert.DoesNotContain(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.ValueLifetimeEscape &&
+            diagnostic.Message.Contains("local 'source'"));
+    }
+
+    [Theory]
+    [InlineData("int local = 42;", "Borrow(local)")]
+    [InlineData("int[] local = int[2];", "ArrayBorrow(local)")]
+    public void RelocationDoesNotEraseBorrowedArrayElementDependencies(string local, string operation)
+    {
+        Compilation compilation = Compile($$"""
+            void Escape()
+            {
+                Result[] destination;
+                {
+                    {{local}}
+                    Result[] source = Result[1];
+                    source[0] = {{operation}};
+                    destination = move source;
+                }
+            }
+            """);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.ValueLifetimeEscape &&
+            diagnostic.Message.Contains("local 'local'"));
+    }
+
+    [Theory]
+    [InlineData("void Escape() { int[] destination; { int[] source = int[2]; destination = source; } }")]
+    [InlineData("int[] Escape() { int[] source = int[2]; return move source; }")]
+    public void StackArraysStillCannotEscapeWithoutLocalRelocation(string source) =>
+        Assert.True(Compile(source).HasErrors);
+
     [Fact]
     public void ExternalBorrowIsAnInferredResultContract()
     {

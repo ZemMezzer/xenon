@@ -50,10 +50,10 @@ jobs:
         include:
           - platform: win_x64
             runner: windows-2022
-          - platform: win_x86
-            runner: windows-2022
+            generator: Visual Studio 17 2022
           - platform: win_arm64
-            runner: windows-11-arm
+            runner: windows-11-vs2026-arm
+            generator: Visual Studio 18 2026
           - platform: darwin_arm64
             runner: macos-15
 
@@ -80,11 +80,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/${{ matrix.platform }}/llvm
-          key: llvm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/*.cmake') }}
+          key: llvm-build-v2-${{ matrix.runner }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('Build.bat', 'Build.sh', 'CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/*.cmake') }}
 
       - name: Build on Windows
         if: runner.os == 'Windows'
         shell: cmd
+        env:
+          CMAKE_GENERATOR: ${{ matrix.generator }}
         run: Build.bat ${{ matrix.platform }}
 
       - name: Build on macOS

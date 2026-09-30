@@ -36,8 +36,9 @@ if /I "%XENON_PLATFORM_ID%"=="win_arm64" (
 set "VERSION_ARG="
 if defined XENON_VERSION set "VERSION_ARG=-DXENON_VERSION=%XENON_VERSION%"
 
+rem CMake selects the installed Visual Studio version; CI pins it via CMAKE_GENERATOR.
 cmake -S "%ROOT%" -B "%ROOT%\build\%XENON_PLATFORM_ID%\cmake" ^
-  -G "Visual Studio 17 2022" -A "%CMAKE_ARCH%" ^
+  -A "%CMAKE_ARCH%" ^
   -DXENON_PLATFORM=%XENON_PLATFORM_ID% %VERSION_ARG%
 if errorlevel 1 exit /b %errorlevel%
 

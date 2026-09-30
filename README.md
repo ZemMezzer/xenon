@@ -25,11 +25,11 @@ The repository contains the compiler, LLVM code generator, build driver, project
 
 Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)** and add the extracted `xenon` executable to your `PATH`.
 
-Release archives are NativeAOT distributions for Windows x64/x86/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
+Release archives are NativeAOT distributions for Windows x64/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
 
 Xenon uses LLVM 20 for code generation. Release executables contain the required LLVM code through static linkage; no adjacent `LLVM-C.dll`, `libLLVM.dll`, `libLLVM.dylib`, or `libLLVM.so` is required. Xenon also produces native binaries, so a host linker is required:
 
-- **Windows:** Visual Studio 2022 Build Tools with the **Desktop development with C++** workload;
+- **Windows:** Visual Studio 2022 or 2026 Build Tools with the **Desktop development with C++** workload;
 - **macOS:** Xcode Command Line Tools.
 
 Check the installation:
@@ -125,9 +125,9 @@ Run `xenon --help` to see all available options.
 CMake at the repository root owns the complete build graph: it builds the pinned LLVM submodule as static libraries, restores the .NET solution, and publishes the NativeAOT compiler with those libraries linked into the executable. Required host dependencies are:
 
 - Git with submodule support;
-- CMake 3.24 or newer;
+- CMake 3.24 or newer (4.2 or newer for Visual Studio 2026);
 - the .NET SDK selected by [`xenon/global.json`](xenon/global.json);
-- Visual Studio 2022 Build Tools with the Desktop development with C++ workload and a Windows SDK on Windows;
+- Visual Studio 2022 or 2026 Build Tools with the Desktop development with C++ workload and a Windows SDK on Windows;
 - Xcode Command Line Tools on Apple Silicon macOS.
 
 Clone and build on an AMD64 Windows host (the default is `win_x64`):
@@ -138,7 +138,9 @@ cd xenon
 Build.bat
 ```
 
-`Build.bat win_x64` selects the same platform explicitly; use `Build.bat win_arm64` for Windows Arm64. For a direct Visual Studio CMake configure, select both the Xenon platform and generator architecture:
+`Build.bat win_x64` selects the same platform explicitly; use `Build.bat win_arm64` for Windows Arm64. The script uses the installed Visual Studio generator selected by CMake; set `CMAKE_GENERATOR` to select a specific version. CI pins Windows x64 to VS 2022 and Windows Arm64 to the `windows-11-vs2026-arm` image with VS 2026.
+
+For a direct Visual Studio CMake configure, select both the Xenon platform and generator architecture:
 
 ```console
 cmake -S . -B build/win_x64/cmake -G "Visual Studio 17 2022" -A x64 -DXENON_PLATFORM=win_x64

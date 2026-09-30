@@ -453,7 +453,8 @@ public sealed class NativeLinker
                  .Select(path => path!)
                  .Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            foreach (string version in new[] { "2022", "2019", "2017" })
+            // VS 2026 uses the major-version directory "18" instead of a year.
+            foreach (string version in new[] { "18", "2022", "2019", "2017" })
             {
                 string visualStudioRoot = Path.Combine(programFilesRoot, "Microsoft Visual Studio", version);
                 if (!Directory.Exists(visualStudioRoot))

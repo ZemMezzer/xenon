@@ -17,14 +17,17 @@ internal sealed class ValueLifetimeAnalyzer
         public HashSet<ValueLifetimeDependency> Dependencies { get; } = [];
         public Dictionary<string, Value> Fields { get; } = [];
         public HashSet<ValueLifetimeDependency> BorrowedStorage { get; } = [];
+        // Backing allocation lifetime is transferable; element borrows are not.
+        public HashSet<ValueLifetimeDependency> StackArrayBacking { get; } = [];
         public HashSet<BoundExpression> Operations { get; } = new(ReferenceEqualityComparer.Instance);
         public Dictionary<FunctionSymbol, ImmutableArray<Value>> Callables { get; } = new(ReferenceEqualityComparer.Instance);
         public Value Copy() { var value = new Value(); value.Add(this); return value; }
-        public void Add(Value value)
+        public void Add(Value value, bool includeStackArrayBacking = true)
         {
             foreach (var field in value.Fields)
                 Fields[field.Key] = Fields.TryGetValue(field.Key, out var previousField) ? Union([previousField, field.Value]) : field.Value;
             Dependencies.UnionWith(value.Dependencies); BorrowedStorage.UnionWith(value.BorrowedStorage); Operations.UnionWith(value.Operations);
+            if (includeStackArrayBacking) StackArrayBacking.UnionWith(value.StackArrayBacking);
             foreach (var pair in value.Callables)
                 Callables[pair.Key] = Callables.TryGetValue(pair.Key, out var previous)
                     ? previous.Zip(pair.Value, (left, right) => Union([left, right])).ToImmutableArray() : pair.Value;
@@ -255,7 +258,7 @@ internal sealed class ValueLifetimeAnalyzer
     private static Value Project(Value source, string field)
     {
         if (source.Fields.TryGetValue(field, out var known)) return known.Copy();
-        Value projected = source.Copy(); projected.Operations.Clear(); projected.Fields.Clear();
+        Value projected = source.Copy(); projected.Operations.Clear(); projected.Fields.Clear(); projected.StackArrayBacking.Clear();
         projected.Dependencies.Clear();
         foreach (var dependency in source.Dependencies)
         {
@@ -387,14 +390,16 @@ internal sealed class ValueLifetimeAnalyzer
                 if (!ResumableFrameAnalysis.CarriesBorrow(suspension.Type)) result.Dependencies.Clear();
                 break;
             case BoundAssignmentExpression assignment:
-                result = Eval(assignment.Expression); Store(assignment.Target, result, expression, assignment.Target is BoundVariableExpression);
+                result = Eval(assignment.Expression);
+                TransferStackArrayBacking(assignment.Target, assignment.Expression, result);
+                Store(assignment.Target, result, expression, assignment.Target is BoundVariableExpression);
                 break;
             case BoundMemberAccessExpression member:
                 result = Project(Eval(member.Receiver), member.Field.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 if (member.Type is ReferenceTypeSymbol) result.Add(Borrow(member.Receiver));
                 break;
             case BoundIndexExpression index:
-                result = Eval(index.Receiver); result.Operations.Clear(); result.Fields.Clear();
+                result = Eval(index.Receiver); result.Operations.Clear(); result.Fields.Clear(); result.StackArrayBacking.Clear();
                 foreach (var item in index.Indices) _ = Eval(item); break;
             case BoundPropertySetExpression setter:
                 result = Call(expression, setter.Property.Setter!, [setter.Value], setter.Receiver); break;
@@ -424,6 +429,24 @@ internal sealed class ValueLifetimeAnalyzer
         }
         return result;
     }
+    private static void TransferStackArrayBacking(BoundExpression target, BoundExpression source, Value value)
+    {
+        while (source is BoundFullExpression full) source = full.Expression;
+        if (target is not BoundVariableExpression { Variable: LocalVariableSymbol { Type: ArrayTypeSymbol } destination } ||
+            source is not BoundMoveExpression { Type: ArrayTypeSymbol } || value.StackArrayBacking.Count == 0)
+            return;
+
+        // The binder validates relocation and lowering transfers the cleanup node.
+        // Retain a dependency on the new owner so subsequent borrows/async calls
+        // cannot outlive it. Do not discard dependencies of borrowed elements.
+        value.Dependencies.ExceptWith(value.StackArrayBacking);
+        value.BorrowedStorage.ExceptWith(value.StackArrayBacking);
+        value.StackArrayBacking.Clear();
+        var backing = new ValueLifetimeDependency(destination, null);
+        value.Dependencies.Add(backing);
+        value.StackArrayBacking.Add(backing);
+    }
+
     private void AddExternal(Value value)
     {
         foreach (var dependency in value.Dependencies)
@@ -481,7 +504,10 @@ internal sealed class ValueLifetimeAnalyzer
             if (replace) _values[root] = value.Copy();
             else
             {
-                Value combined = Read(root); combined.Add(value);
+                Value combined = Read(root);
+                // A stored field/element can borrow another array, but that
+                // array's allocation is not the destination's backing storage.
+                combined.Add(value, includeStackArrayBacking: false);
                 if (fieldPath.Length > 0) combined.Fields[fieldPath] = value.Copy();
                 _values[root] = combined;
             }
@@ -524,7 +550,12 @@ internal sealed class ValueLifetimeAnalyzer
                 Value initialized = declaration.Initializer is null ? new() : Eval(declaration.Initializer);
                 if (declaration.Variable.Type is ArrayTypeSymbol && declaration.Initializer is not null &&
                     BoundTree.DescendantsAndSelf(declaration.Initializer).OfType<BoundArrayCreationExpression>().Any(array => array.Storage == ArrayStorageKind.Stack))
+                {
                     initialized.Add(Value.Local(declaration.Variable));
+                    initialized.StackArrayBacking.Add(new(declaration.Variable, null));
+                }
+                if (declaration.Initializer is not null)
+                    TransferStackArrayBacking(new BoundVariableExpression(declaration.Variable), declaration.Initializer, initialized);
                 // Binding a readonly local reference materializes and extends a
                 // temporary to that local's lexical lifetime under existing rules.
                 if (declaration.Variable.Type is ReferenceTypeSymbol)

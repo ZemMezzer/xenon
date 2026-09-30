@@ -39,14 +39,12 @@ jobs:
           - platform: win_x64
             rid: win-x64
             runner: windows-2022
-            executable: xenon.exe
-          - platform: win_x86
-            rid: win-x86
-            runner: windows-2022
+            generator: Visual Studio 17 2022
             executable: xenon.exe
           - platform: win_arm64
             rid: win-arm64
-            runner: windows-11-arm
+            runner: windows-11-vs2026-arm
+            generator: Visual Studio 18 2026
             executable: xenon.exe
           - platform: darwin_arm64
             rid: osx-arm64
@@ -76,12 +74,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/${{ matrix.platform }}/llvm
-          key: llvm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/*.cmake') }}
+          key: llvm-build-v2-${{ matrix.runner }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('Build.bat', 'Build.sh', 'CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/*.cmake') }}
 
       - name: Build release on Windows
         if: runner.os == 'Windows'
         shell: cmd
         env:
+          CMAKE_GENERATOR: ${{ matrix.generator }}
           XENON_VERSION: ${{ needs.validate-version.outputs.version }}
         run: Build.bat ${{ matrix.platform }}
 
