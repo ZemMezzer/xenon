@@ -770,6 +770,75 @@ public sealed class CoreIntelligenceTests
             RequestAtAsync(session, "textDocument/prepareRename", uri, source, operation));
     }
 
+    [Fact]
+    public async Task AsyncFunctionsExposeModifierInHoverAndCompletion()
+    {
+        const string source = """
+            namespace Example;
+            struct Result { public static void operator resolve(Result& value, int n) {} }
+            async Result Value() { return 42; }
+            void Use() { Result value = Value(); }
+            """;
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("async.xe", source)).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        { textDocument = new { uri, version = 1, text = source } }), default);
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source,
+            source.LastIndexOf("Value()", StringComparison.Ordinal));
+        Assert.Contains("async Result", hover.GetProperty("contents").GetProperty("value").GetString());
+        JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source,
+            source.IndexOf("async", StringComparison.Ordinal));
+        Assert.Contains(completion.GetProperty("items").EnumerateArray(), item => item.GetProperty("label").GetString() == "async");
+    }
+
+    [Fact]
+    public async Task ReservedRuntimeNamesAreHiddenFromEditorAndCannotBeIntroducedByRename()
+    {
+        const string source = """
+            namespace Example;
+            extern void __xenon_native();
+            void Visible() {}
+            struct Data { public int __xenon_field; public int Value; }
+            void Use() { int __xenon_local = 0; __xenon_native(); Visible(); Data data = Data(); data.Value; }
+            """;
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("reserved.xe", source)).AbsoluteUri;
+        await using var session = new LanguageServerSession((_, _) => Task.CompletedTask,
+            diagnosticDebounce: TimeSpan.Zero);
+        await session.HandleRequestAsync("initialize", LspTestProtocol.Json(new { rootUri = uri }), default);
+        await session.HandleNotificationAsync("initialized", LspTestProtocol.Json(new { }), default);
+        await session.HandleNotificationAsync("textDocument/didOpen", LspTestProtocol.Json(new
+        { textDocument = new { uri, version = 1, text = source } }), default);
+        int call = source.LastIndexOf("__xenon_native", StringComparison.Ordinal);
+        foreach (int offset in new[] { call, source.LastIndexOf("data.Value", StringComparison.Ordinal) + 5 })
+        {
+            JsonElement completion = await RequestAtAsync(session, "textDocument/completion", uri, source, offset);
+            Assert.DoesNotContain(completion.GetProperty("items").EnumerateArray(),
+                item => item.GetProperty("label").GetString()!.StartsWith("__xenon_", StringComparison.Ordinal));
+        }
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source, call);
+        Assert.Equal(JsonValueKind.Null, hover.ValueKind);
+        JsonElement definition = await RequestAtAsync(session, "textDocument/definition", uri, source, call);
+        Assert.Equal(JsonValueKind.Null, definition.ValueKind);
+        JsonElement signatures = await RequestAtAsync(session, "textDocument/signatureHelp", uri, source,
+            call + "__xenon_native(".Length);
+        Assert.Equal(JsonValueKind.Null, signatures.ValueKind);
+        JsonElement symbols = Result(await session.HandleRequestAsync("textDocument/documentSymbol",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        Assert.DoesNotContain("__xenon_", symbols.GetRawText());
+        JsonElement workspace = Result(await session.HandleRequestAsync("workspace/symbol",
+            LspTestProtocol.Json(new { query = "__xenon_" }), default));
+        Assert.Empty(workspace.EnumerateArray());
+        JsonRpcException error = await Assert.ThrowsAsync<JsonRpcException>(() => RequestAtAsync(session,
+            "textDocument/rename", uri, source, source.LastIndexOf("Visible()", StringComparison.Ordinal),
+            newName: "__xenon_forged"));
+        Assert.Equal(LspErrorCodes.InvalidParams, error.Code);
+    }
+
     private static async Task<JsonElement> RequestAtAsync(LanguageServerSession session, string method,
         string uri, string source, int offset, object? context = null, string? newName = null)
     {

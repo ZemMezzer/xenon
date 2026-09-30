@@ -36,6 +36,8 @@ public sealed record LambdaExpressionSyntax(
     SyntaxToken? FatArrowToken,
     BlockStatementSyntax Body) : ExpressionSyntax
 {
+    public SyntaxToken? AsyncKeyword { get; init; }
+    public bool IsAsync => AsyncKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.LambdaExpression;
     public SyntaxToken IntroducerToken => FunctionKeyword ?? OpenBracketToken ?? OpenParenthesisToken;
 }

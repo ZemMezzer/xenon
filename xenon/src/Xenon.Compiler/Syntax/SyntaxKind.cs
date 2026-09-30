@@ -136,6 +136,7 @@ public enum SyntaxKind
     CatchKeyword,
     FinallyKeyword,
     ThrowKeyword,
+    AsyncKeyword,
     AwaitKeyword,
 
     CompilationUnit,

@@ -14,6 +14,7 @@ public sealed class FunctionSymbol : Symbol
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
     public ImmutableArray<LifetimeDependency> ResultLifetimeDependencies { get; internal set; } = [];
     public ImmutableArray<LifetimeStore> LifetimeStores { get; internal set; } = [];
+    public bool IsAsync { get; internal set; }
     public bool ReturnsResumableOperation { get; internal set; }
     public bool CreatesResumableOperation { get; internal set; }
     public ImmutableArray<ReferenceReturnOrigin> ReferenceReturnOrigins { get; private set; } = [];
@@ -36,6 +37,7 @@ public sealed class FunctionSymbol : Symbol
             declaration.AccessModifierToken, declaration.SecondaryAccessModifierToken, Accessibility.Private);
         FunctionKind = FunctionKind.Ordinary;
         IsReadonly = declaration.IsReadonly;
+        IsAsync = declaration.IsAsync;
         SetTypeParameters(typeParameters.IsDefault ? [] : typeParameters);
         IsExtern = declaration.IsExtern;
         IsExport = declaration.IsExport;
@@ -59,6 +61,7 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = Accessibility.Public;
         IsAbstract = true;
         IsReadonly = declaration.IsReadonly;
+        IsAsync = declaration.IsAsync;
         IsDefinition = false;
         SetSourceOrigin(declaration);
         ApplyParameterDocumentation();
@@ -118,6 +121,7 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = AccessibilityFacts.FromSyntax(declaration.AccessModifierToken,
             declaration.SecondaryAccessModifierToken, Accessibility.Private);
+        IsAsync = declaration.IsAsync;
         IsStatic = declaration.IsStatic;
         OperatorKind = declaration.IsOperator
             ? OperatorFacts.FromSource(declaration.IdentifierToken.Text, parameters.Length) : null;

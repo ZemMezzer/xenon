@@ -1,25 +1,32 @@
+using Xenon.Compiler;
+
 namespace Xenon.Driver;
 
 internal static class NativeExceptionRuntime
 {
     public static readonly string[] ExportedSymbols =
     [
-        "__xenon_eh_allocate",
-        "__xenon_eh_object",
-        "__xenon_eh_activate",
-        "__xenon_eh_throw",
-        "__xenon_eh_current",
-        "__xenon_eh_matches",
-        "__xenon_eh_handle",
-        "__xenon_eh_abandon",
-        "__xenon_eh_replace_previous",
-        "__xenon_eh_cleanup",
-        "__xenon_eh_initialize",
-        "__xenon_eh_rethrow",
-        "__xenon_eh_terminate",
+        RuntimeAbiNames.AsyncRootCreate, RuntimeAbiNames.AsyncRootRetain,
+        RuntimeAbiNames.AsyncRootRelease, RuntimeAbiNames.AsyncRootNotify, RuntimeAbiNames.AsyncRootPump,
+        RuntimeAbiNames.AsyncRootClose,
+        RuntimeAbiNames.EhAllocate,
+        RuntimeAbiNames.EhObject,
+        RuntimeAbiNames.EhActivate,
+        RuntimeAbiNames.EhThrow,
+        RuntimeAbiNames.EhCurrent,
+        RuntimeAbiNames.EhMatches,
+        RuntimeAbiNames.EhHandle,
+        RuntimeAbiNames.EhAbandon,
+        RuntimeAbiNames.EhReplacePrevious,
+        RuntimeAbiNames.EhCleanup,
+        RuntimeAbiNames.EhInitialize,
+        RuntimeAbiNames.EhRethrow,
+        RuntimeAbiNames.EhTerminate,
     ];
 
-    public const string Source = """
+    public static string Source => ExceptionSource + NativeAsyncRuntime.Source;
+
+    private static readonly string ExceptionSource = $$"""
         #include <cstddef>
         #include <cstdint>
         #include <cstdio>
@@ -73,7 +80,7 @@ internal static class NativeExceptionRuntime
         }
         }
 
-        extern "C" void* __xenon_eh_allocate(std::uintptr_t size, std::uintptr_t alignment,
+        extern "C" void* {{RuntimeAbiNames.EhAllocate}}(std::uintptr_t size, std::uintptr_t alignment,
                                                const char* type_chain, const char* type_name,
                                                void (*destructor)(void*)) {
             if (alignment == 0) alignment = 1;
@@ -92,27 +99,27 @@ internal static class NativeExceptionRuntime
             return record;
         }
 
-        extern "C" void* __xenon_eh_object(void* opaque) {
+        extern "C" void* {{RuntimeAbiNames.EhObject}}(void* opaque) {
             return static_cast<XenonExceptionRecord*>(opaque)->object;
         }
 
-        extern "C" void __xenon_eh_activate(void* opaque) {
+        extern "C" void {{RuntimeAbiNames.EhActivate}}(void* opaque) {
             auto* record = static_cast<XenonExceptionRecord*>(opaque);
             record->previous = current_exception;
             current_exception = record;
         }
 
-        extern "C" [[noreturn]] void __xenon_eh_throw(void* opaque) {
-            __xenon_eh_activate(opaque);
+        extern "C" [[noreturn]] void {{RuntimeAbiNames.EhThrow}}(void* opaque) {
+            {{RuntimeAbiNames.EhActivate}}(opaque);
             throw XenonNativeException{};
         }
 
-        extern "C" void* __xenon_eh_current() {
+        extern "C" void* {{RuntimeAbiNames.EhCurrent}}() {
             if (current_exception) current_exception->caught = true;
             return current_exception;
         }
 
-        extern "C" bool __xenon_eh_matches(void* opaque, const char* requested_chain) {
+        extern "C" bool {{RuntimeAbiNames.EhMatches}}(void* opaque, const char* requested_chain) {
             auto* record = static_cast<XenonExceptionRecord*>(opaque);
             if (!record || !record->type_chain || !requested_chain) return false;
             std::size_t requested_length = std::strcspn(requested_chain, "\n");
@@ -127,7 +134,7 @@ internal static class NativeExceptionRuntime
             return false;
         }
 
-        extern "C" void __xenon_eh_handle(void* opaque) {
+        extern "C" void {{RuntimeAbiNames.EhHandle}}(void* opaque) {
             auto* record = static_cast<XenonExceptionRecord*>(opaque);
             if (!record) terminate_current();
             if (record != current_exception) {
@@ -142,7 +149,7 @@ internal static class NativeExceptionRuntime
             destroy_record(record);
         }
 
-        extern "C" void __xenon_eh_abandon(void* opaque) {
+        extern "C" void {{RuntimeAbiNames.EhAbandon}}(void* opaque) {
             auto* abandoned = static_cast<XenonExceptionRecord*>(opaque);
             XenonExceptionRecord** link = &current_exception;
             while (*link && *link != abandoned) link = &(*link)->previous;
@@ -151,20 +158,20 @@ internal static class NativeExceptionRuntime
             destroy_record(abandoned);
         }
 
-        extern "C" void __xenon_eh_replace_previous() {
+        extern "C" void {{RuntimeAbiNames.EhReplacePrevious}}() {
             if (!current_exception || !current_exception->previous) return;
             XenonExceptionRecord* replaced = current_exception->previous;
             current_exception->previous = replaced->previous;
             destroy_record(replaced);
         }
 
-        extern "C" void __xenon_eh_cleanup(void (*destructor)(void*), void* object) noexcept {
+        extern "C" void {{RuntimeAbiNames.EhCleanup}}(void (*destructor)(void*), void* object) noexcept {
             if (!destructor) return;
             try { destructor(object); }
             catch (...) { terminate_current(); }
         }
 
-        extern "C" void __xenon_eh_initialize(void (*initializer)(), unsigned char* guard) {
+        extern "C" void {{RuntimeAbiNames.EhInitialize}}(void (*initializer)(), unsigned char* guard) {
             try { initializer(); }
             catch (...) {
                 if (guard) *guard = 0;
@@ -172,12 +179,12 @@ internal static class NativeExceptionRuntime
             }
         }
 
-        extern "C" [[noreturn]] void __xenon_eh_rethrow() {
+        extern "C" [[noreturn]] void {{RuntimeAbiNames.EhRethrow}}() {
             if (!current_exception) terminate_current();
             current_exception->caught = false;
             throw XenonNativeException{};
         }
 
-        extern "C" [[noreturn]] void __xenon_eh_terminate() { terminate_current(); }
+        extern "C" [[noreturn]] void {{RuntimeAbiNames.EhTerminate}}() { terminate_current(); }
         """;
 }

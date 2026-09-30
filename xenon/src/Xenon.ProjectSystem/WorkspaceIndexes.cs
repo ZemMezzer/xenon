@@ -282,7 +282,7 @@ internal static class WorkspaceIndexBuilder
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!visited.Add(symbol)) return;
-            foreach (var syntaxReference in symbol.IsUserVisible ? symbol.DeclaringSyntaxReferences : [])
+            foreach (var syntaxReference in EditorSymbolClassifier.IsEditorVisible(symbol) ? symbol.DeclaringSyntaxReferences : [])
             {
                 SourceText source = syntaxReference.Source;
                 if (!sourceMap.TryGetValue(source.FileId, out var owner) || owner.ProjectId != projectId) continue;

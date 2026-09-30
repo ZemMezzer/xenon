@@ -129,6 +129,7 @@ internal sealed class GenericFunctionSpecializer
         specialized.SetReferenceReturnOrigins(definition.ReferenceReturnOrigins);
         specialized.ResultLifetimeDependencies = definition.ResultLifetimeDependencies;
         specialized.LifetimeStores = definition.LifetimeStores;
+        specialized.IsAsync = definition.IsAsync;
         specialized.ReturnsResumableOperation = definition.ReturnsResumableOperation;
         specialized.CreatesResumableOperation = definition.CreatesResumableOperation;
         specialized.SetSharedReturnOrigins(definition.SharedReturnOrigins);

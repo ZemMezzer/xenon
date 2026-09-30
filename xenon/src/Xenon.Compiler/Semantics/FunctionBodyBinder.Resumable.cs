@@ -25,9 +25,10 @@ internal sealed partial class FunctionBodyBinder
 
     private void BeginResumableBinding(BlockStatementSyntax body)
     {
+        if (!_function.IsAsync) return;
         var nested = SyntaxNavigator.DescendantNodesAndSelf(body).OfType<LambdaExpressionSyntax>()
             .SelectMany(SyntaxNavigator.DescendantNodesAndSelf).ToHashSet(ReferenceEqualityComparer.Instance);
-        if (!SyntaxNavigator.DescendantNodesAndSelf(body).OfType<AwaitExpressionSyntax>().Any(node => !nested.Contains(node))) return;
+
         TextLocation location = body.OpenBraceToken.Location;
         foreach (TryStatementSyntax region in SyntaxNavigator.DescendantNodesAndSelf(body).OfType<TryStatementSyntax>())
         {
@@ -41,14 +42,19 @@ internal sealed partial class FunctionBodyBinder
         if (_function.FunctionKind is FunctionKind.Constructor or FunctionKind.Destructor ||
             _function.ReturnType is not StructTypeSymbol { IsStatic: false, IsAbstract: false } type)
         {
-            _diagnostics.Report(location, "resumable return type requires an accessible parameterless constructor and completion operators",
+            _diagnostics.Report(location, $"type '{_function.ReturnType.ToDisplayString()}' cannot be used as an async return type because it does not provide the required completion protocol",
                 DiagnosticIds.InvalidResumableReturn);
             return;
         }
+        if (!DiscoverOperators([type], OperatorKind.Resolve).Any(candidate => IsAccessible(candidate) &&
+                candidate.Parameters.Length is 1 or 2 && OperatorFacts.ProtocolSignatureError(candidate) is null))
+            _diagnostics.Report(location,
+                $"async return type '{type.ToDisplayString()}' requires an accessible operator resolve({type.ToDisplayString()}&, value) or operator resolve({type.ToDisplayString()}&)",
+                DiagnosticIds.MissingCompletionOperator);
         _resumableResult = new LocalVariableSymbol("__resumable_result", type, _function, false)
             { Destructor = TypeFacts.GetCompleteDestructor(type) };
         _definitelyAssigned.Add(_resumableResult);
-        if (!TypeFacts.CanCopy(type))
+        if (SyntaxNavigator.DescendantNodesAndSelf(body).OfType<AwaitExpressionSyntax>().Any(node => !nested.Contains(node)) && !TypeFacts.CanCopy(type))
             _diagnostics.Report(location, "resumable return object must support ordinary copying so the caller and frame can own handles to the same logical state",
                 DiagnosticIds.InvalidResumableReturn);
         if (type.Constructors.IsEmpty)
@@ -61,7 +67,7 @@ internal sealed partial class FunctionBodyBinder
             FunctionSymbol? constructor = type.Constructors.FirstOrDefault(candidate => candidate.Parameters.IsEmpty && IsAccessible(candidate));
             if (constructor is null)
             {
-                _diagnostics.Report(location, "resumable return type requires an accessible parameterless constructor",
+                _diagnostics.Report(location, "async return type requires an accessible parameterless constructor",
                     DiagnosticIds.InvalidResumableReturn);
                 _resumableConstruction = new BoundErrorExpression();
             }
@@ -126,6 +132,8 @@ internal sealed partial class FunctionBodyBinder
         TextLocation location = syntax.CloseBraceToken.Location;
         if (!AlwaysReturns(body))
         {
+            if (!DiscoverOperators([_function.ReturnType], OperatorKind.Resolve).Any(candidate => candidate.Parameters.Length == 1))
+                _diagnostics.Report(location, "not all code paths produce a value", DiagnosticIds.MissingCompletionOperator);
             BoundExpression completion = BindCompletionOperator(OperatorKind.Resolve,
                 [new BoundVariableExpression(_resumableResult!)], [], syntax, location);
             body = body with { Statements = body.Statements.Add(new BoundReturnStatement(completion)) };
@@ -133,7 +141,8 @@ internal sealed partial class FunctionBodyBinder
         ValidateSuspensionLifetimes(body);
         var catches = ImmutableArray.CreateBuilder<BoundCatchClause>();
         FunctionSymbol[] rejects = DiscoverOperators([_function.ReturnType], OperatorKind.Reject)
-            .Where(candidate => candidate.Parameters.Length == 2 && OperatorFacts.ProtocolSignatureError(candidate) is null).ToArray();
+            .Where(candidate => candidate.Parameters.Length == 2 && IsAccessible(candidate) &&
+                OperatorFacts.ProtocolSignatureError(candidate) is null).ToArray();
         foreach (TypeSymbol errorType in rejects.Select(candidate => OperatorFacts.ValueType(candidate.Parameters[1].Type))
                      .Distinct(TypeIdentity.Comparer).OrderByDescending(ExceptionInheritanceDepth))
         {
@@ -146,12 +155,9 @@ internal sealed partial class FunctionBodyBinder
             catches.Add(new BoundCatchClause(errorType, error,
                 new BoundBlockStatement([new BoundReturnStatement(CompleteFullExpression(rejection, resultConsumed: false))])));
         }
-        if (catches.Count == 0)
-            _diagnostics.Report(location, "resumable return type requires a suitable operator reject for escaping exceptions",
-                DiagnosticIds.MissingCompletionOperator);
         BoundBlockStatement result = new([
             new BoundVariableDeclarationStatement(_resumableResult!, _resumableConstruction),
-            new BoundTryStatement(body, catches.ToImmutable(), null)]) { IsResumable = true };
+            new BoundTryStatement(body, catches.ToImmutable(), null)]) { IsResumable = true, RequiresSuspensionStateMachine = _suspensionIndex != 0 };
         FunctionCleanupAnalyzer.Recompute(_function, result);
         return result;
     }
@@ -162,6 +168,11 @@ internal sealed partial class FunctionBodyBinder
     private BoundExpression BindAwaitExpression(AwaitExpressionSyntax syntax)
     {
         TextLocation location = syntax.AwaitKeyword.Location;
+        if (!_function.IsAsync)
+        {
+            _diagnostics.Report(location, "'await' may only be used inside an async function", DiagnosticIds.InvalidAwaitContext);
+            return new BoundErrorExpression();
+        }
         if (_resumableResult is null)
         {
             _diagnostics.Report(location, "await requires a function with a valid resumable return type", DiagnosticIds.InvalidAwaitContext);

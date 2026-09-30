@@ -94,7 +94,7 @@ public static class SymbolDisplay
         if (diagnostic) return signature;
         if (function.FunctionKind is FunctionKind.Constructor or FunctionKind.Destructor)
             return signature;
-        return $"{function.ReturnType.ToDisplayString(format)} " +
+        return (function.IsAsync ? "async " : "") + $"{function.ReturnType.ToDisplayString(format)} " +
                (function.IsReadonly ? "readonly " : "") + signature;
     }
 

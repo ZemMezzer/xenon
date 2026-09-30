@@ -59,6 +59,8 @@ public sealed class Compilation
                 targetLayout, cancellationToken);
         if (!SemanticModel.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
             SemanticModel = SemanticModel.WithAdditionalDiagnostics(ResumableExceptionAnalyzer.Analyze(this, cancellationToken));
+        if (!SemanticModel.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+            SemanticModel = SemanticModel.WithAdditionalDiagnostics(AsyncEntryPoint.Validate(this));
         Diagnostics = SemanticModel.Diagnostics;
     }
 
@@ -622,6 +624,9 @@ public sealed class Compilation
         void Inspect(BoundFunction function)
         {
             MarkType(function.Symbol.ReturnType);
+            if (Options.OutputKind == CompilationOutputKind.Executable && function.Symbol.Name == "Main" &&
+                AsyncEntryPoint.GetAwaitOperator(function.Symbol) is { } rootAwait)
+                MarkSymbol(rootAwait);
             foreach (ParameterSymbol parameter in function.Symbol.Parameters)
                 MarkType(parameter.Type, TypeFacts.GetCompleteDestructor(parameter.Type) is null
                     ? TypeReachabilityReason.Reference

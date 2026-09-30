@@ -77,6 +77,7 @@ public sealed record BoundBlockStatement(
     ImmutableArray<BoundStatement> Statements) : BoundStatement
 {
     public bool IsResumable { get; init; }
+    public bool RequiresSuspensionStateMachine { get; init; }
     // Function-level finalization, after local scope cleanup on every exit.
     public BoundExpression? ExitCleanup { get; init; }
     // A stack value allocated in this lexical scope was relocated to an

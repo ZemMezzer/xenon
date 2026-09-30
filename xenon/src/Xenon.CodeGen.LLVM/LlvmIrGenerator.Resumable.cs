@@ -1,3 +1,4 @@
+using Xenon.Compiler;
 using LLVMSharp.Interop;
 using LLVMApi = LLVMSharp.Interop.LLVM;
 using Xenon.Compiler.Semantics;
@@ -11,6 +12,7 @@ public sealed partial class LlvmIrGenerator
     private sealed unsafe partial class FunctionEmitter
     {
         private bool _isResumable;
+        private bool _isAsyncCompletion;
         private ResumableFrameAnalysis? _resumableFrame;
         private DeferredCompletion? _deferredCompletion;
         private sealed class DeferredCompletion(BoundCallExpression call)
@@ -42,7 +44,7 @@ public sealed partial class LlvmIrGenerator
             BoundVariableDeclarationStatement resultDeclaration = (BoundVariableDeclarationStatement)body.Statements[0];
             LLVMValueRef result = EmitExpression(resultDeclaration.Initializer!);
             LLVMValueRef frameResult = EmitCopyValue(result, _function.ReturnType);
-            LLVMValueRef state = ResumeCall("__xenon_resume_create", ResumePointer, [], "resumable.control");
+            LLVMValueRef state = ResumeCall(RuntimeAbiNames.ResumeCreate, ResumePointer, [], "resumable.control");
             LLVMValueRef[] inputs = Enumerable.Range(0, checked((int)_llvmFunction.ParamsCount))
                 .Select(index => _llvmFunction.GetParam((uint)index)).ToArray();
             if (_function.IsCapturingLambda)
@@ -66,8 +68,71 @@ public sealed partial class LlvmIrGenerator
                 emitter.EndResumableBody();
             }
             LLVMValueRef handle = _builder.BuildCall2(rampType, ramp, inputs.Concat(new[] { frameResult, state }).ToArray(), "resumable.frame");
-            ResumeCall("__xenon_resume_start", _context.VoidType, [state, handle]);
+            ResumeCall(RuntimeAbiNames.ResumeStart, _context.VoidType, [state, handle]);
             _builder.BuildRet(result);
+            _terminated = true;
+        }
+
+        public void EmitAsyncRoot(FunctionSymbol awaiting)
+        {
+            LLVMValueRef root = ResumeCall(RuntimeAbiNames.AsyncRootCreate, ResumePointer, [], "async.root");
+            LLVMBasicBlockRef failure = _llvmFunction.AppendBasicBlock("async.root.unhandled");
+            _exceptionTargets.Push(new ExceptionTarget(failure, 0, 0, 0));
+            LLVMValueRef operation = EmitPotentiallyThrowingCall(_function, _functions[_function], [], "async.main.result");
+            LLVMValueRef address = _builder.BuildAlloca(_mapType(_function.ReturnType), "async.main.address");
+            _builder.BuildStore(operation, address);
+            StorageTypeSymbol? storage = awaiting.Parameters.Length == 3
+                ? (StorageTypeSymbol)((ReferenceTypeSymbol)awaiting.Parameters[1].Type).ElementType : null;
+            LLVMValueRef slot = default;
+            if (storage is not null)
+            {
+                slot = _builder.BuildAlloca(_mapType(storage), "async.main.slot");
+                _builder.BuildStore(DefaultValue(storage, _mapType, _virtualTables), slot);
+            }
+            LLVMBasicBlockRef retry = _llvmFunction.AppendBasicBlock("async.root.retry");
+            LLVMBasicBlockRef pending = _llvmFunction.AppendBasicBlock("async.root.pending");
+            LLVMBasicBlockRef ready = _llvmFunction.AppendBasicBlock("async.root.ready");
+            _builder.BuildBr(retry);
+            _builder.PositionAtEnd(retry);
+            // function void() uses the ordinary ref-counted function control ABI.
+            LLVMTypeRef word = _mapType(BuiltinTypes.NUInt);
+            LLVMTypeRef controlType = _context.GetStructType([word, ResumePointer, ResumePointer], false);
+            LLVMValueRef control = _builder.BuildCall2(_getMemoryRuntime().MallocType, _getMemoryRuntime().Malloc,
+                new[] { LLVMValueRef.CreateConstInt(word, (ulong)(3 * (_getIntegerBitWidth(BuiltinTypes.NUInt) / 8))) }, "root.continuation.control");
+            _builder.BuildStore(LLVMValueRef.CreateConstInt(word, 1), _builder.BuildStructGEP2(controlType, control, 0, "root.refs"));
+            _builder.BuildStore(root, _builder.BuildStructGEP2(controlType, control, 1, "root.environment"));
+            LLVMTypeRef callbackType = LLVMTypeRef.CreateFunction(_context.VoidType, [ResumePointer], false);
+            _builder.BuildStore(GetOrAddFunction(RuntimeAbiNames.AsyncRootRelease, callbackType),
+                _builder.BuildStructGEP2(controlType, control, 2, "root.drop"));
+            ResumeCall(RuntimeAbiNames.AsyncRootRetain, _context.VoidType, [root]);
+            LLVMValueRef continuation = LLVMValueRef.CreateConstNull(_mapType(awaiting.Parameters[^1].Type));
+            continuation = _builder.BuildInsertValue(continuation, GetOrAddFunction(RuntimeAbiNames.AsyncRootNotify, callbackType), 0, "root.notify");
+            continuation = _builder.BuildInsertValue(continuation, control, 1, "root.continuation");
+            LLVMValueRef operand = awaiting.Parameters[0].Type is ReferenceTypeSymbol ? address :
+                EmitCopyValue(_builder.BuildLoad2(_mapType(_function.ReturnType), address, "root.operand"), _function.ReturnType);
+            LLVMValueRef[] arguments = storage is null ? [operand, continuation] : [operand, slot, continuation];
+            LLVMValueRef complete = EmitPotentiallyThrowingCall(awaiting, _functions[awaiting], arguments, "root.complete");
+            _builder.BuildCondBr(complete, ready, pending);
+            _builder.PositionAtEnd(pending);
+            if (storage is not null) EmitStorageStateCheck(slot, storage, expectedInitialized: false);
+            ResumeCall(RuntimeAbiNames.AsyncRootPump, _context.VoidType, [root]);
+            _builder.BuildBr(retry);
+            _builder.PositionAtEnd(ready);
+            LLVMValueRef result = LLVMValueRef.CreateConstInt(_context.Int32Type, 0);
+            if (storage is not null)
+            {
+                EmitStorageStateCheck(slot, storage, expectedInitialized: true);
+                result = _builder.BuildLoad2(_context.Int32Type, GetStorageValueAddress(slot, storage), "root.exit.code");
+            }
+            if (TypeFacts.GetCompleteDestructor(_function.ReturnType) is { } destructor)
+                EmitLifecycleCall(destructor, address, []);
+            ResumeCall(RuntimeAbiNames.AsyncRootClose, _context.VoidType, [root]);
+            _exceptionTargets.Pop();
+            _builder.BuildRet(result);
+            _builder.PositionAtEnd(failure);
+            LlvmFunction terminate = _getExceptionRuntime().Terminate;
+            _builder.BuildCall2(terminate.Type, terminate.Value, Array.Empty<LLVMValueRef>(), string.Empty);
+            _builder.BuildUnreachable();
             _terminated = true;
         }
 
@@ -148,12 +213,13 @@ public sealed partial class LlvmIrGenerator
                     _finalizerScopes.Count, _activeCatchScopes.Count));
                 EmitPotentiallyThrowingCall(call.Function, _functions[call.Function], completion.Arguments, string.Empty);
                 if (rejecting) ReleaseCatchScopes(0, _ => true, []);
-                if (TypeFacts.GetCompleteDestructor(_function.ReturnType) is { } destructor)
+                if (_isResumable && TypeFacts.GetCompleteDestructor(_function.ReturnType) is { } destructor)
                     EmitLifecycleCall(destructor, GetAddress(_resumableReturnVariable!), []);
-                if (_function.IsCapturingLambda)
+                if (_isResumable && _function.IsCapturingLambda)
                     EmitFunctionControlRelease(_builder.BuildLoad2(ResumePointer, _closureEnvironment, "resumable.capture.owner"));
                 _exceptionTargets.Pop();
-                _builder.BuildBr(_coroutineComplete);
+                if (_isResumable) _builder.BuildBr(_coroutineComplete);
+                else _builder.BuildRet(_builder.BuildLoad2(_mapType(_function.ReturnType), GetAddress(_resumableReturnVariable!), "async.result"));
                 _builder.PositionAtEnd(failure);
                 LlvmFunction terminate = _getExceptionRuntime().Terminate;
                 _builder.BuildCall2(terminate.Type, terminate.Value, Array.Empty<LLVMValueRef>(), string.Empty);
@@ -216,7 +282,7 @@ public sealed partial class LlvmIrGenerator
             LLVMValueRef continuationAddress = _builder.BuildAlloca(_mapType(expression.Continuation.Type), "await.continuation");
             _addresses[expression.Continuation] = continuationAddress;
 
-            LLVMValueRef continuation = ResumeCall("__xenon_resume_continuation", _mapType(expression.Continuation.Type),
+            LLVMValueRef continuation = ResumeCall(RuntimeAbiNames.ResumeContinuation, _mapType(expression.Continuation.Type),
                 [_llvmFunction.GetParam(_llvmFunction.ParamsCount - 1)], "await.resume");
             _builder.BuildStore(continuation, continuationAddress);
             FunctionSymbol continuationDestructor = TypeFacts.GetCompleteDestructor(expression.Continuation.Type)!;

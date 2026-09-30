@@ -1,3 +1,4 @@
+using Xenon.Compiler;
 using System.Runtime.InteropServices;
 using LLVMSharp.Interop;
 using LLVMApi = LLVMSharp.Interop.LLVM;
@@ -24,7 +25,7 @@ internal static unsafe class LlvmResumableRuntime
         var roots = new List<(LLVMValueRef Function, LLVMLinkage Linkage)>();
         for (LLVMValueRef function = module.FirstFunction; function != default; function = function.NextFunction)
             if (function.Name.EndsWith(".resumable", StringComparison.Ordinal) ||
-                function.Name is "__xenon_malloc" or "__xenon_free")
+                function.Name is RuntimeAbiNames.Malloc or RuntimeAbiNames.Free)
             {
                 roots.Add((function, function.Linkage));
                 function.Linkage = LLVMLinkage.LLVMExternalLinkage;
@@ -45,25 +46,31 @@ internal static unsafe class LlvmResumableRuntime
         {
             Marshal.FreeCoTaskMem(pipeline);
             foreach ((LLVMValueRef function, LLVMLinkage linkage) in roots) function.Linkage = linkage;
+            // All callers and callbacks are now in this module; these helpers need no native exports.
+            foreach (string name in RuntimeAbiNames.ResumableHelpers)
+            {
+                LLVMValueRef helper = module.GetNamedFunction(name);
+                if (helper != default) helper.Linkage = LLVMLinkage.LLVMInternalLinkage;
+            }
         }
     }
 
     // Each registration has its own once flag and epoch. Stale or duplicate callbacks
     // retain only the small control record, never a pointer to freed coroutine storage.
     // Gate bits: running=1, requested=2, terminal=4. Only the running owner touches the frame.
-    private const string RuntimeIr = """
+    private static readonly string RuntimeIr = $$"""
         %xe.resume.state = type { WORD, ptr, i32, WORD }
         %xe.resume.token = type { ptr, WORD, i32 }
         %xe.function.control = type { WORD, ptr, ptr }
-        declare ptr @__xenon_malloc(WORD)
-        declare void @__xenon_free(ptr)
+        declare ptr @{{RuntimeAbiNames.Malloc}}(WORD)
+        declare void @{{RuntimeAbiNames.Free}}(ptr)
         declare i1 @llvm.coro.done(ptr)
         declare void @llvm.coro.resume(ptr)
         declare void @llvm.coro.destroy(ptr)
 
-        define linkonce_odr ptr @__xenon_resume_create() {
+        define linkonce_odr ptr @{{RuntimeAbiNames.ResumeCreate}}() {
         entry:
-          %state = call ptr @__xenon_malloc(WORD ptrtoint (ptr getelementptr (%xe.resume.state, ptr null, i32 1) to WORD))
+          %state = call ptr @{{RuntimeAbiNames.Malloc}}(WORD ptrtoint (ptr getelementptr (%xe.resume.state, ptr null, i32 1) to WORD))
           store WORD 1, ptr %state
           %handle = getelementptr %xe.resume.state, ptr %state, i32 0, i32 1
           store ptr null, ptr %handle
@@ -74,28 +81,28 @@ internal static unsafe class LlvmResumableRuntime
           ret ptr %state
         }
 
-        define linkonce_odr void @__xenon_resume_release(ptr %state) {
+        define linkonce_odr void @{{RuntimeAbiNames.ResumeRelease}}(ptr %state) {
         entry:
           %old = atomicrmw sub ptr %state, WORD 1 release
           %last = icmp eq WORD %old, 1
           br i1 %last, label %destroy, label %end
         destroy:
           fence acquire
-          call void @__xenon_free(ptr %state)
+          call void @{{RuntimeAbiNames.Free}}(ptr %state)
           br label %end
         end:
           ret void
         }
 
-        define linkonce_odr void @__xenon_resume_token_drop(ptr %token) {
+        define linkonce_odr void @{{RuntimeAbiNames.ResumeTokenDrop}}(ptr %token) {
         entry:
           %state = load ptr, ptr %token
-          call void @__xenon_resume_release(ptr %state)
-          call void @__xenon_free(ptr %token)
+          call void @{{RuntimeAbiNames.ResumeRelease}}(ptr %state)
+          call void @{{RuntimeAbiNames.Free}}(ptr %token)
           ret void
         }
 
-        define linkonce_odr void @__xenon_resume_drain(ptr %state) {
+        define linkonce_odr void @{{RuntimeAbiNames.ResumeDrain}}(ptr %state) {
         entry:
           %address = getelementptr %xe.resume.state, ptr %state, i32 0, i32 1
           %handle = load ptr, ptr %address
@@ -115,21 +122,21 @@ internal static unsafe class LlvmResumableRuntime
         finish:
           store atomic i32 4, ptr %gate release, align 4
           call void @llvm.coro.destroy(ptr %handle)
-          call void @__xenon_resume_release(ptr %state)
+          call void @{{RuntimeAbiNames.ResumeRelease}}(ptr %state)
           br label %end
         end:
           ret void
         }
 
-        define linkonce_odr void @__xenon_resume_start(ptr %state, ptr %handle) {
+        define linkonce_odr void @{{RuntimeAbiNames.ResumeStart}}(ptr %state, ptr %handle) {
         entry:
           %address = getelementptr %xe.resume.state, ptr %state, i32 0, i32 1
           store ptr %handle, ptr %address
-          call void @__xenon_resume_drain(ptr %state)
+          call void @{{RuntimeAbiNames.ResumeDrain}}(ptr %state)
           ret void
         }
 
-        define linkonce_odr void @__xenon_resume_request(ptr %token) {
+        define linkonce_odr void @{{RuntimeAbiNames.ResumeRequest}}(ptr %token) {
         entry:
           %used = getelementptr %xe.resume.token, ptr %token, i32 0, i32 2
           %old = atomicrmw xchg ptr %used, i32 1 acq_rel
@@ -156,31 +163,31 @@ internal static unsafe class LlvmResumableRuntime
           %address = getelementptr %xe.resume.state, ptr %state, i32 0, i32 1
           %handle = load ptr, ptr %address
           call void @llvm.coro.resume(ptr %handle)
-          call void @__xenon_resume_drain(ptr %state)
+          call void @{{RuntimeAbiNames.ResumeDrain}}(ptr %state)
           br label %end
         end:
           ret void
         }
 
-        define linkonce_odr { ptr, ptr } @__xenon_resume_continuation(ptr %state) {
+        define linkonce_odr { ptr, ptr } @{{RuntimeAbiNames.ResumeContinuation}}(ptr %state) {
         entry:
           %epochAddress = getelementptr %xe.resume.state, ptr %state, i32 0, i32 3
           %oldEpoch = atomicrmw add ptr %epochAddress, WORD 1 acq_rel
           %epoch = add WORD %oldEpoch, 1
           %retain = atomicrmw add ptr %state, WORD 1 monotonic
-          %token = call ptr @__xenon_malloc(WORD ptrtoint (ptr getelementptr (%xe.resume.token, ptr null, i32 1) to WORD))
+          %token = call ptr @{{RuntimeAbiNames.Malloc}}(WORD ptrtoint (ptr getelementptr (%xe.resume.token, ptr null, i32 1) to WORD))
           store ptr %state, ptr %token
           %epochSlot = getelementptr %xe.resume.token, ptr %token, i32 0, i32 1
           store WORD %epoch, ptr %epochSlot
           %used = getelementptr %xe.resume.token, ptr %token, i32 0, i32 2
           store i32 0, ptr %used
-          %control = call ptr @__xenon_malloc(WORD ptrtoint (ptr getelementptr (%xe.function.control, ptr null, i32 1) to WORD))
+          %control = call ptr @{{RuntimeAbiNames.Malloc}}(WORD ptrtoint (ptr getelementptr (%xe.function.control, ptr null, i32 1) to WORD))
           store WORD 1, ptr %control
           %environment = getelementptr %xe.function.control, ptr %control, i32 0, i32 1
           store ptr %token, ptr %environment
           %destructor = getelementptr %xe.function.control, ptr %control, i32 0, i32 2
-          store ptr @__xenon_resume_token_drop, ptr %destructor
-          %value = insertvalue { ptr, ptr } { ptr @__xenon_resume_request, ptr null }, ptr %control, 1
+          store ptr @{{RuntimeAbiNames.ResumeTokenDrop}}, ptr %destructor
+          %value = insertvalue { ptr, ptr } { ptr @{{RuntimeAbiNames.ResumeRequest}}, ptr null }, ptr %control, 1
           ret { ptr, ptr } %value
         }
         """;

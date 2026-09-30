@@ -151,7 +151,12 @@ internal sealed class Lexer
         }
 
         string text = _source.Text[start.._position];
-        return MakeToken(SyntaxFacts.GetKeywordKind(text), start, leadingDocumentation: leadingDocumentation);
+        SyntaxToken token = MakeToken(SyntaxFacts.GetKeywordKind(text), start, leadingDocumentation: leadingDocumentation);
+        if (RuntimeAbiNames.IsReservedIdentifier(text))
+            Diagnostics.Report(token.Location,
+                $"identifier '{text}' uses reserved compiler/runtime prefix '{RuntimeAbiNames.Prefix}'",
+                DiagnosticIds.ReservedRuntimeIdentifier);
+        return token;
     }
 
     private SyntaxToken LexNumber(string? leadingDocumentation)

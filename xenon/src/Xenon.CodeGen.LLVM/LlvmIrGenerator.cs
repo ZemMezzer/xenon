@@ -372,7 +372,7 @@ public sealed partial class LlvmIrGenerator
                 EmitExecutableEntryPoint(compilation.SemanticModel.Functions);
             }
 
-            if (implementationFunctions.Any(function => function.Body.IsResumable))
+            if (implementationFunctions.Any(function => function.Body.RequiresSuspensionStateMachine))
                 LlvmResumableRuntime.LinkAndLower(_module, GetIntegerBitWidth(BuiltinTypes.NUInt));
             _module.Verify(LLVMVerifierFailureAction.LLVMReturnStatusAction);
             if (targetMachine is not null)
@@ -574,7 +574,7 @@ public sealed partial class LlvmIrGenerator
         string abiIdentity,
         string category,
         string sourceIdentity) =>
-        $"__xenon_{category}_{Convert.ToHexString(Encoding.UTF8.GetBytes(abiIdentity))}_" +
+        $"{RuntimeAbiNames.Prefix}{category}_{Convert.ToHexString(Encoding.UTF8.GetBytes(abiIdentity))}_" +
         Convert.ToHexString(Encoding.UTF8.GetBytes(sourceIdentity));
 
     private string GetManagedName(Symbol owner, string category, string sourceIdentity) =>
@@ -1462,6 +1462,11 @@ public sealed partial class LlvmIrGenerator
         {
             value.Linkage = LLVMLinkage.LLVMExternalLinkage;
         }
+        else if (function.IsExport && implementationName != nativeName)
+        {
+            // Cross-artifact callers use the native export thunk, never its implementation.
+            value.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        }
         else if (wholeProgramDefinition && !function.IsExport)
         {
             value.Linkage = LLVMLinkage.LLVMInternalLinkage;
@@ -1876,9 +1881,52 @@ public sealed partial class LlvmIrGenerator
                 _compilation.Options.EnableRuntimeChecks,
                 IsWindowsTarget(),
                 _exceptionsEnabled);
-            if (function.Body.IsResumable) emitter.EmitResumableWrapper(function.Body);
+            if (function.Body.RequiresSuspensionStateMachine) emitter.EmitResumableWrapper(function.Body);
             else emitter.Emit(function.Body);
         }
+    }
+
+    private void EmitAsyncExecutableEntryPoint(FunctionSymbol entryPoint)
+    {
+        if (AsyncEntryPoint.GetError(entryPoint) is { } error) throw new LlvmCodeGenerationException(error);
+        FunctionSymbol awaiting = AsyncEntryPoint.GetAwaitOperator(entryPoint)!;
+        if (_module.GetNamedFunction("main").Handle != IntPtr.Zero)
+            throw new LlvmCodeGenerationException("Native symbol 'main' conflicts with the generated executable entry point.");
+        LLVMValueRef nativeEntry = _module.AddFunction("main", LLVMTypeRef.CreateFunction(_context.Int32Type, [], false));
+        using LLVMBuilderRef builder = _context.CreateBuilder();
+        builder.PositionAtEnd(nativeEntry.AppendBasicBlock("entry"));
+        var emitter = new FunctionEmitter(
+            _context,
+            builder,
+            entryPoint,
+            nativeEntry,
+            _functions,
+            _functionEffects,
+            _cAbiFunctions,
+            _cAbi,
+            _staticFields,
+            _threadLocalEnsures,
+            _virtualTables,
+            _interfaceMaps,
+            _interfaceKeys,
+            _closureEnvironmentDestructors,
+            GetFunctionValueInvokeAddress,
+            _interfaceMapEntryType,
+            MapType,
+            GetOrDeclareMemoryRuntime,
+            GetOrDeclareExceptionRuntime,
+            GetOrDeclareExceptionTypeKey,
+            GetExceptionTypeDisplayName,
+            GetOrDeclareTrap,
+            GetOrDeclareStringCompare,
+            GetAbiSize,
+            GetAbiAlignment,
+            GetFieldOffset,
+            GetIntegerBitWidth,
+            _compilation.Options.EnableRuntimeChecks,
+            IsWindowsTarget(),
+            _exceptionsEnabled);
+        emitter.EmitAsyncRoot(awaiting);
     }
 
     private void EmitExecutableEntryPoint(ImmutableArray<BoundFunction> functions)
@@ -1902,6 +1950,11 @@ public sealed partial class LlvmIrGenerator
         }
 
         FunctionSymbol entryPoint = candidates[0].Symbol;
+        if (entryPoint.IsAsync)
+        {
+            EmitAsyncExecutableEntryPoint(entryPoint);
+            return;
+        }
         if (!TypeIdentity.AreSame(entryPoint.ReturnType, BuiltinTypes.Int) || !entryPoint.Parameters.IsEmpty)
         {
             throw new LlvmCodeGenerationException(
@@ -2193,10 +2246,10 @@ public sealed partial class LlvmIrGenerator
         LLVMTypeRef alignedMallocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType, sizeType], false);
         LLVMTypeRef callocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType, sizeType], false);
         LLVMTypeRef freeType = LLVMTypeRef.CreateFunction(_context.VoidType, [pointerType], false);
-        LLVMValueRef malloc = _module.AddFunction("__xenon_malloc", mallocType);
-        LLVMValueRef alignedMalloc = _module.AddFunction("__xenon_aligned_malloc", alignedMallocType);
-        LLVMValueRef calloc = _module.AddFunction("__xenon_calloc", callocType);
-        LLVMValueRef free = _module.AddFunction("__xenon_free", freeType);
+        LLVMValueRef malloc = _module.AddFunction(RuntimeAbiNames.Malloc, mallocType);
+        LLVMValueRef alignedMalloc = _module.AddFunction(RuntimeAbiNames.AlignedMalloc, alignedMallocType);
+        LLVMValueRef calloc = _module.AddFunction(RuntimeAbiNames.Calloc, callocType);
+        LLVMValueRef free = _module.AddFunction(RuntimeAbiNames.Free, freeType);
         malloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
         alignedMalloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
         calloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
@@ -2524,19 +2577,19 @@ public sealed partial class LlvmIrGenerator
             return new LlvmFunction(_module.AddFunction(name, type), type);
         }
         _exceptionRuntime = new LlvmExceptionRuntime(
-            Native("__xenon_eh_allocate", pointer, size, size, pointer, pointer, pointer),
-            Native("__xenon_eh_object", pointer, pointer),
-            Native("__xenon_eh_activate", _context.VoidType, pointer),
-            Native("__xenon_eh_throw", _context.VoidType, pointer),
-            Native("__xenon_eh_current", pointer),
-            Native("__xenon_eh_matches", _context.Int1Type, pointer, pointer),
-            Native("__xenon_eh_handle", _context.VoidType, pointer),
-            Native("__xenon_eh_abandon", _context.VoidType, pointer),
-            Native("__xenon_eh_replace_previous", _context.VoidType),
-            Native("__xenon_eh_cleanup", _context.VoidType, pointer, pointer),
-            Native("__xenon_eh_initialize", _context.VoidType, pointer, pointer),
-            Native("__xenon_eh_rethrow", _context.VoidType),
-            Native("__xenon_eh_terminate", _context.VoidType));
+            Native(RuntimeAbiNames.EhAllocate, pointer, size, size, pointer, pointer, pointer),
+            Native(RuntimeAbiNames.EhObject, pointer, pointer),
+            Native(RuntimeAbiNames.EhActivate, _context.VoidType, pointer),
+            Native(RuntimeAbiNames.EhThrow, _context.VoidType, pointer),
+            Native(RuntimeAbiNames.EhCurrent, pointer),
+            Native(RuntimeAbiNames.EhMatches, _context.Int1Type, pointer, pointer),
+            Native(RuntimeAbiNames.EhHandle, _context.VoidType, pointer),
+            Native(RuntimeAbiNames.EhAbandon, _context.VoidType, pointer),
+            Native(RuntimeAbiNames.EhReplacePrevious, _context.VoidType),
+            Native(RuntimeAbiNames.EhCleanup, _context.VoidType, pointer, pointer),
+            Native(RuntimeAbiNames.EhInitialize, _context.VoidType, pointer, pointer),
+            Native(RuntimeAbiNames.EhRethrow, _context.VoidType),
+            Native(RuntimeAbiNames.EhTerminate, _context.VoidType));
         return _exceptionRuntime;
     }
 
@@ -2553,7 +2606,7 @@ public sealed partial class LlvmIrGenerator
         LLVMTypeRef dataType = LLVMTypeRef.CreateArray(_context.Int8Type, (uint)bytes.Length);
         LLVMValueRef data = _module.AddGlobal(dataType,
             MangleManagedName(_moduleIdentity, "exception_type", identity));
-        data.Linkage = LLVMLinkage.LLVMLinkOnceODRLinkage;
+        data.Linkage = LLVMLinkage.LLVMInternalLinkage;
         data.IsGlobalConstant = true;
         data.Initializer = LLVMValueRef.CreateConstArray(_context.Int8Type,
             bytes.Select(value => LLVMValueRef.CreateConstInt(_context.Int8Type, value, false)).ToArray());
@@ -2759,7 +2812,8 @@ public sealed partial class LlvmIrGenerator
         public void Emit(BoundBlockStatement body)
         {
             _exitCleanup = body.ExitCleanup;
-            if (_isResumable) _resumableReturnVariable = ((BoundVariableDeclarationStatement)body.Statements[0]).Variable;
+            _isAsyncCompletion = body.IsResumable;
+            if (_isAsyncCompletion) _resumableReturnVariable = ((BoundVariableDeclarationStatement)body.Statements[0]).Variable;
             if (_function.HasScopeCleanup)
             {
                 LLVMTypeRef pointer = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
@@ -3802,7 +3856,7 @@ public sealed partial class LlvmIrGenerator
         private void EmitRuntimeRethrow()
         {
             // A protocol violation or foreign exception must never escape a continuation.
-            LlvmFunction function = _isResumable ? _getExceptionRuntime().Terminate : _getExceptionRuntime().Rethrow;
+            LlvmFunction function = _isAsyncCompletion ? _getExceptionRuntime().Terminate : _getExceptionRuntime().Rethrow;
             _builder.BuildCall2(function.Type, function.Value, Array.Empty<LLVMValueRef>(), string.Empty);
             _builder.BuildUnreachable();
             _terminated = true;
@@ -4018,10 +4072,10 @@ public sealed partial class LlvmIrGenerator
 
         private void EmitVariableDeclaration(BoundVariableDeclarationStatement statement)
         {
-            if (_isResumable && ReferenceEquals(statement.Variable, _resumableReturnVariable))
+            if (_isAsyncCompletion && ReferenceEquals(statement.Variable, _resumableReturnVariable))
             {
                 LLVMValueRef resultAddress = GetAddress(statement.Variable);
-                _builder.BuildStore(_llvmFunction.GetParam(_llvmFunction.ParamsCount - 2), resultAddress);
+                _builder.BuildStore(_isResumable ? _llvmFunction.GetParam(_llvmFunction.ParamsCount - 2) : EmitExpression(statement.Initializer!), resultAddress);
                 return;
             }
             LLVMValueRef address = GetAddress(statement.Variable);
@@ -4207,7 +4261,7 @@ public sealed partial class LlvmIrGenerator
 
         private void EmitReturn(BoundReturnStatement statement)
         {
-            if (_isResumable) { EmitResumableReturn(statement); return; }
+            if (_isAsyncCompletion) { EmitResumableReturn(statement); return; }
             // Capture the result before destructors can mutate observable state.
             LLVMValueRef result = statement.Expression is null ? default : EmitExpression(statement.Expression);
             PendingReturnValue? previousPendingReturn = _pendingReturn;

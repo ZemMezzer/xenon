@@ -65,11 +65,11 @@ public sealed class TargetSelectionTests
     }
 
     [Theory]
-    [InlineData("__xenon_target_os", false)]
-    [InlineData("__xenon_target_arch", false)]
-    [InlineData("__xenon_target_os", true)]
-    [InlineData("__xenon_target_arch", true)]
-    public void FormerQueryNamesAreOrdinaryExterns(string name, bool takeAddress)
+    [InlineData("my__xenon_target_os", false)]
+    [InlineData("my__xenon_target_arch", false)]
+    [InlineData("my__xenon_target_os", true)]
+    [InlineData("my__xenon_target_arch", true)]
+    public void NamesContainingReservedPrefixAreOrdinaryExterns(string name, bool takeAddress)
     {
         string body = takeAddress
             ? $"function long(int)* query = &{name}; return cast<int>(query(7));"

@@ -253,6 +253,7 @@ public sealed record XelibSymbolRecord
     public ImmutableArray<XelibReferenceFieldOriginRecord> ReferenceFieldOrigins { get; init; } = [];
     public ImmutableArray<XelibLifetimeDependencyRecord> ResultLifetimeDependencies { get; init; } = [];
     public ImmutableArray<XelibLifetimeStoreRecord> LifetimeStores { get; init; } = [];
+    public bool IsAsync { get; init; }
     public bool ReturnsResumableOperation { get; init; }
     public bool CreatesResumableOperation { get; init; }
     public ImmutableArray<XelibCaptureRecord> Captures { get; init; } = [];
@@ -441,6 +442,7 @@ public sealed record XelibBodyNode
     public bool Flag1 { get; init; }
     public bool Flag2 { get; init; }
     public bool Flag3 { get; init; }
+    public bool Flag4 { get; init; }
     public ImmutableArray<int> Integers { get; init; } = [];
     public ImmutableArray<XelibSymbolReference> Symbols { get; init; } = [];
     public ImmutableArray<XelibLocalRecord> Locals { get; init; } = [];

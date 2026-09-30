@@ -57,7 +57,7 @@ public sealed class ResumableRuntimeTests
     public async Task PendingCompletionPreservesLocalsAndIgnoresDuplicateContinuation(string profile)
     {
         await Run(Protocol + """
-            Result Use()
+            async Result Use()
             {
                 Resource resource = Resource(8);
                 int value = await Operation();
@@ -83,7 +83,7 @@ public sealed class ResumableRuntimeTests
     public async Task SynchronousAndReentrantCompletion(bool reentrant)
     {
         await Run(Protocol + $$"""
-            Result Use() { int value = await Operation(); return value; }
+            async Result Use() { int value = await Operation(); return value; }
             int Main()
             {
                 Harness.Ready = {{(!reentrant).ToString().ToLowerInvariant()}};
@@ -104,7 +104,7 @@ public sealed class ResumableRuntimeTests
             ? "try { int value = await Operation(); return value; } catch (readonly int& error) { return error + 1; }"
             : "int value = await Operation(); return value;";
         await Run(Protocol + $$"""
-            Result Use() { Resource resource = Resource(8); {{body}} }
+            async Result Use() { Resource resource = Resource(8); {{body}} }
             int Main()
             {
                 Result result = Use();
@@ -121,7 +121,7 @@ public sealed class ResumableRuntimeTests
     public async Task MultipleAwaitsInLoopsPreserveEvaluationAndBorrowedLocal()
     {
         await Run(Protocol + """
-            Result Use()
+            async Result Use()
             {
                 Resource owner = Resource(3);
                 Resource& reference = owner;
@@ -179,7 +179,7 @@ public sealed class ResumableRuntimeTests
                     return true;
                 }
             }
-            TestTask<unique<Resource>> Use()
+            async TestTask<unique<Resource>> Use()
             {
                 unique<Resource> value = await Operation();
                 return move value;
@@ -206,7 +206,7 @@ public sealed class ResumableRuntimeTests
     {
         await Run(Protocol + """
             struct FailingResource { public ~FailingResource() { throw 17; } }
-            Result Use()
+            async Result Use()
             {
                 FailingResource resource = FailingResource();
                 int value = await Operation();
@@ -237,7 +237,7 @@ public sealed class ResumableRuntimeTests
                     return false;
                 }
             }
-            Result Use()
+            async Result Use()
             {
                 try { await TemporaryOperation(); }
                 finally { Harness.Calls += 10; }
@@ -262,7 +262,7 @@ public sealed class ResumableRuntimeTests
             Result Start()
             {
                 shared<Resource> resource = new Resource(8);
-                function Result() work = [resource]() => { int value = await Operation(); return value + resource->Value; };
+                function Result() work = async [resource]() => { int value = await Operation(); return value + resource->Value; };
                 return work();
             }
             int Main()
@@ -283,7 +283,7 @@ public sealed class ResumableRuntimeTests
         await Run(Protocol + """
             Operation NextOperation() { Harness.Ready = false; return Operation(); }
             int Add(int first, int second) { return first + second; }
-            Result Use() { return Add(await NextOperation(), await NextOperation()); }
+            async Result Use() { return Add(await NextOperation(), await NextOperation()); }
             int Main()
             {
                 Result result = Use();
@@ -307,7 +307,7 @@ public sealed class ResumableRuntimeTests
             extern uint WaitForSingleObject(void* handle, uint milliseconds);
             extern bool CloseHandle(void* handle);
             uint Notify(void* argument) { Harness.Next(); return cast<uint>(0); }
-            Result Use() { Resource resource = Resource(1); int value = await Operation(); return value; }
+            async Result Use() { Resource resource = Resource(1); int value = await Operation(); return value; }
             int Main()
             {
                 for (int i = 0; i < 20; i++)
@@ -334,7 +334,7 @@ public sealed class ResumableRuntimeTests
     {
         await Run(Protocol + """
             struct Pair { public unique<Resource> First; public unique<Resource> Second; }
-            Result Use()
+            async Result Use()
             {
                 Pair pair = Pair();
                 pair.First = new Resource(1);
@@ -368,7 +368,7 @@ public sealed class ResumableRuntimeTests
                 { target.State->Value = value->Value; target.State->Status++; }
                 public static void operator reject(Handle& target, int error) { target.State->Status = 2; }
             }
-            Handle Use()
+            async Handle Use()
             {
                 try { await Operation(); return new Resource(1); }
                 finally { return new Resource(2); }
@@ -391,9 +391,9 @@ public sealed class ResumableRuntimeTests
             struct Reader
             {
                 public int Value;
-                public Result Read() { int value = this.Value; await Operation(); return value; }
+                public async Result Read() { int value = this.Value; await Operation(); return value; }
             }
-            Result Read(Resource& resource) { int value = resource.Value; await Operation(); return value; }
+            async Result Read(Resource& resource) { int value = resource.Value; await Operation(); return value; }
             int Main()
             {
                 Result first;
@@ -418,7 +418,7 @@ public sealed class ResumableRuntimeTests
     public async Task InlineArrayAndSelfBorrowHaveStableFrameAddresses(string profile)
     {
         await Run(Protocol + """
-            Result Use()
+            async Result Use()
             {
                 Resource owner = Resource(9);
                 Resource* before = &owner;
@@ -450,13 +450,13 @@ public sealed class ResumableRuntimeTests
             Result ReadBefore()
             {
                 Resource resource = Resource(21);
-                function Result() work = [&resource]() => { int value = resource.Value; await Operation(); return value; };
+                function Result() work = async [&resource]() => { int value = resource.Value; await Operation(); return value; };
                 return work();
             }
             Result ReadOwned()
             {
                 unique<Resource> resource = new Resource(42);
-                function Result() work = [move resource]() => { await Operation(); return resource->Value; };
+                function Result() work = async [move resource]() => { await Operation(); return resource->Value; };
                 return work();
             }
             int Main()
@@ -480,7 +480,7 @@ public sealed class ResumableRuntimeTests
     public async Task DynamicArrayScopeFinishesBeforeSuspension()
     {
         await Run(Protocol + """
-            Result Use(int count)
+            async Result Use(int count)
             {
                 int value;
                 { int[] values = int[count]; values[0] = 42; value = values[0]; }
@@ -508,7 +508,7 @@ public sealed class ResumableRuntimeTests
                 public SelfReference* Self;
                 public SelfReference() { Self = this; }
             }
-            Result Use()
+            async Result Use()
             {
                 { Cell[] early = Cell[2]; }
                 pin<SelfReference> stable = SelfReference();
@@ -544,7 +544,7 @@ public sealed class ResumableRuntimeTests
     {
         await Run(Protocol + """
             static struct Data { public static int Value; public static int[] Values; }
-            Result Use()
+            async Result Use()
             {
                 int& value = Data.Value;
                 int[]& array = Data.Values;
@@ -586,7 +586,7 @@ public sealed class ResumableRuntimeTests
             struct Reader
             {
                 public int Value;
-                public Result Read(Resource& resource, int[]& values)
+                public async Result Read(Resource& resource, int[]& values)
                 {
                     await Operation();
                     values[0] = resource.Value + this.Value;
@@ -594,7 +594,7 @@ public sealed class ResumableRuntimeTests
                 }
             }
             T Identity<T>(T value) { return move value; }
-            Result Parent()
+            async Result Parent()
             {
                 Resource resource = Resource(20);
                 Reader reader = Reader(); reader.Value = 22;
@@ -619,17 +619,53 @@ public sealed class ResumableRuntimeTests
             """, profile);
     }
 
-    internal static async Task Run(string source, string profile = "debug")
+    internal static async Task Run(string source, string profile = "debug", int expectedExit = 42, string? expectedError = null, bool nativeScheduler = false)
     {
         using var directory = new WorkspaceTestDirectory();
         directory.WriteProject("AwaitApp", sources: [("main.xe", source)]);
+        if (nativeScheduler)
+        {
+            // Ordinary FFI fixture: scheduling is owned by this library, never the async root.
+            directory.Write("native/scheduler.cpp", """
+                #include <thread>
+                #include <chrono>
+                extern "C" void test_schedule_callback(void (*callback)(void*), void* context) {
+                    std::thread([=] {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        callback(context);
+                    }).detach();
+                }
+                """);
+            directory.Write("native/CMakeLists.txt", """
+                cmake_minimum_required(VERSION 3.24)
+                project(XenonTestScheduler LANGUAGES CXX)
+                set(CMAKE_CXX_STANDARD 17)
+                set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+                add_library(test_scheduler STATIC scheduler.cpp)
+                """);
+            string nativeBuild = directory.PathOf("native/build");
+            foreach (string[] arguments in new[] {
+                new[] { "-S", directory.PathOf("native"), "-B", nativeBuild },
+                new[] { "--build", nativeBuild, "--config", "Release" } })
+            {
+                NativeProcessResult tool = await new NativeProcessRunner().RunAsync(
+                    new NativeProcessRequest("cmake", arguments, directory.Root, TimeSpan.FromMinutes(3)));
+                Assert.True(tool.StartError is null && !tool.TimedOut && tool.ExitCode == 0,
+                    $"start={tool.StartError}; stdout={tool.Stdout}; stderr={tool.Stderr}");
+            }
+            string library = Path.Combine(nativeBuild, OperatingSystem.IsWindows()
+                ? "Release/test_scheduler.lib" : "libtest_scheduler.a").Replace('\\', '/');
+            File.AppendAllText(directory.PathOf("AwaitApp/AwaitApp.xeproj"),
+                $"\n[libraries]\nlibraries = [\"{library}\"]\n");
+        }
         XenonBuildResult build = new XenonBuildDriver().Build(new XenonBuildRequest(
             directory.PathOf("AwaitApp/AwaitApp.xeproj"), profile, directory.PathOf("build")));
         Assert.True(build.Success, string.Join(Environment.NewLine,
             new[] { build.Failure }.Concat(build.Diagnostics.Select(diagnostic => diagnostic.ToString()))));
         NativeProcessResult process = await new NativeProcessRunner().RunAsync(new NativeProcessRequest(
             build.ArtifactPath!, [], directory.Root, TimeSpan.FromSeconds(15)));
-        Assert.True(process.StartError is null && !process.TimedOut && process.ExitCode == 42,
+        Assert.True(process.StartError is null && !process.TimedOut && process.ExitCode == expectedExit,
             $"exit={process.ExitCode}; start={process.StartError}; stdout={process.Stdout}; stderr={process.Stderr}");
+        if (expectedError is not null) Assert.Contains(expectedError, process.Stderr);
     }
 }

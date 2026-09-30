@@ -167,6 +167,7 @@ public static class XelibBodyCodec
         var locals = new Dictionary<int, LocalVariableSymbol>();
         foreach (XelibLocalRecord record in root.Locals)
         {
+            XelibReader.ValidateSourceIdentifier(record.Name);
             if (record.Id <= 0 || locals.ContainsKey(record.Id)) Invalid("duplicate or invalid local ID");
             var local = new LocalVariableSymbol(record.Name, type(record.TypeId), function, record.IsReadonly)
             {
@@ -225,7 +226,7 @@ public static class XelibBodyCodec
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.CapturedPlace, TypeId = typeId(value.Type), Flag1 = value.OwnsValue };
             case BoundBlockStatement value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Block,
-                    Flag1 = value.ExitCleanup is not null, Flag2 = value.RetainsStackStorage, Flag3 = value.IsResumable,
+                    Flag1 = value.ExitCleanup is not null, Flag2 = value.RetainsStackStorage, Flag3 = value.IsResumable, Flag4 = value.RequiresSuspensionStateMachine,
                     Children = EAll(value.Statements.Cast<BoundNode>().Concat(
                         value.ExitCleanup is null ? [] : [value.ExitCleanup])) };
             case BoundVariableDeclarationStatement value:
@@ -545,7 +546,7 @@ public static class XelibBodyCodec
                 {
                     ExitCleanup = node.Flag1 ? E(statementCount) : null,
                     RetainsStackStorage = node.Flag2,
-                    IsResumable = node.Flag3,
+                    IsResumable = node.Flag3, RequiresSuspensionStateMachine = node.Flag4,
                 };
                 return result;
             }

@@ -33,6 +33,7 @@ public sealed class NativeExceptionRuntimeTests
                 #include <cstdio>
                 #include <exception>
                 #include <thread>
+                #include <chrono>
                 #include <vector>
 
                 extern "C" void* __xenon_eh_allocate(std::uintptr_t, std::uintptr_t,
@@ -41,6 +42,34 @@ public sealed class NativeExceptionRuntimeTests
                 extern "C" void* __xenon_eh_current();
                 extern "C" void __xenon_eh_handle(void*);
                 extern "C" [[noreturn]] void __xenon_eh_rethrow();
+
+                // Native ABI tests intentionally bypass Xenon source identifiers.
+                extern "C" void* __xenon_async_root_create();
+                extern "C" void __xenon_async_root_retain(void*);
+                extern "C" void __xenon_async_root_release(void*);
+                extern "C" void __xenon_async_root_notify(void*);
+                extern "C" void __xenon_async_root_pump(void*);
+                extern "C" void __xenon_async_root_close(void*);
+
+                void check_async_root() {
+                    void* root = __xenon_async_root_create();
+                    __xenon_async_root_retain(root);
+                    // Notifications before wait must not be lost; duplicates coalesce.
+                    __xenon_async_root_notify(root);
+                    __xenon_async_root_notify(root);
+                    __xenon_async_root_pump(root);
+                    std::thread worker([=] {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        __xenon_async_root_notify(root);
+                    });
+                    __xenon_async_root_pump(root);
+                    worker.join();
+                    // A retained continuation can safely arrive after entry completion.
+                    __xenon_async_root_close(root);
+                    __xenon_async_root_notify(root);
+                    __xenon_async_root_pump(root);
+                    __xenon_async_root_release(root);
+                }
 
                 [[noreturn]] void host_handler() {
                     std::fputs("host terminate called\n", stderr);
@@ -81,6 +110,7 @@ public sealed class NativeExceptionRuntimeTests
                         return caught_once() ? 42 : 1;
                     if (argc > 1 && std::strcmp(argv[1], "nested") == 0)
                         return nested_and_rethrow() ? 42 : 1;
+                    check_async_root();
                     if (!caught_once() || !nested_and_rethrow()) return 1;
                     std::atomic<bool> ok{true};
                     std::vector<std::thread> threads;
