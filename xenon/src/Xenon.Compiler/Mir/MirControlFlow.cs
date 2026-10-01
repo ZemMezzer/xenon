@@ -32,4 +32,18 @@ public sealed class MirControlFlow
         }
         Reachable = reachable.ToImmutable();
     }
-}
+    /// <summary>Whether the reachable graph contains a cycle, independent of block numbering.</summary>
+    public bool HasCycle()
+    {
+        var indegrees = Reachable.ToDictionary(block => block,
+            block => Predecessors[block].Count(edge => Reachable.Contains(edge.Source)));
+        var ready = new Queue<MirBlockId>(indegrees.Where(pair => pair.Value == 0).Select(pair => pair.Key));
+        int visited = 0;
+        while (ready.TryDequeue(out var block))
+        {
+            visited++;
+            foreach (var edge in Successors[block])
+                if (--indegrees[edge.Target] == 0) ready.Enqueue(edge.Target);
+        }
+        return visited != Reachable.Count;
+    }}

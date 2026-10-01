@@ -16,6 +16,14 @@ public sealed partial class LlvmIrGenerator
             TypeSymbol Pointee(int index) => ((PointerTypeSymbol)operation.Arguments[index].Type).ElementType;
             switch (operation.Intrinsic)
             {
+                case MirIntrinsicKind.AsyncRootCreate:
+                    return ResumeCall(RuntimeAbiNames.AsyncRootCreate, ResumePointer, [], "async.root");
+                case MirIntrinsicKind.AsyncRootContinuation:
+                    return MirAsyncRootContinuation(args[0], operation.ResultType);
+                case MirIntrinsicKind.AsyncRootPump:
+                    return ResumeCall(RuntimeAbiNames.AsyncRootPump, _context.VoidType, args);
+                case MirIntrinsicKind.AsyncRootClose:
+                    return ResumeCall(RuntimeAbiNames.AsyncRootClose, _context.VoidType, args);
                 case MirIntrinsicKind.CoroutineCreate: return MirCreateCoroutine();
                 case MirIntrinsicKind.CoroutineSuspend:
                     return ResumeCall("llvm.coro.suspend", _context.Int8Type,
@@ -65,11 +73,6 @@ public sealed partial class LlvmIrGenerator
                     return _builder.BuildLoad2(ResumePointer, FunctionControlField(args[0], 1, "function.environment.address"), "function.environment");
                 case MirIntrinsicKind.CallableDestructor:
                     return _builder.BuildLoad2(ResumePointer, FunctionControlField(args[0], 2, "function.destructor.address"), "function.destructor");
-                case MirIntrinsicKind.DestroyOwner:
-                    LLVMValueRef owner = _builder.BuildLoad2(_mapType(operation.SubjectType!), args[0], "owner");
-                    return operation.SubjectType is SharedTypeSymbol shared ? EmitSharedRelease(owner, shared, operation.Function) : EmitWeakRelease(owner);
-                case MirIntrinsicKind.DestroyCallable:
-                    return EmitFunctionControlRelease(_builder.BuildExtractValue(_builder.BuildLoad2(_mapType(operation.SubjectType!), args[0], "callable"), 1, "callable.control"));
                 case MirIntrinsicKind.MakeCallable: return MirMakeCallable(operation, args);
                 case MirIntrinsicKind.CheckStorageEmpty or MirIntrinsicKind.CheckStorageInitialized:
                     EmitStorageStateCheck(args[0], (StorageTypeSymbol)Pointee(0), operation.Intrinsic == MirIntrinsicKind.CheckStorageInitialized);
@@ -78,8 +81,6 @@ public sealed partial class LlvmIrGenerator
                     if (_threadLocalEnsures.TryGetValue(operation.Field!, out LlvmFunction ensure))
                         MirInvoke(ensure.Type, ensure.Value, [], "");
                     return default;
-                case MirIntrinsicKind.ReleaseClosure:
-                    return EmitFunctionControlRelease(_builder.BuildLoad2(ResumePointer, _closureEnvironment, "resumable.capture.owner"));
                 case MirIntrinsicKind.CreateContinuation:
                     return ResumeCall(RuntimeAbiNames.ResumeContinuation, _mapType(operation.ResultType),
                         [_llvmFunction.GetParam(_llvmFunction.ParamsCount - 1)], "await.continuation");
@@ -99,9 +100,7 @@ public sealed partial class LlvmIrGenerator
                 case MirIntrinsicKind.AtomicLoad: return EmitLoad(Pointee(0), args[0], "atomic.load");
                 case MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore:
                     AtomicTypeSymbol atomic = (AtomicTypeSymbol)Pointee(0);
-                    if (operation.Intrinsic == MirIntrinsicKind.AtomicStore && IsLockBackedAtomic(atomic))
-                        EmitAtomicReplacement(args[1], args[0], atomic);
-                    else EmitAtomicStore(args[1], args[0], atomic, operation.Intrinsic == MirIntrinsicKind.AtomicInitialize);
+                    EmitAtomicStore(args[1], args[0], atomic, operation.Intrinsic == MirIntrinsicKind.AtomicInitialize);
                     return args[1];
                 case MirIntrinsicKind.AtomicUpdate:
                     AtomicTypeSymbol updated = (AtomicTypeSymbol)Pointee(0);

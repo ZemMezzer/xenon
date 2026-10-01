@@ -60,7 +60,7 @@ public sealed partial class MirLowerer
     {
         Block outer = _unwindTarget, outerRethrow = _rethrowTarget;
         MirSourceInfo scopeSource = _functionSource with { Scope = _scope };
-        MirOperand? stack = _bound.Symbol.HasStackArrays && !_bound.Body.RequiresSuspensionStateMachine ? Save(new MirStackSave(_types.PointerTo(BuiltinTypes.Byte)), scopeSource) : null;
+        MirOperand? stack = _hasStackArrays && !_bound.Body.RequiresSuspensionStateMachine ? Save(new MirStackSave(_types.PointerTo(BuiltinTypes.Byte)), scopeSource) : null;
         var previousPlaces = _ownedPlaces.ToArray();
         var previousArrays = _arrayCreations.ToArray();
         int depth = _exits.Count;

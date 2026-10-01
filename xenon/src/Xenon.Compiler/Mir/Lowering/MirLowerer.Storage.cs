@@ -47,6 +47,7 @@ public sealed partial class MirLowerer
     private void ConstructStorage(BoundStorageConstructExpression construction, MirSourceInfo source)
     {
         MirPlace tracked = Place(construction.Storage);
+        CheckArgumentReservation(tracked, construction.Storage.Type, source);
         if (TypeFacts.IsPinned(construction.Storage.Type) && !IsStorage(construction.Storage.Type))
         {
             TypeSymbol pointerType = _types.PointerTo(construction.Storage.Type);

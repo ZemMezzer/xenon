@@ -42,7 +42,8 @@ internal static class MirSemanticDiagnostics
                 bool ambiguousPin = violation.Check == MirOwnershipCheck.PinnedInitialization &&
                     violation.Status == MirOwnershipStatus.MaybeInitialized && function.Symbol.FunctionKind == FunctionKind.Constructor &&
                     locals[violation.Place.Local].Kind == MirLocalKind.Receiver;
-                string id = violation.Check == MirOwnershipCheck.SelfMove ? DiagnosticIds.SelfMove :
+                string id = violation.Check == MirOwnershipCheck.ArgumentReservation ? DiagnosticIds.ArgumentLifetimeConflict :
+                    violation.Check == MirOwnershipCheck.SelfMove ? DiagnosticIds.SelfMove :
                     violation.Check == MirOwnershipCheck.RequiredField
                     ? field!.Type is PinTypeSymbol ? DiagnosticIds.PinnedRelocation : DiagnosticIds.ReferenceFieldNotInitialized :
                     violation.Check == MirOwnershipCheck.PinnedInitialization
@@ -57,7 +58,9 @@ internal static class MirSemanticDiagnostics
                 string Name(MirPlace place) => locals[place.Local].Name +
                     string.Concat(place.Projections.OfType<MirFieldProjection>().Select(field => "." + field.Field.Name));
                 string name = Name(violation.Place), cause = Name(violation.Cause);
-                string message = violation.Check == MirOwnershipCheck.SelfMove ? $"cannot move '{name}' into itself" :
+                string message = violation.Check == MirOwnershipCheck.ArgumentReservation
+                    ? $"cannot reinitialize '{name}' after moving an overlapping place in an earlier argument; split the operations into separate statements"
+                    : violation.Check == MirOwnershipCheck.SelfMove ? $"cannot move '{name}' into itself" :
                     violation.Check == MirOwnershipCheck.RequiredField
                     ? field!.Type is PinTypeSymbol
                         ? $"pinned field '{field.Name}' must be constructed at its final address before the object is used or its constructor exits"

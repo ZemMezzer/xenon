@@ -310,7 +310,12 @@ public sealed class AsyncTests
         Assert.False(consumer.HasErrors, string.Join(Environment.NewLine, consumer.Diagnostics));
         Assert.Contains(consumer.GetStaticImplementationFunctions(), function => function.Symbol.OperatorKind == OperatorKind.Await);
         string ir = new LlvmIrGenerator().GenerateForTarget(consumer, LlvmTargetOptions.CreateHost());
-        Assert.Contains("async.root.retry", ir);
+        var helper = Assert.Single(consumer.GetMirFunctions(), function => function.Symbol.AsyncEntryPointOwner is not null);
+        Assert.True(new Xenon.Compiler.Mir.MirControlFlow(helper).HasCycle());
+        Assert.Contains(helper.Blocks, block => block.Terminator is Xenon.Compiler.Mir.MirDrop);
+        Assert.Contains(helper.Blocks, block => block.Terminator is Xenon.Compiler.Mir.MirIntrinsicCall
+            { Intrinsic: Xenon.Compiler.Mir.MirIntrinsicKind.AsyncRootPump });
+        Assert.Contains("async.root", ir);
     }
 
     private static Compilation Compile(string source) => Compilation.Create(SourceText.From(Protocol + source));

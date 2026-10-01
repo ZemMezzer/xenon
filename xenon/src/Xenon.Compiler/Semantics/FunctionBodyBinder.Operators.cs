@@ -132,8 +132,6 @@ internal sealed partial class FunctionBodyBinder
         {
             BoundExpression call = CreateOperatorCall(selected,
                 ValidateFunctionArguments(selected, [source], [], location), explicitContext);
-            if (_argumentFlowCandidates.TryGetValue(source, out ArgumentFlowTransaction? transaction))
-                transaction.CommitMaterializedCandidate(source);
             _expressionLocations[call] = location;
             if (syntax is not null)
             {
@@ -142,7 +140,7 @@ internal sealed partial class FunctionBodyBinder
                 if (syntax is CastExpressionSyntax or LiteralExpressionSyntax)
                     RecordCandidates(syntax, selected, [selected], CandidateReason.None);
             }
-            RecordExceptionalFlow();
+            RecordExceptionalReferenceBinding();
             result = ContextualizeConversion(call, destination, location);
             return true;
         }
@@ -243,7 +241,7 @@ internal sealed partial class FunctionBodyBinder
         _semanticInfo.Conversions[syntax] = SymbolInfo.FromSymbol(selected);
         _semanticInfo.ExplicitReferences.Add(new ResolvedSymbolReference(
             selected, nameToken.Location, ResolvedReferenceKind.Call));
-        RecordExceptionalFlow();
+        RecordExceptionalReferenceBinding();
         result = ContextualizeConversion(call, destination, nameToken.Location);
         return true;
     }
@@ -281,7 +279,7 @@ internal sealed partial class FunctionBodyBinder
         _semanticInfo.Conversions[syntax] = SymbolInfo.FromSymbol(selected);
         _semanticInfo.ExplicitReferences.Add(new ResolvedSymbolReference(
             selected, syntax.IntroducerToken.Location, ResolvedReferenceKind.Call));
-        RecordExceptionalFlow();
+        RecordExceptionalReferenceBinding();
         result = ContextualizeConversion(call, destination, syntax.IntroducerToken.Location);
         return true;
     }

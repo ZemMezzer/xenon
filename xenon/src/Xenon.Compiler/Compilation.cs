@@ -2,6 +2,9 @@ using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Libraries;
+using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Analysis;
+using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
 using Xenon.Compiler.Semantics.Symbols;
@@ -10,7 +13,7 @@ using Xenon.Compiler.Text;
 
 namespace Xenon.Compiler;
 
-public sealed class Compilation
+public sealed partial class Compilation
 {
     private readonly ConcurrentDictionary<SyntaxTree, SemanticModel> _semanticModels =
         new(ReferenceEqualityComparer.Instance);
@@ -323,23 +326,24 @@ public sealed class Compilation
             GetNativeReachability().InterfaceDispatchTypes.Contains(type);
     }
 
-    private NativeReachability GetNativeReachability()
+    private NativeReachability GetNativeReachability(CancellationToken cancellation = default)
     {
         if (_nativeReachability is { } cached) return cached;
         lock (_nativeReachabilityLock)
         {
             if (_nativeReachability is { } winner) return winner;
-            return _nativeReachability = ComputeNativeReachability();
+            return _nativeReachability = ComputeNativeReachability(cancellation);
         }
     }
 
-    private NativeReachability ComputeNativeReachability()
+    private NativeReachability ComputeNativeReachability(CancellationToken cancellation)
     {
         ImmutableArray<BoundFunction> source = SemanticModel.Functions;
         var available = new Dictionary<FunctionSymbol, BoundFunction>(ReferenceEqualityComparer.Instance);
         foreach (BoundFunction function in References.OfType<LibraryCompilationReference>()
                      .SelectMany(reference => reference.ImplementationFunctions))
             available.TryAdd(function.Symbol, function);
+        var initialMir = new Dictionary<FunctionSymbol, MirFunction>(ReferenceEqualityComparer.Instance);
         var selected = new HashSet<FunctionSymbol>(ReferenceEqualityComparer.Instance);
         var pending = new Queue<FunctionSymbol>();
         var reachableTypes = new HashSet<DeclaredTypeSymbol>(ReferenceEqualityComparer.Instance);
@@ -369,12 +373,6 @@ public sealed class Compilation
                         foreach (InterfaceTypeSymbol @interface in structure.ImplementedInterfaces)
                             MarkType(@interface);
                         foreach (FieldSymbol field in structure.AllInstanceFields) MarkType(field.Type);
-                    }
-                    if ((added & TypeReachabilityReason.Construct) != 0)
-                    {
-                        SelectInstanceInitializers(structure);
-                        if (structure.HasVirtualDispatch)
-                            MarkType(structure, TypeReachabilityReason.VirtualDispatch);
                     }
                     if ((added & TypeReachabilityReason.Destruct) != 0 &&
                         TypeFacts.GetCompleteDestructor(structure) is { } destructor)
@@ -443,12 +441,6 @@ public sealed class Compilation
             }
         }
 
-        void SelectInstanceInitializers(StructTypeSymbol structure)
-        {
-            if (structure.BaseType is { } baseType) SelectInstanceInitializers(baseType);
-            if (structure.InstanceInitializer is { } initializer) Select(initializer);
-        }
-
         void MarkStaticField(FieldSymbol field)
         {
             if (!field.IsStatic || !reachableStaticFields.Add(field)) return;
@@ -488,150 +480,52 @@ public sealed class Compilation
             }
         }
 
-        void MarkOperation(BoundNode node)
+        void InspectMir(MirFunction function)
         {
-            switch (node)
+            MarkType(function.ReturnType);
+            foreach (MirLocal local in function.Locals) MarkType(local.Type);
+            foreach (Symbol symbol in MirSymbols.Referenced(function)) MarkSymbol(symbol);
+            foreach (var block in function.Blocks)
             {
-                case BoundThrowStatement { Expression.Type: { } thrownType }:
-                    MarkDestructionRequirement(thrownType);
-                    break;
-                case BoundAssignmentExpression assignment
-                    when assignment.OperatorKind == SyntaxKind.EqualsToken &&
-                         !IsSameScalarStorage(assignment):
-                    bool mayReplaceLiveValue =
-                        assignment.MovedPlaceReinitialization != MovedPlaceReinitializationState.DefinitelyMoved &&
-                        (assignment.RequiresRuntimeInitializationCheck || !assignment.IsInitialization);
-                    if (mayReplaceLiveValue || IsCleanupTrackedProjection(assignment.Target))
-                        MarkDestructionRequirement(assignment.Target.Type);
-                    break;
-                case BoundCompareExchangeExpression
+                foreach (var statement in block.Statements)
+                    switch (statement)
+                    {
+                        case MirInitializeDispatch dispatch:
+                            MarkType(dispatch.Type, TypeReachabilityReason.VirtualDispatch);
+                            break;
+                        case MirAssign { Value: MirInterfaceView view }:
+                            MarkType(view.SourceType, TypeReachabilityReason.InterfaceDispatch);
+                            break;
+                        case MirAssign { Value: MirTypeLayout layout }:
+                            MarkType(layout.SubjectType);
+                            break;
+                    }
+                switch (block.Terminator)
                 {
-                    Target.Type: AtomicTypeSymbol comparedAtomic,
-                }:
-                    MarkDestructionRequirement(comparedAtomic);
-                    break;
-                case BoundStructConstructionExpression construction:
-                    MarkType(construction.StructType, TypeReachabilityReason.Construct);
-                    break;
-                case BoundConstructorCallExpression constructor:
-                    MarkType(constructor.StructType, TypeReachabilityReason.VirtualDispatch);
-                    break;
-                case BoundNewExpression { StructType: { } allocated } allocation:
-                    MarkType(allocated, allocation.Constructor is null
-                        ? TypeReachabilityReason.Construct
-                        : TypeReachabilityReason.VirtualDispatch);
-                    break;
-                case BoundStorageConstructExpression
-                {
-                    ValueType: StructTypeSymbol stored,
-                    Value: null,
-                } storage:
-                    MarkType(stored, storage.Constructor is null
-                        ? TypeReachabilityReason.Construct
-                        : TypeReachabilityReason.VirtualDispatch);
-                    break;
-                case BoundArrayCreationExpression array:
-                    TypeSymbol element = array.ElementType is AtomicTypeSymbol atomic
-                        ? atomic.ElementType : array.ElementType;
-                    if (element is StructTypeSymbol arrayElement)
-                        MarkType(arrayElement, TypeReachabilityReason.Construct);
-                    if (array.Storage == ArrayStorageKind.Stack)
-                        MarkDestructionRequirement(array.ElementType);
-                    break;
-                case BoundDefaultValueExpression { ValueType: StructTypeSymbol defaulted }
-                    when defaulted.HasVirtualDispatch:
-                    MarkType(defaulted, TypeReachabilityReason.VirtualDispatch);
-                    break;
-                case BoundInterfaceConversionExpression conversion:
-                    MarkType(conversion.SourceType, TypeReachabilityReason.InterfaceDispatch);
-                    break;
-                case BoundMethodCallExpression call when call.Method.VTableSlot is not null:
-                    MarkVirtualReceiver(call.Receiver.Type, call.IsPointerAccess);
-                    break;
-                case BoundCompoundAccessorAssignmentExpression assignment
-                    when assignment.Getter.VTableSlot is not null || assignment.Setter.VTableSlot is not null:
-                    MarkVirtualReceiver(assignment.Receiver.Type, assignment.IsPointerAccess);
-                    break;
-                case BoundPropertySetExpression property when property.Property.Setter?.VTableSlot is not null:
-                    MarkVirtualReceiver(property.Receiver.Type, property.IsPointerAccess);
-                    break;
-                case BoundIndexerSetExpression indexer when indexer.Indexer.Setter?.VTableSlot is not null:
-                    MarkVirtualReceiver(indexer.Receiver.Type, pointerAccess: false);
-                    break;
-                case BoundDeleteExpression
-                {
-                    Destructor.VTableSlot: not null,
-                    Pointer.Type: PointerTypeSymbol { ElementType: StructTypeSymbol freed },
-                }:
-                    MarkType(freed, TypeReachabilityReason.VirtualDispatch);
-                    break;
-                case BoundDestroyFieldsExpression destruction:
-                    foreach (FieldSymbol field in destruction.StructType.Fields)
-                        MarkType(field.Type, TypeReachabilityReason.Destruct);
-                    if (destruction.StructType.BaseType is { } destroyedBase)
-                        MarkType(destroyedBase, TypeReachabilityReason.Destruct);
-                    break;
+                    case MirCall { IsVirtual: true, Receiver.Type: PointerTypeSymbol { ElementType: StructTypeSymbol receiver } }:
+                        MarkType(receiver, TypeReachabilityReason.VirtualDispatch);
+                        break;
+                    case MirDrop { IsVirtual: true, Destructor.ContainingType: StructTypeSymbol destroyed }:
+                        MarkType(destroyed, TypeReachabilityReason.VirtualDispatch);
+                        break;
+                    case MirIntrinsicCall intrinsic:
+                        if (intrinsic.SubjectType is { } subject) MarkType(subject);
+                        foreach (var capture in intrinsic.Captures)
+                            MarkDestructionRequirement(capture.StorageType);
+                        break;
+                }
             }
-        }
-
-        static bool IsSameScalarStorage(BoundAssignmentExpression assignment) =>
-            assignment.Expression is BoundCopyExpression copy &&
-            TryGetScalarProjection(copy.Source, out VariableSymbol? source, out ImmutableArray<FieldSymbol> sourcePath) &&
-            TryGetScalarProjection(assignment.Target, out VariableSymbol? destination,
-                out ImmutableArray<FieldSymbol> destinationPath) &&
-            ReferenceEquals(source, destination) && sourcePath.SequenceEqual(destinationPath);
-
-        static bool IsCleanupTrackedProjection(BoundExpression expression) =>
-            TryGetScalarProjection(expression, out _, out _);
-
-        static bool TryGetScalarProjection(
-            BoundExpression expression,
-            out VariableSymbol? variable,
-            out ImmutableArray<FieldSymbol> path)
-        {
-            if (expression is BoundVariableExpression { Variable: LocalVariableSymbol or ParameterSymbol } root)
-            {
-                variable = root.Variable;
-                path = [];
-                return true;
-            }
-            if (expression is BoundMemberAccessExpression { IsPointerAccess: false } member &&
-                TryGetScalarProjection(member.Receiver, out variable, out path))
-            {
-                path = path.Add(member.Field);
-                return true;
-            }
-            if (expression is BoundLifetimeValueExpression value &&
-                TryGetScalarProjection(value.Source, out variable, out path))
-                return true;
-            variable = null;
-            path = [];
-            return false;
-        }
-
-        void MarkVirtualReceiver(TypeSymbol type, bool pointerAccess)
-        {
-            StructTypeSymbol? structure = pointerAccess ? type switch
-            {
-                PointerTypeSymbol { ElementType: StructTypeSymbol pointer } => pointer,
-                OwnershipTypeSymbol { ElementType: StructTypeSymbol owned } => owned,
-                _ => null,
-            } : type as StructTypeSymbol;
-            if (structure is not null)
-                MarkType(structure, TypeReachabilityReason.VirtualDispatch);
+            if (function.Resumable is { } resumable) InspectMir(resumable.Initialization);
         }
 
         void Inspect(BoundFunction function)
         {
-            MarkType(function.Symbol.ReturnType);
             if (Options.OutputKind == CompilationOutputKind.Executable && function.Symbol.Name == "Main" &&
                 AsyncEntryPoint.GetAwaitOperator(function.Symbol) is { } rootAwait)
                 MarkSymbol(rootAwait);
-            foreach (ParameterSymbol parameter in function.Symbol.Parameters)
-                MarkType(parameter.Type, TypeFacts.GetCompleteDestructor(parameter.Type) is null
-                    ? TypeReachabilityReason.Reference
-                    : TypeReachabilityReason.Destruct);
-            XelibBodyCodec.Collect(function.Body, type => MarkType(type), MarkSymbol, MarkOperation);
+            MirFunction mir = MirLowerer.Lower(function, TypeFactory, SemanticModel.ExpressionLocations, cancellation);
+            initialMir[function.Symbol] = mir;
+            InspectMir(MirReachability.Prune(mir, cancellation));
         }
         void MarkSourceTypes(NamespaceSymbol @namespace)
         {
@@ -668,7 +562,7 @@ public sealed class Compilation
             .DistinctBy(function => function.Symbol, ReferenceEqualityComparer.Instance)
             .ToImmutableArray();
         return new NativeReachability(functions, selected, reachableTypes, reachableVirtualDispatchTypes,
-            reachableInterfaceDispatchTypes, reachableStaticFields);
+            reachableInterfaceDispatchTypes, reachableStaticFields, [.. functions.Select(function => initialMir[function.Symbol])]);
     }
 
     private sealed record NativeReachability(
@@ -677,14 +571,15 @@ public sealed class Compilation
         HashSet<DeclaredTypeSymbol> Types,
         HashSet<StructTypeSymbol> VirtualDispatchTypes,
         HashSet<StructTypeSymbol> InterfaceDispatchTypes,
-        HashSet<FieldSymbol> StaticFields);
+        HashSet<FieldSymbol> StaticFields,
+        ImmutableArray<MirFunction> InitialMir);
 
     [Flags]
     private enum TypeReachabilityReason : byte
     {
         None = 0,
         Reference = 1 << 0,
-        Construct = 1 << 1,
+
         Destruct = 1 << 2,
         VirtualDispatch = 1 << 3,
         InterfaceDispatch = 1 << 4,

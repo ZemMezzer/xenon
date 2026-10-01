@@ -111,11 +111,12 @@ public static class MirPrinter
         _ => throw new NotSupportedException($"Unknown MIR rvalue {value.GetType().Name}."),
     };
 
-    private static string Statement(MirStatement statement) => statement switch
+    public static string Statement(MirStatement statement) => statement switch
     {
         MirAssign assign => $"{Place(assign.Destination)} = {RValue(assign.Value)}" +
             (assign.TransferDestination is { } transfer ? $" [transfer to {Place(transfer)}]" : "") +
             (assign.IsAggregateInitialization ? " [aggregate.init]" : "") +
+            (assign.IsArgumentReservationCheck ? " [argument.reservation.check]" : "") +
             (assign.ReservedMove is { } reserved ? $" [reserve {Place(reserved)}]" : "") +
             (assign.WriteKind == MirWriteKind.Initialize && assign.PreviousValueState == MirPreviousValueState.Live &&
                 assign.ConstructorField is null && !assign.RequiresRuntimeInitializationCheck ? "" :
@@ -135,7 +136,7 @@ public static class MirPrinter
         _ => throw new NotSupportedException($"Unknown MIR statement {statement.GetType().Name}."),
     };
 
-    private static string Terminator(MirTerminator terminator) => terminator switch
+    public static string Terminator(MirTerminator terminator) => terminator switch
     {
         MirGoto go => $"goto {go.Target}",
         MirSwitch selection => $"switch {Operand(selection.Value)} [" +

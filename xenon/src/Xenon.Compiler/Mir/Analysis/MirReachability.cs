@@ -6,11 +6,11 @@ public static class MirReachability
 {
     public static MirFunction Prune(MirFunction function, CancellationToken cancellation = default)
     {
-        var graph = MirFlowFacts.Graph(function, cancellation);
+        var graph = MirFlowFacts.Graph(function, cancellation, externalCallsMayUnwind: true);
         var reachable = graph.Reachable;
         if (function.HasDynamicCleanupOrder)
         {
-            var partitions = new MirScalarPartitions<MirFlowState>(graph, new MirFlowFacts(), cancellation);
+            var partitions = new MirScalarPartitions<MirFlowState>(graph, new MirFlowFacts(externalCallsMayUnwind: true), cancellation);
             var flow = MirDataflow.Solve(graph, partitions, cancellation);
             reachable = reachable.Where(block => !flow.Input[block].IsEmpty).ToImmutableHashSet();
         }

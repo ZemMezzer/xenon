@@ -21,6 +21,7 @@ public sealed partial class MirLowerer
     }
 
     private readonly BoundFunction _bound;
+    private readonly bool _hasStackArrays;
     private readonly TypeFactory _types;
     private readonly bool _diagnosticRecovery;
     private readonly IReadOnlySet<BoundExpression>? _invalidExpressions;
@@ -48,6 +49,8 @@ public sealed partial class MirLowerer
         IReadOnlyDictionary<BoundExpression, int>? origins, bool diagnosticRecovery, IReadOnlySet<BoundExpression>? invalidExpressions, IReadOnlyDictionary<BoundAssignmentExpression, AssignmentState>? ownershipStates, IReadOnlyDictionary<BoundExpression, LifetimeOwner?>? lifetimeOwners)
     {
         _bound = function;
+        _hasStackArrays = BoundTree.DescendantsAndSelf(function.Body).Any(node =>
+            node is BoundArrayCreationExpression { Storage: ArrayStorageKind.Stack });
         _types = types;
         _diagnosticRecovery = diagnosticRecovery;
         _invalidExpressions = invalidExpressions;
@@ -87,7 +90,7 @@ public sealed partial class MirLowerer
                 ? new MirReturn(null, lowering._functionSource) : new MirUnreachable(lowering._functionSource));
         MirFunction result = new(function.Symbol, [.. lowering._locals],
             [.. lowering._blocks.Select(block => new MirBasicBlock(block.Id, [.. block.Statements],
-                block.Terminator ?? new MirUnreachable(builder._functionSource)))], new(0), lowering._functionSource) { Scopes = [.. lowering._scopes], UnwindExit = lowering._unwind.Id, ResumableBodyEntry = lowering._resumableBodyEntry, HasDynamicCleanupOrder = lowering._hasDynamicCleanupOrder };
+                block.Terminator ?? new MirUnreachable(builder._functionSource)))], new(0), lowering._functionSource) { Scopes = [.. lowering._scopes], UnwindExit = lowering._unwind.Id, ResumableBodyEntry = lowering._resumableBodyEntry, HasDynamicCleanupOrder = lowering._hasDynamicCleanupOrder, HasExceptionRegions = lowering._hasExceptionRegions };
         if (initialization is not null)
             result = result with { ReturnType = BuiltinTypes.Void, Resumable = new(initialization, lowering.Variable(lowering._resumableResultInput!).Local) };
         MirVerifier.VerifyOrThrow(result);
@@ -175,7 +178,7 @@ public sealed partial class MirLowerer
         switch (statement)
         {
             case BoundBlockStatement { ExitCleanup: { } cleanup } block:
-                Try(new BoundTryStatement(block with { ExitCleanup = null }, [], new BoundBlockStatement([new BoundExpressionStatement(cleanup)])));
+                Try(new BoundTryStatement(block with { ExitCleanup = null }, [], new BoundBlockStatement([new BoundExpressionStatement(cleanup)])), isSourceRegion: false);
                 break;
             case BoundBlockStatement block:
                 ScopedBlock(block);
@@ -609,10 +612,19 @@ public sealed partial class MirLowerer
 
     private readonly Dictionary<BoundExpression, MirPlace> _transferDestinations = new(ReferenceEqualityComparer.Instance);
 
+    private void CheckArgumentReservation(MirPlace target, TypeSymbol type, MirSourceInfo source)
+    {
+        if (_pendingMoves.Count == 0) return;
+        var pointer = _types.PointerTo(type);
+        _current.Statements.Add(new MirAssign(Temporary(pointer, source), new MirBorrow(target, MirBorrowKind.Raw, pointer), source)
+            { IsArgumentReservationCheck = true });
+    }
+
     private MirOperand Assignment(BoundAssignmentExpression expression)
     {
         MirSourceInfo source = Source(expression);
         MirPlace target = Place(expression.Target);
+        CheckArgumentReservation(target, expression.Target.Type, source);
         if (target.Projections.LastOrDefault() is MirFieldProjection field && target.Projections.All(projection => projection is MirFieldProjection))
         {
             MirPlace parent = new(target.Local, target.Projections.RemoveAt(target.Projections.Length - 1));

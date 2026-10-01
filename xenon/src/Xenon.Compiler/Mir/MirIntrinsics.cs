@@ -17,25 +17,21 @@ public enum MirStorageCheckPurpose { None, Read, Move, Destruct, Initialize }
 public enum MirIntrinsicKind
 {
     CoroutineCreate, CoroutineSuspend, CoroutineFree, CoroutineEnd,
+    AsyncRootCreate, AsyncRootContinuation, AsyncRootPump, AsyncRootClose,
     CloneValue,
     AllocateStackArray,
     AllocateHeapArray,
     ArrayLength,
     ArrayRank,
     ArrayDimension,
-    MoveStorage,
-    ConstructStorage,
-    DestroyStorage,
-    CreateContinuation, ReleaseClosure, EnsureThreadLocal,
+    CreateContinuation, EnsureThreadLocal,
     ReleaseStrong, SharedPayload, ReleaseWeak, CallableControl, ClosureControl,
     ReleaseCallableCount, CallableEnvironment, CallableDestructor,
     CheckStorageEmpty,
     CheckStorageInitialized,
     AdoptUnique, AdoptShared, ConvertWeak, LockWeak,
-    DestroyFields, DestroyOwner, DestroyCallable,
-    Allocate, Malloc, AlignedMalloc, Calloc, Free, Delete,
+    Allocate, Malloc, AlignedMalloc, Calloc, Free,
     CompareExchangeOwned, AtomicExchange, MakeCallable, AtomicLoad, AtomicInitialize, AtomicStore, AtomicUpdate, CompareExchange, Swap,
-    MarkStorageInitialized,
 }
 
 /// <summary>

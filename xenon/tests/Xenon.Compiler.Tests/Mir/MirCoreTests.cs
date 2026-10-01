@@ -18,6 +18,33 @@ public sealed class MirCoreTests
     private static MirReturn Return() => new(Int(1), Source);
 
     [Fact]
+    public void CycleDetectionUsesEdgesInsteadOfBlockNumbering()
+    {
+        Assert.False(new MirControlFlow(Body(
+            Block(0, new MirGoto(new(2), Source)),
+            Block(1, Return()),
+            Block(2, new MirGoto(new(1), Source)))).HasCycle());
+        Assert.True(new MirControlFlow(Body(
+            Block(0, new MirGoto(new(2), Source)),
+            Block(1, new MirGoto(new(2), Source)),
+            Block(2, new MirGoto(new(1), Source)))).HasCycle());
+        Assert.False(new MirControlFlow(Body(
+            Block(0, Return()), Block(1, new MirGoto(new(1), Source)))).HasCycle());
+    }
+    [Fact]
+    public void ReservationCheckRequiresAnExplicitPlaceBorrow()
+    {
+        var types = new TypeFactory();
+        var address = new MirLocal(new(1), "address", types.PointerTo(BuiltinTypes.Int), MirLocalKind.Temporary, Source);
+        var assign = new MirAssign(new(new(1)), new MirBorrow(new(new(0)), MirBorrowKind.Raw, address.Type), Source)
+        { IsArgumentReservationCheck = true };
+        var valid = Body(Block(0, Return(), assign)) with { Locals = [Local(0), address] };
+        Assert.Empty(MirVerifier.Verify(valid));
+        Assert.Contains("[argument.reservation.check]", MirPrinter.Dump(valid));
+        var invalid = valid with { Blocks = [Block(0, Return(), assign with { Value = new MirDefault(address.Type) })] };
+        Assert.Contains(MirVerifier.Verify(invalid), error => error.Message.Contains("reservation check"));
+    }
+    [Fact]
     public void ValidLoopAndSwitchHaveExplicitSuccessors()
     {
         MirFunction function = Body(

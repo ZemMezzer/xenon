@@ -17,7 +17,7 @@ public sealed record MirExceptionTest(MirLocalId Record, TypeSymbol Type);
 /// establish a definite match. Facts do not rely on a source control-flow tree.
 /// </summary>
 public sealed class MirFlowFacts(IReadOnlyDictionary<FunctionSymbol, HashSet<TypeSymbol>>? effects = null,
-    Func<MirTerminator, IEnumerable<TypeSymbol>?>? callEffects = null) : IMirDataflowAnalysis<MirFlowState>
+    Func<MirTerminator, IEnumerable<TypeSymbol>?>? callEffects = null, bool externalCallsMayUnwind = false) : IMirDataflowAnalysis<MirFlowState>
 {
     private static readonly ImmutableHashSet<TypeSymbol> Unknown = ImmutableHashSet.Create<TypeSymbol>(TypeIdentity.Comparer, BuiltinTypes.Error);
     private static readonly ImmutableHashSet<TypeSymbol> EmptyTypes = ImmutableHashSet.Create<TypeSymbol>(TypeIdentity.Comparer);
@@ -29,9 +29,9 @@ public sealed class MirFlowFacts(IReadOnlyDictionary<FunctionSymbol, HashSet<Typ
         block.Id == graph.Function.Entry ? Bottom with { Reachable = true } : Bottom;
 
     public static MirControlFlow Graph(MirFunction function, CancellationToken cancellation = default,
-        IReadOnlyDictionary<FunctionSymbol, HashSet<TypeSymbol>>? effects = null)
+        IReadOnlyDictionary<FunctionSymbol, HashSet<TypeSymbol>>? effects = null, bool externalCallsMayUnwind = false)
     {
-        var analysis = new MirFlowFacts(effects);
+        var analysis = new MirFlowFacts(effects, externalCallsMayUnwind: externalCallsMayUnwind);
         var facts = MirDataflow.Solve(new MirControlFlow(function), analysis, cancellation);
         return new(function, (block, edge) => analysis.Edge(block, edge, facts.Output[block.Id]).Reachable);
     }
@@ -155,9 +155,8 @@ public sealed class MirFlowFacts(IReadOnlyDictionary<FunctionSymbol, HashSet<Typ
         if (edge.Kind == MirEdgeKind.Unwind)
         {
             if (source.Terminator is MirIntrinsicCall primitive &&
-                primitive.Intrinsic is not (MirIntrinsicKind.EnsureThreadLocal or MirIntrinsicKind.DestroyOwner or
-                    MirIntrinsicKind.DestroyCallable or MirIntrinsicKind.ReleaseClosure)) return Bottom;
-            if (source.Terminator is MirCall { Callee: MirFunctionOperand { Function.IsExtern: true } }) return Bottom;
+                primitive.Intrinsic != MirIntrinsicKind.EnsureThreadLocal) return Bottom;
+            if (!externalCallsMayUnwind && source.Terminator is MirCall { Callee: MirFunctionOperand { Function.IsExtern: true } }) return Bottom;
             if (callEffects?.Invoke(source.Terminator) is { } dynamicEffects)
             {
                 var thrown = dynamicEffects.ToImmutableHashSet(TypeIdentity.Comparer);

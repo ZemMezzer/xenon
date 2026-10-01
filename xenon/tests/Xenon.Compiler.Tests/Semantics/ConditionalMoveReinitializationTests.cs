@@ -1,3 +1,4 @@
+using Xenon.Compiler.Mir;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
@@ -9,7 +10,7 @@ namespace Xenon.Compiler.Tests.Semantics;
 public sealed class ConditionalMoveReinitializationTests
 {
     [Fact]
-    public void BinderDistinguishesLiveDefinitelyMovedAndMaybeMovedReassignment()
+    public void MirDistinguishesLiveDefinitelyMovedAndMaybeMovedReassignment()
     {
         Compilation compilation = Create("""
             namespace Example;
@@ -39,9 +40,9 @@ public sealed class ConditionalMoveReinitializationTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        Assert.Equal(MovedPlaceReinitializationState.MaybeMoved, FinalAssignment(compilation, "Maybe").MovedPlaceReinitialization);
-        Assert.Equal(MovedPlaceReinitializationState.DefinitelyMoved, FinalAssignment(compilation, "Definite").MovedPlaceReinitialization);
-        Assert.Equal(MovedPlaceReinitializationState.Live, FinalAssignment(compilation, "Live").MovedPlaceReinitialization);
+        Assert.Equal(MirPreviousValueState.MaybeMoved, FinalAssignment(compilation, "Maybe").PreviousValueState);
+        Assert.Equal(MirPreviousValueState.DefinitelyMoved, FinalAssignment(compilation, "Definite").PreviousValueState);
+        Assert.Equal(MirPreviousValueState.Live, FinalAssignment(compilation, "Live").PreviousValueState);
     }
 
     [Fact]
@@ -71,7 +72,7 @@ public sealed class ConditionalMoveReinitializationTests
     }
 
     [Fact]
-    public void BinderTracksMaybeMovedAcrossNestedBranchesAndLoopBreaks()
+    public void MirTracksMaybeMovedAcrossNestedBranchesAndLoopBreaks()
     {
         Compilation compilation = Create("""
             namespace Example;
@@ -103,10 +104,10 @@ public sealed class ConditionalMoveReinitializationTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        Assert.Equal(MovedPlaceReinitializationState.MaybeMoved,
-            FinalAssignment(compilation, "Nested").MovedPlaceReinitialization);
-        Assert.Equal(MovedPlaceReinitializationState.MaybeMoved,
-            FinalAssignment(compilation, "Loop").MovedPlaceReinitialization);
+        Assert.Equal(MirPreviousValueState.MaybeMoved,
+            FinalAssignment(compilation, "Nested").PreviousValueState);
+        Assert.Equal(MirPreviousValueState.MaybeMoved,
+            FinalAssignment(compilation, "Loop").PreviousValueState);
     }
 
     [Fact]
@@ -132,16 +133,13 @@ public sealed class ConditionalMoveReinitializationTests
         Assert.Contains("runtime lifetime flag", diagnostic.Message, StringComparison.Ordinal);
     }
 
-    private static BoundAssignmentExpression FinalAssignment(Compilation compilation, string functionName)
+    private static MirAssign FinalAssignment(Compilation compilation, string functionName)
     {
-        BoundFunction function = Assert.Single(compilation.SemanticModel.Functions, candidate =>
-            candidate.Symbol.Name == functionName);
-        BoundExpression expression = Assert.IsType<BoundExpressionStatement>(function.Body.Statements[^1]).Expression;
-        return Assert.IsType<BoundAssignmentExpression>(expression is BoundFullExpression full
-            ? full.Expression
-            : expression);
+        var function = compilation.GetMirFunctions(lowered: false).Single(function => function.Symbol.Name == functionName);
+        var value = function.Locals.Single(local => local.Name == "value");
+        return function.Blocks.SelectMany(block => block.Statements).OfType<MirAssign>()
+            .Last(assign => assign.IsSemanticWrite && assign.Destination.Local == value.Id);
     }
-
     private static Compilation Create(string source) =>
         Compilation.Create(SourceText.From(source, "conditional-move-reinitialization.xe"));
 }

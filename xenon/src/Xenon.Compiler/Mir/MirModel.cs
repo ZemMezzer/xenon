@@ -39,6 +39,7 @@ public sealed record MirFunction(FunctionSymbol Symbol, ImmutableArray<MirLocal>
     public MirResumableBody? Resumable { get; init; }
     public Analysis.MirCoroutineLayout? Coroutine { get; init; }
     public bool HasDynamicCleanupOrder { get; init; }
+    public bool HasExceptionRegions { get; init; }
     public MirBlockId? UnwindExit { get; init; }
     public MirBlockId? ResumableBodyEntry { get; init; }
     public ImmutableArray<MirScope> Scopes { get; init; } = [new(0, null)];
@@ -158,6 +159,7 @@ public sealed record MirAssign(MirPlace Destination, MirRValue Value, MirSourceI
     // A replacement through an external place cannot test a local lifetime flag.
     public bool IsUntrackedReplacementCheck { get; init; }
     public bool IsPinnedInitializationCheck { get; init; }
+    public bool IsArgumentReservationCheck { get; init; }
     public bool IsCompleteReceiverRead { get; init; }
     // Ownership is reserved while later arguments evaluate, then committed by
     // MirForget. An unwind before that commit cancels the reservation.

@@ -72,7 +72,7 @@ internal sealed partial class MirReadonlyAnalysis
                 HashSet<object> right = Read(arguments[1], swapped);
                 StoreValue(arguments[0], right, swapped); StoreValue(arguments[1], left, swapped);
                 return [];
-            case MirIntrinsicKind.Free or MirIntrinsicKind.Delete:
+            case MirIntrinsicKind.Free:
                 if (arguments.Length != 0) CheckWrite(arguments[0], site);
                 return [];
             default: return [];

@@ -190,6 +190,8 @@ public sealed class MirOwnershipMigrationTests
                 return statement is BoundBlockStatement nested ? Rewrite(nested) : statement;
             })],
         };
+        function.Symbol.HasStackArrays = false;
+        function.Symbol.HasScalarCleanup = false;
         var lowered = MirLowerer.Lower(function with { Body = Rewrite(function.Body) }, compilation.TypeFactory);
         Assert.Equal(MirPrinter.Dump(original), MirPrinter.Dump(lowered));
     }

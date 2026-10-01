@@ -43,8 +43,26 @@ public sealed partial class LlvmIrGenerator
             foreach (MirBasicBlock block in function.Blocks.Where(block => graph.Reachable.Contains(block.Id)))
             {
                 _builder.PositionAtEnd(_mirBlocks[block.Id]);
-                foreach (MirStatement statement in block.Statements) EmitMirStatement(statement);
-                EmitMirTerminator(block.Terminator);
+                int statementIndex = 0;
+                try
+                {
+                    foreach (MirStatement statement in block.Statements)
+                    {
+                        EmitMirStatement(statement);
+                        statementIndex++;
+                    }
+                    EmitMirTerminator(block.Terminator);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    bool isStatement = statementIndex < block.Statements.Length;
+                    MirSourceInfo source = isStatement ? block.Statements[statementIndex].Source : block.Terminator.Source;
+                    string operation = isStatement ? MirPrinter.Statement(block.Statements[statementIndex])
+                        : MirPrinter.Terminator(block.Terminator);
+                    throw new LlvmCodeGenerationException(
+                        $"{function.Symbol.FullName}/{block.Id}/{(isStatement ? $"statement {statementIndex}" : "terminator")}: {operation}" +
+                        $" ({source.Location.Path}:{source.Location.Start.Line + 1}:{source.Location.Start.Character + 1}): {exception.Message}", exception);
+                }
             }
         }
 
@@ -57,8 +75,7 @@ public sealed partial class LlvmIrGenerator
                     !_functionEffects.TryGetValue(direct.Function, out LlvmFunctionEffects effects) || effects.MayThrow,
                 MirDrop { IsVirtual: false, Destructor: { } destructor } =>
                     !_functionEffects.TryGetValue(destructor, out LlvmFunctionEffects effects) || effects.MayThrow,
-                MirIntrinsicCall intrinsic => intrinsic.Intrinsic is MirIntrinsicKind.EnsureThreadLocal or
-                    MirIntrinsicKind.DestroyOwner or MirIntrinsicKind.DestroyCallable or MirIntrinsicKind.ReleaseClosure,
+                MirIntrinsicCall intrinsic => intrinsic.Intrinsic == MirIntrinsicKind.EnsureThreadLocal,
                 _ => true,
             };
         }

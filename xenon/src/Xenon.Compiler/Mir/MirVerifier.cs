@@ -151,6 +151,8 @@ public sealed partial class MirVerifier
                         if (assign.IsAggregateInitialization && (assign.WriteKind != MirWriteKind.Initialize ||
                             assign.Destination.Projections.LastOrDefault() is not MirFieldProjection))
                             Error("aggregate initialization requires an initializing field store");
+                        if (assign.IsArgumentReservationCheck && assign.Value is not MirBorrow { Kind: MirBorrowKind.Raw })
+                            Error("argument reservation check requires a raw place borrow");
                         if (assign.ReservedMove is { } reserved) Place(reserved);
                         if (assign.TransferDestination is { } transfer)
                         {

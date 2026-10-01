@@ -21,9 +21,9 @@ public sealed partial class MirVerifier
         int arity = operation.Intrinsic switch
         {
             MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray => operation.ResultType is ArrayTypeSymbol array ? array.Rank : -1,
-            MirIntrinsicKind.ArrayDimension or MirIntrinsicKind.ConstructStorage => 2,
-            MirIntrinsicKind.ClosureControl or MirIntrinsicKind.CreateContinuation or MirIntrinsicKind.ReleaseClosure or MirIntrinsicKind.EnsureThreadLocal or MirIntrinsicKind.Allocate => 0,
-            MirIntrinsicKind.CoroutineCreate => 0,
+            MirIntrinsicKind.ArrayDimension => 2,
+            MirIntrinsicKind.ClosureControl or MirIntrinsicKind.CreateContinuation or MirIntrinsicKind.EnsureThreadLocal or MirIntrinsicKind.Allocate => 0,
+            MirIntrinsicKind.CoroutineCreate or MirIntrinsicKind.AsyncRootCreate => 0,
             MirIntrinsicKind.MakeCallable => operation.Captures.Length,
             MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc or MirIntrinsicKind.Swap or MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate or MirIntrinsicKind.AtomicExchange => 2,
             MirIntrinsicKind.CompareExchange or MirIntrinsicKind.CompareExchangeOwned => 3,
@@ -33,6 +33,18 @@ public sealed partial class MirVerifier
         MirOperand? first = operation.Arguments.FirstOrDefault();
         switch (operation.Intrinsic)
         {
+            case MirIntrinsicKind.AsyncRootCreate:
+                if (operation.ResultType is not PointerTypeSymbol) Error("async root must be a pointer");
+                break;
+            case MirIntrinsicKind.AsyncRootContinuation:
+                if (first!.Type is not PointerTypeSymbol) Error("async continuation requires a root");
+                if (operation.ResultType is not FunctionValueTypeSymbol rootCallback || !rootCallback.ParameterTypes.IsEmpty ||
+                    !TypeIdentity.AreSame(rootCallback.ReturnType, BuiltinTypes.Void)) Error("root continuation requires function void()");
+                break;
+            case MirIntrinsicKind.AsyncRootPump or MirIntrinsicKind.AsyncRootClose:
+                if (first!.Type is not PointerTypeSymbol) Error("async root operation requires a pointer");
+                Same(operation.ResultType, BuiltinTypes.Void, "async root operation result");
+                break;
             case MirIntrinsicKind.CoroutineCreate:
                 if (_function.Coroutine is null) Error("coroutine operation requires transformed MIR");
                 if (operation.ResultType is not PointerTypeSymbol) Error("coroutine handle must be a pointer");
@@ -95,20 +107,14 @@ public sealed partial class MirVerifier
                 if (operation.Intrinsic == MirIntrinsicKind.ArrayDimension && operation.Arguments[1].Type is not PrimitiveTypeSymbol { IsInteger: true })
                     Error("array metadata dimension must be an integer");
                 break;
-            case MirIntrinsicKind.MoveStorage or MirIntrinsicKind.ConstructStorage or MirIntrinsicKind.DestroyStorage or
-                MirIntrinsicKind.CheckStorageEmpty or MirIntrinsicKind.CheckStorageInitialized or MirIntrinsicKind.MarkStorageInitialized:
-                if (first!.Type is not PointerTypeSymbol { ElementType: StorageTypeSymbol storage })
-                { Error("storage intrinsic requires a pointer to storage"); break; }
-                Same(operation.ResultType, operation.Intrinsic == MirIntrinsicKind.MoveStorage ? storage.ElementType : BuiltinTypes.Void, "storage intrinsic result");
-                if (operation.Intrinsic == MirIntrinsicKind.ConstructStorage)
-                    Same(operation.Arguments[1].Type, storage.ElementType, "storage initializer");
+            case MirIntrinsicKind.CheckStorageEmpty or MirIntrinsicKind.CheckStorageInitialized:
+                if (first!.Type is not PointerTypeSymbol { ElementType: StorageTypeSymbol })
+                    Error("storage check requires a storage wrapper address");
+                Same(operation.ResultType, BuiltinTypes.Void, "storage check result");
                 break;
             case MirIntrinsicKind.EnsureThreadLocal:
-                if (operation.Field is not { IsThreadLocal: true }) Error("thread-local ensure requires a thread-local field");
-                Same(operation.ResultType, BuiltinTypes.Void, "thread-local ensure result");
-                break;
-            case MirIntrinsicKind.ReleaseClosure:
-                Same(operation.ResultType, BuiltinTypes.Void, "closure release result");
+                if (operation.Field is not { IsThreadLocal: true }) Error("thread-local initialization requires a thread-local field");
+                Same(operation.ResultType, BuiltinTypes.Void, "thread-local initialization result");
                 break;
             case MirIntrinsicKind.CreateContinuation:
                 if (operation.ResultType is not FunctionValueTypeSymbol callback || !callback.ParameterTypes.IsEmpty ||
@@ -135,14 +141,9 @@ public sealed partial class MirVerifier
                 foreach (MirOperand size in operation.Arguments)
                     if (size.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("allocation size/alignment must be integral");
                 break;
-            case MirIntrinsicKind.Free or MirIntrinsicKind.Delete:
+            case MirIntrinsicKind.Free:
                 if (first!.Type is not (PointerTypeSymbol or ArrayTypeSymbol)) Error("deallocation requires a pointer or array");
                 Same(operation.ResultType, BuiltinTypes.Void, "deallocation result");
-                break;
-            case MirIntrinsicKind.DestroyFields or MirIntrinsicKind.DestroyOwner or MirIntrinsicKind.DestroyCallable:
-                if (first!.Type is not PointerTypeSymbol address || operation.SubjectType is null ||
-                    !TypeIdentity.AreSame(address.ElementType, operation.SubjectType)) Error("destruction requires its concrete storage address");
-                Same(operation.ResultType, BuiltinTypes.Void, "destruction result");
                 break;
             case MirIntrinsicKind.MakeCallable:
                 if (operation.Function is null || operation.ResultType is not FunctionValueTypeSymbol) Error("callable requires an invoke function and callable type");
@@ -151,6 +152,8 @@ public sealed partial class MirVerifier
                 break;
             case MirIntrinsicKind.AtomicExchange or MirIntrinsicKind.AtomicLoad or MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate:
                 if (first!.Type is not PointerTypeSymbol { ElementType: AtomicTypeSymbol atomic }) { Error("atomic operation requires an atomic address"); break; }
+                if (operation.Intrinsic == MirIntrinsicKind.AtomicStore && TypeFacts.GetCompleteDestructor(atomic.ElementType) is not null)
+                    Error("owned atomic replacement requires exchange and explicit drop");
                 Same(operation.ResultType, atomic.ElementType, "atomic result");
                 if (operation.Arguments.Length == 2) Same(operation.Arguments[1].Type, atomic.ElementType, "atomic value");
                 if (operation.Intrinsic == MirIntrinsicKind.AtomicUpdate && operation.Operator is null) Error("atomic update requires an operator");

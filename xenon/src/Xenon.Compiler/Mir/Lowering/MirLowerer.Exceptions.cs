@@ -93,8 +93,10 @@ public sealed partial class MirLowerer
 
     private MirOperand CurrentException() => Save(new MirCurrentException(_types.PointerTo(BuiltinTypes.Byte)), _functionSource);
 
-    private void Try(BoundTryStatement region)
+    private bool _hasExceptionRegions;
+    private void Try(BoundTryStatement region, bool isSourceRegion = true)
     {
+        _hasExceptionRegions |= isSourceRegion;
         Block outerUnwind = _unwindTarget, outerRethrow = _rethrowTarget;
         int depth = _exits.Count;
         Block dispatch = NewBlock(), exceptionalExit = NewBlock(), end = NewBlock();

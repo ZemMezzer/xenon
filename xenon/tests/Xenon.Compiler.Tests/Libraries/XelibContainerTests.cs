@@ -1109,7 +1109,7 @@ public sealed class XelibContainerTests
         StructTypeSymbol ownershipHolder = Assert.Single(reference.GlobalNamespace.Namespaces).Structs
             .Single(type => type.Name == "OwnershipHolder");
         Assert.Contains(ownershipBodies, function =>
-            ReferenceEquals(function.Symbol, ownershipHolder.CompleteDestructor));
+            ReferenceEquals(function.Symbol, TypeFacts.GetCompleteDestructor(ownershipHolder.Fields.Single().Type)));
         Assert.DoesNotContain(ownershipBodies, function => function.Symbol.Name == "OtherCleanup");
         GenerateForHost(ownership);
         AssertClosure("""

@@ -3,7 +3,7 @@ using Xenon.Compiler.Semantics.Symbols;
 
 namespace Xenon.Compiler.Mir.Analysis;
 
-public enum MirOwnershipCheck { Read, UntrackedReplacement, PinnedInitialization, RequiredField, SelfMove }
+public enum MirOwnershipCheck { Read, UntrackedReplacement, PinnedInitialization, RequiredField, SelfMove, ArgumentReservation }
 public sealed record MirOwnershipViolation(MirLocation Location, MirPlace Place,
     MirOwnershipStatus Status, MirSourceInfo Source, MirPlace Cause, MirOwnershipCheck Check = MirOwnershipCheck.Read);
 
@@ -21,7 +21,7 @@ public static class MirOwnershipChecks
         {
             for (int index = 0; index < block.Statements.Length; index++)
             {
-                if (block.Statements[index] is not MirAssign read || !(read.IsSemanticRead || read.IsUntrackedReplacementCheck || read.IsPinnedInitializationCheck)) continue;
+                if (block.Statements[index] is not MirAssign read || !(read.IsSemanticRead || read.IsUntrackedReplacementCheck || read.IsPinnedInitializationCheck || read.IsArgumentReservationCheck)) continue;
                 var location = new MirLocation(block.Id, index);
                 if (read.IsCompleteReceiverRead)
                     RequiredFields(location, read.Source, states.Before[location]);
@@ -45,6 +45,13 @@ public static class MirOwnershipChecks
                         if (read.TransferDestination is { } transfer &&
                             analysis.Resolve(transfer, location).Any(destination => destination.Equals(resolved)))
                             violations.Add(new(location, resolved, status, read.Source, resolved, MirOwnershipCheck.SelfMove));
+                        if (read.IsArgumentReservationCheck)
+                        {
+                            if (states.Before[location].Any(pair => pair.Value.HasFlag(MirInitialization.Reserved) &&
+                                (pair.Key.IsPrefixOf(resolved) || resolved.IsPrefixOf(pair.Key))))
+                                violations.Add(new(location, resolved, status, read.Source, resolved, MirOwnershipCheck.ArgumentReservation));
+                            continue;
+                        }
                         if (read.IsPinnedInitializationCheck)
                         {
                             if (status != MirOwnershipStatus.Uninitialized)
