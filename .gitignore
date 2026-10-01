@@ -71,3 +71,7 @@ dkms.conf
 /build/
 .idea
 Xenon.sln.DotSettings.user
+
+# Local audit notes; public documentation lives in xenon.docs
+/audits/
+/docs/
