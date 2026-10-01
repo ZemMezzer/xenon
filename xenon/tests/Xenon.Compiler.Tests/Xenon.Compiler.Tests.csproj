@@ -30,6 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="Mir/Snapshots/**/*" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../Workspaces/**/*">
       <Link>Workspaces/%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

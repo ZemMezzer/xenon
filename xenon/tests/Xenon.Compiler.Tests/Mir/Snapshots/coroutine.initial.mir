@@ -1,0 +1,153 @@
+fn Snapshot.Run -> void {
+  entry bb0
+  local _0: Result [variable] "__resumable_result"
+  local _1: int [variable] "live"
+  local _2: Result& [temporary] "tmp2"
+  local _3: Result& [temporary] "tmp3"
+  local _4: int [temporary] "tmp4"
+  local _5: int [temporary] "tmp5"
+  local _6: Operation [temporary] "tmp6"
+  local _7: storage<int> [variable] "__await_result_0"
+  local _8: bool [temporary] "tmp8"
+  local _9: function void() [variable] "__continuation_0"
+  local _10: function void() [temporary] "tmp10"
+  local _11: bool [temporary] "tmp11"
+  local _12: readonly Operation& [temporary] "tmp12"
+  local _13: readonly Operation& [temporary] "tmp13"
+  local _14: storage<int>& [temporary] "tmp14"
+  local _15: storage<int>& [temporary] "tmp15"
+  local _16: function void() [temporary] "tmp16"
+  local _17: function void() [temporary] "tmp17"
+  local _18: function void() [temporary] "tmp18"
+  local _19: bool [temporary] "tmp19"
+  local _20: bool [temporary] "tmp20"
+  local _21: storage<int>* [temporary] "tmp21"
+  local _22: storage<int>* [temporary] "tmp22"
+  local _23: int [temporary] "tmp23"
+  local _24: int [temporary] "tmp24"
+  local _25: int [temporary] "tmp25"
+  local _26: byte* [temporary] "tmp26"
+
+bb0:
+  storage.live _0
+  goto bb2
+
+bb1:
+  abort
+
+bb2:
+  storage.live _1
+  _1 = const 7: int
+  _2 = borrow.exclusive _0
+  _3 = copy _2
+  _4 = copy _1
+  _5 = copy _4
+  storage.live _6
+  _6 = default<Operation>
+  storage.live _7
+  _7 = default<storage<int>>
+  _8 = const true: bool
+  goto bb11
+
+bb3:
+  _26 = exception.current
+  goto bb4
+
+bb4:
+  goto bb1
+
+bb5:
+  unreachable
+
+bb6:
+  storage.dead _1
+  goto bb3
+
+bb7:
+  storage.dead _7
+  goto bb3
+
+bb8:
+  abort
+
+bb9:
+  switch copy _8 [const true: bool -> bb10, otherwise -> bb7]
+
+bb10:
+  _8 = const false: bool
+  drop _7 via .__storage_destructor_73746F7261676528696E7429 -> bb7 unwind bb8
+
+bb11:
+  storage.live _9
+  _10 = intrinsic CreateContinuation() -> bb14 unwind bb9
+
+bb12:
+  _21 = borrow.raw _7
+  intrinsic CheckStorageEmpty(copy _21) -> bb23 unwind bb9
+
+bb13:
+  _22 = borrow.raw _7
+  intrinsic CheckStorageInitialized(copy _22) -> bb24 unwind bb9
+
+bb14:
+  _9 = copy _10
+  _11 = const true: bool
+  _12 = borrow.shared _6
+  _13 = copy _12
+  _14 = borrow.exclusive _7
+  _15 = copy _14
+  _16 = copy _9
+  _17 = intrinsic CloneValue(copy _16) -> bb18 unwind bb16
+
+bb15:
+  abort
+
+bb16:
+  switch copy _11 [const true: bool -> bb17, otherwise -> bb9]
+
+bb17:
+  _11 = const false: bool
+  drop _9 via .__function_value_destructor_66756E6374696F6E28766F69643B29 -> bb9 unwind bb15
+
+bb18:
+  _18 = copy _17
+  _19 = call fn Snapshot.Operation.operator await(copy _13, copy _15, copy _18) -> bb19 unwind bb16
+
+bb19:
+  _20 = copy _19
+  goto bb21
+
+bb20:
+  storage.dead _9
+  switch copy _20 [const true: bool -> bb13, otherwise -> bb12]
+
+bb21:
+  switch copy _11 [const true: bool -> bb22, otherwise -> bb20]
+
+bb22:
+  _11 = const false: bool
+  drop _9 via .__function_value_destructor_66756E6374696F6E28766F69643B29 -> bb20 unwind bb9
+
+bb23:
+  suspend resume bb11
+
+bb24:
+  _23 = move _7.value
+  storage.state _7 = false
+  operation.complete copy _6 -> _23
+  storage.dead _7
+  _8 = const false: bool
+  _24 = add(copy _5, copy _23)
+  _25 = copy _24
+  goto bb25
+
+bb25:
+  storage.dead _1
+  call fn Snapshot.Result.operator resolve(copy _3, copy _25) -> bb27 unwind bb26
+
+bb26:
+  abort
+
+bb27:
+  return
+}

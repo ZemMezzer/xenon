@@ -9,6 +9,25 @@ namespace Xenon.Compiler.Tests.Mir;
 
 public sealed class MirSnapshotTests
 {
+    [Theory]
+    [InlineData("control", false)]
+    [InlineData("control", true)]
+    [InlineData("cleanup", false)]
+    [InlineData("cleanup", true)]
+    [InlineData("exceptions", false)]
+    [InlineData("exceptions", true)]
+    [InlineData("coroutine", false)]
+    [InlineData("coroutine", true)]
+    public void ProductionPipelineSnapshots(string name, bool lowered)
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "Mir", "Snapshots");
+        var compilation = Compilation.Create(SourceText.From(
+            File.ReadAllText(Path.Combine(directory, name + ".xe")), name + ".xe"));
+        Assert.Empty(compilation.Diagnostics);
+        var function = compilation.GetMirFunctions(lowered).Single(function => function.Symbol.Name == "Run");
+        string expected = File.ReadAllText(Path.Combine(directory, name + (lowered ? ".lowered.mir" : ".initial.mir")));
+        Assert.Equal(expected.Replace("\r\n", "\n"), MirPrinter.Dump(function));
+    }
     [Fact]
     public void ScalarLoweringSnapshot()
     {

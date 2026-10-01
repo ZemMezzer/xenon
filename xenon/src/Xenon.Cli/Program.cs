@@ -4,6 +4,7 @@ using System.Text;
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler;
 using Xenon.Compiler.Diagnostics;
+using Xenon.Compiler.Mir;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
 using Xenon.Driver;
@@ -47,6 +48,8 @@ internal static class Program
         int argumentIndex = projectCommand ? 1 : 0;
         bool dumpTokens = false;
         bool emitLlvm = false;
+        bool emitMir = false;
+        bool dumpMir = false;
         bool emitObject = projectCommand;
         string profileName = "debug";
         string? targetTriple = null;
@@ -65,6 +68,12 @@ internal static class Program
                     break;
                 case "--dump-tokens":
                     dumpTokens = true;
+                    break;
+                case "--emit-mir":
+                    emitMir = true;
+                    break;
+                case "--dump-mir":
+                    dumpMir = true;
                     break;
                 case "--emit-llvm":
                     emitLlvm = true;
@@ -137,9 +146,9 @@ internal static class Program
             return WriteUsageError("target triple cannot be empty");
         }
 
-        if (targetTriple is not null && !emitObject && !emitLlvm)
+        if (targetTriple is not null && !emitObject && !emitLlvm && !emitMir && !dumpMir)
         {
-            return WriteUsageError("option '--target' requires 'build', '--emit-object', or '--emit-llvm'");
+            return WriteUsageError("option '--target' requires 'build', '--emit-object', '--emit-llvm', '--emit-mir', or '--dump-mir'");
         }
 
         try { _ = CompilationTarget.Normalize(targetTriple ?? LlvmTargetPlatform.HostTriple); }
@@ -169,7 +178,7 @@ internal static class Program
         if (projectCommand)
         {
             return RunProjectCommand(inputs[0], profileName, targetTriple, runCommand, dumpTokens,
-                nativeCpu: nativeCpu, defines: defines);
+                nativeCpu: nativeCpu, defines: defines, emitMir: emitMir, dumpMir: dumpMir);
         }
 
         // A project file or directory always goes through the graph-aware driver,
@@ -178,7 +187,7 @@ internal static class Program
         {
             bool compileOnly = !emitObject && !emitLlvm;
             return RunProjectCommand(inputs[0], profileName, targetTriple, run: false, dumpTokens,
-                compileOnly, skipLink: true, nativeCpu: nativeCpu, defines: defines);
+                compileOnly, skipLink: true, nativeCpu: nativeCpu, defines: defines, emitMir: emitMir, dumpMir: dumpMir);
         }
 
         CompilationInput input;
@@ -218,7 +227,7 @@ internal static class Program
         }
 
         LlvmTargetOptions? selectedTarget = null;
-        if (!compilation.HasErrors && (emitObject || emitLlvm || compilation.RequiresTargetLayout))
+        if (!compilation.HasErrors && (emitObject || emitLlvm || emitMir || dumpMir || compilation.RequiresTargetLayout))
         {
             try
             {
@@ -250,6 +259,9 @@ internal static class Program
         {
             return CompilationError;
         }
+
+        if (!WriteMir(compilation, emitMir ? Path.ChangeExtension(input.LlvmOutputPath, ".mir") : null, dumpMir))
+            return CompilationError;
 
         LlvmObjectFile? objectFile = null;
         if (emitObject)
@@ -321,6 +333,27 @@ internal static class Program
         return Success;
     }
 
+    private static bool WriteMir(Compilation compilation, string? outputPath, bool dump)
+    {
+        if (outputPath is null && !dump) return true;
+        try
+        {
+            string text = compilation.DumpMir(includeSource: dump);
+            if (outputPath is not null)
+            {
+                File.WriteAllText(outputPath, text, new UTF8Encoding(false));
+                Console.WriteLine($"Wrote MIR to '{outputPath}'.");
+            }
+            if (dump) Console.Write(text);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or MirVerificationException)
+        {
+            Console.Error.WriteLine($"error: cannot emit MIR: {exception.Message}");
+            return false;
+        }
+    }
+
     private static CompilationInput ResolveInput(IReadOnlyList<string> inputs, string profileName)
     {
         var sourceFiles = ImmutableArray.CreateBuilder<string>(inputs.Count);
@@ -388,7 +421,7 @@ internal static class Program
 
     private static int RunProjectCommand(string inputPath, string profileName, string? targetTriple,
         bool run, bool dumpTokens, bool compileOnly = false, bool skipLink = false,
-        bool nativeCpu = false, IEnumerable<string>? defines = null)
+        bool nativeCpu = false, IEnumerable<string>? defines = null, bool emitMir = false, bool dumpMir = false)
     {
         XenonBuildResult result = new XenonBuildDriver().Build(CreateProjectBuildRequest(
             inputPath, profileName, targetTriple, compileOnly, skipLink, nativeCpu, defines));
@@ -406,6 +439,11 @@ internal static class Program
                 $"cannot run target '{result.TargetTriple}' on host '{LlvmTargetPlatform.HostTriple}'");
         if (dumpTokens && result.Compilation is not null)
             DumpTokens(result.Compilation);
+        if (result.Compilation is { } mirCompilation &&
+            !WriteMir(mirCompilation, emitMir
+                ? result.LlvmIrPath is { } llvmPath ? Path.ChangeExtension(llvmPath, ".mir")
+                    : Path.Combine(result.Project!.RootDirectory, result.Project.Name + ".mir")
+                : null, dumpMir)) return CompilationError;
         if (result.ObjectPath is not null)
             Console.WriteLine($"Wrote {result.TargetTriple} object file to '{result.ObjectPath}'.");
         if (result.ArtifactPath is not null)
@@ -479,10 +517,10 @@ internal static class Program
         Console.WriteLine("Xenon compiler");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  xenon build [path] [--profile debug|release] [--target triple] [--native-cpu] [--dump-tokens] [--emit-llvm]");
+        Console.WriteLine("  xenon build [path] [--profile debug|release] [--target triple] [--native-cpu] [--dump-tokens] [--emit-llvm] [--emit-mir] [--dump-mir]");
         Console.WriteLine("  xenon run [path] [--profile debug|release] [--native-cpu]");
         Console.WriteLine("  xenon lsp");
-        Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] [--emit-object] [--native-cpu] <source.xe> [additional.xe ...]");
+        Console.WriteLine("  xenon [--dump-tokens] [--emit-llvm] [--emit-mir] [--dump-mir] [--emit-object] [--native-cpu] <source.xe> [additional.xe ...]");
         Console.WriteLine("  Defines: -DNAME, --define NAME, --define=NAME (boolean symbols; XENON_ is reserved)");
         Console.WriteLine("  xenon --version");
         Console.WriteLine("  xenon --help");

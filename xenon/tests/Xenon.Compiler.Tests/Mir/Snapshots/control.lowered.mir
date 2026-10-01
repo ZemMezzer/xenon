@@ -1,0 +1,83 @@
+fn Snapshot.Run -> int {
+  entry bb0
+  local _0: int [parameter] "count"
+  local _1: int [variable] "sum"
+  local _2: int [variable] "i"
+  local _3: int [temporary] "tmp3"
+  local _4: int [temporary] "tmp4"
+  local _5: int [temporary] "tmp5"
+  local _6: bool [temporary] "tmp6"
+  local _7: int [temporary] "tmp7"
+  local _8: int [temporary] "tmp8"
+  local _9: bool [temporary] "tmp9"
+  local _10: int [temporary] "tmp10"
+  local _11: int [temporary] "tmp11"
+  local _12: int [temporary] "tmp12"
+  local _13: int [temporary] "tmp13"
+  local _14: int [temporary] "tmp14"
+  local _15: int [temporary] "tmp15"
+  local _16: int [temporary] "tmp16"
+  local _17: int [temporary] "tmp17"
+
+bb0:
+  storage.live _1
+  _1 = const 0: int
+  storage.live _2
+  _2 = const 0: int
+  goto bb4
+
+bb1:
+  unreachable
+
+bb2:
+  unreachable
+
+bb3:
+  unreachable
+
+bb4:
+  _3 = copy _2
+  _4 = copy _3
+  _5 = copy _0
+  _6 = less(copy _4, copy _5)
+  switch copy _6 [const true: bool -> bb5, otherwise -> bb7]
+
+bb5:
+  _7 = copy _2
+  _8 = copy _7
+  _9 = equal(copy _8, const 2: int)
+  switch copy _9 [const true: bool -> bb8, otherwise -> bb9]
+
+bb6:
+  _14 = copy _2
+  _15 = add(copy _14, const 1: int)
+  _2 = copy _15
+  goto bb4
+
+bb7:
+  goto bb11
+
+bb8:
+  goto bb6
+
+bb9:
+  goto bb10
+
+bb10:
+  _10 = copy _1
+  _11 = copy _2
+  _12 = add(copy _10, copy _11)
+  _13 = copy _12
+  _1 = copy _13 [write replace, previous live]
+  goto bb6
+
+bb11:
+  storage.dead _2
+  _16 = copy _1
+  _17 = copy _16
+  goto bb12
+
+bb12:
+  storage.dead _1
+  return copy _17
+}

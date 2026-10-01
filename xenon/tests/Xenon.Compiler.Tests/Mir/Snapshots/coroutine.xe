@@ -1,0 +1,7 @@
+namespace Snapshot;
+struct Result { public static void operator resolve(Result& target, int value) {} }
+struct Operation {
+    public static bool operator await(readonly Operation& value, storage<int>& result, function void() continuation)
+    { result = 42; return true; }
+}
+async Result Run() { int live = 7; return live + await Operation(); }

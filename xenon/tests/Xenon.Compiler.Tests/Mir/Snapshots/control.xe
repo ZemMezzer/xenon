@@ -1,0 +1,2 @@
+namespace Snapshot;
+int Run(int count) { int sum = 0; for (int i = 0; i < count; i++) { if (i == 2) continue; sum += i; } return sum; }

@@ -1,0 +1,297 @@
+fn Snapshot.Run -> void {
+  entry bb0
+  local _0: bool [parameter] "choose"
+  local _1: Item [variable] "first"
+  local _2: long [temporary] "tmp2"
+  local _3: bool [temporary] "tmp3"
+  local _4: long [temporary] "tmp4"
+  local _5: int [temporary] "tmp5"
+  local _6: long [temporary] "tmp6"
+  local _7: bool [temporary] "tmp7"
+  local _8: int [temporary] "tmp8"
+  local _9: long [temporary] "tmp9"
+  local _10: bool [temporary] "tmp10"
+  local _11: Item [temporary] "tmp11"
+  local _12: bool [temporary] "tmp12"
+  local _13: bool [temporary] "tmp13"
+  local _14: Item [variable] "second"
+  local _15: long [temporary] "tmp15"
+  local _16: bool [temporary] "tmp16"
+  local _17: long [temporary] "tmp17"
+  local _18: int [temporary] "tmp18"
+  local _19: long [temporary] "tmp19"
+  local _20: bool [temporary] "tmp20"
+  local _21: int [temporary] "tmp21"
+  local _22: long [temporary] "tmp22"
+  local _23: bool [temporary] "tmp23"
+  local _24: Item [temporary] "tmp24"
+  local _25: bool [temporary] "tmp25"
+  local _26: int [temporary] "tmp26"
+  local _27: long [temporary] "tmp27"
+  local _28: bool [temporary] "tmp28"
+  local _29: int [temporary] "tmp29"
+  local _30: long [temporary] "tmp30"
+  local _31: bool [temporary] "tmp31"
+  local _32: int [temporary] "tmp32"
+  local _33: long [temporary] "tmp33"
+  local _34: bool [temporary] "tmp34"
+  local _35: int [temporary] "tmp35"
+  local _36: long [temporary] "tmp36"
+  local _37: bool [temporary] "tmp37"
+
+bb0:
+  _2 = const 0: long
+  _4 = const -1: long
+  _3 = const false: bool
+  storage.live _1
+  storage.live _11
+  _11 = default<Item>
+  _1 = copy _11
+  _12 = less(copy _4, const 0: long)
+  switch copy _12 [const true: bool -> bb15, otherwise -> bb16]
+
+bb1:
+  resume.unwind
+
+bb2:
+  storage.dead _1
+  goto bb1
+
+bb3:
+  _5 = const -1: int
+  _6 = const -1: long
+  switch copy _3 [const true: bool -> bb4, otherwise -> bb6]
+
+bb4:
+  _7 = greater(copy _4, copy _6)
+  switch copy _7 [const true: bool -> bb5, otherwise -> bb6]
+
+bb5:
+  _5 = const 0: int
+  _6 = copy _4
+  goto bb6
+
+bb6:
+  switch copy _5 [const 0: int -> bb8, otherwise -> bb2]
+
+bb7:
+  abort
+
+bb8:
+  _3 = const false: bool
+  drop _1 via Snapshot.Item.__dtor -> bb3 unwind bb7
+
+bb9:
+  _8 = const -1: int
+  _9 = const -1: long
+  switch copy _3 [const true: bool -> bb10, otherwise -> bb12]
+
+bb10:
+  _10 = greater(copy _4, copy _9)
+  switch copy _10 [const true: bool -> bb11, otherwise -> bb12]
+
+bb11:
+  _8 = const 0: int
+  _9 = copy _4
+  goto bb12
+
+bb12:
+  switch copy _8 [const 0: int -> bb14, otherwise -> bb2]
+
+bb13:
+  abort
+
+bb14:
+  _3 = const false: bool
+  drop _1 via Snapshot.Item.__dtor -> bb9 unwind bb13
+
+bb15:
+  _4 = copy _2
+  _2 = add(copy _2, const 1: long)
+  goto bb16
+
+bb16:
+  _3 = const true: bool
+  _13 = copy _0
+  switch copy _13 [const true: bool -> bb17, otherwise -> bb18]
+
+bb17:
+  _15 = const 0: long
+  _17 = const -1: long
+  _16 = const false: bool
+  storage.live _14
+  _24 = move _1 owner _1
+  _3 = const false: bool
+  _14 = copy _24
+  _25 = less(copy _17, const 0: long)
+  switch copy _25 [const true: bool -> bb34, otherwise -> bb35]
+
+bb18:
+  goto bb19
+
+bb19:
+  goto bb49
+
+bb20:
+  storage.dead _14
+  goto bb3
+
+bb21:
+  storage.dead _14
+  goto bb9
+
+bb22:
+  _18 = const -1: int
+  _19 = const -1: long
+  switch copy _16 [const true: bool -> bb23, otherwise -> bb25]
+
+bb23:
+  _20 = greater(copy _17, copy _19)
+  switch copy _20 [const true: bool -> bb24, otherwise -> bb25]
+
+bb24:
+  _18 = const 0: int
+  _19 = copy _17
+  goto bb25
+
+bb25:
+  switch copy _18 [const 0: int -> bb27, otherwise -> bb20]
+
+bb26:
+  abort
+
+bb27:
+  _16 = const false: bool
+  drop _14 via Snapshot.Item.__dtor -> bb22 unwind bb26
+
+bb28:
+  _21 = const -1: int
+  _22 = const -1: long
+  switch copy _16 [const true: bool -> bb29, otherwise -> bb31]
+
+bb29:
+  _23 = greater(copy _17, copy _22)
+  switch copy _23 [const true: bool -> bb30, otherwise -> bb31]
+
+bb30:
+  _21 = const 0: int
+  _22 = copy _17
+  goto bb31
+
+bb31:
+  switch copy _21 [const 0: int -> bb33, otherwise -> bb21]
+
+bb32:
+  abort
+
+bb33:
+  _16 = const false: bool
+  drop _14 via Snapshot.Item.__dtor -> bb28 unwind bb32
+
+bb34:
+  _17 = copy _15
+  _15 = add(copy _15, const 1: long)
+  goto bb35
+
+bb35:
+  _16 = const true: bool
+  goto bb37
+
+bb36:
+  storage.dead _14
+  goto bb19
+
+bb37:
+  _26 = const -1: int
+  _27 = const -1: long
+  switch copy _16 [const true: bool -> bb38, otherwise -> bb40]
+
+bb38:
+  _28 = greater(copy _17, copy _27)
+  switch copy _28 [const true: bool -> bb39, otherwise -> bb40]
+
+bb39:
+  _26 = const 0: int
+  _27 = copy _17
+  goto bb40
+
+bb40:
+  switch copy _26 [const 0: int -> bb47, otherwise -> bb36]
+
+bb41:
+  _29 = const -1: int
+  _30 = const -1: long
+  switch copy _16 [const true: bool -> bb42, otherwise -> bb44]
+
+bb42:
+  _31 = greater(copy _17, copy _30)
+  switch copy _31 [const true: bool -> bb43, otherwise -> bb44]
+
+bb43:
+  _29 = const 0: int
+  _30 = copy _17
+  goto bb44
+
+bb44:
+  switch copy _29 [const 0: int -> bb46, otherwise -> bb20]
+
+bb45:
+  abort
+
+bb46:
+  _16 = const false: bool
+  drop _14 via Snapshot.Item.__dtor -> bb41 unwind bb45
+
+bb47:
+  _16 = const false: bool
+  drop _14 via Snapshot.Item.__dtor -> bb37 unwind bb41
+
+bb48:
+  storage.dead _1
+  return
+
+bb49:
+  _32 = const -1: int
+  _33 = const -1: long
+  switch copy _3 [const true: bool -> bb50, otherwise -> bb52]
+
+bb50:
+  _34 = greater(copy _4, copy _33)
+  switch copy _34 [const true: bool -> bb51, otherwise -> bb52]
+
+bb51:
+  _32 = const 0: int
+  _33 = copy _4
+  goto bb52
+
+bb52:
+  switch copy _32 [const 0: int -> bb59, otherwise -> bb48]
+
+bb53:
+  _35 = const -1: int
+  _36 = const -1: long
+  switch copy _3 [const true: bool -> bb54, otherwise -> bb56]
+
+bb54:
+  _37 = greater(copy _4, copy _36)
+  switch copy _37 [const true: bool -> bb55, otherwise -> bb56]
+
+bb55:
+  _35 = const 0: int
+  _36 = copy _4
+  goto bb56
+
+bb56:
+  switch copy _35 [const 0: int -> bb58, otherwise -> bb2]
+
+bb57:
+  abort
+
+bb58:
+  _3 = const false: bool
+  drop _1 via Snapshot.Item.__dtor -> bb53 unwind bb57
+
+bb59:
+  _3 = const false: bool
+  drop _1 via Snapshot.Item.__dtor -> bb49 unwind bb53
+}

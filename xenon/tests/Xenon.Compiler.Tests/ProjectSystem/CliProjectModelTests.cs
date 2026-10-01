@@ -9,6 +9,28 @@ namespace Xenon.Compiler.Tests.ProjectSystem;
 
 public sealed class CliProjectModelTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CliEmitsMirForSourceAndProjectInputs(bool project)
+    {
+        using var directory = new TemporaryDirectory();
+        directory.Write("App/src/main.xe", "namespace Dump; int Main() { return 42; }");
+        directory.Write("App/App.xeproj", """
+            [project]
+            name = "App"
+            type = "executable"
+            [source]
+            root = "src"
+            """);
+        string input = directory.PathOf(project ? "App/App.xeproj" : "App/src/main.xe");
+        Assert.Equal(0, Program.Main([input, "--emit-mir", "--dump-mir"]));
+        string dump = File.ReadAllText(directory.PathOf(project ? "App/App.mir" : "App/src/main.mir"));
+        Assert.Contains("fn Dump.Main -> int", dump);
+        Assert.Contains("return const 42: int", dump);
+        Assert.Contains("main.xe", dump);
+        Assert.DoesNotContain("define i32", dump);
+    }
     [Fact]
     public void CliRejectsRunningForeignTargetAfterObjectOnlyDriverBuild()
     {
