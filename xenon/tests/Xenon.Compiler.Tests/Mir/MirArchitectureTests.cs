@@ -86,6 +86,32 @@ public sealed class MirArchitectureTests
         Assert.Contains(helper.Symbol, compilation.GetMirFunctions().Select(function => function.Symbol));
     }
     [Fact]
+    public void GeneratedClosureCleanupRootsItsImportedDestructor()
+    {
+        var library = Compilation.Create(SourceText.From("""
+            namespace ClosureLibrary;
+            public struct Item { public ~Item() { } }
+            """));
+        Assert.Empty(library.Diagnostics);
+        var reference = Xenon.Compiler.Libraries.XelibReader.Read(
+            Xenon.Compiler.Libraries.XelibWriter.Write(library,
+                new Xenon.Compiler.Libraries.XelibWriteOptions("ClosureLibrary")));
+        var consumer = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using ClosureLibrary;
+            namespace Consumer;
+            void Run() { if (false) {
+                Item value = Item();
+                function void() callback = [move value]() => { };
+            } }
+            """));
+        Assert.Empty(consumer.Diagnostics);
+        var helper = Assert.Single(consumer.GetMirFunctions(lowered: false),
+            function => function.Symbol.ClosureEnvironmentOwner is not null);
+        var destructor = helper.Blocks.Select(block => block.Terminator).OfType<MirDrop>().First().Destructor;
+        Assert.Contains(destructor, consumer.GetStaticImplementationSymbols());
+        _ = new LlvmIrGenerator().GenerateForTarget(consumer, LlvmTargetOptions.CreateHost());
+    }
+    [Fact]
     public void FailedAndCancelledCompilationsDoNotPublishExecutableMir()
     {
         var invalid = Compilation.Create(SourceText.From("namespace Pipeline; int Main() { return missing; }"));

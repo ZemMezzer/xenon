@@ -1,7 +1,6 @@
 using System.Collections.Immutable;
 using Xenon.Compiler.Mir;
 using Xenon.Compiler.Mir.Analysis;
-using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Semantics.Symbols;
 
 namespace Xenon.Compiler;
@@ -26,22 +25,7 @@ public sealed partial class Compilation
         {
             cancellation.ThrowIfCancellationRequested();
             if (_initialMir.IsDefault)
-            {
-                var implementations = GetNativeReachability(cancellation).InitialMir;
-                var initial = implementations.ToBuilder();
-                foreach (var function in implementations)
-                {
-                    cancellation.ThrowIfCancellationRequested();
-                    if (function.Symbol.IsCapturingLambda)
-                        initial.Add(MirClosureCleanup.Create(function, TypeFactory));
-                    if (Options.OutputKind == CompilationOutputKind.Executable &&
-                        function.Symbol.IsAsync && function.Symbol.Name == "Main" &&
-                        function.Symbol.ContainingType is null && function.Symbol.FunctionKind == FunctionKind.Ordinary)
-                        initial.Add(MirAsyncEntryPoint.Create(function, TypeFactory));
-                }
-                cancellation.ThrowIfCancellationRequested();
-                _initialMir = initial.ToImmutable();
-            }
+                _initialMir = GetNativeReachability(cancellation).InitialMir;
             if (!lowered) return _initialMir;
             if (_loweredMir.IsDefault)
                 _loweredMir = [.. _initialMir.Select(function => MirCoroutineTransform.Lower(

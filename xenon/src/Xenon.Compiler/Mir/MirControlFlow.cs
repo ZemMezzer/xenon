@@ -46,4 +46,5 @@ public sealed class MirControlFlow
                 if (--indegrees[edge.Target] == 0) ready.Enqueue(edge.Target);
         }
         return visited != Reachable.Count;
-    }}
+    }
+}

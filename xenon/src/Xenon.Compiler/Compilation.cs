@@ -344,6 +344,7 @@ public sealed partial class Compilation
                      .SelectMany(reference => reference.ImplementationFunctions))
             available.TryAdd(function.Symbol, function);
         var initialMir = new Dictionary<FunctionSymbol, MirFunction>(ReferenceEqualityComparer.Instance);
+        var generatedMir = new List<MirFunction>();
         var selected = new HashSet<FunctionSymbol>(ReferenceEqualityComparer.Instance);
         var pending = new Queue<FunctionSymbol>();
         var reachableTypes = new HashSet<DeclaredTypeSymbol>(ReferenceEqualityComparer.Instance);
@@ -520,12 +521,20 @@ public sealed partial class Compilation
 
         void Inspect(BoundFunction function)
         {
-            if (Options.OutputKind == CompilationOutputKind.Executable && function.Symbol.Name == "Main" &&
-                AsyncEntryPoint.GetAwaitOperator(function.Symbol) is { } rootAwait)
-                MarkSymbol(rootAwait);
             MirFunction mir = MirLowerer.Lower(function, TypeFactory, SemanticModel.ExpressionLocations, cancellation);
             initialMir[function.Symbol] = mir;
             InspectMir(MirReachability.Prune(mir, cancellation));
+            void AddHelper(MirFunction helper)
+            {
+                generatedMir.Add(helper);
+                InspectMir(MirReachability.Prune(helper, cancellation));
+            }
+            if (function.Symbol.IsCapturingLambda)
+                AddHelper(MirClosureCleanup.Create(mir, TypeFactory));
+            if (Options.OutputKind == CompilationOutputKind.Executable && function.Symbol.IsAsync &&
+                function.Symbol.Name == "Main" && function.Symbol.ContainingType is null &&
+                function.Symbol.FunctionKind == FunctionKind.Ordinary && IsSymbolDefinedHere(function.Symbol))
+                AddHelper(MirAsyncEntryPoint.Create(mir, TypeFactory));
         }
         void MarkSourceTypes(NamespaceSymbol @namespace)
         {
@@ -562,7 +571,7 @@ public sealed partial class Compilation
             .DistinctBy(function => function.Symbol, ReferenceEqualityComparer.Instance)
             .ToImmutableArray();
         return new NativeReachability(functions, selected, reachableTypes, reachableVirtualDispatchTypes,
-            reachableInterfaceDispatchTypes, reachableStaticFields, [.. functions.Select(function => initialMir[function.Symbol])]);
+            reachableInterfaceDispatchTypes, reachableStaticFields, [.. functions.Select(function => initialMir[function.Symbol]), .. generatedMir]);
     }
 
     private sealed record NativeReachability(
