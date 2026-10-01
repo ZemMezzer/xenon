@@ -26,7 +26,6 @@ internal static class MirLifetimeAuthorityDiagnostics
             if (!BoundTree.DescendantsAndSelf(function.Body).Any(node => node is BoundMoveExpression or BoundStorageMoveExpression or
                 BoundExplicitDestructExpression || node is BoundMethodCallExpression call && !call.Method.ReceiverMoveEffects.IsEmpty)) continue;
             var mir = MirLowerer.Lower(function, types, locations, cancellation, diagnosticRecovery: true, invalidExpressions: invalid);
-            var reported = new HashSet<(TextLocation, string)>();
             foreach (var violation in MirLifetimeAuthorityAnalysis.Check(mir, cancellation))
             {
                 string id = violation.IsIndirectReceiver ? DiagnosticIds.HiddenVirtualMoveEffect : violation.IsPartialStorage ? DiagnosticIds.PartialStorageLifetimeOperation : violation.PartialDestructorOwner is not null
@@ -37,7 +36,6 @@ internal static class MirLifetimeAuthorityDiagnostics
                     MirLifetimeAuthority.StorageValue => violation.IsReceiverEffect ? DiagnosticIds.PartialStorageLifetimeOperation : DiagnosticIds.StorageValueLifetimeMutation,
                     _ => DiagnosticIds.UnresolvedLifetimeOwner,
                 };
-                if (!reported.Add((violation.Source.Location, id))) continue;
                 string message = violation.IsIndirectReceiver
                     ? "receiver move effect cannot be represented through this indirect receiver"
                     : violation.IsPartialStorage
@@ -53,7 +51,9 @@ internal static class MirLifetimeAuthorityDiagnostics
                     MirLifetimeAuthority.ReferenceField => "cannot manage a lifetime through a reference field; reference fields borrow external values and do not own their lifetimes",
                     _ => "cannot manage this lifetime because its authoritative owner cannot be resolved to one semantic place",
                 };
-                diagnostics.Report(violation.Source.Location, message, id);
+                MirDiagnosticReporter.Report(diagnostics, mir, violation.Source, message, id,
+                    $"{violation.IsReceiverEffect}:{violation.IsDestruction}:{violation.IsPartialStorage}:" +
+                    string.Join(";", violation.Origins.Select(origin => $"{origin.Kind}:{origin.Ordinal}:{origin.Path}").Order(StringComparer.Ordinal)));
             }
         }
     }

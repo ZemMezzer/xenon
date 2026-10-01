@@ -189,7 +189,16 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
         if (left.Kind is MirReferenceOriginKind.RawPointee or MirReferenceOriginKind.UniquePointee or MirReferenceOriginKind.SharedPointee)
         {
             if (left.PointeeType is not null && right.PointeeType is not null && !TypeIdentity.AreSame(left.PointeeType, right.PointeeType)) return false;
-            if (left.HandleIdentity != right.HandleIdentity &&
+            if (left.Kind == MirReferenceOriginKind.UniquePointee &&
+                left.SharedOwner is { } leftOwner && right.SharedOwner is { } rightOwner)
+            {
+                if (leftOwner.Type is not null && rightOwner.Type is not null &&
+                    !TypeIdentity.AreSame(leftOwner.Type, rightOwner.Type)) return false;
+                if (leftOwner.Identity != rightOwner.Identity && leftOwner.IsFresh && rightOwner.IsFresh) return false;
+                if (!leftOwner.Path.Split('/').Zip(rightOwner.Path.Split('/')).All(pair =>
+                    pair.First == "*" || pair.Second == "*" || pair.First == pair.Second)) return false;
+            }
+            else if (left.HandleIdentity != right.HandleIdentity &&
                 !(left.Kind == MirReferenceOriginKind.SharedPointee && (!left.IsFresh || !right.IsFresh))) return false;
         }
         else if (left.Ordinal != right.Ordinal) return false;

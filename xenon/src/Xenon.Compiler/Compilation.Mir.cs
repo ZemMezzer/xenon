@@ -34,7 +34,7 @@ public sealed partial class Compilation
         }
     }
     /// <summary>Stable MIR text, including the separate initializer of resumable functions.</summary>
-    public string DumpMir(bool lowered = true, bool includeSource = false, CancellationToken cancellation = default)
+    public string DumpMir(bool lowered = true, bool includeSource = false, CancellationToken cancellation = default, bool includeProvenance = false)
     {
         var text = new System.Text.StringBuilder();
         foreach (var function in GetMirFunctions(lowered, cancellation)) Append(function);
@@ -50,6 +50,7 @@ public sealed partial class Compilation
                 text.Append("// resumable body\n");
             }
             text.Append(MirPrinter.Dump(function, includeSource));
+            if (includeProvenance) text.Append(MirProvenancePrinter.Dump(function, cancellation));
         }
     }
 }

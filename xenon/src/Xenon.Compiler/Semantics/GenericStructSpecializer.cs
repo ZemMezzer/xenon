@@ -621,7 +621,7 @@ internal sealed class GenericStructSpecializer
         return field;
     }
 
-    private static FunctionSymbol SpecializeFunction(FunctionSymbol source, Symbol owner,
+    private FunctionSymbol SpecializeFunction(FunctionSymbol source, Symbol owner,
         TypeSymbol returnType, ImmutableArray<ParameterSymbol> parameters)
     {
         string name = source.FunctionKind == FunctionKind.Constructor && owner is StructTypeSymbol structure
@@ -632,6 +632,8 @@ internal sealed class GenericStructSpecializer
             source.IsDefinition, source.DelegatesToThisConstructor, origin: SymbolOrigin.CompilerGenerated,
             documentation: source.Documentation, implementation: source.Implementation,
             accessorKind: source.AccessorKind, operatorKind: source.OperatorKind) { IsAsync = source.IsAsync };
+        if (owner is StructTypeSymbol specialized && _originLocations.TryGetValue(specialized, out var location))
+            function.SpecializationOrigin = location;
         return function;
     }
 

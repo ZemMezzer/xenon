@@ -61,6 +61,41 @@ public sealed class MirSnapshotTests
         finally { CultureInfo.CurrentCulture = previous; }
     }
 
+    [Theory]
+    [InlineData("", "\"\"")]
+    [InlineData("a\"b\\c", "\"a\\u0022b\\\\c\"")]
+    [InlineData("\0\b\f\n\r\t", "\"\\u0000\\b\\f\\n\\r\\t\"")]
+    [InlineData("<>&'", "\"\\u003C\\u003E\\u0026\\u0027\"")]
+    [InlineData("\u0416\u00e9\U0001f600", "\"\\u0416\\u00E9\\uD83D\\uDE00\"")]
+    public void StringConstantsPreserveJsonEscaping(string value, string expected)
+    {
+        var type = new TypeFactory().PointerTo(BuiltinTypes.Byte);
+        Assert.Equal($"const {expected}: {type}", MirPrinter.Operand(new MirConstant(value, type)));
+    }
+
+    [Theory]
+    [InlineData('"', "\"\\u0022\"")]
+    [InlineData('\\', "\"\\\\\"")]
+    [InlineData('\n', "\"\\n\"")]
+    [InlineData('\u0416', "\"\\u0416\"")]
+    public void CharacterConstantsPreserveJsonEscaping(char value, string expected)
+    {
+        Assert.Equal($"const {expected}: char", MirPrinter.Operand(new MirConstant(value, BuiltinTypes.Char)));
+    }
+
+    [Fact]
+    public void LocalNamesAndSourcePathsPreserveJsonEscaping()
+    {
+        Compilation compilation = Compilation.Create(SourceText.From(
+            "namespace Example; int Main() { int value = 7; return value; }", "dir\\\u0416.xe"));
+        MirFunction function = MirLowerer.Lower(compilation.SemanticModel.Functions.Single(), compilation.SemanticModel.TypeFactory);
+        function = function with { Locals = [function.Locals[0] with { Name = "value\"\n\u0416" }, .. function.Locals.Skip(1)] };
+
+        string dump = MirPrinter.Dump(function, includeSource: true);
+        Assert.Contains("\"value\\u0022\\n\\u0416\"", dump);
+        Assert.Contains("\"dir\\\\\\u0416.xe\"@", dump);
+    }
+
     [Fact]
     public void SourceMappingIsOptInAndStable()
     {

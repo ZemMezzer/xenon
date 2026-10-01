@@ -26,7 +26,6 @@ internal static class MirStorageDiagnostics
             var mir = MirLowerer.Lower(function, types, locations, cancellation, diagnosticRecovery: true, invalidExpressions: invalid);
             var analysis = new MirStorageStateAnalysis(mir, cancellation);
             var flow = MirDataflow.Solve(MirFlowFacts.Graph(mir, cancellation), analysis, cancellation);
-            var reported = new HashSet<(TextLocation, string)>();
             foreach (var block in mir.Blocks.Where(block => flow.Graph.Reachable.Contains(block.Id)))
             {
                 if (block.Terminator is not MirIntrinsicCall { StorageCheck: not MirStorageCheckPurpose.None } check) continue;
@@ -35,11 +34,10 @@ internal static class MirStorageDiagnostics
                 if (state != (initialize ? MirStorageContent.Live : MirStorageContent.Empty)) continue;
                 string id = initialize ? DiagnosticIds.StorageAlreadyInitialized :
                     check.StorageCheck == MirStorageCheckPurpose.Destruct ? DiagnosticIds.ExplicitDestructionRequiresLiveValue : DiagnosticIds.StorageNotInitialized;
-                if (!reported.Add((check.Source.Location, id))) continue;
                 string message = initialize ? "cannot initialize storage because it already contains a live value" :
                     check.StorageCheck == MirStorageCheckPurpose.Destruct ? "cannot invoke the destructor of empty storage" :
                     "cannot use storage before constructing its value";
-                diagnostics.Report(check.Source.Location, message, id);
+                MirDiagnosticReporter.Report(diagnostics, mir, check.Source, message, id, check.StorageCheck.ToString());
             }
         }
     }

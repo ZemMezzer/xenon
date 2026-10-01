@@ -85,8 +85,13 @@ public static class MirLifetimeAuthorityAnalysis
             else if (receiverEffect && (indirectReceiver || roots.Any(root => root.Kind == MirReferenceOriginKind.RawPointee)))
                 violations.Add(new(location, source, null, roots, IsReceiverEffect: true, IsIndirectReceiver: true));
             else if (roots.Count == 0 || roots.Any(root => root.Kind == MirReferenceOriginKind.Unknown) ||
-                     roots.DistinctBy(root => (root.Kind, root.Ordinal, root.Path, root.HandleIdentity)).Count() > 1)
+                     roots.DistinctBy(root => (root.Kind, root.Ordinal, root.Path, root.HandleIdentity, root.SharedOwner)).Count() > 1)
                 violations.Add(new(location, source, null, roots, receiverEffect));
+            // Owning handles keep their pointee alive; they do not grant an inline
+            // partial-lifetime protocol. Only explicit storage<T> may be emptied.
+            else if (!receiverEffect && !wholeStorage && roots.Any(root =>
+                root.Kind is MirReferenceOriginKind.SharedPointee or MirReferenceOriginKind.UniquePointee))
+                violations.Add(new(location, source, null, roots, IsDestruction: destruction));
             else if (!receiverEffect && !wholeStorage && PartialOwner(roots.First()) is { } owner)
                 violations.Add(new(location, source, null, roots, PartialDestructorOwner: owner, IsDestruction: destruction));
         }

@@ -7,6 +7,9 @@ public enum MirLifetimeAuthority { Owner, ReferenceParameter, StorageValue, Refe
 
 public enum MirReferenceOriginKind { Local, Parameter, Receiver, Static, Unknown, RawPointee, UniquePointee, SharedPointee }
 
+/// <summary>A flattened shared ancestor of an inline unique handle; paths widen finitely.</summary>
+public sealed record MirSharedOwner(string? Identity, bool IsFresh, TypeSymbol? Type, string Path);
+
 /// <summary>A storage origin and a finite projection path; independent of source syntax.</summary>
 public sealed record MirReferenceOrigin(MirReferenceOriginKind Kind, int Ordinal = -1, string Path = "")
 {
@@ -16,6 +19,7 @@ public sealed record MirReferenceOrigin(MirReferenceOriginKind Kind, int Ordinal
     public int? HandleParameter { get; init; }
     public string? HandleIdentity { get; init; }
     public TypeSymbol? PointeeType { get; init; }
+    public MirSharedOwner? SharedOwner { get; init; }
     public bool IsSafeReference => Kind is MirReferenceOriginKind.Parameter or MirReferenceOriginKind.Receiver or MirReferenceOriginKind.Static;
     public MirReferenceOrigin Project(string path) => this with { Path = Append(Path, path) };
     internal static string Append(string left, string right) => left == "*" || right == "*" ||
@@ -82,15 +86,30 @@ public sealed partial class MirReferenceOrigins(MirFunction function) :
         if (block.Id != function.Entry) return Bottom;
         var state = Bottom.ToBuilder();
         foreach (MirLocal local in function.Locals)
-            if (local.Variable is ParameterSymbol parameter && Carries(local.Type))
-                state[local.Id] = IsHandle(local.Type) ? Handle(local.Type, local.Id, "parameter", parameter: parameter.Ordinal) :
-                    MirReferenceValue.Of(new(MirReferenceOriginKind.Parameter, parameter.Ordinal) { IsReadonly = local.Type is ReferenceTypeSymbol { IsReadonly: true },
+            if (local.Variable is ParameterSymbol parameter)
+            {
+                var value = IsHandle(local.Type) ? Handle(local.Type, local.Id, "parameter", parameter: parameter.Ordinal) :
+                    Carries(local.Type) ? MirReferenceValue.Of(new(MirReferenceOriginKind.Parameter, parameter.Ordinal)
+                    {
+                        IsReadonly = local.Type is ReferenceTypeSymbol { IsReadonly: true },
                         Authority = local.Type is ReferenceTypeSymbol reference && reference.ElementType is not StorageTypeSymbol
-                            ? MirLifetimeAuthority.ReferenceParameter : MirLifetimeAuthority.Owner });
+                            ? MirLifetimeAuthority.ReferenceParameter : MirLifetimeAuthority.Owner,
+                    }) : MirReferenceValue.Empty;
+                // By-value aggregates carry handle fields even when they contain no borrowed references.
+                if (!IsHandle(local.Type)) value = value.Union(OwnedFields(local.Type, local.Id, "parameter-field"));
+                if (!value.Same(MirReferenceValue.Empty)) state[local.Id] = value;
+            }
             else if (local.Kind == MirLocalKind.Receiver)
                 state[local.Id] = MirReferenceValue.Of(new(MirReferenceOriginKind.Receiver));
-            else if (local.Kind == MirLocalKind.Capture && Carries(local.Type))
-                state[local.Id] = MirReferenceValue.Of(new(MirReferenceOriginKind.Unknown));
+            else if (local.Kind == MirLocalKind.Capture)
+            {
+                // The closure owns/carries these handles, while captured references
+                // keep their unknown external storage origin.
+                var value = IsHandle(local.Type) ? Handle(local.Type, local.Id, "capture") :
+                    Carries(local.Type) ? MirReferenceValue.Of(new(MirReferenceOriginKind.Unknown)) : MirReferenceValue.Empty;
+                if (!IsHandle(local.Type)) value = value.Union(OwnedFields(local.Type, local.Id, "capture-field"));
+                if (!value.Same(MirReferenceValue.Empty)) state[local.Id] = value;
+            }
         return state.ToImmutable();
     }
     private static bool Carries(TypeSymbol type) => type is PointerTypeSymbol or OwnershipTypeSymbol || MirLifetimeValue.CarriesBorrow(type);
@@ -111,10 +130,20 @@ public sealed partial class MirReferenceOrigins(MirFunction function) :
         MirReferenceOriginKind.Parameter => new(-2 - address.Ordinal),
         _ => null,
     };
-    private MirReferenceValue Load(MirReferenceOrigin address, ImmutableDictionary<MirLocalId, MirReferenceValue> state)
+    private MirReferenceValue Load(MirReferenceOrigin address, ImmutableDictionary<MirLocalId, MirReferenceValue> state,
+        TypeSymbol? type = null)
     {
-        if (StorageKey(address) is { } key && state.TryGetValue(key, out var stored)) return stored.Project(address.Path);
-        return address.Kind == MirReferenceOriginKind.Local ? MirReferenceValue.Empty : MirReferenceValue.Of(address);
+        if (StorageKey(address) is { } key && state.TryGetValue(key, out var stored))
+        {
+            var value = stored.Project(address.Path);
+            // An explicitly stored value already describes its pointee. An opaque field
+            // inherits only its carrier's address, so derive the handle's own provenance.
+            return type is not null && IsHandle(type) && address.Path.Length != 0 && !stored.Fields.ContainsKey(address.Path)
+                ? OpaqueHandle(type, value) : value;
+        }
+        if (address.Kind == MirReferenceOriginKind.Local) return MirReferenceValue.Empty;
+        var opaque = MirReferenceValue.Of(address);
+        return type is not null && IsHandle(type) ? OpaqueHandle(type, opaque) : opaque;
     }
     private MirReferenceValue Contents(MirReferenceValue addresses, ImmutableDictionary<MirLocalId, MirReferenceValue> state) =>
         addresses.Roots.Aggregate(MirReferenceValue.Empty, (value, root) => value.Union(Load(root, state)));
@@ -125,10 +154,10 @@ public sealed partial class MirReferenceOrigins(MirFunction function) :
         foreach (MirProjection projection in place.Projections)
         {
             if (projection is MirIndexProjection or MirLinearIndexProjection && type is PointerTypeSymbol)
-                roots = roots.SelectMany(root => Load(root, state).Roots).ToImmutableHashSet();
+                roots = roots.SelectMany(root => Load(root, state, type).Roots).ToImmutableHashSet();
             roots = projection switch
             {
-                MirDerefProjection => roots.SelectMany(root => Load(root, state).Roots).ToImmutableHashSet(),
+                MirDerefProjection => roots.SelectMany(root => Load(root, state, type).Roots).ToImmutableHashSet(),
                 MirFieldProjection field => roots.Select(root => root.Project(field.Field.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture))).ToImmutableHashSet(),
                 MirIndexProjection or MirLinearIndexProjection => roots.Select(root => root.Project("*")).ToImmutableHashSet(),
                 _ => roots,
@@ -148,7 +177,7 @@ public sealed partial class MirReferenceOrigins(MirFunction function) :
     }
     public MirReferenceValue Read(MirPlace place, ImmutableDictionary<MirLocalId, MirReferenceValue> state)
     {
-        var value = Address(place, state).Aggregate(MirReferenceValue.Empty, (result, root) => result.Union(Load(root, state)));
+        var value = Address(place, state).Aggregate(MirReferenceValue.Empty, (result, root) => result.Union(Load(root, state, PlaceType(place))));
         if (place.Projections.LastOrDefault() is MirFieldProjection { Field.Type: ReferenceTypeSymbol })
             value = Restrict(value, MirLifetimeAuthority.ReferenceField);
         if (_locals[place.Local].Variable is LocalVariableSymbol or ParameterSymbol && ReferenceLeaves(_locals[place.Local].Type).Any())

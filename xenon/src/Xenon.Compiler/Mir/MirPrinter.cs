@@ -27,7 +27,7 @@ public static class MirPrinter
                     .Append(scope.Parent?.ToString(CultureInfo.InvariantCulture) ?? "root").Append('\n');
         foreach (MirLocal local in function.Locals.OrderBy(local => local.Id.Value))
             output.Append("  local ").Append(local.Id).Append(": ").Append(local.Type).Append(" [")
-                .Append(local.Kind.ToString().ToLowerInvariant()).Append("] ").Append(JsonSerializer.Serialize(local.Name)).Append('\n');
+                .Append(local.Kind.ToString().ToLowerInvariant()).Append("] ").Append(Quote(local.Name)).Append('\n');
         foreach (MirBasicBlock block in function.Blocks.OrderBy(block => block.Id.Value))
         {
             output.Append('\n').Append(block.Id).Append(":\n");
@@ -41,7 +41,7 @@ public static class MirPrinter
         {
             output.Append("  ").Append(text);
             if (includeSource)
-                output.Append(" // ").Append(JsonSerializer.Serialize(source.Location.Path)).Append('@')
+                output.Append(" // ").Append(Quote(source.Location.Path)).Append('@')
                     .Append(source.Location.Span.Start.ToString(CultureInfo.InvariantCulture)).Append('+')
                     .Append(source.Location.Span.Length.ToString(CultureInfo.InvariantCulture))
                     .Append(" scope ").Append(source.Scope.ToString(CultureInfo.InvariantCulture));
@@ -79,11 +79,15 @@ public static class MirPrinter
         _ => throw new NotSupportedException($"Unknown MIR operand {operand.GetType().Name}."),
     };
 
+    // Encode the primitive directly: reflection-based serialization is unavailable in NativeAOT.
+    private static string Quote(string? value) =>
+        value is null ? "null" : $"\"{JsonEncodedText.Encode(value)}\"";
+
     private static string Constant(object? value) => value switch
     {
         null => "null",
-        string text => JsonSerializer.Serialize(text),
-        char character => JsonSerializer.Serialize(character.ToString()),
+        string text => Quote(text),
+        char character => Quote(character.ToString()),
         bool boolean => boolean ? "true" : "false",
         IFormattable number => number.ToString(null, CultureInfo.InvariantCulture),
         _ => throw new NotSupportedException($"Unknown MIR constant {value.GetType().Name}."),

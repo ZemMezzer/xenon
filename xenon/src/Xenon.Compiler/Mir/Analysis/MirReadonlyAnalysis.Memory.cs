@@ -298,7 +298,7 @@ internal sealed partial class MirReadonlyAnalysis
     {
         TextLocation location = site.Source.Location.Source is not null ? site.Source.Location : _location;
         string diagnostic = $"readonly function '{function.Name}' {message}";
-        if (_reported.Add((location, diagnostic))) diagnostics.Report(location, diagnostic, id);
+        if (_reported.Add((location, site.Source.IsFallback ? site.Source.DiagnosticOriginId ?? site.Source.OriginId : null, id))) Xenon.Compiler.Semantics.MirDiagnosticReporter.Report(diagnostics, _body, site.Source, diagnostic, id);
     }
 
     private static bool IsMutableParameter(TypeSymbol type) =>

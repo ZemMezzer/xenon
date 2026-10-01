@@ -338,7 +338,7 @@ internal static class Program
         if (outputPath is null && !dump) return true;
         try
         {
-            string text = compilation.DumpMir(includeSource: dump);
+            string text = compilation.DumpMir(includeSource: dump, includeProvenance: dump);
             if (outputPath is not null)
             {
                 File.WriteAllText(outputPath, text, new UTF8Encoding(false));

@@ -45,7 +45,7 @@ internal static class ValueLifetimeAnalyzer
             foreach (MirBlockId allocation in frame.Suspensions.Values.SelectMany(state => state.Allocations).Distinct())
                 if (blocks[allocation].Terminator is MirIntrinsicCall
                     { Intrinsic: MirIntrinsicKind.AllocateStackArray, FixedArrayLength: null } array)
-                    diagnostics.Report(array.Source.Location,
+                    MirDiagnosticReporter.Report(diagnostics, input.Mir, array.Source,
                         "runtime-sized array backing storage is live across await and has no fixed inline frame layout; use owning heap storage or finish its lifetime before suspension",
                         DiagnosticIds.BorrowAcrossAwait);
         }
@@ -95,21 +95,13 @@ internal static class ValueLifetimeAnalyzer
             var analysis = new MirLifetimeAnalysis(input.Mir, effects, cancellation);
             var flow = analysis.Analyze();
             foreach (MirLifetimeDiagnostic diagnostic in analysis.Diagnostics)
-                diagnostics.Report(Location(diagnostic.Source, input.Bound.Symbol), diagnostic.Message, diagnostic.Id);
+                MirDiagnosticReporter.Report(diagnostics, input.Mir, diagnostic.Source, diagnostic.Message, diagnostic.Id);
             foreach (FunctionSymbol inherited in BaseMethods(input.Bound.Symbol).Where(method => !localFunctions.Contains(method)))
                 if (input.Bound.Symbol.ResultLifetimeDependencies.Except(inherited.ResultLifetimeDependencies).Any() ||
                     input.Bound.Symbol.LifetimeStores.Except(inherited.LifetimeStores).Any())
-                    diagnostics.Report(Location(input.Mir.Source, input.Bound.Symbol),
+                    MirDiagnosticReporter.Report(diagnostics, input.Mir, input.Mir.Source,
                         "override introduces a lifetime dependency absent from the imported base method contract", DiagnosticIds.ValueLifetimeEscape);
             Annotate(input, flow);
-        }
-
-        TextLocation Location(MirSourceInfo source, FunctionSymbol function)
-        {
-            if (source.Location.Source is not null) return source.Location;
-            TextLocation location = function.Locations.FirstOrDefault();
-            if (location.Source is null) location = locations.Values.FirstOrDefault();
-            return location.Source is null ? new(SourceText.From("", "<library specialization>"), new(0, 0)) : location;
         }
     }
 

@@ -18,7 +18,7 @@ internal sealed partial class MirReadonlyAnalysis(FunctionSymbol function, Diagn
     private EvaluationContext _context = null!;
     private readonly Dictionary<object, UncertainLocation> _uncertainLocations = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<FunctionSymbol, RecursiveFrame> _activeCalls = [];
-    private readonly HashSet<(TextLocation Location, string Message)> _reported = [];
+    private readonly HashSet<(TextLocation Location, int? Origin, string Id)> _reported = [];
     private readonly Dictionary<object, MirEffectSite> _sites = new(ReferenceEqualityComparer.Instance);
     private MirFunction _body = null!;
     private int _loopDepth;

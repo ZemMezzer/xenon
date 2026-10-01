@@ -24,12 +24,10 @@ internal static class MirArrayDiagnostics
             var mir = MirLowerer.Lower(function, types, locations, cancellation, diagnosticRecovery: true, invalidExpressions: invalid);
             var analysis = new MirLifetimeAnalysis(mir, cancellation: cancellation);
             _ = analysis.Analyze();
-            var reported = new HashSet<(TextLocation, string)>();
             foreach (var diagnostic in analysis.Diagnostics.Where(diagnostic => diagnostic.Id is
                 DiagnosticIds.StackArrayEscape or DiagnosticIds.StackArrayReturn or DiagnosticIds.StackArrayFree or
                 DiagnosticIds.StackArrayStoredInAggregate or DiagnosticIds.StackArrayPassedAsArgument))
-                if (reported.Add((diagnostic.Source.Location, diagnostic.Id)))
-                    diagnostics.Report(diagnostic.Source.Location, diagnostic.Message, diagnostic.Id);
+                    MirDiagnosticReporter.Report(diagnostics, mir, diagnostic.Source, diagnostic.Message, diagnostic.Id);
         }
     }
 }

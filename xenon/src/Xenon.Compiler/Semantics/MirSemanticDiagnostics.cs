@@ -35,7 +35,6 @@ internal static class MirSemanticDiagnostics
             var blocks = mir.Blocks.ToDictionary(block => block.Id);
             var locals = mir.Locals.ToDictionary(local => local.Id);
             var graph = MirFlowFacts.Graph(mir, cancellation, effects);
-            var reported = new HashSet<(TextLocation, string, string)>();
             foreach (MirOwnershipViolation violation in MirOwnershipChecks.Check(mir, cancellation, effects))
             {
                 MirBasicBlock block = blocks[violation.Location.Block];
@@ -86,8 +85,7 @@ internal static class MirSemanticDiagnostics
                             : violation.Cause.Projections.IsEmpty
                                 ? $"cannot use '{cause}' because it has been moved"
                                 : $"cannot use '{name}' because '{cause}' has been moved";
-                if (reported.Add((violation.Source.Location, id, message)))
-                    diagnostics.Report(violation.Source.Location, message, id);
+                    MirDiagnosticReporter.Report(diagnostics, mir, violation.Source, message, id, $"{violation.Check}:{name}:{cause}");
             }
         }
     }
@@ -118,7 +116,7 @@ internal static class MirSemanticDiagnostics
                 TextLocation location = function.Symbol.Locations.FirstOrDefault(TextLocation.None);
                 if (!diagnostics.Any(diagnostic => diagnostic.Id == DiagnosticIds.InconsistentReceiverMoveEffect &&
                     diagnostic.Location == location && diagnostic.Message == message))
-                    diagnostics.Report(location, message, DiagnosticIds.InconsistentReceiverMoveEffect);
+                    MirDiagnosticReporter.Report(diagnostics, mir, mir.Source, message, DiagnosticIds.InconsistentReceiverMoveEffect, name);
             }
         }
     }

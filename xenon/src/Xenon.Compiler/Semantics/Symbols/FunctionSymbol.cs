@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
+using Xenon.Compiler.Semantics.Binding;
+using Xenon.Compiler.Text;
 using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
@@ -7,6 +9,14 @@ namespace Xenon.Compiler.Semantics.Symbols;
 public sealed class FunctionSymbol : Symbol
 {
     private ImmutableArray<GenericParameterSymbol> _typeParameters = [];
+    internal IReadOnlyDictionary<BoundExpression, TextLocation>? DiagnosticExpressionLocations { get; set; }
+    internal TextLocation SpecializationOrigin { get; set; }
+    internal ImmutableArray<TextLocation> SpecializationLocations { get; private set; } = [];
+    internal void AddSpecializationLocation(TextLocation location)
+    {
+        if (location.Source is not null && location.Path != "<metadata>" && !SpecializationLocations.Any(existing => ReferenceEquals(existing.Source, location.Source) && existing.Span.Start == location.Span.Start))
+            SpecializationLocations = SpecializationLocations.Add(location);
+    }
     public bool HasStackArrays { get; internal set; }
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;

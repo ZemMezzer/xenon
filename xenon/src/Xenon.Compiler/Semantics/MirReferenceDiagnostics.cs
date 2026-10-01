@@ -27,7 +27,6 @@ internal static class MirReferenceDiagnostics
         var analysis = new MirReferenceOrigins(mir);
         var flow = MirDataflow.Solve(MirFlowFacts.Graph(mir, cancellation), analysis, cancellation);
         var origins = new HashSet<MirReferenceOrigin>();
-        var reported = new HashSet<TextLocation>();
         foreach (MirBasicBlock block in mir.Blocks.Where(block => flow.Graph.Reachable.Contains(block.Id)))
         {
             MirOperand? value = block.Terminator switch
@@ -41,7 +40,7 @@ internal static class MirReferenceDiagnostics
             var roots = analysis.Operand(value, flow.Output[block.Id]).Roots;
             origins.UnionWith(roots);
             MirReferenceOrigin? invalid = roots.FirstOrDefault(origin => !origin.IsSafeReference);
-            if (invalid is null || !reported.Add(block.Terminator.Source.Location)) continue;
+            if (invalid is null) continue;
             MirLocal? local = invalid.Kind == MirReferenceOriginKind.Local ? mir.Locals.First(item => item.Id.Value == invalid.Ordinal) : null;
             string subject = local?.Variable switch
             {
@@ -52,7 +51,7 @@ internal static class MirReferenceDiagnostics
             string reason = invalid.Kind != MirReferenceOriginKind.Local
                 ? "the referenced storage may belong to the current function's stack frame and may not outlive the function call"
                 : "the referenced storage belongs to the current function's stack frame and does not outlive the function call";
-            diagnostics.Report(block.Terminator.Source.Location, $"cannot return a reference to {subject} because {reason}", DiagnosticIds.EscapingLocalReference);
+            MirDiagnosticReporter.Report(diagnostics, mir, block.Terminator.Source, $"cannot return a reference to {subject} because {reason}", DiagnosticIds.EscapingLocalReference);
         }
         if (function.Symbol.ReturnType is ReferenceTypeSymbol) function.Symbol.SetReferenceReturnOrigins(origins.Select(origin => origin.Contract)
             .DistinctBy(Key).OrderBy(Key, StringComparer.Ordinal).ToImmutableArray());
@@ -75,7 +74,6 @@ internal static class MirReferenceDiagnostics
         var analysis = new MirReferenceOrigins(mir);
         var flow = MirDataflow.Solve(MirFlowFacts.Graph(mir, cancellation), analysis, cancellation);
         if (!function.Symbol.IsAsync) function.Symbol.SetReferenceFieldOrigins(analysis.ReferenceFields(cancellation, flow));
-        var reported = new HashSet<(TextLocation, string)>();
         foreach (MirBasicBlock block in mir.Blocks.Where(block => flow.Graph.Reachable.Contains(block.Id)))
         {
             if (!constructor && !function.Symbol.IsAsync && block.Terminator is MirReturn { Value: { } operand })
@@ -108,7 +106,7 @@ internal static class MirReferenceDiagnostics
                     invalid.Kind != MirReferenceOriginKind.Local ? "storage with unknown lifetime" : "a temporary value";
                 message = $"constructor cannot store a reference to {subject} because it does not outlive the constructed value";
             }
-            if (reported.Add((source.Location, message))) diagnostics.Report(source.Location, message, DiagnosticIds.AggregateReferenceEscape);
+            MirDiagnosticReporter.Report(diagnostics, mir, source, message, DiagnosticIds.AggregateReferenceEscape, store ? "store" : "return");
         }
     }
     public static void AnalyzeShared(BoundFunction function, TypeFactory types,

@@ -893,7 +893,7 @@ internal sealed class XelibSemanticReconstruction
             value.TypeParameters.ToImmutableDictionary(StringComparer.Ordinal))
         : SymbolDocumentation.Empty;
     private SymbolOrigin Origin(int id) => SymbolOrigin.FromLibrary(_manifest.ContentIdentity,
-        _exportRecords.FirstOrDefault(item => item.SymbolId == id)?.Key ?? $"local:{id}");
+        _exportRecords.FirstOrDefault(item => item.SymbolId == id)?.Key ?? $"local:{id}") with { LibraryDisplayName = _path ?? _manifest.Name + ".xelib" };
     private static SymbolOrigin Origin(Symbol symbol) => symbol.Origin.Kind == SymbolOriginKind.Library
         ? symbol.Origin : SymbolOrigin.Library;
     private static bool Has(XelibSymbolRecord record, XelibSymbolFlags flag) => (record.Flags & flag) != 0;

@@ -26,10 +26,8 @@ internal static class MirBorrowDiagnostics
                 .Any(expression => MirReferenceOrigins.ReferenceLeaves(expression.Type).Any())) continue;
             var mir = MirLowerer.Lower(function, types, locations, cancellation, diagnosticRecovery: true, invalidExpressions: invalid);
             var locals = mir.Locals.ToDictionary(local => local.Id);
-            var reported = new HashSet<(MirBorrowCheck, MirReferenceOrigin, MirLocalId, TextLocation)>();
             foreach (var violation in new MirBorrowAnalysis(mir, cancellation).Check())
             {
-                if (!reported.Add((violation.Check, violation.Place, violation.Alias, violation.Source.Location))) continue;
                 string alias = locals[violation.Alias].Variable?.Name ?? "temporary argument";
                 string name = MirDiagnosticNames.Name(mir, violation.Place);
                 string id = violation.Check switch
@@ -54,7 +52,8 @@ internal static class MirBorrowDiagnostics
                     MirBorrowCheck.AggregateEscape => "cannot store a value containing a borrowed reference in storage whose lifetime is not bounded by the referenced value",
                     _ => $"cannot create a reference to '{name}' while an overlapping borrow through '{alias}' is active",
                 };
-                diagnostics.Report(violation.Source.Location, message, id);
+                MirDiagnosticReporter.Report(diagnostics, mir, violation.Source, message, id,
+                    $"{violation.Check}:{violation.Place.Kind}:{violation.Place.Ordinal}:{violation.Place.Path}:{alias}");
             }
 
         }

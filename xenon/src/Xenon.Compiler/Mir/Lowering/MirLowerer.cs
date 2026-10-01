@@ -28,6 +28,7 @@ public sealed partial class MirLowerer
     private readonly IReadOnlyDictionary<BoundExpression, TextLocation>? _locations;
     private readonly CancellationToken _cancellation;
     private readonly IReadOnlyDictionary<BoundExpression, int>? _origins;
+    private readonly IReadOnlyDictionary<BoundExpression, int> _diagnosticOrigins;
     private readonly List<MirLocal> _locals = [];
     private readonly List<MirScope> _scopes = [new(0, null)];
     private int _scope;
@@ -58,8 +59,11 @@ public sealed partial class MirLowerer
         _lifetimeOwners = lifetimeOwners;
         _locations = locations;
         _origins = origins;
+        _diagnosticOrigins = origins ?? BoundTree.DescendantsAndSelf(function.Body).OfType<BoundExpression>()
+            .Distinct<BoundExpression>(ReferenceEqualityComparer.Instance).Select((expression, id) => (expression, id))
+            .ToDictionary(pair => pair.expression, pair => pair.id, (IEqualityComparer<BoundExpression>)ReferenceEqualityComparer.Instance);
         _cancellation = cancellation;
-        _functionSource = new(function.Symbol.Locations.FirstOrDefault(TextLocation.None));
+        _functionSource = new(MirDiagnosticSource.Resolve(function.Symbol, TextLocation.None)) { IsFallback = true };
         _current = NewBlock();
         _unwind = NewBlock();
         _unwind.Terminator = function.Body.IsResumable ? new MirAbort(_functionSource) : new MirResumeUnwind(_functionSource);
@@ -97,10 +101,16 @@ public sealed partial class MirLowerer
         return result;
     }
 
-    private MirSourceInfo Source(BoundExpression expression) => new(
-        _locations is not null && _locations.TryGetValue(expression, out TextLocation location)
-            ? location : _functionSource.Location, Scope: _scope,
-        OriginId: _origins is not null && _origins.TryGetValue(expression, out int origin) ? origin : null);
+    private MirSourceInfo Source(BoundExpression expression)
+    {
+        TextLocation location = default;
+        bool found = _locations is not null && _locations.TryGetValue(expression, out location) ||
+            _bound.Symbol.DiagnosticExpressionLocations is { } specializedLocations &&
+                specializedLocations.TryGetValue(expression, out location);
+        return new(found ? location : _functionSource.Location, Scope: _scope,
+            OriginId: _origins is not null && _origins.TryGetValue(expression, out int origin) ? origin : null)
+        { IsFallback = !found, DiagnosticOriginId = _diagnosticOrigins.GetValueOrDefault(expression) };
+    }
     private Block NewBlock()
     {
         var block = new Block(new(_blocks.Count));

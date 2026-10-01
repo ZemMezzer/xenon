@@ -169,6 +169,10 @@ internal sealed class SemanticAnalyzer
         functions.AddRange(_synthesizedFunctions);
         functions.AddRange(_semanticInfo.LambdaFunctions);
         AddGeneratedDestructorFunctions(functions);
+        foreach (var function in functions)
+            if (function.Symbol.DiagnosticExpressionLocations is { } specializedLocations)
+                foreach (var entry in specializedLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
+        MirDiagnosticReporter.RegisterCallSites(functions, _expressionLocations);
         ValidateRawFunctionPointerSignatures();
 
         // Binding generic definitions may only produce preliminary cleanup metadata.

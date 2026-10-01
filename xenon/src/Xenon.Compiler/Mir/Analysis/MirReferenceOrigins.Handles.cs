@@ -24,6 +24,30 @@ public sealed partial class MirReferenceOrigins
             IsFresh = fresh, HandleParameter = parameter, HandleIdentity = identity + ":" + local.Value,
             PointeeType = Element(type),
         });
+    // Loading a handle crosses from its carrier storage to a separate pointee.
+    // Map existing roots instead of inventing one for an empty dataflow value.
+    // Keep identities finite when a loop repeatedly follows a handle field.
+    private static MirReferenceValue OpaqueHandle(TypeSymbol type, MirReferenceValue carriers) =>
+        carriers.Roots.Aggregate(MirReferenceValue.Empty, (value, carrier) =>
+            value.Union(LoadedHandle(type, carrier)));
+
+    private static MirReferenceValue LoadedHandle(TypeSymbol type, MirReferenceOrigin carrier)
+    {
+        if (carrier.Kind == MirReferenceOriginKind.Unknown) return MirReferenceValue.Of(carrier);
+        var value = Handle(type, new(carrier.Ordinal), $"loaded:{carrier.Kind}:{carrier.Path}");
+        if (type is not UniqueTypeSymbol) return value;
+        // Different shared handles can reach the same unique field. Flatten the
+        // ancestor instead of recursively nesting origins during loop traversal.
+        var owner = carrier.Kind == MirReferenceOriginKind.SharedPointee
+            ? new MirSharedOwner(carrier.HandleIdentity, carrier.IsFresh, carrier.PointeeType, carrier.Path)
+            : carrier.SharedOwner is { } ancestor
+                ? ancestor with { Path = MirReferenceOrigin.Append(ancestor.Path, carrier.Path) } : null;
+        return owner is null ? value : value with
+        {
+            Roots = value.Roots.Select(root => root with { SharedOwner = owner }).ToImmutableHashSet(),
+        };
+    }
+
     // Seed opaque owning fields at value creation. Read must preserve lattice bottom:
     // manufacturing an origin only when a read is empty makes loop transfer non-monotone.
     private static MirReferenceValue OwnedFields(TypeSymbol type, MirLocalId site, string identity)
@@ -33,7 +57,7 @@ public sealed partial class MirReferenceOrigins
         return result;
         void Visit(TypeSymbol current, string path, HashSet<TypeSymbol> seen)
         {
-            if (current is OwnershipTypeSymbol)
+            if (IsHandle(current))
             {
                 result = result.Store(path, Handle(current, site, identity + ":" + path), true);
                 return;
@@ -46,7 +70,7 @@ public sealed partial class MirReferenceOrigins
         }
     }
     private static MirReferenceValue StoredHandle(TypeSymbol type, MirLocalId local, MirReferenceValue value) =>
-        !value.Roots.IsEmpty && value.Roots.All(IsPointee) ? value : Handle(type, local, "storage");
+        !value.Roots.IsEmpty && value.Roots.All(root => IsPointee(root) || root.Kind == MirReferenceOriginKind.Unknown) ? value : Handle(type, local, "storage");
     private MirReferenceValue Cast(MirCast cast, ImmutableDictionary<MirLocalId, MirReferenceValue> state)
     {
         var value = Operand(cast.Operand, state);

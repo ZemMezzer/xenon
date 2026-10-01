@@ -30,22 +30,19 @@ internal sealed class ResumableExceptionAnalyzer
             if (!function.Symbol.IsSourceDefined)
             {
                 ResumableFrameAnalysis frame = ResumableFrameAnalysis.Analyze(function.Symbol, function.Body, compilation.TypeFactory);
-                TextLocation location = new(compilation.SyntaxTrees[0].Source, new TextSpan(0, 0));
                 foreach (BoundArrayCreationExpression array in frame.RetainedArrays)
                     if (array.Storage == ArrayStorageKind.Stack && !ResumableFrameAnalysis.TryGetConstantLength(array, out _))
-                        diagnostics.Report(location, "runtime-sized array backing storage crosses suspension in specialized resumable function",
+                        MirDiagnosticReporter.Report(diagnostics, function.Symbol, TextLocation.None, "runtime-sized array backing storage crosses suspension in specialized resumable function",
                             DiagnosticIds.BorrowAcrossAwait);
             }
             MirFunction mir = MirLowerer.Lower(function, compilation.TypeFactory, compilation.SemanticModel.ExpressionLocations, cancellationToken);
             HashSet<TypeSymbol> escaping = analyzer._analysis.Escaping(mir with { Entry = mir.ResumableBodyEntry ?? mir.Entry });
             foreach (TypeSymbol error in escaping)
-                    diagnostics.Report(function.Symbol.Locations.IsEmpty
-                            ? new TextLocation(compilation.SyntaxTrees[0].Source, new TextSpan(0, 0))
-                            : function.Symbol.Locations[0],
+                    MirDiagnosticReporter.Report(diagnostics, mir, mir.Source,
                         error == BuiltinTypes.Error
                             ? "resumable function has an exception of unknown type; handle it before completion"
                             : $"resumable return type has no suitable operator reject for escaping exception '{error.ToDisplayString()}'",
-                        DiagnosticIds.MissingCompletionOperator);
+                        DiagnosticIds.MissingCompletionOperator, error.ToDisplayString());
         }
         return diagnostics.ToImmutableArray();
     }
