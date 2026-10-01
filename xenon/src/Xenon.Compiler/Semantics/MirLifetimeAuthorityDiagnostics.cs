@@ -43,7 +43,7 @@ internal static class MirLifetimeAuthorityDiagnostics
                     : violation.IsPartialStorage
                     ? "cannot manage a field lifetime of a value owned by 'storage<T>'; target the complete storage value instead"
                     : violation.PartialDestructorOwner is { } owner
-                    ? $"cannot partially {(violation.IsDestruction ? "end the lifetime of" : "move")} '{MirDiagnosticNames.Name(mir, violation.Origins.First())}' because '{owner.Name}' has a user-defined destructor; manage the complete '{owner.Name}' value instead"
+                    ? $"cannot partially {(violation.IsDestruction ? "end the lifetime of" : "move")} '{MirDiagnosticNames.Name(mir, violation.Origins.First())}' because '{owner.Name}' has a user-defined destructor; {(violation.IsDestruction ? "manage the complete" : "move the entire")} '{owner.Name}' value instead"
                     : violation.Authority switch
                 {
                     MirLifetimeAuthority.ReferenceParameter => "cannot manage a lifetime through an ordinary reference parameter; use 'storage<T>&' when the callable must manage storage lifetime",

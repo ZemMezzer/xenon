@@ -405,7 +405,7 @@ public sealed partial class MirLowerer
             case BoundDeferredGenericMethodCallExpression deferred:
             {
                 MirOperand receiver = deferred.IsPointerAccess
-                    ? Snapshot(Value(deferred.Receiver), source)
+                    ? PointerReceiver(deferred.Receiver, source)
                     : Address(Place(deferred.Receiver), deferred.Receiver.Type, source);
                 ImmutableArray<MirOperand> arguments = Arguments(deferred.Arguments);
                 var callee = new MirRequirementOperand(deferred.Requirement, MirGenericOperation.MethodCall,
@@ -451,13 +451,18 @@ public sealed partial class MirLowerer
             case BoundArrayCreationExpression array:
                 return CreateArray(array, source);
             case BoundArrayMetadataExpression metadata:
+            {
+                MirOperand array = metadata.Receiver.Type is OwnershipTypeSymbol ownerType
+                    ? new MirCopy(PointerStorage(metadata.Receiver), ownerType.StorageType)
+                    : Value(metadata.Receiver);
                 return Intrinsic(metadata.Member switch
                 {
                     "length" or "Length" => MirIntrinsicKind.ArrayLength,
                     "rank" or "Rank" => MirIntrinsicKind.ArrayRank,
                     "GetLength" => MirIntrinsicKind.ArrayDimension,
                     _ => throw Unsupported(metadata),
-                }, metadata.Dimension is null ? [Value(metadata.Receiver)] : [Snapshot(Value(metadata.Receiver), source), Value(metadata.Dimension)], metadata.Type, source);
+                }, metadata.Dimension is null ? [array] : [Snapshot(array, source), Value(metadata.Dimension)], metadata.Type, source);
+            }
             case BoundStorageMoveExpression storage:
                 return MoveStorage(Place(storage.Storage), storage.StorageType, source, semanticRead: true);
             case BoundStorageConstructExpression storage:
@@ -620,11 +625,24 @@ public sealed partial class MirLowerer
             { IsArgumentReservationCheck = true });
     }
 
+    private MirPlace? DirectScalarPlace(BoundExpression expression) => expression switch
+    {
+        BoundVariableExpression variable => Variable(variable.Variable),
+        BoundMemberAccessExpression { IsPointerAccess: false } member when DirectScalarPlace(member.Receiver) is { } parent =>
+            parent.Project(new MirFieldProjection(member.Field)),
+        BoundLifetimeValueExpression lifetime when DirectScalarPlace(lifetime.Source) is { } owner =>
+            owner.Project(new MirLifetimeProjection()),
+        _ => null,
+    };
+
     private MirOperand Assignment(BoundAssignmentExpression expression)
     {
         MirSourceInfo source = Source(expression);
         MirPlace target = Place(expression.Target);
         CheckArgumentReservation(target, expression.Target.Type, source);
+        if (expression.OperatorKind == SyntaxKind.EqualsToken && expression.Expression is BoundCopyExpression selfCopy &&
+            DirectScalarPlace(selfCopy.Source) is { } copied && copied.Equals(target))
+            return Save(new MirUse(new MirCopy(target, expression.Type)), source, semanticRead: true);
         if (target.Projections.LastOrDefault() is MirFieldProjection field && target.Projections.All(projection => projection is MirFieldProjection))
         {
             MirPlace parent = new(target.Local, target.Projections.RemoveAt(target.Projections.Length - 1));

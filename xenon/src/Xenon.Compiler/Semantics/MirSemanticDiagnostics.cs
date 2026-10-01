@@ -21,18 +21,22 @@ internal static class MirSemanticDiagnostics
             ReferenceEquals(pair.Value.Source, error.Location.Source) &&
             error.Location.Span.Start >= pair.Value.Span.Start && error.Location.Span.End <= pair.Value.Span.End))
             .Select(pair => pair.Key).ToHashSet<BoundExpression>(ReferenceEqualityComparer.Instance);
-        foreach (BoundFunction function in functions.DistinctBy(function => function.Symbol))
+        var bodies = functions.DistinctBy(function => function.Symbol)
+            .Where(function => !TypeIdentity.AreSame(function.Symbol.ReturnType, BuiltinTypes.Error) &&
+                !function.Symbol.Parameters.Any(parameter => TypeIdentity.AreSame(parameter.Type, BuiltinTypes.Error) || TypeIdentity.AreSame(parameter.Type, BuiltinTypes.Void)))
+            .Select(function => MirLowerer.Lower(function, types, locations, cancellation, diagnosticRecovery: true, invalidExpressions: invalid)).ToArray();
+        // Calls conservatively accept ownership before unwinding. Cleanup edges can
+        // use destructor effects so a nonthrowing replacement does not poison a catch.
+        var effects = new MirExceptionEffects(bodies, cancellation).Infer()
+            .Where(pair => pair.Key.FunctionKind == FunctionKind.Destructor).ToDictionary(pair => pair.Key, pair => pair.Value);
+        foreach (MirFunction mir in bodies)
         {
             cancellation.ThrowIfCancellationRequested();
-            // Error-recovery bodies have already been diagnosed by binding.
-            if (TypeIdentity.AreSame(function.Symbol.ReturnType, BuiltinTypes.Error) ||
-                function.Symbol.Parameters.Any(parameter => TypeIdentity.AreSame(parameter.Type, BuiltinTypes.Error) || TypeIdentity.AreSame(parameter.Type, BuiltinTypes.Void))) continue;
-            MirFunction mir = MirLowerer.Lower(function, types, locations, cancellation, diagnosticRecovery: true, invalidExpressions: invalid);
             var blocks = mir.Blocks.ToDictionary(block => block.Id);
             var locals = mir.Locals.ToDictionary(local => local.Id);
-            var graph = MirFlowFacts.Graph(mir, cancellation);
+            var graph = MirFlowFacts.Graph(mir, cancellation, effects);
             var reported = new HashSet<(TextLocation, string, string)>();
-            foreach (MirOwnershipViolation violation in MirOwnershipChecks.Check(mir, cancellation))
+            foreach (MirOwnershipViolation violation in MirOwnershipChecks.Check(mir, cancellation, effects))
             {
                 MirBasicBlock block = blocks[violation.Location.Block];
                 MirAssign? read = violation.Location.Statement < block.Statements.Length
@@ -40,7 +44,7 @@ internal static class MirSemanticDiagnostics
                 bool loop = read?.IsMoveRead == true && InCycle(violation.Location.Block, graph);
                 FieldSymbol? field = violation.Place.Projections.OfType<MirFieldProjection>().LastOrDefault()?.Field;
                 bool ambiguousPin = violation.Check == MirOwnershipCheck.PinnedInitialization &&
-                    violation.Status == MirOwnershipStatus.MaybeInitialized && function.Symbol.FunctionKind == FunctionKind.Constructor &&
+                    violation.Status == MirOwnershipStatus.MaybeInitialized && mir.Symbol.FunctionKind == FunctionKind.Constructor &&
                     locals[violation.Place.Local].Kind == MirLocalKind.Receiver;
                 string id = violation.Check == MirOwnershipCheck.ArgumentReservation ? DiagnosticIds.ArgumentLifetimeConflict :
                     violation.Check == MirOwnershipCheck.SelfMove ? DiagnosticIds.SelfMove :

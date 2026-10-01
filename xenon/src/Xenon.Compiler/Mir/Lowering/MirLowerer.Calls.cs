@@ -25,6 +25,13 @@ public sealed partial class MirLowerer
         return result is null ? null : new MirCopy(result, type);
     }
 
+    private MirOperand PointerReceiver(BoundExpression receiver, MirSourceInfo source)
+    {
+        MirPlace storage = receiver is BoundThisExpression ? ((MirCopy)Value(receiver)).Place : PointerStorage(receiver);
+        TypeSymbol type = receiver.Type is OwnershipTypeSymbol owner ? owner.StorageType : receiver.Type;
+        return Save(new MirUse(new MirCopy(storage, type)), source);
+    }
+
     private MirOperand? MethodCall(FunctionSymbol method, BoundExpression receiver,
         ImmutableArray<BoundExpression> arguments, bool pointerAccess, InterfaceTypeSymbol? interfaceType, MirSourceInfo source)
     {
@@ -32,7 +39,7 @@ public sealed partial class MirLowerer
         MirOperand instance;
         if (pointerAccess)
         {
-            instance = Save(new MirUse(Value(receiver)), source);
+            instance = PointerReceiver(receiver, source);
             receiverPlace = ((MirCopy)instance).Place.Project(new MirDerefProjection());
         }
         else

@@ -401,6 +401,7 @@ public sealed partial class MirVerifier
             case MirCall call:
                 Operand(call.Callee);
                 if (call.Receiver is not null) Operand(call.Receiver);
+                if (call.Receiver?.Type is OwnershipTypeSymbol) Error("call receiver must project owner storage before dispatch");
                 if (call.IsIndirectReceiver && call.Receiver is null) Error("indirect receiver call requires a receiver");
                 if (call.Callee is MirFunctionOperand direct && direct.Function.HasImplicitThis && call.Receiver is null)
                     Error("instance call requires a receiver");

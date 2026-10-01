@@ -17,7 +17,7 @@ public sealed partial class MirLowerer
     {
         MirSourceInfo source = Source(expression);
         MirOperand? receiver = expression.Receiver is null ? null : expression.IsPointerAccess
-            ? Snapshot(Value(expression.Receiver), source)
+            ? PointerReceiver(expression.Receiver, source)
             : Address(Place(expression.Receiver), expression.Receiver.Type, source);
         ImmutableArray<BoundExpression> boundArguments = expression.Value is null
             ? expression.Arguments : expression.Arguments.Add(expression.Value);

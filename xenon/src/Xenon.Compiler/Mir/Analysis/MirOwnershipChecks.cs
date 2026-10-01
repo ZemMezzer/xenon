@@ -10,10 +10,11 @@ public sealed record MirOwnershipViolation(MirLocation Location, MirPlace Place,
 /// <summary>Checks source reads against MIR ownership states without diagnosing cleanup bookkeeping.</summary>
 public static class MirOwnershipChecks
 {
-    public static ImmutableArray<MirOwnershipViolation> Check(MirFunction function, CancellationToken cancellation = default)
+    public static ImmutableArray<MirOwnershipViolation> Check(MirFunction function, CancellationToken cancellation = default,
+        IReadOnlyDictionary<FunctionSymbol, HashSet<TypeSymbol>>? effects = null)
     {
         var analysis = new MirMoveAnalysis(function, cancellation);
-        var graph = MirFlowFacts.Graph(function, cancellation);
+        var graph = MirFlowFacts.Graph(function, cancellation, effects);
         var states = MirDataflow.Solve(graph, analysis, cancellation);
         var locals = function.Locals.ToDictionary(local => local.Id);
         var violations = ImmutableArray.CreateBuilder<MirOwnershipViolation>();

@@ -121,9 +121,10 @@ public sealed partial class MirLifetimeAnalysis
             operationType.Methods.Any(method => method.OperatorKind == OperatorKind.Resolve);
         if (call.InterfaceType is not null)
         {
-            value = value.Union(MirLifetimeValue.Union(call.Arguments.Select(argument => Operand(argument, state))));
+            MirLifetimeValue inputs = MirLifetimeValue.Union(call.Arguments.Select(argument => Operand(argument, state)));
             if (call.Receiver is { } receiver)
-                value = value.Union(erasedOperation ? BorrowOperand(receiver, state) : Operand(receiver, state));
+                inputs = inputs.Union(erasedOperation ? BorrowOperand(receiver, state) : Operand(receiver, state));
+            value = value.Union(erasedOperation ? inputs : inputs.AsValue(function.ReturnType));
         }
         if ((function.ReturnsResumableOperation || erasedOperation) && !value.Dependencies.IsEmpty)
             (state, value) = Start(value, state, location);
