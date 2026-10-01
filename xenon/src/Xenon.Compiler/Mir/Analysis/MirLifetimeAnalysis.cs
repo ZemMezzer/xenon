@@ -22,6 +22,8 @@ public sealed partial class MirLifetimeAnalysis : IMirDataflowAnalysis<MirLifeti
     private readonly HashSet<LifetimeDependency> _returns = [];
     private readonly HashSet<LifetimeStore> _stores = [];
     private readonly HashSet<MirLifetimeDiagnostic> _diagnostics = [];
+    private readonly HashSet<int> _retainedArrayScopes = [];
+    public ImmutableHashSet<int> RetainedArrayScopes => _retainedArrayScopes.ToImmutableHashSet();
     private bool _collect;
     private MirLocation _location;
     public bool ReturnsOperation { get; private set; }
@@ -205,7 +207,7 @@ public sealed partial class MirLifetimeAnalysis : IMirDataflowAnalysis<MirLifeti
         _addresses.Before.TryGetValue(location, out var addresses) ? _origins.Resolve(place, addresses).ToArray() : [place];
 
     private MirLifetimeState Write(MirPlace place, MirLifetimeValue value, MirLifetimeState state,
-        MirLocation location, MirSourceInfo source, bool check = true)
+        MirLocation location, MirSourceInfo source, bool check = true, bool aggregateInitialization = false)
     {
         MirPlace[] targets = Resolve(place, location);
         foreach (MirPlace target in targets)
@@ -215,8 +217,10 @@ public sealed partial class MirLifetimeAnalysis : IMirDataflowAnalysis<MirLifeti
                 .Select(field => field.Field.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)));
             if (target.Projections.IsEmpty && local.Variable is LocalVariableSymbol { Type: ArrayTypeSymbol } &&
                 !value.StackArrayBacking.IsEmpty && (value.TransfersBacking || value.StackArrayBacking.All(backing =>
-                    _locals.Values.Any(origin => origin.Kind == MirLocalKind.Temporary && ReferenceEquals(_owners[origin.Id], backing.LocalOwner)))))
+                    _locals.Values.Any(origin => origin.Kind == MirLocalKind.Temporary && origin.Source.Scope == local.Source.Scope && ReferenceEquals(_owners[origin.Id], backing.LocalOwner)))))
             {
+                if (_collect && value.TransfersBacking)
+                    foreach (MirLocalId allocation in value.ArrayStorage) RetainArrayScopes(_locals[allocation], local);
                 var backing = new ValueLifetimeDependency(_owners[local.Id], null);
                 value = value with
                 {
@@ -230,14 +234,25 @@ public sealed partial class MirLifetimeAnalysis : IMirDataflowAnalysis<MirLifeti
             if (element && path.Length == 0) path = "*";
             bool indirect = target.Projections.Any(projection => projection is MirDerefProjection);
             bool external = local.Kind == MirLocalKind.Receiver || indirect;
+            bool stackEscapes = (check || aggregateInitialization) && !value.StackArrayBacking.IsEmpty &&
+                (external || !target.Projections.IsEmpty || local.Type is AtomicTypeSymbol { ElementType: ArrayTypeSymbol });
+            if (_collect && stackEscapes)
+            {
+                bool positional = aggregateInitialization;
+                Report(source, positional ? DiagnosticIds.StackArrayStoredInAggregate : DiagnosticIds.StackArrayEscape,
+                    positional ? "stack array cannot be stored inside a positional struct value" : "stack array cannot escape through this assignment");
+            }
             if (check && _collect)
             {
                 if (local.Kind is MirLocalKind.Variable or MirLocalKind.Parameter) CheckPending(_owners[local.Id], state, source);
                 foreach (ValueLifetimeDependency dependency in value.Dependencies)
                 {
-                    if (dependency.LocalOwner is { } owner && (external || local.Variable is not null && !Outlives(owner, local)))
-                        Report(source, DiagnosticIds.ValueLifetimeEscape,
-                            $"value assigned to '{(external ? "external storage" : local.Name)}' depends on local '{owner.Name}', which does not outlive the destination");
+                    if (dependency.LocalOwner is { } owner && (external || local.Variable is not null && !Outlives(owner, local)) &&
+                        !(stackEscapes && value.StackArrayBacking.Contains(dependency)))
+                        Report(source, value.StackArrayBacking.Contains(dependency) ? DiagnosticIds.StackArrayEscape : DiagnosticIds.ValueLifetimeEscape,
+                            value.StackArrayBacking.Contains(dependency)
+                                ? "stack array cannot escape its allocation scope through this assignment without an explicit move relocation"
+                                : $"value assigned to '{(external ? "external storage" : local.Name)}' depends on local '{owner.Name}', which does not outlive the destination");
                     if (external && dependency.Input is { } input)
                     {
                         int destination = local.Kind == MirLocalKind.Receiver ? -1 :
@@ -270,6 +285,17 @@ public sealed partial class MirLifetimeAnalysis : IMirDataflowAnalysis<MirLifeti
         return state;
     }
 
+    private void RetainArrayScopes(MirLocal allocation, MirLocal destination)
+    {
+        var scopes = new List<int>();
+        int? scope = allocation.Source.Scope;
+        while (scope is { } current && current != destination.Source.Scope)
+        {
+            scopes.Add(current);
+            scope = _function.Scopes.FirstOrDefault(scope => scope.Id == current)?.Parent;
+        }
+        if (scope == destination.Source.Scope) _retainedArrayScopes.UnionWith(scopes);
+    }
     private bool Outlives(Symbol owner, MirLocal destination)
     {
         if (owner is ParameterSymbol or CaptureVariableSymbol) return true;

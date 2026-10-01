@@ -15,12 +15,12 @@ public sealed partial class MirLowerer
 
     private MirOperand? Intrinsic(MirIntrinsicKind intrinsic, ImmutableArray<MirOperand> arguments,
         TypeSymbol type, MirSourceInfo source, FunctionSymbol? function = null, TypeSymbol? subjectType = null,
-        ImmutableArray<CaptureVariableSymbol> captures = default, MirBinaryOperator? op = null, bool returnsOldValue = false, ulong? fixedArrayLength = null, FieldSymbol? field = null)
+        ImmutableArray<CaptureVariableSymbol> captures = default, MirBinaryOperator? op = null, bool returnsOldValue = false, ulong? fixedArrayLength = null, FieldSymbol? field = null, MirStorageCheckPurpose storageCheck = MirStorageCheckPurpose.None)
     {
         MirPlace? result = TypeIdentity.AreSame(type, BuiltinTypes.Void) ? null : Temporary(type, source);
         Block next = NewBlock();
         End(new MirIntrinsicCall(intrinsic, arguments, type, result, next.Id, GuardedUnwind(_unwindTarget, source).Id, source)
-        { Function = function, SubjectType = subjectType, Captures = captures.IsDefault ? [] : captures, Operator = op, ReturnsOldValue = returnsOldValue, FixedArrayLength = fixedArrayLength, Field = field });
+        { Function = function, SubjectType = subjectType, Captures = captures.IsDefault ? [] : captures, Operator = op, ReturnsOldValue = returnsOldValue, FixedArrayLength = fixedArrayLength, Field = field, StorageCheck = storageCheck });
         _current = next;
         return result is null ? null : new MirCopy(result, type);
     }
@@ -28,29 +28,39 @@ public sealed partial class MirLowerer
     private MirOperand? MethodCall(FunctionSymbol method, BoundExpression receiver,
         ImmutableArray<BoundExpression> arguments, bool pointerAccess, InterfaceTypeSymbol? interfaceType, MirSourceInfo source)
     {
-        MirOperand instance = pointerAccess ? Snapshot(Value(receiver), source) :
-            Save(new MirBorrow(Place(receiver), MirBorrowKind.Raw, _types.PointerTo(receiver.Type)), source, semanticRead: true);
+        MirPlace receiverPlace;
+        MirOperand instance;
+        if (pointerAccess)
+        {
+            instance = Save(new MirUse(Value(receiver)), source);
+            receiverPlace = ((MirCopy)instance).Place.Project(new MirDerefProjection());
+        }
+        else
+        {
+            receiverPlace = Place(receiver);
+            instance = Save(new MirBorrow(receiverPlace, MirBorrowKind.Raw, _types.PointerTo(receiver.Type)), source, semanticRead: true);
+        }
+        bool hasMoves = !method.ReceiverMoveEffects.IsEmpty || method.GenericDefinition is { ReceiverMoveEffects.IsEmpty: false };
+        MirPlace owner = hasMoves ? LifetimePlace(receiver, receiverPlace) ?? receiverPlace : receiverPlace;
         var callee = new MirFunctionOperand(method, _types.FunctionPointer(method.ReturnType, method.Parameters.Select(p => p.Type)));
-        MirOperand? result = Call(callee, arguments, source, instance, interfaceType, method.VTableSlot is not null);
-        ApplyReceiverMoves(receiver, method, source);
+        MirOperand? result = Call(callee, arguments, source, instance, interfaceType, method.VTableSlot is not null, pointerAccess);
+        ApplyReceiverMoves(owner, method, source);
         return result;
     }
 
-    private void ApplyReceiverMoves(BoundExpression receiver, FunctionSymbol method, MirSourceInfo source)
+    private void ApplyReceiverMoves(MirPlace receiver, FunctionSymbol method, MirSourceInfo source)
     {
         ImmutableArray<ReceiverMoveEffect> effects = method.ReceiverMoveEffects.IsEmpty &&
             method.GenericDefinition is { } definition ? definition.ReceiverMoveEffects : method.ReceiverMoveEffects;
-        MirPlace? receiverPlace = TrackedReceiver(receiver);
-        if (receiverPlace is null) return;
         foreach (ReceiverMoveEffect effect in effects)
         {
-            MirPlace place = receiverPlace;
-            TypeSymbol type = receiver.Type;
+            MirPlace place = receiver;
+            TypeSymbol? type = method.ContainingType;
             bool valid = true;
             foreach (int ordinal in effect.FieldOrdinals)
             {
-                if (type is not StructTypeSymbol structure ||
-                    structure.Fields.FirstOrDefault(field => field.Ordinal == ordinal) is not { } field)
+                if (type is not IFieldStorageTypeSymbol structure ||
+                    structure.AllInstanceFields.FirstOrDefault(field => field.Ordinal == ordinal) is not { } field)
                 { valid = false; break; }
                 place = place.Project(new MirFieldProjection(field));
                 type = field.Type;
@@ -58,15 +68,6 @@ public sealed partial class MirLowerer
             if (valid) Forget(place, source);
         }
     }
-
-    private MirPlace? TrackedReceiver(BoundExpression receiver) => receiver switch
-    {
-        BoundVariableExpression variable => Variable(variable.Variable),
-        BoundMemberAccessExpression { IsPointerAccess: false } member =>
-            TrackedReceiver(member.Receiver)?.Project(new MirFieldProjection(member.Field)),
-        BoundLifetimeValueExpression lifetime => TrackedReceiver(lifetime.Source)?.Project(new MirLifetimeProjection()),
-        _ => null,
-    };
     private MirOperand ConstructAggregate(BoundStructConstructionExpression construction, MirSourceInfo source)
     {
         MirPlace result = Temporary(construction.Type, source);
@@ -84,7 +85,7 @@ public sealed partial class MirLowerer
         Initialize(construction.StructType);
         MirOperand[] values = Arguments(construction.Arguments).ToArray();
         for (int index = 0; index < values.Length; index++)
-            _current.Statements.Add(new MirAssign(result.Project(new MirFieldProjection(construction.StructType.AllInstanceFields[index])), new MirUse(ConvertValue(values[index], construction.StructType.AllInstanceFields[index].Type, source)), source));
+            _current.Statements.Add(new MirAssign(result.Project(new MirFieldProjection(construction.StructType.AllInstanceFields[index])), new MirUse(ConvertValue(values[index], construction.StructType.AllInstanceFields[index].Type, source)), source) { IsAggregateInitialization = true });
         void Initialize(StructTypeSymbol type)
         {
             if (type.BaseType is { } baseType) Initialize(baseType);

@@ -143,6 +143,12 @@ public sealed partial class MirLifetimeAnalysis
         MirLifetimeValue value = MirLifetimeValue.Empty;
         switch (call.Intrinsic)
         {
+            case MirIntrinsicKind.Swap when call.Arguments is [MirCopy left, MirCopy right]:
+                MirPlace leftPlace = left.Place.Project(new MirDerefProjection()), rightPlace = right.Place.Project(new MirDerefProjection());
+                MirLifetimeValue leftValue = Read(leftPlace, state), rightValue = Read(rightPlace, state);
+                state = Write(leftPlace, rightValue, state, location, call.Source, check: false);
+                state = Write(rightPlace, leftValue, state, location, call.Source, check: false);
+                break;
             case MirIntrinsicKind.MakeCallable:
                 ImmutableArray<MirLifetimeValue> captures = [.. call.Arguments.Select((argument, index) =>
                     index < call.Captures.Length && call.Captures[index].IsBorrow ? BorrowOperand(argument, state) : Operand(argument, state))];

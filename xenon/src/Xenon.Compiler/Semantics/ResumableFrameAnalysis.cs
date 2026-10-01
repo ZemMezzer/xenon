@@ -41,8 +41,9 @@ public sealed class ResumableFrameAnalysis
         {
             if (blocks[blockId].Terminator.Source.OriginId is not { } id) continue;
             var suspension = (BoundAwaitExpression)expressions[id];
-            foreach (int allocation in state.Allocations)
-                if (expressions[allocation] is BoundArrayCreationExpression array) retained.Add(array);
+            foreach (MirBlockId allocation in state.Allocations)
+                if (blocks[allocation].Terminator.Source.OriginId is { } allocationOrigin &&
+                    expressions[allocationOrigin] is BoundArrayCreationExpression array) retained.Add(array);
             ImmutableHashSet<Symbol> symbols = state.Live.Select(local =>
                 locals[local].Kind == MirLocalKind.Receiver ? (Symbol)function : locals[local].Variable)
                 .OfType<Symbol>().ToImmutableHashSet();
@@ -51,12 +52,7 @@ public sealed class ResumableFrameAnalysis
         Suspensions = LiveValues = suspensions;
         LiveAcross = suspensions.Values.SelectMany(value => value).ToImmutableHashSet();
         RetainedArrays = retained.ToImmutable();
-        var frame = new StructTypeSymbol(function.Name + ".frame", function.ContainingNamespace,
-            false, SymbolOrigin.CompilerGenerated, accessibility: Accessibility.Private);
-        frame.SetFields(LiveAcross.OfType<VariableSymbol>().OrderBy(variable => variable.Name, StringComparer.Ordinal)
-            .Select((variable, ordinal) => new FieldSymbol(variable.Name, frame, variable.Type, ordinal,
-                Accessibility.Private, false, false, false, false, null)).ToImmutableArray());
-        FrameType = types.PinOf(frame);
+        FrameType = analysis.CreateFrameType(Mir, types);
         if (TypeFacts.CanRelocate(FrameType)) throw new InvalidOperationException("A pinned frame cannot relocate.");
     }
 

@@ -193,4 +193,12 @@ public sealed class MirCoreTests
         Assert.Contains(MirVerifier.Verify(function with { Locals = [Local(0) with { Source = Source with { Scope = 7 } }] }),
             error => error.Message.Contains("missing scope 7", StringComparison.Ordinal));
     }
+    [Fact]
+    public void StorageCheckPurposeCannotAnnotateUnrelatedIntrinsics()
+    {
+        var call = new MirIntrinsicCall(MirIntrinsicKind.CloneValue, [Int(1)], BuiltinTypes.Int,
+            new(new(0)), new(1), new(1), Source) { StorageCheck = MirStorageCheckPurpose.Move };
+        Assert.Contains(MirVerifier.Verify(Body(Block(0, call), Block(1, Return()))),
+            error => error.Message.Contains("storage check purpose"));
+    }
 }

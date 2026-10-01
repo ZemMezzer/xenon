@@ -6,8 +6,27 @@ public sealed partial class LlvmIrGenerator
 {
     private sealed unsafe partial class FunctionEmitter
     {
+        private LLVMValueRef MirCreateCoroutine()
+        {
+            ReadOnlySpan<byte> name = "presplitcoroutine"u8;
+            fixed (byte* text = name)
+            {
+                uint kind = LLVMSharp.Interop.LLVM.GetEnumAttributeKindForName((sbyte*)text, (nuint)name.Length);
+                _llvmFunction.AddAttributeAtIndex(LLVMAttributeIndex.LLVMAttributeFunctionIndex,
+                    _context.CreateEnumAttribute(kind, 0));
+            }
+            LLVMValueRef nil = LLVMValueRef.CreateConstPointerNull(ResumePointer);
+            _coroutineId = ResumeCall("llvm.coro.id", ResumeToken,
+                [LLVMValueRef.CreateConstInt(_context.Int32Type, 0), nil, nil, nil], "resumable.id");
+            LLVMValueRef size = ResumeCall($"llvm.coro.size.i{_getIntegerBitWidth(Xenon.Compiler.Semantics.Symbols.BuiltinTypes.NUInt)}",
+                _mapType(Xenon.Compiler.Semantics.Symbols.BuiltinTypes.NUInt), [], "resumable.size");
+            LLVMValueRef allocation = _builder.BuildCall2(_getMemoryRuntime().MallocType,
+                _getMemoryRuntime().Malloc, new[] { size }, "resumable.storage");
+            return ResumeCall("llvm.coro.begin", ResumePointer, [_coroutineId, allocation], "resumable.handle");
+        }
         public void EmitMirResumable(MirFunction body)
         {
+            if (body.Coroutine is null) throw new LlvmCodeGenerationException("Coroutine transformation is required before LLVM emission.");
             _mirReturnOverride = result =>
             {
                 LLVMValueRef frameResult = EmitCopyValue(result, body.Symbol.ReturnType);
@@ -31,7 +50,7 @@ public sealed partial class LlvmIrGenerator
                         _getAbiSize, _getAbiAlignment, _getFieldOffset, _getIntegerBitWidth,
                         _enableRuntimeChecks, _isWindowsTarget, _exceptionsEnabled, resumable: true);
                     emitter.EmitMir(body);
-                    emitter.EndResumableBody();
+
                 }
                 LLVMValueRef handle = _builder.BuildCall2(rampType, ramp, inputs.Concat(new[] { frameResult, state }).ToArray(), "resumable.frame");
                 ResumeCall(RuntimeAbiNames.ResumeStart, _context.VoidType, [state, handle]);

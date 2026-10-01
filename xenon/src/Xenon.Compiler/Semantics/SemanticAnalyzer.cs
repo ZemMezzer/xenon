@@ -178,10 +178,14 @@ internal sealed class SemanticAnalyzer
 
         MirSemanticDiagnostics.InferReceiverMoves(functions, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
         ValidateCallableMoveEffects();
-        MirSemanticDiagnostics.Analyze(functions.Concat(_genericImplementations.ToImmutable().Functions
+        var ownershipBodies = functions.Concat(_genericImplementations.ToImmutable().Functions
             .Where(pair => pair.Key.IsSourceDefined && pair.Value.PortableBody is not null)
-            .Select(pair => new BoundFunction(pair.Key, pair.Value.PortableBody!))),
-            _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+            .Select(pair => new BoundFunction(pair.Key, pair.Value.PortableBody!))).ToArray();
+        MirLifetimeAuthorityDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirArrayDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirStorageDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirSemanticDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirBorrowDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
 
         // Lifecycle and accessor effects use the same executable MIR as other analyses.
         MirReadonlyDiagnostics.Analyze(functions,

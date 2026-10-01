@@ -42,6 +42,19 @@ public sealed class MirCleanupTests
         Assert.Equal(expected.Split(',', StringSplitOptions.RemoveEmptyEntries), machine.Drops);
     }
 
+    [Theory]
+    [InlineData("holder")]
+    [InlineData("alias")]
+    public void ReceiverMoveEffectsDeactivateTheActualOwner(string receiver)
+    {
+        MirFunction[] functions = MirFeatureLoweringTests.Lower(Types + $$"""
+            struct Holder { public A value; public A Take() { return move value; } }
+            int Main() { Holder holder = Holder(); Holder& alias = holder; A result = {{receiver}}.Take(); return 0; }
+            """);
+        var machine = new Machine(functions);
+        Assert.Equal(0, machine.Run(functions.Single(f => f.Symbol.Name == "Main"), []));
+        Assert.Equal(["A"], machine.Drops);
+    }
     [Fact]
     public void FailedArrayReplacementDestroysIncomingAndRemainingOldElements()
     {

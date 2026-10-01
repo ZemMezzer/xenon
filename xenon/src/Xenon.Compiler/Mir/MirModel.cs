@@ -37,6 +37,7 @@ public sealed record MirFunction(FunctionSymbol Symbol, ImmutableArray<MirLocal>
     // The executable result can differ from a resumable function's public handle type.
     public TypeSymbol ReturnType { get; init; } = Symbol.ReturnType;
     public MirResumableBody? Resumable { get; init; }
+    public Analysis.MirCoroutineLayout? Coroutine { get; init; }
     public bool HasDynamicCleanupOrder { get; init; }
     public MirBlockId? UnwindExit { get; init; }
     public MirBlockId? ResumableBodyEntry { get; init; }
@@ -149,7 +150,10 @@ public sealed record MirAssign(MirPlace Destination, MirRValue Value, MirSourceI
     public bool IsSemanticRead { get; init; }
     public bool IsSemanticWrite { get; init; }
     public bool IsDeclaration { get; init; }
+    public bool IsAggregateInitialization { get; init; }
     public bool IsMoveRead { get; init; }
+    // Destination of a direct source-level move assignment, before RHS cleanup.
+    public MirPlace? TransferDestination { get; init; }
     public bool IsProjectionBaseRead { get; init; }
     // A replacement through an external place cannot test a local lifetime flag.
     public bool IsUntrackedReplacementCheck { get; init; }
@@ -195,6 +199,7 @@ public sealed record MirCall(MirOperand Callee, ImmutableArray<MirOperand> Argum
 {
     public MirOperand? Receiver { get; init; }
     public InterfaceTypeSymbol? InterfaceType { get; init; }
+    public bool IsIndirectReceiver { get; init; }
     public bool IsVirtual { get; init; }
 
     public override IEnumerable<MirEdge> Successors => [new(Normal, MirEdgeKind.Normal), new(Unwind, MirEdgeKind.Unwind)];
@@ -231,6 +236,7 @@ public sealed record MirUnreachable(MirSourceInfo Source) : MirTerminator(Source
 public sealed record MirDrop(MirPlace Place, FunctionSymbol? Destructor,
     MirBlockId Normal, MirBlockId Unwind, MirSourceInfo Source) : MirTerminator(Source)
 {
+    public bool IsExplicit { get; init; }
     public bool IsVirtual { get; init; }
     public override IEnumerable<MirEdge> Successors => [new(Normal, MirEdgeKind.Normal), new(Unwind, MirEdgeKind.Unwind)];
 }

@@ -4,7 +4,7 @@ using Xenon.Compiler.Semantics.Symbols;
 namespace Xenon.Compiler.Mir.Analysis;
 
 public sealed record MirStorageOrigin(ImmutableHashSet<MirLocalId> Owners,
-    ImmutableHashSet<int> Allocations, ImmutableHashSet<MirPlace> Addresses)
+    ImmutableHashSet<MirBlockId> Allocations, ImmutableHashSet<MirPlace> Addresses)
 {
     public static MirStorageOrigin Empty { get; } = new([], [], []);
     public MirStorageOrigin Union(MirStorageOrigin other) =>
@@ -121,7 +121,7 @@ public sealed class MirStorageOrigins(MirFunction function) :
         MirStorageOrigin origin = MirOperands.Of(source.Terminator).Select(operand => Operand(operand, state))
             .Aggregate(MirStorageOrigin.Empty, (result, item) => result.Union(item));
         if (source.Terminator is MirIntrinsicCall { Intrinsic: MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray } allocation)
-            origin = allocation.Source.OriginId is { } id ? new([], [id], []) : MirStorageOrigin.Empty;
+            origin = new([], [source.Id], []);
         if (source.Terminator is MirCall called)
         {
             // Mutating reference arguments and constructor receivers can fill

@@ -95,20 +95,6 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<BoundExpression> arguments = syntax.Expression is null ? [target] :
             [target, BindDeferredContextualArgument(syntax.Expression)];
         BoundExpression completion = BindCompletionOperator(OperatorKind.Resolve, arguments, [], syntax, syntax.ReturnKeyword.Location);
-        ImmutableArray<BoundExpression> completedArguments = completion switch
-        {
-            BoundCallExpression call => call.Arguments,
-            BoundDeferredGenericOperationExpression call => call.Arguments,
-            _ => [],
-        };
-        if (completedArguments.Length == 2)
-        {
-            BoundExpression value = completedArguments[1];
-
-            if (HasCalleeStackBoundRuntimeStorage(value))
-                _diagnostics.Report(syntax.ReturnKeyword.Location,
-                    "resumable completion cannot retain stack-backed array storage", DiagnosticIds.StackArrayReturn);
-        }
         RecordAbruptFinalizerFlow(_ => true);
         return new BoundReturnStatement(CompleteFullExpression(completion, resultConsumed: false));
     }

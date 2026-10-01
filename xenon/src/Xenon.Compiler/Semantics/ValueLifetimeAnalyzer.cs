@@ -41,10 +41,11 @@ internal static class ValueLifetimeAnalyzer
         foreach (Input input in inputs.Where(input => input.Bound.Body.IsResumable))
         {
             var frame = new MirFrameAnalysis(input.Mir, cancellation);
-            foreach (int origin in frame.Suspensions.Values.SelectMany(state => state.Allocations).Distinct())
-                if (input.Expressions[origin] is BoundArrayCreationExpression { Storage: ArrayStorageKind.Stack } array &&
-                    !ResumableFrameAnalysis.TryGetConstantLength(array, out _))
-                    diagnostics.Report(locations.GetValueOrDefault(array),
+            var blocks = input.Mir.Blocks.ToDictionary(block => block.Id);
+            foreach (MirBlockId allocation in frame.Suspensions.Values.SelectMany(state => state.Allocations).Distinct())
+                if (blocks[allocation].Terminator is MirIntrinsicCall
+                    { Intrinsic: MirIntrinsicKind.AllocateStackArray, FixedArrayLength: null } array)
+                    diagnostics.Report(array.Source.Location,
                         "runtime-sized array backing storage is live across await and has no fixed inline frame layout; use owning heap storage or finish its lifetime before suspension",
                         DiagnosticIds.BorrowAcrossAwait);
         }

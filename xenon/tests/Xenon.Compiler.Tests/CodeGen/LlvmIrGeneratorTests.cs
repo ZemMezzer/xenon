@@ -404,22 +404,11 @@ public sealed class LlvmIrGeneratorTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        FunctionSymbol consume = compilation.SemanticModel.Functions.Single(
-            function => function.Symbol.Name == "Consume").Symbol;
-        string encodedIdentity = Convert.ToHexString(Encoding.UTF8.GetBytes(consume.FullName));
         string ir = new LlvmIrGenerator().GenerateForTarget(
             compilation, LlvmTargetOptions.CreateHost(), "parameter-cleanup-effects");
-        string definition = ir.Split('\n').Single(line =>
-            line.StartsWith("define ", StringComparison.Ordinal) &&
-            line.Contains(encodedIdentity, StringComparison.Ordinal));
-        int attributeMarker = definition.LastIndexOf('#');
-        Assert.True(attributeMarker >= 0, definition);
-        string attributeNumber = new(definition[(attributeMarker + 1)..]
-            .TakeWhile(char.IsAsciiDigit).ToArray());
-        string attributes = ir.Split('\n').Single(line =>
-            line.StartsWith($"attributes #{attributeNumber} =", StringComparison.Ordinal));
-
-        Assert.DoesNotContain("nounwind", attributes, StringComparison.Ordinal);
+        // With explicit cleanup CFG the inlining hint may disappear; no attribute
+        // group is also a valid representation of a potentially throwing function.
+        AssertFunctionAttribute(compilation, ir, "Consume", "nounwind", expected: false);
     }
 
     [Fact]
@@ -3259,7 +3248,8 @@ public sealed class LlvmIrGeneratorTests
         string replace = Body("Example.Holder.Replace");
         Assert.Contains("store i1 false", replace, StringComparison.Ordinal);
         Assert.Contains("switch i1", replace, StringComparison.Ordinal);
-        Assert.Contains($"call void @{ownershipDestructor}", replace, StringComparison.Ordinal);
+        // The old field was moved out; MIR proves its replacement cleanup dead.
+        Assert.DoesNotContain($"call void @{ownershipDestructor}", replace, StringComparison.Ordinal);
 
         string arrayMove = Body("Example.MoveArray");
         Assert.DoesNotContain("@malloc", arrayMove, StringComparison.Ordinal);

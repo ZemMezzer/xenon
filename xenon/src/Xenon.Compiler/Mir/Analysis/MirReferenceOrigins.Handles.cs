@@ -24,6 +24,27 @@ public sealed partial class MirReferenceOrigins
             IsFresh = fresh, HandleParameter = parameter, HandleIdentity = identity + ":" + local.Value,
             PointeeType = Element(type),
         });
+    // Seed opaque owning fields at value creation. Read must preserve lattice bottom:
+    // manufacturing an origin only when a read is empty makes loop transfer non-monotone.
+    private static MirReferenceValue OwnedFields(TypeSymbol type, MirLocalId site, string identity)
+    {
+        MirReferenceValue result = MirReferenceValue.Empty;
+        Visit(type, "", []);
+        return result;
+        void Visit(TypeSymbol current, string path, HashSet<TypeSymbol> seen)
+        {
+            if (current is OwnershipTypeSymbol)
+            {
+                result = result.Store(path, Handle(current, site, identity + ":" + path), true);
+                return;
+            }
+            if (current is LifetimeModifierTypeSymbol modifier) { Visit(modifier.ElementType, path, seen); return; }
+            if (current is not IFieldStorageTypeSymbol structure || !seen.Add(current)) return;
+            foreach (var field in structure.AllInstanceFields)
+                Visit(field.Type, MirReferenceOrigin.Append(path, field.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)), seen);
+            seen.Remove(current);
+        }
+    }
     private static MirReferenceValue StoredHandle(TypeSymbol type, MirLocalId local, MirReferenceValue value) =>
         !value.Roots.IsEmpty && value.Roots.All(IsPointee) ? value : Handle(type, local, "storage");
     private MirReferenceValue Cast(MirCast cast, ImmutableDictionary<MirLocalId, MirReferenceValue> state)

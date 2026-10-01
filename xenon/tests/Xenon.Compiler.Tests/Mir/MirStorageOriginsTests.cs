@@ -79,7 +79,7 @@ public sealed class MirStorageOriginsTests
             Block(4, new MirReturn(null, Source)), Block(5, new MirResumeUnwind(Source)));
         var frame = new MirFrameAnalysis(function);
         MirSuspensionState suspension = frame.Suspensions[new(2)];
-        Assert.True(suspension.Allocations.SetEquals([20]));
+        Assert.True(suspension.Allocations.SetEquals([new MirBlockId(1)]));
         Assert.Contains(new MirLocalId(2), suspension.Live);
         Assert.Contains(new MirLocalId(3), suspension.Live);
         Assert.DoesNotContain(new MirLocalId(1), frame.LiveAcross);

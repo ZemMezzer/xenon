@@ -39,4 +39,38 @@ public sealed class MirBorrowAnalysisTests
     {
         Assert.Empty(Check("value = 2; int& alias = value; alias = 3;", "int& value"));
     }
-}
+    [Fact]
+    public void IncrementChecksBothReadAndWrite()
+    {
+        var violations = Check("int value = 1; int& alias = value; value++; alias = 3;");
+        Assert.Contains(violations, violation => violation.Check == MirBorrowCheck.Read);
+        Assert.Contains(violations, violation => violation.Check == MirBorrowCheck.Mutation);
+    }
+    [Fact]
+    public void PointerIndexBorrowsShareTheirPointeeOrigin()
+    {
+        Assert.Contains(Check("int& first = pointer[index]; int& second = pointer[index]; first = 1; second = 2;",
+            "int* pointer, int index"), violation => violation.Check == MirBorrowCheck.Borrow);
+    }
+    [Fact]
+    public void ExplicitDestructionChecksLiveLoans()
+    {
+        Assert.Contains(Check("storage<int> value = 1; int& alias = value; destruct(value); alias = 2;"),
+            violation => violation.Check == MirBorrowCheck.Destruct);
+    }
+    [Fact]
+    public void FreeChecksLivePointeeLoans()
+    {
+        Assert.Contains(Check("int* value = new int(); int& alias = *value; free value; alias = 2;"),
+            violation => violation.Check == MirBorrowCheck.Free);
+    }    [Fact]
+    public void DirectReferenceArgumentPermitsLaterArgumentReadBeforeCall()
+    {
+        Assert.Empty(Check("int value = 1; action(value, value);", "function void(int&, int)* action"));
+    }
+    [Fact]
+    public void DirectReferenceArgumentsConflictWhenActivatedTogether()
+    {
+        Assert.Contains(Check("int value = 1; action(value, value);", "function void(int&, int&)* action"),
+            violation => violation.Check == MirBorrowCheck.Borrow);
+    }}

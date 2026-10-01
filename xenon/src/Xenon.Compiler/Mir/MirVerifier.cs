@@ -102,6 +102,36 @@ public sealed partial class MirVerifier
             if (resumable.Initialization.Resumable is not null) Error("resumable initializer cannot suspend");
             else _errors.AddRange(Verify(resumable.Initialization));
         }
+        if (_function.Coroutine is { } coroutine)
+        {
+            if (_function.Resumable is null) Error("coroutine layout requires resumable initialization");
+            Same(Local(coroutine.Handle), _function.ReturnType, "coroutine handle");
+            if (TypeFacts.CanRelocate(coroutine.FrameType)) Error("coroutine frame must be pinned");
+            if (coroutine.FrameType.ElementType is not StructTypeSymbol frameType ||
+                frameType.Fields.Length != coroutine.FrameLocals.Count)
+                Error("coroutine frame fields must match retained local storage");
+            else
+            {
+                var retained = coroutine.FrameLocals.OrderBy(local => local.Value).ToArray();
+                for (int index = 0; index < retained.Length; index++)
+                    Same(Local(retained[index]), frameType.Fields[index].Type, "coroutine frame field");
+            }
+            var stateIds = new HashSet<int>();
+            foreach (var state in coroutine.States)
+            {
+                if (state.State <= 0 || !stateIds.Add(state.State)) Error("invalid or duplicate coroutine state");
+                if (!_blocks.Contains(state.Suspension) || !_blocks.Contains(state.Resume)) Error("coroutine state references missing block");
+                foreach (var local in state.Live) Local(local);
+            }
+            foreach (var local in coroutine.FrameLocals) Local(local);
+            if (!coroutine.FrameLocals.SetEquals(coroutine.States.SelectMany(state => state.Live)))
+                Error("coroutine frame must retain exactly the suspension live set");
+            if (_function.Blocks.Any(block => block.Terminator is MirSuspend)) Error("transformed coroutine cannot contain Suspend");
+            var creation = _function.Blocks.Where(block => block.Terminator is MirIntrinsicCall { Intrinsic: MirIntrinsicKind.CoroutineCreate }).ToArray();
+            if (creation.Length != 1 || creation[0].Id != _function.Entry ||
+                ((MirIntrinsicCall)creation[0].Terminator).Destination is not { Projections.IsEmpty: true } destination || destination.Local != coroutine.Handle)
+                Error("coroutine entry must create its frame handle exactly once");
+        }
         foreach (MirBasicBlock block in _function.Blocks)
         {
             _block = block.Id;
@@ -118,7 +148,16 @@ public sealed partial class MirVerifier
                 {
                     case MirAssign assign:
                         TypeSymbol? destinationType = Place(assign.Destination);
+                        if (assign.IsAggregateInitialization && (assign.WriteKind != MirWriteKind.Initialize ||
+                            assign.Destination.Projections.LastOrDefault() is not MirFieldProjection))
+                            Error("aggregate initialization requires an initializing field store");
                         if (assign.ReservedMove is { } reserved) Place(reserved);
+                        if (assign.TransferDestination is { } transfer)
+                        {
+                            Same(Place(transfer), assign.Value.Type, "move transfer destination");
+                            if (!assign.IsSemanticRead || !assign.IsMoveRead)
+                                Error("move transfer destination requires a semantic move read");
+                        }
                         RValue(assign.Value);
                         if (destinationType is not null) Same(assign.Value.Type, destinationType, "assignment");
                         break;
@@ -360,6 +399,7 @@ public sealed partial class MirVerifier
             case MirCall call:
                 Operand(call.Callee);
                 if (call.Receiver is not null) Operand(call.Receiver);
+                if (call.IsIndirectReceiver && call.Receiver is null) Error("indirect receiver call requires a receiver");
                 if (call.Callee is MirFunctionOperand direct && direct.Function.HasImplicitThis && call.Receiver is null)
                     Error("instance call requires a receiver");
                 if (call.Arguments.IsDefault) { Error("call arguments must be initialized"); break; }

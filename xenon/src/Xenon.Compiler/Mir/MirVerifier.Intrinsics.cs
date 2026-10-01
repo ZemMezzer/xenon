@@ -6,11 +6,24 @@ public sealed partial class MirVerifier
 {
     private void Intrinsic(MirIntrinsicCall operation)
     {
+        if (operation.RetainedInFrame && (_function.Coroutine is null ||
+            operation.Intrinsic != MirIntrinsicKind.AllocateStackArray || operation.FixedArrayLength is null))
+            Error("frame allocation requires a fixed stack array in a transformed coroutine");
+        bool validStorageCheck = operation.StorageCheck switch
+        {
+            MirStorageCheckPurpose.None => true,
+            MirStorageCheckPurpose.Initialize => operation.Intrinsic == MirIntrinsicKind.CheckStorageEmpty,
+            MirStorageCheckPurpose.Read or MirStorageCheckPurpose.Move or MirStorageCheckPurpose.Destruct =>
+                operation.Intrinsic == MirIntrinsicKind.CheckStorageInitialized,
+            _ => false,
+        };
+        if (!validStorageCheck) Error("storage check purpose does not match intrinsic");
         int arity = operation.Intrinsic switch
         {
             MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray => operation.ResultType is ArrayTypeSymbol array ? array.Rank : -1,
             MirIntrinsicKind.ArrayDimension or MirIntrinsicKind.ConstructStorage => 2,
             MirIntrinsicKind.ClosureControl or MirIntrinsicKind.CreateContinuation or MirIntrinsicKind.ReleaseClosure or MirIntrinsicKind.EnsureThreadLocal or MirIntrinsicKind.Allocate => 0,
+            MirIntrinsicKind.CoroutineCreate => 0,
             MirIntrinsicKind.MakeCallable => operation.Captures.Length,
             MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc or MirIntrinsicKind.Swap or MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate or MirIntrinsicKind.AtomicExchange => 2,
             MirIntrinsicKind.CompareExchange or MirIntrinsicKind.CompareExchangeOwned => 3,
@@ -20,6 +33,20 @@ public sealed partial class MirVerifier
         MirOperand? first = operation.Arguments.FirstOrDefault();
         switch (operation.Intrinsic)
         {
+            case MirIntrinsicKind.CoroutineCreate:
+                if (_function.Coroutine is null) Error("coroutine operation requires transformed MIR");
+                if (operation.ResultType is not PointerTypeSymbol) Error("coroutine handle must be a pointer");
+                break;
+            case MirIntrinsicKind.CoroutineSuspend:
+                if (_function.Coroutine is null) Error("coroutine operation requires transformed MIR");
+                Same(first!.Type, BuiltinTypes.Bool, "terminal suspension flag");
+                Same(operation.ResultType, BuiltinTypes.Byte, "coroutine suspension result");
+                break;
+            case MirIntrinsicKind.CoroutineFree or MirIntrinsicKind.CoroutineEnd:
+                if (_function.Coroutine is null) Error("coroutine operation requires transformed MIR");
+                if (first!.Type is not PointerTypeSymbol) Error("coroutine operation requires a handle");
+                Same(operation.ResultType, BuiltinTypes.Void, "coroutine operation result");
+                break;
             case MirIntrinsicKind.ReleaseStrong:
                 if (first!.Type is not SharedTypeSymbol) Error("strong release requires shared storage");
                 Same(operation.ResultType, BuiltinTypes.Bool, "strong release result");

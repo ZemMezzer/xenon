@@ -1,3 +1,4 @@
+using Xenon.Compiler.Mir;
 using Xenon.Compiler.Mir.Analysis;
 using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Semantics;
@@ -23,7 +24,7 @@ public sealed class MirReferenceOriginsTests
     [InlineData("int& Forward(int& value) { return value; } int& Use(int& value) { return Forward(value); }")]
     public void ReferenceParameterSurvivesCopiesAndCalls(string source)
     {
-        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0), Assert.Single(Origins(source)));
+        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0) { Authority = MirLifetimeAuthority.ReferenceParameter }, Assert.Single(Origins(source)));
     }
 
     [Theory]
@@ -40,14 +41,14 @@ public sealed class MirReferenceOriginsTests
     {
         var origins = Origins("int& Use(int& left, int& right, bool branch) { if (branch) return left; return right; }");
         Assert.Equal(2, origins.Length);
-        Assert.Contains(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0), origins);
-        Assert.Contains(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 1), origins);
+        Assert.Contains(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0) { Authority = MirLifetimeAuthority.ReferenceParameter }, origins);
+        Assert.Contains(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 1) { Authority = MirLifetimeAuthority.ReferenceParameter }, origins);
     }
 
     [Fact]
     public void ConstantBranchExcludesUnreachableOrigin()
     {
-        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0), Assert.Single(Origins(
+        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0) { Authority = MirLifetimeAuthority.ReferenceParameter }, Assert.Single(Origins(
             "int& Use(int& left, int& right) { if (true) return left; return right; }")));
     }
 
@@ -60,7 +61,7 @@ public sealed class MirReferenceOriginsTests
     [Fact]
     public void FieldProjectionSurvivesReturn()
     {
-        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0, "0"), Assert.Single(Origins(
+        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0, "0") { Authority = MirLifetimeAuthority.ReferenceParameter }, Assert.Single(Origins(
             "struct Pair { public int Value; } int& Use(Pair& pair) { return pair.Value; }")));
     }
 
@@ -103,7 +104,7 @@ public sealed class MirReferenceOriginsTests
     [Fact]
     public void ReturnedReferenceFollowsReferenceFieldPayload()
     {
-        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0), Assert.Single(Origins(
+        Assert.Equal(new MirReferenceOrigin(MirReferenceOriginKind.Parameter, 0) { Authority = MirLifetimeAuthority.ReferenceField }, Assert.Single(Origins(
             "struct Box { public int& Value; public Box(int& value) { Value = value; } } int& Read(Box value) { return value.Value; } int& Use(int& value) { return Read(Box(value)); }")));
     }
     [Fact]
@@ -128,5 +129,25 @@ public sealed class MirReferenceOriginsTests
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         var function = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Use");
         Assert.Equal(new SharedReturnOrigin(kind, parameter), Assert.Single(function.Symbol.SharedReturnOrigins));
+    }
+    [Theory]
+    [InlineData("shared<int>")]
+    [InlineData("int*")]
+    public void ReadingAnUnreachedHandleFieldPreservesProvenanceBottom(string fieldType)
+    {
+        var compilation = Compilation.Create(SourceText.From($$"""
+            namespace Test;
+            struct Box { public {{fieldType}} Value; }
+            void Use(Box box) {}
+            """));
+        Assert.Empty(compilation.Diagnostics);
+        var bound = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "Use");
+        var mir = MirLowerer.Lower(bound, compilation.TypeFactory);
+        var local = mir.Locals.Single(local => local.Variable is ParameterSymbol);
+        var field = ((StructTypeSymbol)local.Type).Fields.Single();
+        var analysis = new MirReferenceOrigins(mir);
+        var value = analysis.Read(new MirPlace(local.Id).Project(new MirFieldProjection(field)), analysis.Bottom);
+        Assert.Empty(value.Roots);
+        Assert.Empty(value.Fields);
     }
 }

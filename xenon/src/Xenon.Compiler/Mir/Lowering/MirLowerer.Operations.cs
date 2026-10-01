@@ -73,21 +73,20 @@ public sealed partial class MirLowerer
             case BoundExplicitDestructExpression destruction:
             {
                 MirPlace tracked = Place(destruction.Target);
+                MirPlace? ownership = LifetimePlace(destruction, tracked);
                 (MirPlace place, TypeSymbol type) = Unpin(tracked, destruction.Target.Type);
                 if (type is StorageTypeSymbol)
                 {
-                    _ = Intrinsic(MirIntrinsicKind.CheckStorageInitialized, [Address(place, type, source)], BuiltinTypes.Void, source);
+                    _ = Intrinsic(MirIntrinsicKind.CheckStorageInitialized, [Address(place, type, source)], BuiltinTypes.Void, source, storageCheck: MirStorageCheckPurpose.Destruct);
                     _current.Statements.Add(new MirSetStorageState(place, false, source));
                     place = place.Project(new MirLifetimeProjection());
                 }
                 // Destroying T empties storage<T>; the wrapper remains live and
                 // can be initialized again through an alias.
                 if (type is not StorageTypeSymbol)
-                    Forget(destruction.TrackedVariable is { } variable
-                        ? new MirPlace(Variable(variable).Local, [.. destruction.TrackedPath.Select(field => (MirProjection)new MirFieldProjection(field))])
-                        : tracked, source);
+                    Forget(ownership ?? tracked, source);
                 Block after = NewBlock();
-                End(new MirDrop(place, destruction.Destructor, after.Id, GuardedUnwind(_unwindTarget, source).Id, source));
+                End(new MirDrop(place, destruction.Destructor, after.Id, GuardedUnwind(_unwindTarget, source).Id, source) { IsExplicit = true });
                 _current = after;
                 return null;
             }

@@ -3,7 +3,7 @@ using Xenon.Compiler.Semantics.Symbols;
 
 namespace Xenon.Compiler.Mir.Analysis;
 
-public enum MirOwnershipCheck { Read, UntrackedReplacement, PinnedInitialization, RequiredField }
+public enum MirOwnershipCheck { Read, UntrackedReplacement, PinnedInitialization, RequiredField, SelfMove }
 public sealed record MirOwnershipViolation(MirLocation Location, MirPlace Place,
     MirOwnershipStatus Status, MirSourceInfo Source, MirPlace Cause, MirOwnershipCheck Check = MirOwnershipCheck.Read);
 
@@ -42,6 +42,9 @@ public static class MirOwnershipChecks
                         // Unknown external pointees are governed by borrow contracts.
                         if (locals[resolved.Local].Kind == MirLocalKind.Temporary) continue;
                         MirOwnershipStatus status = analysis.Status(resolved, states.Before[location]);
+                        if (read.TransferDestination is { } transfer &&
+                            analysis.Resolve(transfer, location).Any(destination => destination.Equals(resolved)))
+                            violations.Add(new(location, resolved, status, read.Source, resolved, MirOwnershipCheck.SelfMove));
                         if (read.IsPinnedInitializationCheck)
                         {
                             if (status != MirOwnershipStatus.Uninitialized)

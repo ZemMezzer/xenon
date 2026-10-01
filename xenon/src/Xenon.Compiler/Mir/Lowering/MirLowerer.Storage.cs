@@ -58,7 +58,7 @@ public sealed partial class MirLowerer
         MirPlace? wrapper = type is StorageTypeSymbol ? target : null;
         if (wrapper is not null)
         {
-            _ = Intrinsic(MirIntrinsicKind.CheckStorageEmpty, [Address(wrapper, type, source)], BuiltinTypes.Void, source);
+            _ = Intrinsic(MirIntrinsicKind.CheckStorageEmpty, [Address(wrapper, type, source)], BuiltinTypes.Void, source, storageCheck: MirStorageCheckPurpose.Initialize);
             target = target.Project(new MirLifetimeProjection());
         }
         if (construction.Value is { } value)
@@ -80,10 +80,10 @@ public sealed partial class MirLowerer
         Activate(tracked, true, source);
     }
 
-    private MirOperand MoveStorage(MirPlace wrapper, StorageTypeSymbol type, MirSourceInfo source)
+    private MirOperand MoveStorage(MirPlace wrapper, StorageTypeSymbol type, MirSourceInfo source, bool semanticRead = false)
     {
-        _ = Intrinsic(MirIntrinsicKind.CheckStorageInitialized, [Address(wrapper, type, source)], BuiltinTypes.Void, source);
-        MirOperand value = Save(new MirUse(new MirMove(wrapper.Project(new MirLifetimeProjection()), type.ElementType)), source);
+        _ = Intrinsic(MirIntrinsicKind.CheckStorageInitialized, [Address(wrapper, type, source)], BuiltinTypes.Void, source, storageCheck: semanticRead ? MirStorageCheckPurpose.Move : MirStorageCheckPurpose.None);
+        MirOperand value = Save(new MirUse(new MirMove(wrapper.Project(new MirLifetimeProjection()), type.ElementType)), source, semanticRead: semanticRead, semanticMove: true);
         _current.Statements.Add(new MirSetStorageState(wrapper, false, source));
         return value;
     }

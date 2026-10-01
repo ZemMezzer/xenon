@@ -59,7 +59,8 @@ public sealed partial class MirLowerer
     private void ScopedBlockCore(BoundBlockStatement block)
     {
         Block outer = _unwindTarget, outerRethrow = _rethrowTarget;
-        MirOperand? stack = _bound.Symbol.HasStackArrays && !_bound.Body.RequiresSuspensionStateMachine && !block.RetainsStackStorage ? Save(new MirStackSave(_types.PointerTo(BuiltinTypes.Byte)), _functionSource) : null;
+        MirSourceInfo scopeSource = _functionSource with { Scope = _scope };
+        MirOperand? stack = _bound.Symbol.HasStackArrays && !_bound.Body.RequiresSuspensionStateMachine ? Save(new MirStackSave(_types.PointerTo(BuiltinTypes.Byte)), scopeSource) : null;
         var previousPlaces = _ownedPlaces.ToArray();
         var previousArrays = _arrayCreations.ToArray();
         int depth = _exits.Count;
@@ -108,7 +109,7 @@ public sealed partial class MirLowerer
         {
             Block dead = NewBlock();
             foreach (MirLocalId local in cleanup.Locals) dead.Statements.Add(new MirStorageDead(local, _functionSource));
-            if (stack is not null) dead.Statements.Add(new MirStackRestore(stack, _functionSource));
+            if (stack is not null) dead.Statements.Add(new MirStackRestore(stack, scopeSource));
             dead.Terminator = new MirGoto(target.Id, _functionSource);
             return dead;
         }
@@ -117,7 +118,7 @@ public sealed partial class MirLowerer
         {
             foreach ((MirPlace place, FunctionSymbol destructor) in DestructionUnits(Variable(variable), variable.Type))
                 RegisterPlace(place, destructor, initialized);
-            if (variable is LocalVariableSymbol { RequiresArrayCleanupTransfer: true, Type: ArrayTypeSymbol array } &&
+            if (variable is LocalVariableSymbol { Type: ArrayTypeSymbol array } &&
                 TypeFacts.GetCompleteDestructor(array.ElementType) is { } elementDestructor)
                 RegisterPlace(Variable(variable), elementDestructor, false, true);
         }

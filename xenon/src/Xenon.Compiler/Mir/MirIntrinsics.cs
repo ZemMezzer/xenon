@@ -12,8 +12,11 @@ public sealed record MirStaticFieldAddress(FieldSymbol Field, PointerTypeSymbol 
 
 public sealed record MirInitializeDispatch(MirPlace Place, StructTypeSymbol Type, MirSourceInfo Source) : MirStatement(Source);
 
+public enum MirStorageCheckPurpose { None, Read, Move, Destruct, Initialize }
+
 public enum MirIntrinsicKind
 {
+    CoroutineCreate, CoroutineSuspend, CoroutineFree, CoroutineEnd,
     CloneValue,
     AllocateStackArray,
     AllocateHeapArray,
@@ -43,6 +46,7 @@ public sealed record MirIntrinsicCall(MirIntrinsicKind Intrinsic, ImmutableArray
     TypeSymbol ResultType, MirPlace? Destination, MirBlockId Normal, MirBlockId Unwind,
     MirSourceInfo Source) : MirTerminator(Source)
 {
+    public MirStorageCheckPurpose StorageCheck { get; init; }
     public FunctionSymbol? Function { get; init; }
     public TypeSymbol? SubjectType { get; init; }
     public FieldSymbol? Field { get; init; }
@@ -50,6 +54,7 @@ public sealed record MirIntrinsicCall(MirIntrinsicKind Intrinsic, ImmutableArray
     public MirBinaryOperator? Operator { get; init; }
     public bool ReturnsOldValue { get; init; }
     public ulong? FixedArrayLength { get; init; }
+    public bool RetainedInFrame { get; init; }
     public override IEnumerable<MirEdge> Successors => [new(Normal, MirEdgeKind.Normal), new(Unwind, MirEdgeKind.Unwind)];
 }
 

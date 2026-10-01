@@ -16,6 +16,17 @@ public sealed partial class LlvmIrGenerator
             TypeSymbol Pointee(int index) => ((PointerTypeSymbol)operation.Arguments[index].Type).ElementType;
             switch (operation.Intrinsic)
             {
+                case MirIntrinsicKind.CoroutineCreate: return MirCreateCoroutine();
+                case MirIntrinsicKind.CoroutineSuspend:
+                    return ResumeCall("llvm.coro.suspend", _context.Int8Type,
+                        [LLVMValueRef.CreateConstNull(ResumeToken), args[0]], "resumable.suspend.state");
+                case MirIntrinsicKind.CoroutineFree:
+                    return EmitDeallocation(ResumeCall("llvm.coro.free", ResumePointer,
+                        [_coroutineId, args[0]], "resumable.release"));
+                case MirIntrinsicKind.CoroutineEnd:
+                    ResumeCall("llvm.coro.end", _context.Int1Type,
+                        [args[0], LLVMValueRef.CreateConstInt(_context.Int1Type, 0), LLVMValueRef.CreateConstNull(ResumeToken)], "resumable.end");
+                    return default;
                 case MirIntrinsicKind.CloneValue: return EmitCopyValue(args[0], operation.ResultType);
                 case MirIntrinsicKind.ArrayLength:
                     EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, args[0], LLVMValueRef.CreateConstPointerNull(args[0].TypeOf), "array.valid"));
@@ -288,7 +299,7 @@ public sealed partial class LlvmIrGenerator
             LLVMValueRef address;
             if (expression.Intrinsic == MirIntrinsicKind.AllocateStackArray)
             {
-                if (_isResumable && expression.FixedArrayLength is { } fixedLength)
+                if (expression.FixedArrayLength is { } fixedLength)
                     allocationSize = SizeConstant(checked(headerSize + fixedLength * elementBytes));
                 address = _builder.BuildArrayAlloca(_context.Int8Type, allocationSize, $"{((ArrayTypeSymbol)expression.ResultType).ElementType.Name}.stack.array");
                 address.Alignment = Math.Max(4, _getAbiAlignment(((ArrayTypeSymbol)expression.ResultType).ElementType));

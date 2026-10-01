@@ -12,7 +12,7 @@ public sealed partial class MirLowerer
         CancellationToken cancellation = default)
     {
         if (!function.Body.IsResumable) throw new ArgumentException("A resumable body is required.", nameof(function));
-        var builder = new MirLowerer(function, types, locations, cancellation, null, false, null, null);
+        var builder = new MirLowerer(function, types, locations, cancellation, null, false, null, null, null);
         return builder.Initialization((BoundVariableDeclarationStatement)function.Body.Statements[0]);
     }
 

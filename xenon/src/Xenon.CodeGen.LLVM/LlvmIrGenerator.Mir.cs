@@ -269,7 +269,7 @@ public sealed partial class LlvmIrGenerator
                     break;
                 case MirReturn result:
                     if (_mirReturnOverride is { } returnOverride) returnOverride(MirValue(result.Value!));
-                    else if (_isResumable) _builder.BuildBr(_coroutineComplete);
+
                     else if (result.Value is null) _builder.BuildRetVoid();
                     else _builder.BuildRet(MirValue(result.Value));
                     break;
@@ -281,7 +281,7 @@ public sealed partial class LlvmIrGenerator
                 case MirResumeUnwind:
                     if (_exceptionsEnabled) MirRuntime(_getExceptionRuntime().Rethrow, [], "");
                     _builder.BuildUnreachable(); break;
-                case MirSuspend suspend: EmitResumableSuspend(_mirBlocks[suspend.Resume], false); break;
+                case MirSuspend: throw new LlvmCodeGenerationException("Suspend must be transformed before LLVM emission.");
                 case MirThrow thrown: EmitMirThrow(thrown); break;
                 case MirCall call:
                     _mirUnwind = _mirBlocks.TryGetValue(call.Unwind, out LLVMBasicBlockRef callUnwind) ? callUnwind : (LLVMBasicBlockRef?)null;

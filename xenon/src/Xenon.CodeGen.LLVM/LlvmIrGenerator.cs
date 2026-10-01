@@ -367,7 +367,8 @@ public sealed partial class LlvmIrGenerator
             foreach (FieldSymbol field in _referencedStaticFields) DeclareStaticField(field);
             DeclareThreadLocalHelpers();
             EmitClosureEnvironmentDestructors();
-            EmitFunctionBodies([.. implementationFunctions.Select(function => MirLowerer.Lower(function, compilation.SemanticModel.TypeFactory, compilation.SemanticModel.ExpressionLocations))]);
+            EmitFunctionBodies([.. implementationFunctions.Select(function => Xenon.Compiler.Mir.Analysis.MirCoroutineTransform.Lower(
+                Xenon.Compiler.Mir.Analysis.MirReachability.Prune(MirLowerer.Lower(function, compilation.SemanticModel.TypeFactory, compilation.SemanticModel.ExpressionLocations)), compilation.SemanticModel.TypeFactory))]);
             EmitCAbiThunks();
             if (compilation.Options.OutputKind == CompilationOutputKind.Executable)
             {
@@ -2802,7 +2803,7 @@ public sealed partial class LlvmIrGenerator
                 ? llvmFunction.GetParam(function.HasImplicitThis ? 1u : 0u)
                 : default;
 
-            if (resumable) BeginResumableBody();
+            _isResumable = resumable;
 
             uint parameterOffset = (function.HasImplicitThis ? 1u : 0u) +
                 (function.IsCapturingLambda ? 1u : 0u);

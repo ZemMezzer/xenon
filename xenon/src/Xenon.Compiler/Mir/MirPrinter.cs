@@ -12,6 +12,15 @@ public static class MirPrinter
         var output = new StringBuilder();
         output.Append("fn ").Append(function.Symbol.FullName).Append(" -> ").Append(function.ReturnType).Append(" {\n");
         output.Append("  entry ").Append(function.Entry).Append('\n');
+        if (function.Coroutine is { } coroutine)
+        {
+            output.Append("  coroutine handle ").Append(coroutine.Handle).Append(" frame [")
+                .AppendJoin(", ", coroutine.FrameLocals.OrderBy(local => local.Value)).Append("]\n");
+            foreach (var state in coroutine.States.OrderBy(state => state.State))
+                output.Append("  state ").Append(state.State.ToString(CultureInfo.InvariantCulture))
+                    .Append(" suspend ").Append(state.Suspension).Append(" resume ").Append(state.Resume)
+                    .Append(" live [").AppendJoin(", ", state.Live.OrderBy(local => local.Value)).Append("]\n");
+        }
         if (includeSource)
             foreach (MirScope scope in function.Scopes.OrderBy(scope => scope.Id))
                 output.Append("  scope ").Append(scope.Id.ToString(CultureInfo.InvariantCulture)).Append(" parent ")
@@ -105,6 +114,8 @@ public static class MirPrinter
     private static string Statement(MirStatement statement) => statement switch
     {
         MirAssign assign => $"{Place(assign.Destination)} = {RValue(assign.Value)}" +
+            (assign.TransferDestination is { } transfer ? $" [transfer to {Place(transfer)}]" : "") +
+            (assign.IsAggregateInitialization ? " [aggregate.init]" : "") +
             (assign.ReservedMove is { } reserved ? $" [reserve {Place(reserved)}]" : "") +
             (assign.WriteKind == MirWriteKind.Initialize && assign.PreviousValueState == MirPreviousValueState.Live &&
                 assign.ConstructorField is null && !assign.RequiresRuntimeInitializationCheck ? "" :
@@ -131,17 +142,18 @@ public static class MirPrinter
             string.Join(", ", selection.Cases.Select(item => $"{Operand(item.Value)} -> {item.Target}").Append($"otherwise -> {selection.Otherwise}")) + "]",
         MirIntrinsicCall call => $"{(call.Destination is null ? "" : Place(call.Destination) + " = ")}intrinsic {call.Intrinsic}" +
                         $"({string.Join(", ", call.Arguments.Select(Operand))})" +
+            $"{(call.StorageCheck == MirStorageCheckPurpose.None ? "" : " check " + call.StorageCheck)}" +
             $"{(call.Function is null ? "" : " fn " + call.Function.FullName)}{(call.SubjectType is null ? "" : " type " + call.SubjectType)}" +
-            $"{(call.Field is null ? "" : " field " + call.Field.Name)}{(call.FixedArrayLength is null ? "" : " length " + call.FixedArrayLength.Value.ToString(CultureInfo.InvariantCulture))}{(call.Operator is null ? "" : " op " + call.Operator)}{(call.ReturnsOldValue ? " old" : "")} -> {call.Normal} unwind {call.Unwind}",
+            $"{(call.Field is null ? "" : " field " + call.Field.Name)}{(call.FixedArrayLength is null ? "" : " length " + call.FixedArrayLength.Value.ToString(CultureInfo.InvariantCulture))}{(call.Operator is null ? "" : " op " + call.Operator)}{(call.ReturnsOldValue ? " old" : "")}{(call.RetainedInFrame ? " frame" : "")} -> {call.Normal} unwind {call.Unwind}",
         MirCall call => $"{(call.Destination is null ? "" : Place(call.Destination) + " = ")}call {Operand(call.Callee)}" +
-            $"({string.Join(", ", call.Arguments.Select(Operand))}){(call.Receiver is null ? "" : " receiver " + Operand(call.Receiver))}{(call.IsVirtual ? " virtual" : "")}{(call.InterfaceType is null ? "" : " interface " + call.InterfaceType)} -> {call.Normal} unwind {call.Unwind}",
+            $"({string.Join(", ", call.Arguments.Select(Operand))}){(call.Receiver is null ? "" : " receiver " + Operand(call.Receiver))}{(call.IsIndirectReceiver ? " indirect-receiver" : "")}{(call.IsVirtual ? " virtual" : "")}{(call.InterfaceType is null ? "" : " interface " + call.InterfaceType)} -> {call.Normal} unwind {call.Unwind}",
         MirReturn ret => ret.Value is null ? "return" : $"return {Operand(ret.Value)}",
         MirThrow throwing => $"throw {(throwing.Exception is null ? "current" : Operand(throwing.Exception))} unwind {throwing.Unwind}",
         MirResumeUnwind => "resume.unwind",
         MirSuspend suspend => $"suspend{(suspend.Payload is null ? "" : " " + Operand(suspend.Payload))} resume {suspend.Resume}",
         MirAbort => "abort",
         MirUnreachable => "unreachable",
-        MirDrop drop => $"drop{(drop.IsVirtual ? " virtual" : "")} {Place(drop.Place)}{(drop.Destructor is null ? "" : " via " + drop.Destructor.FullName)} -> {drop.Normal} unwind {drop.Unwind}",
+        MirDrop drop => $"drop{(drop.IsExplicit ? " explicit" : "")}{(drop.IsVirtual ? " virtual" : "")} {Place(drop.Place)}{(drop.Destructor is null ? "" : " via " + drop.Destructor.FullName)} -> {drop.Normal} unwind {drop.Unwind}",
         _ => throw new NotSupportedException($"Unknown MIR terminator {terminator.GetType().Name}."),
     };
 }

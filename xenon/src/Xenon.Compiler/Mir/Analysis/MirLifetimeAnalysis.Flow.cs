@@ -31,14 +31,14 @@ public sealed partial class MirLifetimeAnalysis
                         };
                     }
                 }
-                if (!MirLifetimeValue.Carries(assign.Value.Type) && assign.Value is not MirBorrow &&
+                if (!MirLifetimeValue.Carries(assign.Value.Type) && assign.Value.Type is not AtomicTypeSymbol { ElementType: ArrayTypeSymbol } && assign.Value is not MirBorrow &&
                     !(assign.Value.Type is PointerTypeSymbol && target.Kind == MirLocalKind.Temporary))
                     value = MirLifetimeValue.Empty;
                 // Pointers denote storage edges. Expanding their pointee fields
                 // would recursively inline linked cleanup/history structures.
                 if (assign.Value.Type is PointerTypeSymbol)
                     value = value with { Fields = MirLifetimeValue.Empty.Fields, Callables = MirLifetimeValue.Empty.Callables };
-                return Write(assign.Destination, value, state, location, assign.Source, check: assign.IsSemanticWrite || target.Variable is not null);
+                return Write(assign.Destination, value, state, location, assign.Source, check: assign.IsSemanticWrite || target.Variable is not null, aggregateInitialization: assign.IsAggregateInitialization);
             case MirCompleteOperation complete:
                 MirLifetimeValue completed = Operand(complete.Operation, state);
                 state = state with { Pending = state.Pending.RemoveRange(completed.Operations) };
@@ -60,6 +60,27 @@ public sealed partial class MirLifetimeAnalysis
     {
         if (!state.Reachable) return state;
         _location = _terminators[terminator];
+        if (_collect && terminator is MirCall call)
+            foreach (MirOperand argument in call.Arguments)
+                if (argument.Type is ArrayTypeSymbol && !Operand(argument, state).StackArrayBacking.IsEmpty)
+                    Report(call.Source, call.Callee is MirFunctionOperand { Function.OperatorKind: OperatorKind.Resolve }
+                        ? DiagnosticIds.StackArrayReturn : DiagnosticIds.StackArrayPassedAsArgument,
+                        call.Callee is MirFunctionOperand { Function.OperatorKind: OperatorKind.Resolve }
+                            ? "resumable completion cannot retain stack-backed array storage" : "stack array cannot be passed to another function");
+        if (_collect && terminator is MirIntrinsicCall intrinsic)
+        {
+            if (intrinsic.Intrinsic == MirIntrinsicKind.Free && intrinsic.Arguments.Length > 0 &&
+                intrinsic.Arguments[0].Type is ArrayTypeSymbol && !Operand(intrinsic.Arguments[0], state).StackArrayBacking.IsEmpty)
+                Report(intrinsic.Source, DiagnosticIds.StackArrayFree, "stack array cannot be freed");
+            if (intrinsic.Intrinsic is MirIntrinsicKind.CompareExchange or MirIntrinsicKind.CompareExchangeOwned &&
+                intrinsic.Arguments.Length > 2 && !Operand(intrinsic.Arguments[2], state).StackArrayBacking.IsEmpty)
+                Report(intrinsic.Source, DiagnosticIds.StackArrayEscape, "stack array cannot escape into an atomic array handle through compare-exchange");
+            if (intrinsic.Intrinsic == MirIntrinsicKind.Swap && intrinsic.Arguments.Length == 2)
+                for (int index = 0; index < 2; index++)
+                    if (intrinsic.Arguments[index].Type is PointerTypeSymbol { ElementType: AtomicTypeSymbol { ElementType: ArrayTypeSymbol } } &&
+                        intrinsic.Arguments[1 - index] is MirCopy opposite && !Read(opposite.Place.Project(new MirDerefProjection()), state).StackArrayBacking.IsEmpty)
+                        Report(intrinsic.Source, DiagnosticIds.StackArrayEscape, "stack array cannot escape into an atomic array handle through swap");
+        }
         switch (terminator)
         {
             case MirDrop drop:
@@ -91,7 +112,9 @@ public sealed partial class MirLifetimeAnalysis
     {
         if (_collect && MirLifetimeValue.Carries(_function.Symbol.ReturnType))
         {
-            foreach (ValueLifetimeDependency dependency in value.Dependencies)
+            if (!value.StackArrayBacking.IsEmpty && _function.Symbol.ReturnType is ArrayTypeSymbol)
+                Report(source, DiagnosticIds.StackArrayReturn, "cannot return-move this value because its backing storage belongs to the current function's stack frame and cannot outlive the function call; use heap-backed or caller-owned storage");
+            foreach (ValueLifetimeDependency dependency in (_function.Symbol.ReturnType is ArrayTypeSymbol ? value.Dependencies.Except(value.StackArrayBacking) : value.Dependencies))
                 if (dependency.Input is { } input) _returns.Add(input);
                 else if (dependency.LocalOwner is { } owner)
                     Report(source, DiagnosticIds.ValueLifetimeEscape,
