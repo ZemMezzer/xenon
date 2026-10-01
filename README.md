@@ -189,6 +189,12 @@ cmake -P cmake/tests/BuildSystemChecks.cmake
 
 Run the complete managed and end-to-end suite through CMake with `--target xenon-tests`. The .NET solution remains available at `xenon/Xenon.sln`; direct restore/build/test commands also redirect outputs to `build/local/`, so they do not create `bin/` or `obj/` directories in the source tree.
 
+## Compiler internals
+
+Executable bodies pass through verified MIR before LLVM code generation. MIR owns
+control flow, ownership and lifetime analysis, cleanup, exception edges and
+coroutine transformation. See the [architecture audit](docs/mir-architecture.md),
+[MIR dump commands](docs/mir-tooling.md) and [migration checkpoints](docs/mir-migration.md).
 ## License
 
 Copyright 2026 Zem. Xenon is available under the [Apache License 2.0](LICENSE).
