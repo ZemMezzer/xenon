@@ -111,6 +111,37 @@ public sealed class MirDataflowTests
             MirLiveness.Analyze(Body(Block(0, new MirReturn(Int(0), Source))), cancellation.Token));
     }
 
+    [Theory]
+    [InlineData(MirDataflowDirection.Forward)]
+    [InlineData(MirDataflowDirection.Backward)]
+    public void ReversedCleanupChainPropagatesInLinearTransfers(MirDataflowDirection direction)
+    {
+        const int count = 512;
+        var blocks = new List<MirBasicBlock> { Block(0, new MirGoto(new(count - 1), Source)) };
+        blocks.Add(Block(1, new MirReturn(Int(0), Source)));
+        for (int id = 2; id < count; id++) blocks.Add(Block(id, new MirGoto(new(id - 1), Source)));
+        var analysis = new ReachabilityCounter(direction);
+        var result = MirDataflow.Solve(new MirControlFlow(Body([.. blocks])), analysis);
+        Assert.All(result.Input.Values, value => Assert.True(value));
+        Assert.All(result.Output.Values, value => Assert.True(value));
+        Assert.InRange(analysis.Transfers, count, 3 * count);
+        Assert.Equal(0, analysis.Joins);
+    }
+
+    private sealed class ReachabilityCounter(MirDataflowDirection direction) : IMirDataflowAnalysis<bool>
+    {
+        public int Transfers { get; private set; }
+        public int Joins { get; private set; }
+        public MirDataflowDirection Direction => direction;
+        public bool Bottom => false;
+        public bool Boundary(MirControlFlow graph, MirBasicBlock block) => direction == MirDataflowDirection.Forward
+            ? block.Id == graph.Function.Entry : block.Terminator is MirReturn;
+        public bool Join(IEnumerable<bool> states) { Joins++; return states.Any(value => value); }
+        public bool Same(bool left, bool right) => left == right;
+        public bool Statement(MirStatement statement, bool state) => state;
+        public bool Terminator(MirTerminator terminator, bool state) { Transfers++; return state; }
+        public bool Edge(MirBasicBlock source, MirEdge edge, bool state) => state;
+    }
     private sealed class Definitions : IMirDataflowAnalysis<ImmutableHashSet<MirLocalId>>
     {
         public MirDataflowDirection Direction => MirDataflowDirection.Forward;

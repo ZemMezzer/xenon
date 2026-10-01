@@ -31,16 +31,37 @@ public sealed record MirDataflowResult<T>(
 
 public static class MirDataflow
 {
+    // Cleanup continuations are commonly allocated before their predecessors.
+    // RPO priorities avoid repeatedly propagating each fact through a reversed chain.
+    private static List<MirBlockId> ReversePostOrder(MirControlFlow graph, CancellationToken cancellation)
+    {
+        var postorder = new List<MirBlockId>(graph.Reachable.Count);
+        var seen = new HashSet<MirBlockId>();
+        var pending = new Stack<(MirBlockId Block, bool Expanded)>();
+        pending.Push((graph.Function.Entry, false));
+        while (pending.TryPop(out var item))
+        {
+            cancellation.ThrowIfCancellationRequested();
+            if (item.Expanded) { postorder.Add(item.Block); continue; }
+            if (!seen.Add(item.Block)) continue;
+            pending.Push((item.Block, true));
+            foreach (MirEdge edge in graph.Successors[item.Block].Reverse()) pending.Push((edge.Target, false));
+        }
+        postorder.Reverse();
+        return postorder;
+    }
     public static MirDataflowResult<T> Solve<T>(MirControlFlow graph, IMirDataflowAnalysis<T> analysis,
         CancellationToken cancellation = default)
     {
         var input = graph.Blocks.Keys.ToDictionary(id => id, _ => analysis.Bottom);
         var output = graph.Blocks.Keys.ToDictionary(id => id, _ => analysis.Bottom);
         bool forward = analysis.Direction == MirDataflowDirection.Forward;
-        var queue = new Queue<MirBlockId>(graph.Function.Blocks.Select(block => block.Id)
-            .Where(graph.Reachable.Contains));
-        var queued = queue.ToHashSet();
-        while (queue.TryDequeue(out MirBlockId id))
+        var order = ReversePostOrder(graph, cancellation);
+        if (!forward) order.Reverse();
+        var priorities = order.Select((id, index) => (id, index)).ToDictionary(pair => pair.id, pair => pair.index);
+        var queue = new PriorityQueue<MirBlockId, int>(order.Select(id => (id, priorities[id])));
+        var queued = order.ToHashSet();
+        while (queue.TryDequeue(out MirBlockId id, out _))
         {
             cancellation.ThrowIfCancellationRequested();
             queued.Remove(id);
@@ -49,7 +70,7 @@ public static class MirDataflow
                 ? graph.Predecessors[id].Where(edge => graph.Reachable.Contains(edge.Source))
                     .Select(edge => analysis.Edge(graph.Blocks[edge.Source], new(id, edge.Kind), output[edge.Source]))
                 : graph.Successors[id].Select(edge => analysis.Edge(block, edge, input[edge.Target]));
-            T joined = analysis.Join(incoming.Prepend(analysis.Boundary(graph, block)));
+            T joined = Join(incoming.Prepend(analysis.Boundary(graph, block)));
             T transferred = Transfer(block, joined, null, null);
             bool changed = forward
                 ? !analysis.Same(input[id], joined) || !analysis.Same(output[id], transferred)
@@ -61,7 +82,7 @@ public static class MirDataflow
                 ? graph.Successors[id].Select(edge => edge.Target)
                 : graph.Predecessors[id].Select(edge => edge.Source);
             foreach (MirBlockId target in affected)
-                if (graph.Reachable.Contains(target) && queued.Add(target)) queue.Enqueue(target);
+                if (graph.Reachable.Contains(target) && queued.Add(target)) queue.Enqueue(target, priorities[target]);
         }
 
         var before = ImmutableDictionary.CreateBuilder<MirLocation, T>();
@@ -70,6 +91,22 @@ public static class MirDataflow
             Transfer(block, forward ? input[block.Id] : output[block.Id], before, after);
         return new(graph, input.ToImmutableDictionary(), output.ToImmutableDictionary(), before.ToImmutable(), after.ToImmutable());
 
+        T Join(IEnumerable<T> states)
+        {
+            T single = analysis.Bottom;
+            bool found = false;
+            List<T>? multiple = null;
+            foreach (T state in states)
+            {
+                if (analysis.Same(state, analysis.Bottom)) continue;
+                if (!found) { single = state; found = true; continue; }
+                if (EqualityComparer<T>.Default.Equals(single, state)) continue;
+                (multiple ??= [single]).Add(state);
+            }
+            // Bottom is the neutral element; a one-predecessor block can reuse its
+            // immutable state instead of rebuilding every map in every analysis.
+            return multiple is null ? single : analysis.Join(multiple);
+        }
         T Transfer(MirBasicBlock block, T state, ImmutableDictionary<MirLocation, T>.Builder? before,
             ImmutableDictionary<MirLocation, T>.Builder? after)
         {
