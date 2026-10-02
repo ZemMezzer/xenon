@@ -164,7 +164,6 @@ internal sealed class Lexer
         int start = _position;
         int numberBase = 10;
         bool isFloatingPoint = false;
-        bool isSinglePrecision = false;
 
         if (Current == '0' && Lookahead is 'x' or 'X')
         {
@@ -217,36 +216,61 @@ internal sealed class Lexer
                     _position++;
                 }
             }
-
-            if (Current is 'f' or 'F')
-            {
-                isFloatingPoint = true;
-                isSinglePrecision = true;
-                _position++;
-            }
         }
 
+        int bodyEnd = _position;
+        while (IdentifierFacts.TryGetContinue(_text, _position, out int width))
+            _position += width;
+
+        string suffixText = _source.Text[bodyEnd.._position];
+        NumericLiteralSuffix? parsedSuffix = suffixText.ToLowerInvariant() switch
+        {
+            "" => NumericLiteralSuffix.None,
+            "f" => NumericLiteralSuffix.Float,
+            "d" => NumericLiteralSuffix.Double,
+            "u" => NumericLiteralSuffix.UInt,
+            "l" => NumericLiteralSuffix.Long,
+            "ul" => NumericLiteralSuffix.ULong,
+            "n" => NumericLiteralSuffix.NInt,
+            "un" => NumericLiteralSuffix.NUInt,
+            _ => null,
+        };
+        bool floatingSuffix = parsedSuffix is NumericLiteralSuffix.Float or NumericLiteralSuffix.Double;
+        if (parsedSuffix is null || (floatingSuffix && numberBase != 10) ||
+            (isFloatingPoint && parsedSuffix != NumericLiteralSuffix.None && !floatingSuffix))
+        {
+            SyntaxToken invalidSuffix = MakeToken(isFloatingPoint
+                ? SyntaxKind.FloatingPointLiteralToken : SyntaxKind.IntegerLiteralToken,
+                start, leadingDocumentation: leadingDocumentation);
+            Diagnostics.Report(new TextLocation(_source, TextSpan.FromBounds(bodyEnd, _position)),
+                $"invalid numeric suffix '{suffixText}'", DiagnosticIds.InvalidNumericSuffix);
+            return invalidSuffix;
+        }
+
+        NumericLiteralSuffix suffix = parsedSuffix.Value;
+        isFloatingPoint |= floatingSuffix;
         string text = _source.Text[start.._position];
+        string body = _source.Text[start..bodyEnd];
 
         if (isFloatingPoint)
         {
-            string digits = isSinglePrecision ? text[..^1] : text;
+            bool isSinglePrecision = suffix == NumericLiteralSuffix.Float;
             if (isSinglePrecision && float.TryParse(
-                    digits,
+                    body,
                     NumberStyles.Float,
                     CultureInfo.InvariantCulture,
-                    out float single))
+                    out float single) && float.IsFinite(single))
             {
-                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, single, leadingDocumentation);
+                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, single, leadingDocumentation, suffix);
             }
 
             if (!isSinglePrecision && double.TryParse(
-                    digits,
+                    body,
                     NumberStyles.Float,
                     CultureInfo.InvariantCulture,
-                    out double @double))
+                    out double @double) && (suffix == NumericLiteralSuffix.None || double.IsFinite(@double)))
             {
-                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, @double, leadingDocumentation);
+                return MakeToken(SyntaxKind.FloatingPointLiteralToken, start, @double, leadingDocumentation, suffix);
             }
 
             SyntaxToken invalidFloat = MakeToken(SyntaxKind.FloatingPointLiteralToken, start,
@@ -255,10 +279,10 @@ internal sealed class Lexer
             return invalidFloat;
         }
 
-        string integerDigits = numberBase == 10 ? text : text[2..];
+        string integerDigits = numberBase == 10 ? body : body[2..];
         if (TryParseUnsignedInteger(integerDigits, numberBase, out ulong integer))
         {
-            return MakeToken(SyntaxKind.IntegerLiteralToken, start, integer, leadingDocumentation);
+            return MakeToken(SyntaxKind.IntegerLiteralToken, start, integer, leadingDocumentation, suffix);
         }
 
         SyntaxToken invalidInteger = MakeToken(SyntaxKind.IntegerLiteralToken, start,
@@ -504,11 +528,11 @@ internal sealed class Lexer
         Diagnostics.ReportInvalidCharacter(new TextLocation(_source, new TextSpan(_position, 1)), '\0');
 
     private SyntaxToken MakeToken(SyntaxKind kind, int start, object? value = null,
-        string? leadingDocumentation = null)
+        string? leadingDocumentation = null, NumericLiteralSuffix numericSuffix = NumericLiteralSuffix.None)
     {
         var span = TextSpan.FromBounds(start, _position);
         return new SyntaxToken(kind, new TextLocation(_source, span), _source.GetText(span), value,
-            LeadingDocumentation: leadingDocumentation);
+            LeadingDocumentation: leadingDocumentation, NumericSuffix: numericSuffix);
     }
 
     private char Peek(int offset)

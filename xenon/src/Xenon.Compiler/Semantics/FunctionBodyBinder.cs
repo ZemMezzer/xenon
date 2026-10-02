@@ -1421,6 +1421,8 @@ internal sealed partial class FunctionBodyBinder
     private BoundExpression BindLiteralExpression(LiteralExpressionSyntax syntax)
     {
         SyntaxToken token = syntax.LiteralToken;
+        if (NumericLiteralBinding.TryBindExplicit(token, _constants, _diagnostics, out BoundExpression explicitLiteral))
+            return explicitLiteral;
         return token.Kind switch
         {
             SyntaxKind.IntegerLiteralToken when token.Value is ulong value && value <= int.MaxValue =>

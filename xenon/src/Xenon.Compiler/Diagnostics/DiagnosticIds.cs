@@ -13,6 +13,7 @@ public static class DiagnosticIds
     public const string MultiScalarCharacter = "XE0008";
     public const string InvalidUnicodeScalar = "XE0009";
     public const string ReservedRuntimeIdentifier = "XE0010";
+    public const string InvalidNumericSuffix = "XE0011";
     public const string UnexpectedToken = "XE1001";
     public const string UsingDirectiveOrder = "XE1002";
     public const string DuplicateModifier = "XE1003";

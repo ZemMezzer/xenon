@@ -1387,6 +1387,9 @@ internal sealed class SemanticAnalyzer
         switch (syntax)
         {
             case LiteralExpressionSyntax literal:
+                if (NumericLiteralBinding.TryBindExplicit(literal.LiteralToken, _constants, _diagnostics,
+                    out BoundExpression explicitLiteral))
+                    return explicitLiteral;
                 return new BoundLiteralExpression(GetConstantLiteralValue(literal), GetConstantExpressionType(literal));
             case ParenthesizedExpressionSyntax parenthesized:
                 return BindConstantExpression(parenthesized.Expression, context);

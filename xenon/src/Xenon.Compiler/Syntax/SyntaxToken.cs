@@ -8,4 +8,5 @@ public sealed record SyntaxToken(
     string Text,
     object? Value = null,
     bool IsMissing = false,
-    string? LeadingDocumentation = null);
+    string? LeadingDocumentation = null,
+    NumericLiteralSuffix NumericSuffix = NumericLiteralSuffix.None);
