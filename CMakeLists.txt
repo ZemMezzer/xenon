@@ -56,6 +56,7 @@ if(NOT EXISTS "${XENON_LLVM_SOURCE_DIRECTORY}/llvm/CMakeLists.txt")
 endif()
 
 find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
+# Run dotnet commands from xenon/ so SDK selection honors xenon/global.json.
 
 set(_xenon_llvm_cmake_args
   -DCMAKE_BUILD_TYPE:STRING=Release
@@ -124,7 +125,7 @@ add_custom_command(
     "-p:XenonRootBuildDirectory=${XENON_PLATFORM_BUILD_DIRECTORY}"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_xenon_restore_stamp}"
   DEPENDS ${_xenon_restore_inputs}
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/xenon"
   COMMENT "Restoring Xenon .NET dependencies"
   VERBATIM)
 add_custom_target(xenon-restore DEPENDS "${_xenon_restore_stamp}")
@@ -145,7 +146,7 @@ add_custom_target(xenon-native ALL
     $<$<BOOL:${XENON_VERSION}>:-p:XenonVersion=${XENON_VERSION}>
   DEPENDS llvm-static xenon-restore
   BYPRODUCTS "${XENON_PUBLISH_DIRECTORY}/${XENON_EXECUTABLE_NAME}"
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/xenon"
   COMMENT "Publishing Xenon NativeAOT (${XENON_DOTNET_RID}) with static LLVM"
   USES_TERMINAL
   VERBATIM)
@@ -177,7 +178,7 @@ add_custom_target(xenon-tests
   COMMAND "${DOTNET_EXECUTABLE}" test "${CMAKE_SOURCE_DIR}/xenon/Xenon.sln"
     --configuration Release
     "-p:XenonRootBuildDirectory=${XENON_TEST_BUILD_DIRECTORY}"
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/xenon"
   COMMENT "Running Xenon managed and end-to-end tests"
   USES_TERMINAL
   VERBATIM)

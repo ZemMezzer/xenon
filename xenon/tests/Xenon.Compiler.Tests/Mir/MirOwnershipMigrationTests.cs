@@ -195,4 +195,30 @@ public sealed class MirOwnershipMigrationTests
         var lowered = MirLowerer.Lower(function with { Body = Rewrite(function.Body) }, compilation.TypeFactory);
         Assert.Equal(MirPrinter.Dump(original), MirPrinter.Dump(lowered));
     }
+
+    [Theory]
+    [InlineData("int")]
+    [InlineData("Item")]
+    public void MovedArrayBackingSurvivesNormalInnerScopeExit(string element)
+    {
+        var compilation = Compilation.Create(SourceText.From($$"""
+            namespace Migration;
+            struct Item { public int Value; public ~Item() {} }
+            void F() { {{element}}[] outer; { {{element}}[] inner = {{element}}[2]; outer = move inner; } }
+            """));
+        Assert.Empty(compilation.Diagnostics);
+        var function = compilation.SemanticModel.Functions.Single(function => function.Symbol.Name == "F");
+        var mir = MirLowerer.Lower(function, compilation.TypeFactory);
+        var locals = mir.Locals.ToDictionary(local => local.Id);
+        int innerScope = mir.Locals.Single(local => local.Name == "inner").Source.Scope;
+        int outerScope = mir.Locals.Single(local => local.Name == "outer").Source.Scope;
+        var restores = mir.Blocks.SelectMany(block => block.Statements).OfType<MirStackRestore>().ToArray();
+
+        Assert.DoesNotContain(restores, restore =>
+            locals[Assert.IsType<MirCopy>(restore.Token).Place.Local].Source.Scope == innerScope);
+        Assert.Contains(restores, restore =>
+            locals[Assert.IsType<MirCopy>(restore.Token).Place.Local].Source.Scope == outerScope);
+        Assert.All(restores, restore => Assert.Equal(
+            locals[Assert.IsType<MirCopy>(restore.Token).Place.Local].Source.Scope, restore.Source.Scope));
+    }
 }

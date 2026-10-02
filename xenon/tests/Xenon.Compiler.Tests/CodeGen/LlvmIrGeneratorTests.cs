@@ -269,7 +269,10 @@ public sealed class LlvmIrGeneratorTests
         Assert.Equal(string.Empty, portable.Cpu);
         Assert.Equal(string.Empty, portable.Features);
         Assert.False(string.IsNullOrWhiteSpace(native.Cpu));
-        Assert.False(string.IsNullOrWhiteSpace(native.Features));
+        Assert.Equal(LlvmTargetPlatform.HostCpuName, native.Cpu);
+        // LLVM can describe the host through its CPU name alone (Apple Silicon
+        // has no additional feature string in LLVM 20).
+        Assert.Equal(LlvmTargetPlatform.HostCpuFeatures, native.Features);
     }
 
     [Fact]

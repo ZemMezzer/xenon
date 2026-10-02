@@ -153,10 +153,6 @@ public sealed class MirHandleLifetimeTests
 
     private const string TaskProtocol = """
         namespace Program;
-        extern void Sleep(uint milliseconds);
-        extern void* CreateThread(void* threadAttributes, nuint stackSize,
-            function uint(void*)* startAddress, void* parameter, uint creationFlags, uint* threadId);
-        extern bool CloseHandle(void* handle);
         struct TaskState<T> {
             public int Status;
             public storage<T> Value;
@@ -193,36 +189,6 @@ public sealed class MirHandleLifetimeTests
                 task.State->HasContinuation = true;
                 return false;
             }
-            public static Task<int> Yield() {
-                Task<int> task = Task<int>();
-                TaskScheduler.PendingYield = task;
-                void* thread = CreateThread(null, cast<nuint>(0), &YieldThread, null, cast<uint>(0), null);
-                if (thread != null) { CloseHandle(thread); }
-                return task;
-            }
-            public static Task<int> WaitForSeconds(float seconds) {
-                Task<int> task = Task<int>();
-                TaskScheduler.PendingDelay = task;
-                TaskScheduler.DelayMilliseconds = cast<uint>(seconds * 1000.0f);
-                void* thread = CreateThread(null, cast<nuint>(0), &DelayThread, null, cast<uint>(0), null);
-                if (thread != null) { CloseHandle(thread); }
-                return task;
-            }
-        }
-        static struct TaskScheduler {
-            public static Task<int> PendingYield;
-            public static Task<int> PendingDelay;
-            public static uint DelayMilliseconds;
-        }
-        uint YieldThread(void* context) {
-            Sleep(cast<uint>(1));
-            resolve(TaskScheduler.PendingYield, 0);
-            return cast<uint>(0);
-        }
-        uint DelayThread(void* context) {
-            Sleep(TaskScheduler.DelayMilliseconds);
-            resolve(TaskScheduler.PendingDelay, 0);
-            return cast<uint>(0);
         }
         """;
 }

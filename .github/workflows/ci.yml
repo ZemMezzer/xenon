@@ -14,9 +14,14 @@ permissions:
 
 jobs:
   managed:
-    name: Managed and end-to-end tests
-    runs-on: windows-2022
-    timeout-minutes: 45
+    name: Managed and end-to-end tests (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    # MIR ownership regressions compile large cleanup graphs in both profiles.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, macos-15]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -29,8 +34,9 @@ jobs:
       - name: Check platform mapping and XML escaping
         run: cmake -P cmake/tests/BuildSystemChecks.cmake
 
-      - name: Build and test moved solution
-        run: dotnet test xenon/Xenon.sln --configuration Release
+      - name: Build and test solution
+        working-directory: xenon
+        run: dotnet test Xenon.sln --configuration Release
 
       - name: Reject source-local build artifacts
         shell: pwsh
@@ -44,6 +50,8 @@ jobs:
     name: Static LLVM + NativeAOT (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
     strategy:
       fail-fast: false
       matrix:

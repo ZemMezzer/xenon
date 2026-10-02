@@ -5,7 +5,7 @@ namespace Xenon.Compiler.Mir.Lowering;
 
 public sealed partial class MirLowerer
 {
-    private sealed record LexicalCleanup(List<TemporaryGuard> Guards, MirLocalId[] Locals, MirOperand? Stack);
+    private sealed record LexicalCleanup(List<TemporaryGuard> Guards, MirLocalId[] Locals, MirOperand? Stack, MirSourceInfo Source);
     private readonly Dictionary<MirPlace, TemporaryGuard> _ownedPlaces = [];
     private readonly List<TemporaryGuard> _valueGuards = [];
     private bool _parametersRegistered;
@@ -83,7 +83,7 @@ public sealed partial class MirLowerer
             PrepareArrayHistory(guard, creation.ArrayType, Source(creation));
             _arrayCreations[creation] = guard;
         }
-        var cleanup = new LexicalCleanup(guards, declarations.Where(d => !_bound.Body.IsResumable || !ReferenceEquals(d, _bound.Body.Statements[0])).Select(d => Variable(d.Variable).Local).ToArray(), stack);
+        var cleanup = new LexicalCleanup(guards, declarations.Where(d => !_bound.Body.IsResumable || !ReferenceEquals(d, _bound.Body.Statements[0])).Select(d => Variable(d.Variable).Local).ToArray(), stack, scopeSource);
         if (guards.Count == 0 && cleanup.Locals.Length == 0 && stack is null)
         {
             foreach (BoundStatement child in block.Statements) Statement(child);

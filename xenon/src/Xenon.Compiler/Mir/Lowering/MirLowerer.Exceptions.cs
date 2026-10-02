@@ -55,7 +55,9 @@ public sealed partial class MirLowerer
                     _current = after;
                     foreach (MirLocalId local in cleanup.Locals)
                         _current.Statements.Add(new MirStorageDead(local, _functionSource));
-                    if (cleanup.Stack is { } stack) _current.Statements.Add(new MirStackRestore(stack, _functionSource));
+                    // Backing-retention analysis identifies the scope being exited,
+                    // including when return/break exits several scopes at once.
+                    if (cleanup.Stack is { } stack) _current.Statements.Add(new MirStackRestore(stack, cleanup.Source));
                 }
                 if (action.Record is { } record)
                 {
