@@ -3,7 +3,7 @@
 **A statically typed, LLVM-backed language for building native applications and libraries.**
 
 [![Tests](https://img.shields.io/github/actions/workflow/status/ZemMezzer/xenon/ci.yml?branch=main&label=tests)](https://github.com/ZemMezzer/xenon/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/ZemMezzer/xenon?display_name=tag&sort=semver&label=release)](https://github.com/ZemMezzer/xenon/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/ZemMezzer/xenon?display_name=tag&sort=date&label=release)](https://github.com/ZemMezzer/xenon/releases/latest)
 [![Documentation](https://img.shields.io/badge/documentation-xenonlang.com-2563eb)](https://xenonlang.com/)
 [![License](https://img.shields.io/badge/license-Apache_2.0-D22128)](LICENSE)
 
