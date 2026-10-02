@@ -30,6 +30,8 @@ jobs:
     needs: validate-version
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
     permissions:
       contents: read
     strategy:

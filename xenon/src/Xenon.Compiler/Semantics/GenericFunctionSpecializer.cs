@@ -111,7 +111,11 @@ internal sealed class GenericFunctionSpecializer
 
         typeArguments = typeArguments.Select(_types.Intern).ToImmutableArray();
         var key = new GenericInstantiationKey(definition, typeArguments);
-        if (_symbols.TryGetValue(key, out FunctionSymbol? existing)) return existing;
+        if (_symbols.TryGetValue(key, out FunctionSymbol? existing))
+        {
+            existing.AddSpecializationLocation(location);
+            return existing;
+        }
 
         TypeSymbol returnType = Substitute(definition.ReturnType, substitutions, location);
         ImmutableArray<ParameterSymbol> parameters = definition.Parameters.Select(parameter =>
@@ -125,6 +129,7 @@ internal sealed class GenericFunctionSpecializer
             isExtern: definition.IsExtern, isExport: definition.IsExport, isDefinition: true,
             origin: SymbolOrigin.CompilerGenerated, documentation: definition.Documentation);
         specialized.SetGenericSpecialization(definition, typeArguments);
+        specialized.AddSpecializationLocation(location);
         specialized.SetReceiverMoveEffects(definition.ReceiverMoveEffects);
         specialized.SetReferenceReturnOrigins(definition.ReferenceReturnOrigins);
         specialized.ResultLifetimeDependencies = definition.ResultLifetimeDependencies;

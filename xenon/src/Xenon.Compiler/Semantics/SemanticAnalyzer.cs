@@ -147,6 +147,8 @@ internal sealed class SemanticAnalyzer
             var binder = new FunctionBodyBinder(symbol, scope, _diagnostics, _constants, _semanticInfo,
                 genericSpecializer, _cancellationToken);
             BoundBlockStatement boundBody = binder.BindBody(body);
+            MirSemanticDiagnostics.InferReceiverMoves([new BoundFunction(symbol, boundBody)],
+                _typeFactory, _diagnostics, binder.ExpressionLocations, _cancellationToken);
             // Generic definitions are checked now, but only concrete specializations may
             // enter the emitted function set.
             if (symbol.IsGenericDefinition)
@@ -163,11 +165,14 @@ internal sealed class SemanticAnalyzer
         StabilizeCallableSummaries();
         BindSpecializedStructFunctions(functions, genericSpecializer);
         ValidateConversionPairs();
-        ValidateCallableMoveEffects();
         functions.AddRange(genericSpecializer.Functions);
         functions.AddRange(_synthesizedFunctions);
         functions.AddRange(_semanticInfo.LambdaFunctions);
         AddGeneratedDestructorFunctions(functions);
+        foreach (var function in functions)
+            if (function.Symbol.DiagnosticExpressionLocations is { } specializedLocations)
+                foreach (var entry in specializedLocations) _expressionLocations.TryAdd(entry.Key, entry.Value);
+        MirDiagnosticReporter.RegisterCallSites(functions, _expressionLocations);
         ValidateRawFunctionPointerSignatures();
 
         // Binding generic definitions may only produce preliminary cleanup metadata.
@@ -175,18 +180,22 @@ internal sealed class SemanticAnalyzer
         foreach (BoundFunction function in functions)
             FunctionCleanupAnalyzer.Recompute(function.Symbol, function.Body);
 
-        // Lifecycle/accessor checks need all bodies, including declarations that
-        // occur after the readonly caller and synthesized field initializers.
-        var bodies = functions.ToDictionary(bound => bound.Symbol, bound => bound.Body);
-        ImmutableArray<StructTypeSymbol> types = [.. _structSymbols.Values];
-        foreach ((FunctionSymbol symbol, BlockStatementSyntax body, _) in _functionBodies)
-        {
-            _cancellationToken.ThrowIfCancellationRequested();
-            if (symbol.IsGenericDefinition) continue;
-            if (symbol.IsReadonly)
-                new ReadonlyEffectAnalyzer(symbol, _diagnostics, _expressionLocations,
-                    body.OpenBraceToken.Location, bodies, types, _cancellationToken).Analyze(bodies[symbol]);
-        }
+        MirSemanticDiagnostics.InferReceiverMoves(functions, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        ValidateCallableMoveEffects();
+        var ownershipBodies = functions.Concat(_genericImplementations.ToImmutable().Functions
+            .Where(pair => pair.Key.IsSourceDefined && pair.Value.PortableBody is not null)
+            .Select(pair => new BoundFunction(pair.Key, pair.Value.PortableBody!))).ToArray();
+        MirLifetimeAuthorityDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirArrayDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirStorageDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirSemanticDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        MirBorrowDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+
+        // Lifecycle and accessor effects use the same executable MIR as other analyses.
+        MirReadonlyDiagnostics.Analyze(functions,
+            _functionBodies.Where(item => !item.Symbol.IsGenericDefinition && item.Symbol.IsReadonly)
+                .Select(item => (item.Symbol, item.Body.OpenBraceToken.Location)),
+            [.. _structSymbols.Values], _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
 
         if (!_diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
             ValueLifetimeAnalyzer.Analyze(functions.ToImmutable(), _genericImplementations.ToImmutable(),
@@ -194,7 +203,7 @@ internal sealed class SemanticAnalyzer
 
         RecordDeclarations(_globalNamespace);
         return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), _diagnostics.ToImmutableArray(),
-            _syntaxTrees, _semanticInfo, _genericImplementations.ToImmutable(), _constants.RequiresTargetLayout);
+            _syntaxTrees, _semanticInfo, _genericImplementations.ToImmutable(), _constants.RequiresTargetLayout, expressionLocations: _expressionLocations);
     }
 
     private void StabilizeCallableSummaries()
@@ -205,13 +214,17 @@ internal sealed class SemanticAnalyzer
             PropagateGenericStructCallableSummaries();
             string before = GetCallableSummaryFingerprint();
             var diagnostics = new DiagnosticBag();
+            var summaryBodies = new List<BoundFunction>();
+            var summaryLocations = new Dictionary<BoundExpression, TextLocation>(ReferenceEqualityComparer.Instance);
             foreach ((FunctionSymbol symbol, BlockStatementSyntax body, FileSymbolScope scope) in _functionBodies)
             {
                 _cancellationToken.ThrowIfCancellationRequested();
                 var binder = new FunctionBodyBinder(symbol, scope, diagnostics, _constants,
                     new SemanticInfoStore(), _cancellationToken);
-                _ = binder.BindBody(body);
+                summaryBodies.Add(new BoundFunction(symbol, binder.BindBody(body)));
+                foreach (var entry in binder.ExpressionLocations) summaryLocations[entry.Key] = entry.Value;
             }
+            MirSemanticDiagnostics.InferReceiverMoves(summaryBodies, _typeFactory, diagnostics, summaryLocations, _cancellationToken);
             PropagateGenericStructCallableSummaries();
             lastDiagnostics = diagnostics;
             string after = GetCallableSummaryFingerprint();

@@ -147,11 +147,11 @@ public sealed class CharPrimitiveTests
         Compilation compilation = Compile("""
             namespace Unicode;
             export char Echo(char value) { return value; }
-            uint Emoji() { return cast<uint>('😀'); }
-            nuint CharSize() { return sizeof(char); }
+            export uint Emoji() { return cast<uint>('😀'); }
+            export nuint CharSize() { return sizeof(char); }
             bool Ordered() { return 'A' < 'Ж' && '😀' == '😀'; }
             """);
-        var target = LlvmTargetOptions.CreateHost();
+        var target = LlvmTargetOptions.CreateHost(optimizationLevel: 1);
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, target, "unicode-char");
 
         string exportStorage = target.Triple.Contains("windows", StringComparison.OrdinalIgnoreCase)
@@ -175,12 +175,12 @@ public sealed class CharPrimitiveTests
         Compilation compilation = Compile("""
             namespace Unicode;
             struct Layout { public byte Prefix; public char Value; }
-            uint Size() { return cast<uint>(sizeof(char)); }
-            uint Alignment() { return cast<uint>(alignof(char)); }
-            uint Offset() { return cast<uint>(offsetof(Layout, Value)); }
+            export uint Size() { return cast<uint>(sizeof(char)); }
+            export uint Alignment() { return cast<uint>(alignof(char)); }
+            export uint Offset() { return cast<uint>(offsetof(Layout, Value)); }
             """);
 
-        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple),
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple, OptimizationLevel: 1),
             "unicode-char-layout");
 
         Assert.Equal(3, Count(ir, "ret i32 4"));

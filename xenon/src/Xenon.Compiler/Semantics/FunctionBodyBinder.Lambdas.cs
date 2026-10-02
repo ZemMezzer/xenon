@@ -66,66 +66,24 @@ internal sealed partial class FunctionBodyBinder
         // Captures are evaluated when the lambda argument is evaluated, even though
         // its signature cannot be contextualized until overload resolution finishes.
         // Preparing them here preserves source-order ownership and borrow effects.
-        ExpressionFlow? before = _argumentFlowTransactions.Count == 0
-            ? null : CaptureExpressionFlow();
-        ArgumentFlowTransaction? transaction = _argumentFlowTransactions.TryPeek(out var activeTransaction)
+
+        ArgumentBindingTransaction? transaction = _argumentBindingTransactions.TryPeek(out var activeTransaction)
             ? activeTransaction : null;
-        var arrayCleanupBefore = new Dictionary<LocalVariableSymbol, bool>();
-        foreach (LambdaCaptureSyntax capture in syntax.Captures)
-            if (_scope.Lookup(capture.IdentifierToken.Text) is LocalVariableSymbol
-                { Type: ArrayTypeSymbol } variable)
-                arrayCleanupBefore.TryAdd(variable, variable.RequiresArrayCleanupTransfer);
-        Dictionary<MovePlace, TextLocation>? loopSites = _loopMoveContexts.TryPeek(out var loopContext)
-            ? loopContext.Sites
-            : null;
-        HashSet<MovePlace>? loopSitesBefore = loopSites?.Keys.ToHashSet();
-        PrepareLambdaCaptures(syntax);
-        if (before is not null)
+        ImmutableArray<PreparedLambdaCapture> prepared = PrepareLambdaCaptures(syntax);
+        if (transaction is not null)
         {
             _deferredLambdaArtifactRoots[syntax] = artifactRoot;
-            transaction ??= _argumentFlowTransactions.Peek();
-            var borrows = ImmutableArray.CreateBuilder<ArgumentFlowTransaction.DeferredCaptureBorrow>();
-            foreach (PreparedLambdaCapture capture in _preparedLambdaCaptures[syntax])
-                if (capture.Syntax.CaptureKind is LambdaCaptureKind.MutableBorrow or LambdaCaptureKind.ReadonlyBorrow &&
-                    TryGetBorrowPlace(capture.Initializer, out BorrowPlace place, out _))
-                    borrows.Add(new ArgumentFlowTransaction.DeferredCaptureBorrow(
-                        place, capture.Syntax.CaptureKind == LambdaCaptureKind.ReadonlyBorrow));
-            KeyValuePair<MovePlace, TextLocation>[] addedLoopSites = loopSites is null
-                ? []
-                : loopSites.Where(entry => !loopSitesBefore!.Contains(entry.Key)).ToArray();
-            ImmutableArray<PreparedLambdaCapture> prepared = _preparedLambdaCaptures[syntax];
-            void RollbackAuxiliaryState(
-                IReadOnlyDictionary<MovePlace, TextLocation?> supersedingMutations)
+            void RollbackAuxiliaryState()
             {
-                foreach (var entry in arrayCleanupBefore)
-                {
-                    KeyValuePair<MovePlace, TextLocation?>? latest = supersedingMutations
-                        .Where(candidate => ReferenceEquals(candidate.Key.RootVariable, entry.Key))
-                        .Select(candidate => (KeyValuePair<MovePlace, TextLocation?>?)candidate)
-                        .LastOrDefault();
-                    entry.Key.RequiresArrayCleanupTransfer = latest?.Value is not null || entry.Value;
-                }
-                if (loopSites is not null)
-                    foreach (var entry in addedLoopSites)
-                        if (loopSites.TryGetValue(entry.Key, out TextLocation current) && current.Equals(entry.Value))
-                        {
-                            KeyValuePair<MovePlace, TextLocation?>? latest = supersedingMutations
-                                .Where(candidate => PlacesOverlap(candidate.Key, entry.Key))
-                                .Select(candidate => (KeyValuePair<MovePlace, TextLocation?>?)candidate)
-                                .LastOrDefault();
-                            if (latest?.Value is { } moveLocation)
-                                loopSites[entry.Key] = moveLocation;
-                            else
-                                loopSites.Remove(entry.Key);
-                        }
                 foreach (PreparedLambdaCapture capture in prepared)
-                    _argumentFlowCandidates.Remove(capture.Initializer);
+                    _argumentBindingCandidates.Remove(capture.Initializer);
                 _preparedLambdaCaptures.Remove(syntax);
                 _deferredLambdaArtifactRoots.Remove(syntax);
                 _deferredLambdaCaptureTransactions.Remove(syntax);
             }
-            transaction.RecordDeferredLambdaCapture(
-                syntax, before, CaptureExpressionFlow(), borrows.ToImmutable(), RollbackAuxiliaryState);
+            var moves = prepared.Where(capture => capture.Syntax.CaptureKind == LambdaCaptureKind.Move)
+                .Select(capture => new MovePlace(capture.Source, [])).ToImmutableArray();
+            transaction.RecordDeferredLambdaCapture(syntax, moves, RollbackAuxiliaryState);
             _deferredLambdaCaptureTransactions[syntax] = transaction;
         }
         return new BoundUnboundLambdaExpression(syntax);
@@ -197,7 +155,7 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
         _deferredLambdaCaptureTransactions.TryGetValue(syntax,
-            out ArgumentFlowTransaction? captureTransaction);
+            out ArgumentBindingTransaction? captureTransaction);
         captureTransaction?.EnsureTypeFactorySnapshot(_fileScope.TypeFactory);
         SemanticInfoStore.Snapshot? semanticSnapshot = captureTransaction is null
             ? null : _semanticInfo.CaptureSnapshot();
@@ -246,7 +204,6 @@ internal sealed partial class FunctionBodyBinder
         foreach (CaptureVariableSymbol capture in function.LambdaCaptures)
         {
             binder._scope.TryDeclare(capture);
-            binder._definitelyAssigned.Add(capture);
         }
         BoundBlockStatement body = binder.BindBody(syntax.Body);
         _semanticInfo.LambdaFunctions.Add(new BoundFunction(function, body));
@@ -276,11 +233,9 @@ internal sealed partial class FunctionBodyBinder
     private void RollbackRejectedDeferredLambda(LambdaExpressionSyntax syntax)
     {
         if (!_deferredLambdaCaptureTransactions.TryGetValue(syntax,
-                out ArgumentFlowTransaction? transaction))
+                out ArgumentBindingTransaction? transaction))
             return;
-        ExpressionFlow flow = transaction.RollbackUnmaterializedLambdaCaptures(
-            CaptureExpressionFlow(), _diagnostics, OnTransactionalDiagnosticRemoved);
-        RestoreExpressionFlow(flow);
+        transaction.RollbackUnmaterializedLambdaCaptures();
     }
 
     private ImmutableArray<PreparedLambdaCapture> PrepareLambdaCaptures(LambdaExpressionSyntax syntax)
@@ -335,10 +290,6 @@ internal sealed partial class FunctionBodyBinder
             {
                 initializer = ContextualizeConversion(sourceExpression, storageType,
                     capture.IdentifierToken.Location);
-                if (capture.CaptureKind is LambdaCaptureKind.MutableBorrow or LambdaCaptureKind.ReadonlyBorrow &&
-                    TryGetBorrowPlace(initializer, out BorrowPlace place, out LocalVariableSymbol? alias))
-                    ValidateBorrowCreation(place, capture.CaptureKind == LambdaCaptureKind.ReadonlyBorrow,
-                        alias, capture.IdentifierToken.Location);
             }
             captures.Add(new PreparedLambdaCapture(capture, source, storageType, initializer));
         }
@@ -484,7 +435,6 @@ internal sealed partial class FunctionBodyBinder
         foreach (CaptureVariableSymbol capture in function.LambdaCaptures)
         {
             binder._scope.TryDeclare(capture);
-            binder._definitelyAssigned.Add(capture);
         }
         BoundBlockStatement body = binder.BindBody(syntax.Body);
         bool applicable = binder._lambdaProbeReturnsCompatible &&

@@ -1,9 +1,11 @@
-using Xenon.Compiler.Semantics.Binding;
+using System.Collections.Immutable;
+using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics.Symbols;
+using Xenon.Compiler.Text;
 
-namespace Xenon.Compiler.Semantics;
+namespace Xenon.Compiler.Mir.Analysis;
 
-internal sealed partial class ReadonlyEffectAnalyzer
+internal sealed partial class MirReadonlyAnalysis
 {
     // Bound the finite partition; large or dynamically sized arrays retain the
     // wildcard abstraction. Unknown indices join all elements of a partition.
@@ -23,14 +25,14 @@ internal sealed partial class ReadonlyEffectAnalyzer
         public int Index { get; } = index;
     }
 
-    private void InitializeArrayElements(BoundArrayCreationExpression allocation)
+    private void InitializeArrayElements(MirIntrinsicCall allocation, MirEffectSite site)
     {
-        object root = Root(allocation);
+        object root = Root(site);
         if (!_arrays.TryGetValue(root, out var array))
         {
             var lengths = new List<int>();
             long count = 1;
-            foreach (BoundExpression dimension in allocation.Dimensions)
+            foreach (MirOperand dimension in allocation.Arguments)
             {
                 if (ConstantIndex(dimension) is not int length || length < 0 || length > MaxTrackedArrayElements) return;
                 count *= length;
@@ -42,23 +44,10 @@ internal sealed partial class ReadonlyEffectAnalyzer
         }
         array.Repeated |= _loopDepth != 0;
         foreach (ArrayElement element in array.Elements)
-            StoreValue([element], Read([root], allocation.ElementType), allocation.ElementType);
+            StoreValue([element], Read([root], ((ArrayTypeSymbol)allocation.ResultType).ElementType), ((ArrayTypeSymbol)allocation.ResultType).ElementType);
     }
 
-    private static int? ConstantIndex(BoundExpression expression)
-    {
-        if (expression is BoundCastExpression cast) return ConstantIndex(cast.Expression);
-        if (expression is not BoundLiteralExpression literal) return null;
-        return literal.Value switch
-        {
-            int value => value,
-            long value when value is >= int.MinValue and <= int.MaxValue => (int)value,
-            ulong value when value <= int.MaxValue => (int)value,
-            _ => null,
-        };
-    }
-
-    private HashSet<object> ArrayElements(IEnumerable<object> arrays, IReadOnlyList<BoundExpression>? indices = null)
+    private HashSet<object> ArrayElements(IEnumerable<object> arrays, IReadOnlyList<MirOperand>? indices = null)
     {
         HashSet<object> result = [];
         foreach (object origin in arrays)

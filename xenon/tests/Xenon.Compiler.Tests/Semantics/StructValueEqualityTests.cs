@@ -1,3 +1,4 @@
+using Xenon.Compiler.Mir;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
@@ -101,15 +102,13 @@ public sealed class StructValueEqualityTests
         BoundFunction constructor = Assert.Single(compilation.SemanticModel.Functions, function =>
             function.Symbol.FunctionKind == FunctionKind.Constructor &&
             function.Symbol.ContainingType?.Name == "Holder");
-        BoundAssignmentExpression[] normal = Assignments(constructor.Body)
-            .Where(assignment => assignment.Target is BoundMemberAccessExpression { Field.Name: "Normal" })
-            .ToArray();
-        BoundAssignmentExpression[] atomic = Assignments(constructor.Body)
-            .Where(assignment => assignment.Target is BoundMemberAccessExpression { Field.Name: "Atomic" })
-            .ToArray();
-
-        Assert.Equal([true, true, false], normal.Select(assignment => assignment.IsInitialization));
-        Assert.Equal([true, true, false], atomic.Select(assignment => assignment.IsInitialization));
+        MirFunction mir = compilation.GetMirFunctions(lowered: false).Single(function => ReferenceEquals(function.Symbol, constructor.Symbol));
+        MirAssign[] normal = mir.Blocks.SelectMany(block => block.Statements).OfType<MirAssign>()
+            .Where(assign => assign.IsSemanticWrite && assign.ConstructorField?.Name == "Normal").ToArray();
+        MirIntrinsicCall[] atomic = mir.Blocks.Select(block => block.Terminator).OfType<MirIntrinsicCall>()
+            .Where(operation => operation.Intrinsic is MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicExchange).ToArray();
+        Assert.Equal([true, true, false], normal.Select(assignment => assignment.WriteKind == MirWriteKind.Initialize));
+        Assert.Equal([true, true, false], atomic.Select(assignment => assignment.Intrinsic == MirIntrinsicKind.AtomicInitialize));
     }
 
     [Theory]
@@ -137,8 +136,15 @@ public sealed class StructValueEqualityTests
         BoundFunction constructor = Assert.Single(compilation.SemanticModel.Functions, function =>
             function.Symbol.FunctionKind == FunctionKind.Constructor &&
             function.Symbol.ContainingType?.Name == "Holder");
-        Assert.Single(Assignments(constructor.Body).Where(assignment =>
-            assignment.RequiresRuntimeInitializationCheck));
+        MirFunction mir = compilation.GetMirFunctions(lowered: false).Single(function => ReferenceEquals(function.Symbol, constructor.Symbol));
+        if (body.Contains("Atomic", StringComparison.Ordinal))
+            Assert.Single(mir.Blocks.Select(block => block.Terminator).OfType<MirIntrinsicCall>()
+                .Where(operation => operation.Intrinsic is MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicExchange)
+                .GroupBy(operation => operation.Source.Location)
+                .Where(group => group.Select(operation => operation.Intrinsic).Distinct().Count() == 2));
+        else
+            Assert.Single(mir.Blocks.SelectMany(block => block.Statements).OfType<MirAssign>()
+                .Where(assignment => assignment.IsSemanticWrite && assignment.RequiresRuntimeInitializationCheck));
     }
 
     [Fact]

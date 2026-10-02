@@ -19,7 +19,7 @@ public sealed class SemanticModel
         ImmutableArray<BoundFunction> functions, ImmutableArray<Diagnostic> semanticDiagnostics,
         ImmutableArray<SyntaxTree> syntaxTrees, SemanticInfoStore semanticInfo,
         GenericImplementationStore? genericImplementations = null,
-        bool requiresTargetLayout = false, SyntaxTree? primaryTree = null)
+        bool requiresTargetLayout = false, SyntaxTree? primaryTree = null, IReadOnlyDictionary<BoundExpression, TextLocation>? expressionLocations = null)
     {
         GlobalNamespace = globalNamespace;
         TypeFactory = typeFactory;
@@ -31,10 +31,13 @@ public sealed class SemanticModel
         GenericImplementations = genericImplementations ?? GenericImplementationStore.Empty;
         Diagnostics = syntaxTrees.SelectMany(tree => tree.Diagnostics).Concat(semanticDiagnostics).ToImmutableArray();
         RequiresTargetLayout = requiresTargetLayout;
+        ExpressionLocations = expressionLocations?.ToImmutableDictionary(ReferenceEqualityComparer.Instance) ??
+            ImmutableDictionary<BoundExpression, TextLocation>.Empty;
     }
 
     public NamespaceSymbol GlobalNamespace { get; }
     public TypeFactory TypeFactory { get; }
+    public IReadOnlyDictionary<BoundExpression, TextLocation> ExpressionLocations { get; }
     public ImmutableArray<BoundFunction> Functions { get; }
     public ImmutableArray<Diagnostic> SemanticDiagnostics { get; }
     public ImmutableArray<Diagnostic> Diagnostics { get; }
@@ -44,10 +47,10 @@ public sealed class SemanticModel
 
     internal SemanticModel WithAdditionalDiagnostics(ImmutableArray<Diagnostic> diagnostics) => diagnostics.IsEmpty
         ? this : new(GlobalNamespace, TypeFactory, Functions, SemanticDiagnostics.AddRange(diagnostics),
-            _syntaxTrees, _semanticInfo, GenericImplementations, RequiresTargetLayout, _primaryTree);
+            _syntaxTrees, _semanticInfo, GenericImplementations, RequiresTargetLayout, _primaryTree, ExpressionLocations);
 
     internal SemanticModel ForTree(SyntaxTree tree) => new(GlobalNamespace, TypeFactory, Functions,
-        SemanticDiagnostics, _syntaxTrees, _semanticInfo, GenericImplementations, RequiresTargetLayout, tree);
+        SemanticDiagnostics, _syntaxTrees, _semanticInfo, GenericImplementations, RequiresTargetLayout, tree, ExpressionLocations);
 
     public Symbol? GetDeclaredSymbol(SyntaxNode declaration, CancellationToken cancellationToken = default)
     {

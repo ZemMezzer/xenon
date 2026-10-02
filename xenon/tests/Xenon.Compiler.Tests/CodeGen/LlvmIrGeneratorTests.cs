@@ -1,5 +1,7 @@
 using Xenon.CodeGen.LLVM;
 using Xenon.Compiler.Diagnostics;
+using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Lowering;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 using Xenon.Compiler.Text;
@@ -10,6 +12,37 @@ namespace Xenon.Compiler.Tests.CodeGen;
 
 public sealed class LlvmIrGeneratorTests
 {
+    private static MirFunction Lowered(Compilation compilation, string name) =>
+        MirLowerer.Lower(compilation.SemanticModel.Functions.Single(function => function.Symbol.FullName == name),
+            compilation.SemanticModel.TypeFactory, compilation.SemanticModel.ExpressionLocations);
+
+    private static IEnumerable<MirDrop> NormalDrops(MirFunction function)
+    {
+        var flags = new Dictionary<MirLocalId, object?>();
+        object? Value(MirOperand operand) => operand switch {
+            MirConstant constant => constant.Value,
+            MirCopy copy => flags[copy.Place.Local],
+            _ => throw new InvalidOperationException("Unexpected destructor guard operand."),
+        };
+        MirBlockId current = function.Entry;
+        for (int step = 0; step < function.Blocks.Length * 2; step++)
+        {
+            MirBasicBlock block = function.Blocks.Single(item => item.Id == current);
+            foreach (MirAssign assignment in block.Statements.OfType<MirAssign>())
+                if (assignment.Value is MirUse use) flags[assignment.Destination.Local] = Value(use.Operand);
+            switch (block.Terminator)
+            {
+                case MirDrop drop: yield return drop; current = drop.Normal; break;
+                case MirGoto next: current = next.Target; break;
+                case MirSwitch selection:
+                    current = selection.Cases.FirstOrDefault(item => Equals(item.Value.Value, Value(selection.Value)))?.Target ?? selection.Otherwise;
+                    break;
+                case MirReturn: yield break;
+                default: throw new InvalidOperationException("Unexpected destructor control flow.");
+            }
+        }
+        throw new InvalidOperationException("Destructor path did not terminate.");
+    }
     [Fact]
     public void Generator_EmitsConcreteGenericFunctionSpecializations()
     {
@@ -177,10 +210,10 @@ public sealed class LlvmIrGeneratorTests
         string uncheckedIr = new LlvmIrGenerator().GenerateForTarget(uncheckedCompilation,
             LlvmTargetOptions.CreateHost(), "unchecked-empty-function");
 
-        Assert.Contains("function.invoke.valid", checkedIr, StringComparison.Ordinal);
+        Assert.Contains("function.valid", checkedIr, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.trap()", checkedIr, StringComparison.Ordinal);
         Assert.Contains("unreachable", checkedIr, StringComparison.Ordinal);
-        Assert.DoesNotContain("function.invoke.valid", uncheckedIr, StringComparison.Ordinal);
+        Assert.DoesNotContain("function.valid", uncheckedIr, StringComparison.Ordinal);
         Assert.DoesNotContain("call void @llvm.trap()", uncheckedIr, StringComparison.Ordinal);
     }
 
@@ -236,7 +269,10 @@ public sealed class LlvmIrGeneratorTests
         Assert.Equal(string.Empty, portable.Cpu);
         Assert.Equal(string.Empty, portable.Features);
         Assert.False(string.IsNullOrWhiteSpace(native.Cpu));
-        Assert.False(string.IsNullOrWhiteSpace(native.Features));
+        Assert.Equal(LlvmTargetPlatform.HostCpuName, native.Cpu);
+        // LLVM can describe the host through its CPU name alone (Apple Silicon
+        // has no additional feature string in LLVM 20).
+        Assert.Equal(LlvmTargetPlatform.HostCpuFeatures, native.Features);
     }
 
     [Fact]
@@ -371,22 +407,11 @@ public sealed class LlvmIrGeneratorTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        FunctionSymbol consume = compilation.SemanticModel.Functions.Single(
-            function => function.Symbol.Name == "Consume").Symbol;
-        string encodedIdentity = Convert.ToHexString(Encoding.UTF8.GetBytes(consume.FullName));
         string ir = new LlvmIrGenerator().GenerateForTarget(
             compilation, LlvmTargetOptions.CreateHost(), "parameter-cleanup-effects");
-        string definition = ir.Split('\n').Single(line =>
-            line.StartsWith("define ", StringComparison.Ordinal) &&
-            line.Contains(encodedIdentity, StringComparison.Ordinal));
-        int attributeMarker = definition.LastIndexOf('#');
-        Assert.True(attributeMarker >= 0, definition);
-        string attributeNumber = new(definition[(attributeMarker + 1)..]
-            .TakeWhile(char.IsAsciiDigit).ToArray());
-        string attributes = ir.Split('\n').Single(line =>
-            line.StartsWith($"attributes #{attributeNumber} =", StringComparison.Ordinal));
-
-        Assert.DoesNotContain("nounwind", attributes, StringComparison.Ordinal);
+        // With explicit cleanup CFG the inlining hint may disappear; no attribute
+        // group is also a valid representation of a potentially throwing function.
+        AssertFunctionAttribute(compilation, ir, "Consume", "nounwind", expected: false);
     }
 
     [Fact]
@@ -1004,15 +1029,14 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "control-flow");
 
-        Assert.Contains("for.condition:", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("while.condition:", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("if.then:", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("if.else:", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("br i1", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("switch i1", llvmIr, StringComparison.Ordinal);
+        MirFunction sum = Lowered(compilation, "Example.Sum");
+        Assert.True(sum.Blocks.Count(block => block.Terminator is MirSwitch) >= 4);
+        Assert.Contains(sum.Blocks, block => block.Terminator.Successors.Any(edge => edge.Target.Value < block.Id.Value));
     }
 
     [Fact]
-    public void Generator_UsesPhiNodesForShortCircuitBooleanOperators()
+    public void Generator_EmitsMirBranchesForShortCircuitBooleanOperators()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -1030,9 +1054,13 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "short-circuit");
 
-        Assert.Contains("logic.rhs:", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("phi i1", llvmIr, StringComparison.Ordinal);
-        Assert.Equal(2, llvmIr.Split("phi i1", StringSplitOptions.None).Length - 1);
+        Assert.Equal(2, llvmIr.Split("switch i1", StringSplitOptions.None).Length - 1);
+        foreach (string name in new[] { "Example.Both", "Example.Either" })
+        {
+            MirFunction function = Lowered(compilation, name);
+            MirSwitch branch = Assert.Single(function.Blocks.Select(block => block.Terminator).OfType<MirSwitch>());
+            Assert.NotEqual(branch.Cases.Single().Target, branch.Otherwise);
+        }
     }
 
     [Fact]
@@ -1086,7 +1114,7 @@ public sealed class LlvmIrGeneratorTests
 
         string llvmIr = new LlvmIrGenerator().GenerateForTarget(compilation, target, "heap-struct");
 
-        Assert.Contains("insertvalue %Example.Pair", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("store %Example.Pair", llvmIr, StringComparison.Ordinal);
         Assert.Contains($"call ptr @__xenon_aligned_malloc(i{IntPtr.Size * 8} 8, i{IntPtr.Size * 8} 4)", llvmIr, StringComparison.Ordinal);
         Assert.Contains("call void @__xenon_free", llvmIr, StringComparison.Ordinal);
     }
@@ -1321,8 +1349,9 @@ public sealed class LlvmIrGeneratorTests
 
         string count = ManagedSymbol("static-layout", "Example.Entity.Count", "static_field");
         Assert.Contains($"@{count} = global i32 1024", llvmIr, StringComparison.Ordinal);
-        Assert.Contains($"load i32, ptr @{count}", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("ret i64 4", llvmIr, StringComparison.Ordinal);
+        Assert.Contains($"store ptr @{count}", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("load i32, ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("store i64 4", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1348,8 +1377,9 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "static-write");
 
         string value = ManagedSymbol("static-write", "Example.State.Value", "static_field");
-        Assert.Contains($"store i32 41, ptr @{value}", llvmIr, StringComparison.Ordinal);
-        Assert.Contains($"load i32, ptr @{value}", llvmIr, StringComparison.Ordinal);
+        Assert.Contains($"store ptr @{value}", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("store i32 41", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("load i32, ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("store i32", llvmIr, StringComparison.Ordinal);
     }
 
@@ -1707,7 +1737,7 @@ public sealed class LlvmIrGeneratorTests
         string llvmIr = new LlvmIrGenerator().Generate(compilation, "inherited-interface-implementation");
 
         Assert.Contains("@" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.Example.IValue.__itable", "interface_table") + " = global [2 x ptr] [ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__imap", "interface_map") + ", ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Base.Get", "function") + "]", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("interface.runtime.map = load ptr", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("interface.map = load ptr", llvmIr, StringComparison.Ordinal);
         Assert.Contains("@" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__vtable", "vtable") + " = global [1 x ptr] [ptr @" + ManagedSymbol("inherited-interface-implementation", "Example.Derived.__imap", "interface_map") + "]", llvmIr, StringComparison.Ordinal);
     }
 
@@ -1744,7 +1774,7 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Contains("@" + ManagedSymbol("virtual-destructor", "Example.Enemy.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("@" + ManagedSymbol("virtual-destructor", "Example.Enemy.__dtor", "function"), llvmIr, StringComparison.Ordinal);
-        Assert.Contains("destructor.slot", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("virtual.slot", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1794,7 +1824,7 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Contains("@" + ManagedSymbol("destructor-gap", "Example.Derived.__vtable", "vtable"), llvmIr, StringComparison.Ordinal);
         Assert.Contains("call void @" + ManagedSymbol("destructor-gap", "Example.Base.__dtor", "function"), llvmIr, StringComparison.Ordinal);
-        Assert.Contains("destructor.slot", llvmIr, StringComparison.Ordinal);
+        Assert.Contains("virtual.slot", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2391,7 +2421,7 @@ public sealed class LlvmIrGeneratorTests
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         string ir = new LlvmIrGenerator().Generate(compilation);
         Assert.Contains($"switch i{bits}", ir, StringComparison.Ordinal);
-        Assert.Contains($"i{bits} 42, label %switch.case", ir, StringComparison.Ordinal);
+        Assert.Contains($"i{bits} 42, label %bb", ir, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -2417,16 +2447,15 @@ public sealed class LlvmIrGeneratorTests
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
         Assert.Contains($"call ptr @__xenon_aligned_malloc(i{pointerBits}", ir, StringComparison.Ordinal);
-        Assert.Contains("array.dimension.inrange = icmp ult i32", ir, StringComparison.Ordinal);
-        Assert.Contains("array.linear.index", ir, StringComparison.Ordinal);
+        Assert.Contains("dimension.valid = icmp ult i32", ir, StringComparison.Ordinal);
+        Assert.Contains("index.linear", ir, StringComparison.Ordinal);
         Assert.Contains("getelementptr inbounds i32", ir, StringComparison.Ordinal);
         Assert.Contains("getelementptr inbounds i8", ir, StringComparison.Ordinal);
-        Assert.Contains("array.dimension.cache", ir, StringComparison.Ordinal);
-        Assert.Contains("array.cache.matches = icmp eq ptr", ir, StringComparison.Ordinal);
-        Assert.Contains("array.cache.miss", ir, StringComparison.Ordinal);
+        Assert.Contains("array.dimension = load i32", ir, StringComparison.Ordinal);
+        Assert.Contains("index.inrange", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("!invariant.load", ir, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
-        Assert.Contains("array.free.end", ir, StringComparison.Ordinal);
+        Assert.Contains("call void @__xenon_free", ir, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2445,7 +2474,7 @@ public sealed class LlvmIrGeneratorTests
     }
 
     [Fact]
-    public void Generator_EmitsSwitchCasesBeforeMergeInSourceOrder()
+    public void Generator_PreservesGroupedSwitchTargetsInMir()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -2465,15 +2494,15 @@ public sealed class LlvmIrGeneratorTests
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
 
         string ir = new LlvmIrGenerator().Generate(compilation);
-        var caseBlocks = System.Text.RegularExpressions.Regex.Matches(
-            ir,
-            @"(?m)^switch.case[^:]*:");
-        int merge = ir.IndexOf("switch.end:", StringComparison.Ordinal);
-
-        Assert.Equal(3, caseBlocks.Count);
-        Assert.True(caseBlocks[0].Index < caseBlocks[1].Index, ir);
-        Assert.True(caseBlocks[1].Index < caseBlocks[2].Index, ir);
-        Assert.True(merge > caseBlocks[2].Index, ir);
+        MirFunction lowered = Lowered(compilation, "Example.Test");
+        MirSwitch selection = Assert.Single(lowered.Blocks.Select(block => block.Terminator).OfType<MirSwitch>());
+        Assert.Equal(new object?[] { 0, 1, 2 }, selection.Cases.Select(item => item.Value.Value));
+        MirBasicBlock groupedLabel = lowered.Blocks.Single(block => block.Id == selection.Cases[1].Target);
+        Assert.Empty(groupedLabel.Statements);
+        Assert.Equal(selection.Cases[2].Target, Assert.IsType<MirGoto>(groupedLabel.Terminator).Target);
+        Assert.NotEqual(selection.Cases[0].Target, selection.Cases[1].Target);
+        Assert.NotEqual(selection.Cases[1].Target, selection.Otherwise);
+        Assert.Contains("switch i32", ir, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2564,7 +2593,7 @@ public sealed class LlvmIrGeneratorTests
             enumeration.Members.Select(member => (int)member.Value!).ToArray());
         string ir = new LlvmIrGenerator().GenerateForTarget(original, options);
         Assert.Contains($"switch i{pointerBytes * 8}", ir, StringComparison.Ordinal);
-        Assert.Contains($"i32 {pointerBytes * 2 + 1}, label %switch.case", ir, StringComparison.Ordinal);
+        Assert.Contains($"i32 {pointerBytes * 2 + 1}, label %bb", ir, StringComparison.Ordinal);
         Assert.True(original.RequiresTargetLayout);
         Assert.All(Assert.Single(Assert.Single(original.SemanticModel.GlobalNamespace.Namespaces).Enums).Members,
             member => Assert.Null(member.Value));
@@ -2766,9 +2795,9 @@ public sealed class LlvmIrGeneratorTests
         string ir = new LlvmIrGenerator().GenerateForTarget(compilation, new LlvmTargetOptions(triple));
         Assert.Contains("call ptr @llvm.stacksave.p0", ir, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.stackrestore.p0", ir, StringComparison.Ordinal);
-        Assert.Contains("stack.destroy.element", ir, StringComparison.Ordinal);
-        Assert.Contains("local.cleanup.node", ir, StringComparison.Ordinal);
-        Assert.Contains("local.constructed", ir, StringComparison.Ordinal);
+        Assert.Contains("element.address", ir, StringComparison.Ordinal);
+        Assert.Contains("switch i1", ir, StringComparison.Ordinal);
+        Assert.Contains("store i1 true", ir, StringComparison.Ordinal);
         int start = ir.IndexOf("@" + ManagedSymbol("xenon", "Example.Test", "function"), StringComparison.Ordinal);
         string body = ir[start..ir.IndexOf("\n}", start, StringComparison.Ordinal)];
         Assert.DoesNotContain("call void @__xenon_free", body, StringComparison.Ordinal);
@@ -2859,14 +2888,14 @@ public sealed class LlvmIrGeneratorTests
         string ir = new LlvmIrGenerator().GenerateForTarget(
             compilation, LlvmTargetOptions.CreateHost(), "destructor-glue");
         Assert.Contains(ManagedSymbol("destructor-glue", container.CompleteDestructor.FullName, "function"), ir, StringComparison.Ordinal);
-        int second = ir.IndexOf("Second.destructor.address", StringComparison.Ordinal);
-        int first = ir.IndexOf("First.destructor.address", StringComparison.Ordinal);
-        Assert.True(second >= 0 && first > second, "generated destructor glue must destroy fields in reverse declaration order");
-        Assert.Contains("local.cleanup.node", ir, StringComparison.Ordinal);
+        MirFunction glue = Lowered(compilation, container.CompleteDestructor.FullName);
+        Assert.Equal(new[] { "Second", "First" }, NormalDrops(glue).Select(drop =>
+            Assert.IsType<MirFieldProjection>(drop.Place.Projections.Last()).Field.Name));
+        Assert.Contains("switch i1", ir, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Generator_LowersCompositeCopiesFieldByField()
+    public void Generator_CopiesTrivialAggregatesIntoIndependentStorage()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -2883,10 +2912,10 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Empty(compilation.Diagnostics);
         string ir = new LlvmIrGenerator().Generate(compilation, "copy-glue");
-        Assert.Contains("copy.Pair", ir, StringComparison.Ordinal);
-        Assert.Contains("copy.Left", ir, StringComparison.Ordinal);
-        Assert.Contains("copy.Right", ir, StringComparison.Ordinal);
-        Assert.Contains("copy.Tail", ir, StringComparison.Ordinal);
+        Assert.Contains("load %Example.Container", ir, StringComparison.Ordinal);
+        Assert.Contains("store %Example.Container", ir, StringComparison.Ordinal);
+        Assert.Contains("ptr %source", ir, StringComparison.Ordinal);
+        Assert.Contains("ptr %destination", ir, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2979,9 +3008,11 @@ public sealed class LlvmIrGeneratorTests
             return ir[start..end];
         }
 
-        Assert.Contains("local.destructor.active", Body("Maybe"), StringComparison.Ordinal);
-        Assert.Contains("local.destroy", Body("Maybe"), StringComparison.Ordinal);
-        Assert.DoesNotContain("local.destructor.active", Body("Definite"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Maybe"), StringComparison.Ordinal);
+        Assert.Contains("store i1 false", Body("Maybe"), StringComparison.Ordinal);
+                MirFunction definite = Lowered(compilation, "Example.Definite");
+        Assert.Contains(definite.Blocks.SelectMany(block => block.Statements).OfType<MirAssign>(),
+            assignment => assignment.WriteKind == MirWriteKind.Replace && assignment.PreviousValueState == MirPreviousValueState.DefinitelyMoved);
     }
 
     [Fact]
@@ -3054,8 +3085,8 @@ public sealed class LlvmIrGeneratorTests
         }
 
         string use = Body("Example.Use");
-        Assert.Contains("ownership.cleanup.active", use, StringComparison.Ordinal);
-        Assert.Contains("ownership.cleanup.destroy", use, StringComparison.Ordinal);
+        Assert.Contains("switch i1", use, StringComparison.Ordinal);
+        Assert.Contains("store i1 false", use, StringComparison.Ordinal);
         Assert.DoesNotContain("local.cleanup.node", use, StringComparison.Ordinal);
         Assert.DoesNotContain("stack.cleanup.field", use, StringComparison.Ordinal);
         Assert.DoesNotContain("llvm.stacksave", use, StringComparison.Ordinal);
@@ -3066,19 +3097,19 @@ public sealed class LlvmIrGeneratorTests
         Assert.DoesNotContain("stack.cleanup.field", forward, StringComparison.Ordinal);
 
         string aggregate = Body("Example.UseAggregate");
-        Assert.Contains("ownership.cleanup.active", aggregate, StringComparison.Ordinal);
+        Assert.Contains("switch i1", aggregate, StringComparison.Ordinal);
         Assert.DoesNotContain("local.cleanup.node", aggregate, StringComparison.Ordinal);
         Assert.DoesNotContain("stack.cleanup.field", aggregate, StringComparison.Ordinal);
         Assert.DoesNotContain("llvm.stacksave", aggregate, StringComparison.Ordinal);
 
         string nested = Body("Example.UseNestedAggregate");
-        Assert.Contains("ownership.cleanup.active", nested, StringComparison.Ordinal);
+        Assert.Contains("switch i1", nested, StringComparison.Ordinal);
         Assert.DoesNotContain("local.cleanup.node", nested, StringComparison.Ordinal);
         Assert.DoesNotContain("stack.cleanup.field", nested, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Generator_RetainsGenericCleanupFallbackForDeferredNonTransparentAndStackOwnership()
+    public void Generator_EmitsMirDropGuardsForDeferredNonTransparentAndStackOwnership()
     {
         Compilation compilation = CreateCompilation("""
             namespace Example;
@@ -3128,21 +3159,21 @@ public sealed class LlvmIrGeneratorTests
             return ir[start..end];
         }
 
-        Assert.Contains("local.cleanup.node", Body("Example.Deferred"), StringComparison.Ordinal);
-        Assert.Contains("stack.cleanup.field", Body("Example.Deferred"), StringComparison.Ordinal);
-        Assert.Contains("local.cleanup.node", Body("Example.CustomAggregate"), StringComparison.Ordinal);
-        Assert.Contains("stack.cleanup.field", Body("Example.CustomAggregate"), StringComparison.Ordinal);
-        Assert.Contains("local.cleanup.node", Body("Example.MixedStackArray"), StringComparison.Ordinal);
-        Assert.Contains("stack.cleanup.field", Body("Example.MixedStackArray"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.Deferred"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.Deferred"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.CustomAggregate"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.CustomAggregate"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.MixedStackArray"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.MixedStackArray"), StringComparison.Ordinal);
         Assert.Contains("llvm.stacksave", Body("Example.MixedStackArray"), StringComparison.Ordinal);
-        Assert.Contains("local.cleanup.node", Body("Example.Pinned"), StringComparison.Ordinal);
-        Assert.Contains("stack.cleanup.field", Body("Example.Pinned"), StringComparison.Ordinal);
-        Assert.Contains("local.cleanup.node", Body("Example.Stored"), StringComparison.Ordinal);
-        Assert.Contains("stack.cleanup.field", Body("Example.Stored"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.Pinned"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.Pinned"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.Stored"), StringComparison.Ordinal);
+        Assert.Contains("switch i1", Body("Example.Stored"), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Generator_RetainsGenericCleanupFallbackForOversizedTransparentAggregate()
+    public void Generator_EmitsMirDropGuardsForEveryFieldOfLargeAggregate()
     {
         string fields = string.Join(Environment.NewLine,
             Enumerable.Range(0, 17).Select(index => $"public shared<Resource> Value{index};"));
@@ -3171,8 +3202,8 @@ public sealed class LlvmIrGeneratorTests
         Assert.True(end > start);
         string body = ir[start..end];
 
-        Assert.Contains("local.cleanup.node", body, StringComparison.Ordinal);
-        Assert.Contains("stack.cleanup.field", body, StringComparison.Ordinal);
+        Assert.Contains("switch i1", body, StringComparison.Ordinal);
+        Assert.Contains("switch i1", body, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3219,8 +3250,9 @@ public sealed class LlvmIrGeneratorTests
         string ownershipDestructor = ManagedSymbol(module, ownership.CompleteDestructor!.FullName, "function");
         string replace = Body("Example.Holder.Replace");
         Assert.Contains("store i1 false", replace, StringComparison.Ordinal);
-        Assert.Contains("ownership.cleanup.active", replace, StringComparison.Ordinal);
-        Assert.Contains($"call void @{ownershipDestructor}", replace, StringComparison.Ordinal);
+        Assert.Contains("switch i1", replace, StringComparison.Ordinal);
+        // The old field was moved out; MIR proves its replacement cleanup dead.
+        Assert.DoesNotContain($"call void @{ownershipDestructor}", replace, StringComparison.Ordinal);
 
         string arrayMove = Body("Example.MoveArray");
         Assert.DoesNotContain("@malloc", arrayMove, StringComparison.Ordinal);

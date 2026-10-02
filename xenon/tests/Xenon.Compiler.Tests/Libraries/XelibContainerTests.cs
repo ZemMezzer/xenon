@@ -716,9 +716,9 @@ public sealed class XelibContainerTests
         byte[] bytes = XelibWriter.Write(library, new XelibWriteOptions("PortableLayout"));
         LibraryCompilationReference reference = XelibReader.Read(bytes);
         Compilation app = Compilation.Create(new CompilationOptions(ConditionalCompilation: new(targetTriple: triple)), [reference], SourceText.From(
-            "using PortableLayout; namespace App; int Main() { return cast<int>(PointerBytes()); }",
+            "using PortableLayout; namespace App; export int Main() { return cast<int>(PointerBytes()); }",
             "app.xe"));
-        var target = new LlvmTargetOptions(triple);
+        var target = new LlvmTargetOptions(triple, OptimizationLevel: 1);
         string ir = new LlvmIrGenerator().GenerateForTarget(LlvmIrGenerator.BindForTarget(app, target), target);
         Assert.Contains($"ret i{expected * 8} {expected}", ir, StringComparison.Ordinal);
 
@@ -750,12 +750,12 @@ public sealed class XelibContainerTests
         LibraryCompilationReference reference = XelibReader.Read(bytes);
         Compilation app = Compilation.Create(new CompilationOptions(ConditionalCompilation: new(targetTriple: triple)), [reference], SourceText.From("""
             namespace App;
-            int Main() {
+            export int Main() {
                 return cast<int>(GenericLayout.State<int*>.Width +
                     GenericLayout.State<int*>.Alignment);
             }
             """, "app.xe"));
-        var target = new LlvmTargetOptions(triple);
+        var target = new LlvmTargetOptions(triple, OptimizationLevel: 1);
         string ir = new LlvmIrGenerator().GenerateForTarget(LlvmIrGenerator.BindForTarget(app, target), target);
         Assert.Contains($"ret i32 {expected}", ir, StringComparison.Ordinal);
 
@@ -821,13 +821,13 @@ public sealed class XelibContainerTests
         Compilation app = Compilation.Create(new CompilationOptions(ConditionalCompilation: new(targetTriple: triple)), [reference], SourceText.From("""
             using OrdinaryLayout;
             namespace App;
-            int Main() { return cast<int>(Width + Alignment) + LibraryMetric(); }
+            export int Main() { return cast<int>(Width + Alignment) + LibraryMetric(); }
             """, "app.xe"));
         Assert.False(app.HasErrors, string.Join(Environment.NewLine, app.Diagnostics));
-        var target = new LlvmTargetOptions(triple);
+        var target = new LlvmTargetOptions(triple, OptimizationLevel: 1);
         string ir = new LlvmIrGenerator().GenerateForTarget(LlvmIrGenerator.BindForTarget(app, target), target);
         Assert.Contains($"ret i32 {expected}", ir, StringComparison.Ordinal);
-        Assert.Contains($"add i32 {expected}", ir, StringComparison.Ordinal);
+        Assert.Contains($"ret i32 {expected * 2}", ir, StringComparison.Ordinal);
 
     }
 
@@ -1109,7 +1109,7 @@ public sealed class XelibContainerTests
         StructTypeSymbol ownershipHolder = Assert.Single(reference.GlobalNamespace.Namespaces).Structs
             .Single(type => type.Name == "OwnershipHolder");
         Assert.Contains(ownershipBodies, function =>
-            ReferenceEquals(function.Symbol, ownershipHolder.CompleteDestructor));
+            ReferenceEquals(function.Symbol, TypeFacts.GetCompleteDestructor(ownershipHolder.Fields.Single().Type)));
         Assert.DoesNotContain(ownershipBodies, function => function.Symbol.Name == "OtherCleanup");
         GenerateForHost(ownership);
         AssertClosure("""

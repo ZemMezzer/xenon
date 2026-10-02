@@ -12,15 +12,7 @@ internal sealed partial class FunctionBodyBinder
     private LocalVariableSymbol? _resumableResult;
     private BoundExpression? _resumableConstruction;
     private int _suspensionIndex;
-    private void ValidateSuspensionLifetimes(BoundBlockStatement body)
-    {
-        ResumableFrameAnalysis analysis = ResumableFrameAnalysis.Analyze(_function, body, _fileScope.TypeFactory);
-        foreach (BoundArrayCreationExpression array in analysis.RetainedArrays)
-            if (array.Storage == ArrayStorageKind.Stack && !ResumableFrameAnalysis.TryGetConstantLength(array, out _))
-                _diagnostics.Report(_expressionLocations.GetValueOrDefault(array),
-                    "runtime-sized array backing storage is live across await and has no fixed inline frame layout; use owning heap storage or finish its lifetime before suspension",
-                    DiagnosticIds.BorrowAcrossAwait);
-    }
+
 
 
     private void BeginResumableBinding(BlockStatementSyntax body)
@@ -53,7 +45,6 @@ internal sealed partial class FunctionBodyBinder
                 DiagnosticIds.MissingCompletionOperator);
         _resumableResult = new LocalVariableSymbol("__resumable_result", type, _function, false)
             { Destructor = TypeFacts.GetCompleteDestructor(type) };
-        _definitelyAssigned.Add(_resumableResult);
         if (SyntaxNavigator.DescendantNodesAndSelf(body).OfType<AwaitExpressionSyntax>().Any(node => !nested.Contains(node)) && !TypeFacts.CanCopy(type))
             _diagnostics.Report(location, "resumable return object must support ordinary copying so the caller and frame can own handles to the same logical state",
                 DiagnosticIds.InvalidResumableReturn);
@@ -93,7 +84,7 @@ internal sealed partial class FunctionBodyBinder
             RollbackUnmaterializedContextualArguments(arguments);
             return new BoundErrorExpression();
         }
-        RecordExceptionalFlow();
+        RecordExceptionalReferenceBinding();
         return CreateOperatorCall(selected, ValidateFunctionArguments(selected, arguments, argumentSyntax, location));
     }
 
@@ -103,26 +94,6 @@ internal sealed partial class FunctionBodyBinder
         ImmutableArray<BoundExpression> arguments = syntax.Expression is null ? [target] :
             [target, BindDeferredContextualArgument(syntax.Expression)];
         BoundExpression completion = BindCompletionOperator(OperatorKind.Resolve, arguments, [], syntax, syntax.ReturnKeyword.Location);
-        ImmutableArray<BoundExpression> completedArguments = completion switch
-        {
-            BoundCallExpression call => call.Arguments,
-            BoundDeferredGenericOperationExpression call => call.Arguments,
-            _ => [],
-        };
-        if (completedArguments.Length == 2)
-        {
-            BoundExpression value = completedArguments[1];
-            if (value.Type is ReferenceTypeSymbol)
-                ValidateReturnedReference(value, syntax.ReturnKeyword.Location);
-            else if (ContainsValueReferenceStorage(value.Type) &&
-                GetValueReferenceMetadata(value, value.Type).Any(reference => !IsSafeReferenceReturnSource(reference.Source)))
-                _diagnostics.Report(syntax.ReturnKeyword.Location,
-                    "resumable completion cannot retain a value borrowing storage owned by the completed frame",
-                    DiagnosticIds.AggregateReferenceEscape);
-            if (HasCalleeStackBoundRuntimeStorage(value))
-                _diagnostics.Report(syntax.ReturnKeyword.Location,
-                    "resumable completion cannot retain stack-backed array storage", DiagnosticIds.StackArrayReturn);
-        }
         RecordAbruptFinalizerFlow(_ => true);
         return new BoundReturnStatement(CompleteFullExpression(completion, resultConsumed: false));
     }
@@ -138,7 +109,7 @@ internal sealed partial class FunctionBodyBinder
                 [new BoundVariableExpression(_resumableResult!)], [], syntax, location);
             body = body with { Statements = body.Statements.Add(new BoundReturnStatement(completion)) };
         }
-        ValidateSuspensionLifetimes(body);
+
         var catches = ImmutableArray.CreateBuilder<BoundCatchClause>();
         FunctionSymbol[] rejects = DiscoverOperators([_function.ReturnType], OperatorKind.Reject)
             .Where(candidate => candidate.Parameters.Length == 2 && IsAccessible(candidate) &&
@@ -148,7 +119,6 @@ internal sealed partial class FunctionBodyBinder
         {
             ReferenceTypeSymbol reference = _fileScope.TypeFactory.ReferenceTo(errorType, isReadonly: true);
             var error = new LocalVariableSymbol("__resumable_error", reference, _function, true);
-            _definitelyAssigned.Add(error);
             BoundExpression errorValue = new BoundReferenceDereferenceExpression(new BoundVariableExpression(error), reference);
             BoundExpression rejection = BindCompletionOperator(OperatorKind.Reject,
                 [new BoundVariableExpression(_resumableResult!), errorValue], [], syntax, location);
@@ -159,6 +129,7 @@ internal sealed partial class FunctionBodyBinder
             new BoundVariableDeclarationStatement(_resumableResult!, _resumableConstruction),
             new BoundTryStatement(body, catches.ToImmutable(), null)]) { IsResumable = true, RequiresSuspensionStateMachine = _suspensionIndex != 0 };
         FunctionCleanupAnalyzer.Recompute(_function, result);
+
         return result;
     }
 
@@ -203,9 +174,7 @@ internal sealed partial class FunctionBodyBinder
         LocalVariableSymbol? storage = storageType is null ? null :
             new LocalVariableSymbol($"__await_result_{_suspensionIndex}", storageType, _function, false);
         _suspensionIndex++;
-        _definitelyAssigned.Add(continuation);
-        _valueReferenceMetadata[new MovePlace(continuation, [])] = [];
-        if (storage is not null) _definitelyAssigned.Add(storage);
+
         ImmutableArray<BoundExpression> arguments = storage is null
             ? [operand, new BoundVariableExpression(continuation)]
             : [operand, new BoundVariableExpression(storage), new BoundVariableExpression(continuation)];
@@ -219,7 +188,7 @@ internal sealed partial class FunctionBodyBinder
                     DiagnosticIds.ValueNotCopyable);
             else converted = converted.SetItem(0, new BoundCopyExpression(converted[0]));
         }
-        RecordExceptionalFlow();
+        RecordExceptionalReferenceBinding();
         var awaiting = new BoundAwaitExpression(operand, CreateOperatorCall(selected, converted), storage, continuation,
             storageType?.ElementType ?? BuiltinTypes.Void);
         return awaiting;

@@ -1,0 +1,91 @@
+fn Snapshot.Run -> int {
+  entry bb0
+  local _0: int [temporary] "tmp0"
+  local _1: int [temporary] "tmp1"
+  local _2: int [variable] "done"
+  local _3: byte* [temporary] "tmp3"
+  local _4: bool [temporary] "tmp4"
+  local _5: readonly int& [variable] "error"
+  local _6: readonly int& [temporary] "tmp6"
+  local _7: int [temporary] "tmp7"
+  local _8: int [temporary] "tmp8"
+  local _9: byte* [temporary] "tmp9"
+  local _10: bool [temporary] "tmp10"
+
+bb0:
+  _0 = call fn Snapshot.Work() -> bb5 unwind bb2
+
+bb1:
+  resume.unwind
+
+bb2:
+  _3 = exception.current
+  _4 = exception.matches<int>(copy _3)
+  switch copy _4 [const true: bool -> bb8, otherwise -> bb9]
+
+bb3:
+  _9 = exception.current
+  _10 = const true: bool
+  storage.live _2
+  _2 = const 1: int
+  goto bb18
+
+bb4:
+  unreachable
+
+bb5:
+  _1 = copy _0
+  storage.live _2
+  _2 = const 1: int
+  goto bb7
+
+bb6:
+  unreachable
+
+bb7:
+  storage.dead _2
+  return copy _1
+
+bb8:
+  storage.live _5
+  _5 = exception.reference<readonly int&>(copy _3)
+  _6 = copy _5
+  _7 = copy (*_6)
+  _8 = copy _7
+  exception.handle copy _3
+  storage.live _2
+  _2 = const 1: int
+  goto bb12
+
+bb9:
+  goto bb3
+
+bb10:
+  unreachable
+
+bb11:
+  unreachable
+
+bb12:
+  storage.dead _2
+  return copy _8
+
+bb13:
+  unreachable
+
+bb14:
+  unreachable
+
+bb15:
+  unreachable
+
+bb16:
+  unreachable
+
+bb17:
+  unreachable
+
+bb18:
+  storage.dead _2
+  goto bb1
+}

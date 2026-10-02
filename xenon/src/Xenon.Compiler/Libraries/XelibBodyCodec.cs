@@ -619,8 +619,19 @@ public static class XelibBodyCodec
                     ? currentFunction?.LambdaCaptures.FirstOrDefault(capture => capture.Ordinal == node.Integer) ??
                       throw Invalid($"unknown capture ordinal {node.Integer}")
                     : Variable(node.LocalId, node.Symbol));
-            case XelibBodyOpcode.This: return new BoundThisExpression(
-                (DeclaredTypeSymbol)type(node.AuxTypeId), (PointerTypeSymbol)type(node.TypeId));
+            case XelibBodyOpcode.This:
+            {
+                DeclaredTypeSymbol owner = (DeclaredTypeSymbol)type(node.AuxTypeId);
+                PointerTypeSymbol pointer = (PointerTypeSymbol)type(node.TypeId);
+                if (owner is StructTypeSymbol { IsGenericDefinition: true } &&
+                    currentFunction?.ContainingStruct is { GenericDefinition: { } definition } specializedOwner &&
+                    ReferenceEquals(definition, owner))
+                {
+                    owner = specializedOwner;
+                    pointer = new PointerTypeSymbol(owner, pointer.IsReadonly);
+                }
+                return new BoundThisExpression(owner, pointer);
+            }
             case XelibBodyOpcode.Unary: return new BoundUnaryExpression(Map(node.Operator), E(0),
                 type(node.TypeId), node.Flag1);
             case XelibBodyOpcode.Move:

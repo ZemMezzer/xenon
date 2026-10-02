@@ -1,3 +1,4 @@
+using Xenon.Compiler.Mir;
 using Xenon.Compiler.Diagnostics;
 using Xenon.Compiler.Semantics;
 using Xenon.Compiler.Semantics.Binding;
@@ -37,20 +38,15 @@ public sealed class ConcurrencyHardeningTests
             """);
 
         Assert.Empty(compilation.Diagnostics);
-        BoundFunction function = Assert.Single(compilation.SemanticModel.Functions,
-            candidate => candidate.Symbol.Name == "Use");
-        BoundAssignmentExpression[] assignments = function.Body.Statements
-            .OfType<BoundExpressionStatement>()
-            .Select(statement => statement.Expression is BoundFullExpression full
-                ? full.Expression
-                : statement.Expression)
-            .OfType<BoundAssignmentExpression>()
+        MirFunction function = compilation.GetMirFunctions(lowered: false).Single(function => function.Symbol.Name == "Use");
+        MirIntrinsicCall[] assignments = function.Blocks.Select(block => block.Terminator).OfType<MirIntrinsicCall>()
+            .Where(operation => operation.Intrinsic is MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicExchange)
             .ToArray();
         Assert.Equal(10, assignments.Length);
         for (int index = 0; index < assignments.Length; index += 2)
         {
-            Assert.True(assignments[index].IsInitialization);
-            Assert.False(assignments[index + 1].IsInitialization);
+            Assert.Equal(MirIntrinsicKind.AtomicInitialize, assignments[index].Intrinsic);
+            Assert.Contains(assignments[index + 1].Intrinsic, new[] { MirIntrinsicKind.AtomicStore, MirIntrinsicKind.AtomicExchange });
         }
     }
 

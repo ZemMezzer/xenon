@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
+using Xenon.Compiler.Semantics.Binding;
+using Xenon.Compiler.Text;
 using Xenon.Compiler.Syntax;
 
 namespace Xenon.Compiler.Semantics.Symbols;
@@ -7,6 +9,14 @@ namespace Xenon.Compiler.Semantics.Symbols;
 public sealed class FunctionSymbol : Symbol
 {
     private ImmutableArray<GenericParameterSymbol> _typeParameters = [];
+    internal IReadOnlyDictionary<BoundExpression, TextLocation>? DiagnosticExpressionLocations { get; set; }
+    internal TextLocation SpecializationOrigin { get; set; }
+    internal ImmutableArray<TextLocation> SpecializationLocations { get; private set; } = [];
+    internal void AddSpecializationLocation(TextLocation location)
+    {
+        if (location.Source is not null && location.Path != "<metadata>" && !SpecializationLocations.Any(existing => ReferenceEquals(existing.Source, location.Source) && existing.Span.Start == location.Span.Start))
+            SpecializationLocations = SpecializationLocations.Add(location);
+    }
     public bool HasStackArrays { get; internal set; }
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
@@ -384,6 +394,35 @@ public sealed class FunctionSymbol : Symbol
         SetMetadata(origin);
     }
 
+    // An ordinary ABI function whose executable cleanup body is synthesized in MIR.
+    internal FunctionSymbol(FunctionSymbol closure, PointerTypeSymbol environmentType)
+        : base($"__closure_env_destructor_{closure.Name}", SymbolKind.Function, closure.ContainingSymbol)
+    {
+        FunctionKind = FunctionKind.Ordinary;
+        ReturnType = BuiltinTypes.Void;
+        Parameters = ParameterSymbol.Own([new ParameterSymbol("environment", environmentType, 0)], this);
+        Accessibility = Accessibility.Private;
+        IsStatic = true;
+        IsDefinition = true;
+        ClosureEnvironmentOwner = closure;
+        SetMetadata(SymbolOrigin.CompilerGenerated);
+    }
+
+    internal FunctionSymbol(FunctionSymbol asyncEntryPoint)
+        : base($"__async_entry_{asyncEntryPoint.Name}", SymbolKind.Function, asyncEntryPoint.ContainingSymbol)
+    {
+        FunctionKind = FunctionKind.Ordinary;
+        ReturnType = BuiltinTypes.Int;
+        Parameters = [];
+        Accessibility = Accessibility.Private;
+        IsStatic = true;
+        IsDefinition = true;
+        AsyncEntryPointOwner = asyncEntryPoint;
+        SetMetadata(SymbolOrigin.CompilerGenerated);
+    }
+
+    public FunctionSymbol? AsyncEntryPointOwner { get; }
+    public FunctionSymbol? ClosureEnvironmentOwner { get; }
     public NamespaceSymbol ContainingNamespace => GetContainingSymbol<NamespaceSymbol>()!;
 
     public DeclaredTypeSymbol? ContainingType => GetContainingSymbol<DeclaredTypeSymbol>();
@@ -551,7 +590,7 @@ public sealed class FunctionSymbol : Symbol
     internal SyntaxNode? ImplementationDeclaration => Implementation is SourceSymbolImplementation source
         ? source.Declaration : GenericDefinition?.ImplementationDeclaration;
     public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences =>
-        Origin.Kind != SymbolOriginKind.Source || Declaration is TypeDeclarationSyntax ||
+        Origin.Kind != SymbolOriginKind.Source || Declaration is null or TypeDeclarationSyntax ||
             FunctionKind is FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor
             ? base.DeclaringSyntaxReferences : [new(Declaration)];
 }

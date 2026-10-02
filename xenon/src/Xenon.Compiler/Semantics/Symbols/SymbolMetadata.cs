@@ -21,6 +21,7 @@ internal sealed record SourceSymbolImplementation(SyntaxNode Declaration) : Symb
 public sealed record SymbolOrigin(SymbolOriginKind Kind, ImmutableArray<SyntaxReference> SyntaxReferences,
     string? LibraryContentIdentity = null, string? LibrarySymbolKey = null)
 {
+    public string? LibraryDisplayName { get; init; }
     public static SymbolOrigin Source(SyntaxNode declaration) =>
         new(SymbolOriginKind.Source, [new SyntaxReference(declaration)]);
 

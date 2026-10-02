@@ -89,6 +89,7 @@ internal sealed class SourceGenericFunctionImplementation(
         var binder = new FunctionBodyBinder(specialization, specializedScope, diagnostics, constants,
             semanticInfo, specializer, cancellationToken);
         BoundBlockStatement result = binder.BindBody(body);
+        specialization.DiagnosticExpressionLocations = binder.ExpressionLocations;
         specializer.AddGeneratedFunctions(semanticInfo.LambdaFunctions);
         return result;
     }

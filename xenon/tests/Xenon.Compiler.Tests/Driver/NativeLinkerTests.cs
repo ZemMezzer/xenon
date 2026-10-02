@@ -24,6 +24,107 @@ public sealed class NativeLinkerTests
     [Theory]
     [InlineData(0)]
     [InlineData(3)]
+    public void ClosureCopiesReferenceParameterInsteadOfBorrowingItsStackSlot(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Holder { public function void() Callback; }
+            Holder Wrap(int& value)
+            {
+                function void() callback = [value]() => { value += 2; };
+                return Holder { callback };
+            }
+            int Main()
+            {
+                int value = 40;
+                { Holder holder = Wrap(value); holder.Callback(); }
+                return value;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void OwningReceiversExposePayloadToAccessorsAndArrayMetadata(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Resource {
+                public int Value;
+                public int Item { get { return Value; } set { Value = value; } }
+                public int this[int index] { get { return Value + index; } set { Value = value - index; } }
+            }
+            int Main() {
+                shared<Resource> resource = new Resource();
+                resource->Item = 30;
+                resource->Item += 10;
+                if (resource->Value != 40) return 1;
+                (*resource)[0] = 41;
+                (*resource)[0] += 1;
+                if (resource->Item != 42) return 2;
+                unique<int[,]> first = new int[2,3];
+                shared<int[]> second = new int[4];
+                if (first.Length != 6 || first.Rank != 2 || first.GetLength(1) != 3) return 3;
+                if (second.Length != 4 || second.Rank != 1 || second.GetLength(0) != 4) return 4;
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void SelfCopyDoesNotEndScalarOrFieldLifetime(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct Log { public static int Count; }
+            struct Value { public int Id; public ~Value() { Log.Count++; } }
+            struct Box { public Value Field; }
+            int Main() {
+                {
+                    Value value = Value { 42 };
+                    value = value;
+                    Box box = Box { Value { 42 } };
+                    box.Field = box.Field;
+                    if (Log.Count != 0 || value.Id != 42 || box.Field.Id != 42) return 1;
+                }
+                if (Log.Count != 2) return 2;
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void SharedClosureSurvivesItsSourceScope(int optimization)
+    {
+        int exit = RunIterationFourProgram("""
+            struct State { public static int Result; public static int Cleanups; }
+            struct Resource {
+                public int Value;
+                public Resource(int value) { Value = value; }
+                public void Use() { State.Result = Value; }
+                public ~Resource() { State.Cleanups++; }
+            }
+            int Main() {
+                function int() callback;
+                {
+                    shared<Resource> resource = new Resource(40);
+                    callback = [resource]() => { resource->Use(); return resource->Value; };
+                }
+                if (State.Cleanups != 0) return 11;
+                if (callback() != 40) return 12;
+                if (State.Result != 40) return 13;
+                return 42;
+            }
+            """, optimization);
+        Assert.Equal(42, exit);
+    }
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
     public void DereferencingUniqueArrayPreservesArrayHandle(int optimization)
     {
         int exit = RunIterationFourProgram("""
