@@ -105,3 +105,7 @@ jobs:
         run: >-
           cmake --build build/${{ matrix.platform }}/cmake
           --config Release --target check
+
+      - name: Verify application icon
+        shell: pwsh
+        run: ./cmake/tests/VerifyApplicationIcon.ps1 -PublishDirectory 'build/${{ matrix.platform }}/xenon/publish'

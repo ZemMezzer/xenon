@@ -23,7 +23,7 @@ The repository contains the compiler, LLVM code generator, build driver, project
 
 ## Quick start
 
-Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)** and add the extracted `xenon` executable to your `PATH`.
+Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)**. On Windows, add the directory containing `xenon.exe` to your `PATH`. On macOS, install `Xenon.app` and add its `Contents/MacOS` directory as described below.
 
 Release archives are NativeAOT distributions for Windows x64/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
 
@@ -37,6 +37,25 @@ Check the installation:
 ```console
 xenon --version
 ```
+
+The compiler uses the repository's `icon.png` as its application icon. Windows
+builds embed a multi-resolution icon in `xenon.exe`. NativeAOT publishes on macOS
+produce a self-contained `Xenon.app` bundle, with the executable inside
+`Contents/MacOS` and its icon inside `Contents/Resources`. There is no separate
+CLI executable alongside the bundle. The original PNG is also embedded as
+a resource in the compiler on both platforms.
+
+To use the macOS bundle from a terminal, place it in `/Applications` and add its
+executable directory to your shell configuration (for example, `~/.zshrc`):
+
+```sh
+export PATH="/Applications/Xenon.app/Contents/MacOS:$PATH"
+```
+
+The bundle provides the same command-line compiler, including `xenon lsp`; it
+does not provide a graphical editor. Its local ad-hoc signature does not replace
+Developer ID signing or notarization. Finder displays the custom icon on the
+`.app` bundle.
 
 Create a directory containing `main.xe`:
 

@@ -6,12 +6,30 @@
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
     <PublishAot>true</PublishAot>
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <XenonIconSource>$(MSBuildThisFileDirectory)../../../icon.png</XenonIconSource>
+    <ApplicationIcon Condition="$([MSBuild]::IsOSPlatform('Windows')) and $(RuntimeIdentifier.StartsWith('win-'))">$(XenonObjDirectory)$(MSBuildProjectName)/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/xenon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="../Shared/XenonBuildInfo.cs" Link="XenonBuildInfo.cs" />
     <None Include="../../../LICENSE" Link="LICENSE" CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="$(XenonIconSource)" LogicalName="Xenon.Icon.png" />
   </ItemGroup>
+
+  <Target Name="GenerateXenonApplicationIcon" BeforeTargets="CoreCompile"
+          Condition="'$(ApplicationIcon)' != ''"
+          Inputs="$(XenonIconSource);$(MSBuildThisFileDirectory)../../../cmake/GenerateWindowsIcon.ps1"
+          Outputs="$(ApplicationIcon)">
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)../../../cmake/GenerateWindowsIcon.ps1&quot; -Source &quot;$(XenonIconSource)&quot; -Destination &quot;$(ApplicationIcon)&quot;" />
+    <ItemGroup>
+      <FileWrites Include="$(ApplicationIcon)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="PackageXenonMacApp" AfterTargets="CopyNativeBinary"
+          Condition="$([MSBuild]::IsOSPlatform('OSX')) and $(RuntimeIdentifier.StartsWith('osx-')) and '$(PublishAot)' == 'true'">
+    <Exec Command="sh &quot;$(MSBuildThisFileDirectory)../../../cmake/PackageMacApp.sh&quot; &quot;$(XenonIconSource)&quot; &quot;$(PublishDir)&quot; &quot;$(IntermediateOutputPath)app-icon&quot; &quot;$(XenonVersion)&quot;" />
+  </Target>
 
   <Import Project="$(LLVMNativePropsFile)"
           Condition="'$(XenonStaticLLVM)' == 'true' and Exists('$(LLVMNativePropsFile)')" />
