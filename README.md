@@ -23,7 +23,7 @@ The repository contains the compiler, LLVM code generator, build driver, project
 
 ## Quick start
 
-Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)**. On Windows, add the directory containing `xenon.exe` to your `PATH`. On macOS, install `Xenon.app` and add its `Contents/MacOS` directory as described below.
+Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)**. On Windows, add the directory containing `xenon.exe` to your `PATH`. On macOS, add the directory containing the standalone `xenon` executable to your `PATH`, as described below.
 
 Release archives are NativeAOT distributions for Windows x64/Arm64 and Apple Silicon macOS. They do not require a .NET runtime or SDK on the target machine.
 
@@ -38,24 +38,25 @@ Check the installation:
 xenon --version
 ```
 
-The compiler uses the repository's `icon.png` as its application icon. Windows
-builds embed a multi-resolution icon in `xenon.exe`. NativeAOT publishes on macOS
-produce a self-contained `Xenon.app` bundle, with the executable inside
-`Contents/MacOS` and its icon inside `Contents/Resources`. There is no separate
-CLI executable alongside the bundle. The original PNG is also embedded as
-a resource in the compiler on both platforms.
+Windows builds use the repository's `icon.png` to embed a multi-resolution
+application icon in `xenon.exe`. NativeAOT publishes on macOS produce a standalone
+`xenon` command-line executable. The original PNG is embedded as a resource in
+the compiler on both platforms.
 
-To use the macOS bundle from a terminal, place it in `/Applications` and add its
-executable directory to your shell configuration (for example, `~/.zshrc`):
+For example, on macOS, run the following from the extracted archive directory
+to install the binary into `~/.local/bin`:
 
 ```sh
-export PATH="/Applications/Xenon.app/Contents/MacOS:$PATH"
+mkdir -p "$HOME/.local/bin"
+install -m 755 xenon "$HOME/.local/bin/xenon"
 ```
 
-The bundle provides the same command-line compiler, including `xenon lsp`; it
-does not provide a graphical editor. Its local ad-hoc signature does not replace
-Developer ID signing or notarization. Finder displays the custom icon on the
-`.app` bundle.
+Add that directory to your shell configuration (for example, `~/.zshrc`), then
+open a new terminal:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 Create a directory containing `main.xe`:
 
@@ -194,7 +195,7 @@ For C-compatible `extern`, `export`, and raw C function pointer signatures:
 
 Windows x86 (32-bit) is not a supported build or compiler target; use `win_x64` or `win_arm64` instead.
 
-The superbuild keeps LLVM as a static dependency with X86 and AArch64 code-generation backends, then publishes Xenon through NativeAOT. All generated CMake, LLVM, MSBuild, and NativeAOT files live under `build/<platform>/`: CMake under `cmake/`, LLVM under `llvm/`, and the final executable under `xenon/publish/`. Deleting root `build/` performs a complete clean. The `check` target runs the statically linked LLVM C++ smoke test, `xenon --version`, compiles and runs a minimal Xenon program, checks build-system mappings, and verifies source-tree cleanliness:
+The superbuild keeps LLVM as a static dependency with X86 and AArch64 code-generation backends, then publishes Xenon through NativeAOT. All generated CMake, LLVM, MSBuild, and NativeAOT files live under `build/<platform>/`: CMake under `cmake/`, LLVM under `llvm/`, and the final executable under `xenon/publish/` (`xenon` on macOS, `xenon.exe` on Windows). Deleting root `build/` performs a complete clean. The `check` target runs the statically linked LLVM C++ smoke test, `xenon --version`, compiles and runs a minimal Xenon program, checks build-system mappings, and verifies source-tree cleanliness:
 
 ```console
 cmake --build build/win_x64/cmake --config Release --target check

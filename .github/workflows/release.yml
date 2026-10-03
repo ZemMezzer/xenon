@@ -51,7 +51,7 @@ jobs:
           - platform: darwin_arm64
             rid: osx-arm64
             runner: macos-15
-            executable: Xenon.app/Contents/MacOS/xenon
+            executable: xenon
 
     steps:
       - name: Check out repository and LLVM
@@ -121,7 +121,7 @@ jobs:
           cmake --build build/${{ matrix.platform }}/cmake
           --config Release --target check
 
-      - name: Verify application icon
+      - name: Verify executable resources
         shell: pwsh
         run: ./cmake/tests/VerifyApplicationIcon.ps1 -PublishDirectory 'build/${{ matrix.platform }}/xenon/publish'
 

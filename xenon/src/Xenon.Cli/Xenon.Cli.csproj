@@ -26,9 +26,10 @@
     </ItemGroup>
   </Target>
 
-  <Target Name="PackageXenonMacApp" AfterTargets="CopyNativeBinary"
+  <Target Name="RemoveLegacyXenonMacApp" AfterTargets="CopyNativeBinary"
           Condition="$([MSBuild]::IsOSPlatform('OSX')) and $(RuntimeIdentifier.StartsWith('osx-')) and '$(PublishAot)' == 'true'">
-    <Exec Command="sh &quot;$(MSBuildThisFileDirectory)../../../cmake/PackageMacApp.sh&quot; &quot;$(XenonIconSource)&quot; &quot;$(PublishDir)&quot; &quot;$(IntermediateOutputPath)app-icon&quot; &quot;$(XenonVersion)&quot;" />
+    <!-- Remove bundles left by earlier publishes into the same directory. -->
+    <RemoveDir Directories="$(PublishDir)Xenon.app" />
   </Target>
 
   <Import Project="$(LLVMNativePropsFile)"

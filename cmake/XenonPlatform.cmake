@@ -5,7 +5,7 @@ function(xenon_platform_properties platform rid_var architecture_var generator_p
     set(_rid osx-arm64)
     set(_architecture arm64)
     set(_generator_platform "")
-    set(_executable Xenon.app/Contents/MacOS/xenon)
+    set(_executable xenon)
   elseif(platform STREQUAL "win_x64")
     set(_rid win-x64)
     set(_architecture x86_64)

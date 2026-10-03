@@ -68,22 +68,16 @@ if (Test-Path -LiteralPath $windowsBinary) {
     $binary = $windowsBinary
     [XenonIconVerification]::VerifyWindowsIcon($binary)
 } else {
-    $bundle = Join-Path $PublishDirectory 'Xenon.app'
-    $binary = Join-Path $bundle 'Contents/MacOS/xenon'
-    if (Test-Path -LiteralPath (Join-Path $PublishDirectory 'xenon')) {
-        throw 'The macOS distribution must contain only the bundled executable.'
+    $binary = Join-Path $PublishDirectory 'xenon'
+    if (Test-Path -LiteralPath (Join-Path $PublishDirectory 'Xenon.app')) {
+        throw 'The macOS distribution must contain a standalone executable, not an app bundle.'
     }
-    $plist = Join-Path $bundle 'Contents/Info.plist'
-    $iconName = & /usr/bin/plutil -extract CFBundleIconFile raw -o - $plist
-    if ($LASTEXITCODE -ne 0 -or $iconName -ne 'Xenon.icns') { throw 'Invalid bundle icon metadata.' }
-    $iconBytes = [IO.File]::ReadAllBytes((Join-Path $bundle "Contents/Resources/$iconName"))
-    if ([Text.Encoding]::ASCII.GetString($iconBytes, 0, 4) -ne 'icns') { throw 'Invalid ICNS resource.' }
-    & /usr/bin/codesign --verify --strict $bundle
-    if ($LASTEXITCODE -ne 0) { throw 'Invalid application bundle signature.' }
+    & /usr/bin/codesign --verify --strict $binary
+    if ($LASTEXITCODE -ne 0) { throw 'Invalid executable signature.' }
     & $binary --version
-    if ($LASTEXITCODE -ne 0) { throw 'The bundled CLI failed to start.' }
+    if ($LASTEXITCODE -ne 0) { throw 'The standalone CLI failed to start.' }
 }
 if (-not [XenonIconVerification]::ContainsPng($binary, $sourceIcon)) {
     throw 'The original icon.png is missing from the NativeAOT executable.'
 }
-Write-Output 'Application icon and embedded source PNG verified.'
+Write-Output 'NativeAOT executable and embedded source PNG verified (application icon on Windows).'

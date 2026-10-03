@@ -12,7 +12,7 @@ endfunction()
 foreach(_case IN ITEMS
     "win_x64|win-x64|x86_64|x64|xenon.exe"
     "win_arm64|win-arm64|arm64|ARM64|xenon.exe"
-    "darwin_arm64|osx-arm64|arm64||Xenon.app/Contents/MacOS/xenon")
+    "darwin_arm64|osx-arm64|arm64||xenon")
   string(REPLACE "|" ";" _fields "${_case}")
   list(LENGTH _fields _field_count)
   assert_equal("${_field_count}" "5" "${_case} field count")
