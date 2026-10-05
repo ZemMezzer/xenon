@@ -18,6 +18,9 @@ internal sealed partial class FunctionBodyBinder
     private void BeginResumableBinding(BlockStatementSyntax body)
     {
         if (!_function.IsAsync) return;
+        // The return type already has a source diagnostic; no completion protocol
+        // can be checked until it resolves to an actual type.
+        if (TypeIdentity.AreSame(_function.ReturnType, BuiltinTypes.Error)) return;
         var nested = SyntaxNavigator.DescendantNodesAndSelf(body).OfType<LambdaExpressionSyntax>()
             .SelectMany(SyntaxNavigator.DescendantNodesAndSelf).ToHashSet(ReferenceEqualityComparer.Instance);
 

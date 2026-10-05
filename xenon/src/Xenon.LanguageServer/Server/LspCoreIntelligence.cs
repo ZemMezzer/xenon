@@ -410,7 +410,7 @@ internal static class LspCoreIntelligence
             SyntaxKind.ReturnKeyword => 19,
         SyntaxKind.UsingKeyword or SyntaxKind.NamespaceKeyword or SyntaxKind.StructKeyword or
             SyntaxKind.InterfaceKeyword or SyntaxKind.TemplateKeyword or SyntaxKind.WhereKeyword or
-            SyntaxKind.EnumKeyword => 20,
+            SyntaxKind.EnumKeyword or SyntaxKind.VarKeyword => 20,
         SyntaxKind.GetKeyword or SyntaxKind.SetKeyword or SyntaxKind.BaseKeyword or
             SyntaxKind.ThisKeyword or SyntaxKind.SizeOfKeyword or SyntaxKind.AlignOfKeyword or
             SyntaxKind.OffsetOfKeyword or SyntaxKind.CastKeyword or SyntaxKind.BitCastKeyword => 21,
@@ -429,6 +429,7 @@ internal static class LspCoreIntelligence
             return "primitive type";
         return keyword switch
         {
+            "var" => "local variable type inference",
             "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" or "function" =>
                 "type-forming keyword",
             "new" or "move" or "lock" or "await" => "value-forming keyword",

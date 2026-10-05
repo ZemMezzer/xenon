@@ -12,6 +12,29 @@ namespace Xenon.LanguageServer.Tests;
 
 public sealed class CoreIntelligenceHardeningTests
 {
+    [Theory]
+    [InlineData("var count = 10u;", "count = 20u;", "uint count")]
+    [InlineData("readonly var count = 10u;", "count;", "uint count")]
+    [InlineData("var count = Item();", "count;", "Item count")]
+    [InlineData("readonly var count = Item();", "count;", "Item count")]
+    public async Task InferredLocalExposesItsTypeAndDeclarationKeywordToTheEditor(
+        string declaration, string use, string expectedHover)
+    {
+        string source = $"namespace App; struct Item {{}} void Test() {{ {declaration} {use} }}";
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("inference.xe", source)).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement hover = await RequestAtAsync(session, "textDocument/hover", uri, source,
+            source.LastIndexOf("count", StringComparison.Ordinal));
+        Assert.Contains(expectedHover, hover.GetProperty("contents").GetProperty("value").GetString());
+
+        JsonElement tokens = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var inferredKeyword = Assert.Single(DecodeTokens(source, tokens.GetProperty("data")), token => token.Text == "var");
+        Assert.Equal(20, inferredKeyword.Type);
+    }
+
     [Fact]
     public async Task ImportedXelibNestedReadonlyValueKeepsMembersVisibleForCompletion()
     {
@@ -523,6 +546,7 @@ public sealed class CoreIntelligenceHardeningTests
         AssertKeywordDetails(keywordItems, ["malloc", "calloc", "free", "delete", "destruct"], "lifetime operation keyword");
         AssertKeywordDetails(keywordItems, ["resolve", "reject"], "completion operator");
         AssertKeywordDetails(keywordItems, ["true", "false", "null"], "literal keyword");
+        AssertKeywordDetails(keywordItems, ["var"], "local variable type inference");
         AssertKeywordDetails(keywordItems,
             ["void", "bool", "byte", "char", "sbyte", "short", "ushort", "int", "uint", "long", "ulong",
                 "float", "double", "nint", "nuint", "clong", "culong"],

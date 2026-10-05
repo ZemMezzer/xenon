@@ -10,6 +10,45 @@ namespace Xenon.LanguageServer.Tests;
 public sealed class OwnershipIntelligenceTests
 {
     [Fact]
+    public async Task InvalidVarInAsyncGenericReturnPublishesDiagnosticAndRecoversAfterEdit()
+    {
+        const string source = """
+            namespace App;
+            struct Task<T>
+            {
+                public storage<T> Value;
+                public static void operator resolve(Task<T>& result, T value) { result.Value = move value; }
+                public static bool operator await(readonly Task<T>& result, storage<T>& value, function void() next)
+                {
+                    return false;
+                }
+            }
+            public async Task<var> Main() { return 42; }
+            """;
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("main.xe", source)).AbsoluteUri;
+        var notifications = Channel.CreateUnbounded<JsonElement>();
+        await using var session = new LanguageServerSession((method, value) =>
+        {
+            if (method == "textDocument/publishDiagnostics")
+                notifications.Writer.TryWrite(Result(value));
+            return Task.CompletedTask;
+        }, diagnosticDebounce: TimeSpan.Zero);
+
+        await InitializeAsync(session, uri, source);
+        JsonElement published = await ReadDiagnosticsAsync(notifications.Reader, version: 1);
+        Assert.True(published.GetProperty("diagnostics").GetArrayLength() == 1, published.ToString());
+        JsonElement diagnostic = Assert.Single(published.GetProperty("diagnostics").EnumerateArray());
+        Assert.Equal(DiagnosticIds.InvalidVarContext, diagnostic.GetProperty("code").GetString());
+        Assert.Equal(3, diagnostic.GetProperty("range").GetProperty("end").GetProperty("character").GetInt32() -
+            diagnostic.GetProperty("range").GetProperty("start").GetProperty("character").GetInt32());
+
+        await ChangeAsync(session, uri, source.Replace("Task<var>", "Task<int>", StringComparison.Ordinal), version: 2);
+        JsonElement corrected = await ReadDiagnosticsAsync(notifications.Reader, version: 2);
+        Assert.Empty(corrected.GetProperty("diagnostics").EnumerateArray());
+    }
+
+    [Fact]
     public async Task OwnershipTypesMembersAndOperationsHaveCompilerBackedEditorIdentity()
     {
         const string source = """

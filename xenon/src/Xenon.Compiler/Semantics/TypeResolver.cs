@@ -39,17 +39,27 @@ internal static class TypeResolver
     {
         switch (syntax)
         {
+            // Invalid non-local uses have already been diagnosed by the parser.
+            case InferredTypeSyntax:
+                return BuiltinTypes.Error;
             case QualifiedTypeSyntax qualified:
                 return ResolveCore(qualified.ElementType, scope, diagnostics, isReadonly ||
                     qualified.Position == TypeQualifierPosition.Prefix && qualified.QualifierToken.Kind == SyntaxKind.ReadonlyKeyword);
             case PointerTypeSyntax pointer:
-                return scope.TypeFactory.PointerTo(ResolveCore(pointer.ElementType, scope, diagnostics, isReadonly),
+            {
+                TypeSymbol element = ResolveCore(pointer.ElementType, scope, diagnostics, isReadonly);
+                if (TypeIdentity.AreSame(element, BuiltinTypes.Error)) return BuiltinTypes.Error;
+                return scope.TypeFactory.PointerTo(element,
                     isReadonly && !pointer.ElementType.Contains<PointerTypeSyntax>());
+            }
             case FunctionPointerTypeSyntax function:
             {
                 TypeSymbol returnType = ResolveCore(function.ReturnType, scope, diagnostics);
                 ImmutableArray<TypeSymbol> parameterTypes = function.ParameterTypes
                     .Select(parameter => ResolveCore(parameter, scope, diagnostics)).ToImmutableArray();
+                if (TypeIdentity.AreSame(returnType, BuiltinTypes.Error) ||
+                    parameterTypes.Any(type => TypeIdentity.AreSame(type, BuiltinTypes.Error)))
+                    return BuiltinTypes.Error;
                 foreach ((TypeSyntax parameterSyntax, TypeSymbol parameterType) in function.ParameterTypes.Zip(parameterTypes))
                 {
                     if (TypeIdentity.AreSame(parameterType, BuiltinTypes.Void))
@@ -65,6 +75,9 @@ internal static class TypeResolver
                 TypeSymbol returnType = ResolveCore(function.ReturnType, scope, diagnostics);
                 ImmutableArray<TypeSymbol> parameterTypes = function.ParameterTypes
                     .Select(parameter => ResolveCore(parameter, scope, diagnostics)).ToImmutableArray();
+                if (TypeIdentity.AreSame(returnType, BuiltinTypes.Error) ||
+                    parameterTypes.Any(type => TypeIdentity.AreSame(type, BuiltinTypes.Error)))
+                    return BuiltinTypes.Error;
                 foreach ((TypeSyntax parameterSyntax, TypeSymbol parameterType) in function.ParameterTypes.Zip(parameterTypes))
                     if (TypeIdentity.AreSame(parameterType, BuiltinTypes.Void))
                         diagnostics.Report(parameterSyntax.NameToken.Location,
@@ -76,6 +89,7 @@ internal static class TypeResolver
             case ReferenceTypeSyntax reference:
             {
                 TypeSymbol element = ResolveCore(reference.ElementType, scope, diagnostics, isReadonly);
+                if (TypeIdentity.AreSame(element, BuiltinTypes.Error)) return BuiltinTypes.Error;
                 if (!TypeIdentity.AreSame(element, BuiltinTypes.Void)) return scope.TypeFactory.ReferenceTo(element, isReadonly);
                 diagnostics.Report(reference.NameToken.Location, "reference element type cannot be 'void'",
                     DiagnosticIds.VoidReferenceElementType);
@@ -84,6 +98,7 @@ internal static class TypeResolver
             case ArrayTypeSyntax array:
             {
                 TypeSymbol element = ResolveCore(array.ElementType, scope, diagnostics, isReadonly);
+                if (TypeIdentity.AreSame(element, BuiltinTypes.Error)) return BuiltinTypes.Error;
                 if (!TypeIdentity.AreSame(element, BuiltinTypes.Void)) return scope.TypeFactory.ArrayOf(element, array.Rank);
                 diagnostics.Report(array.NameToken.Location, "array element type cannot be 'void'",
                     DiagnosticIds.VoidArrayElementType);
@@ -125,6 +140,7 @@ internal static class TypeResolver
                     }
 
                     TypeSymbol element = ResolveCore(modifierArguments.Arguments[0], scope, diagnostics);
+                    if (TypeIdentity.AreSame(element, BuiltinTypes.Error)) return BuiltinTypes.Error;
                     string? invalidReason = ValidateLifetimeModifierComposition(named.NameToken.Kind, element);
                     if (invalidReason is not null)
                     {
@@ -158,6 +174,7 @@ internal static class TypeResolver
                     }
 
                     TypeSymbol element = ResolveCore(ownershipArguments.Arguments[0], scope, diagnostics);
+                    if (TypeIdentity.AreSame(element, BuiltinTypes.Error)) return BuiltinTypes.Error;
                     if (TypeIdentity.AreSame(element, BuiltinTypes.Void) ||
                         element is ReferenceTypeSymbol or PointerTypeSymbol or OwnershipTypeSymbol or LifetimeModifierTypeSymbol)
                     {
@@ -226,6 +243,10 @@ internal static class TypeResolver
                     }
                     ImmutableArray<TypeSymbol> typeArguments = arguments.Arguments
                         .Select(argument => ResolveCore(argument, scope, diagnostics)).ToImmutableArray();
+                    // A diagnosed argument must not produce a specialization whose
+                    // fields, parameters or generated bodies contain an error type.
+                    if (typeArguments.Any(argument => TypeIdentity.AreSame(argument, BuiltinTypes.Error)))
+                        return BuiltinTypes.Error;
                     return type switch
                     {
                         StructTypeSymbol structure =>

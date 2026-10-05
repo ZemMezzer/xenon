@@ -247,4 +247,7 @@ public static class DiagnosticIds
     public const string BorrowAcrossAwait = "XE2283";
     public const string ValueLifetimeEscape = "XE2284";
     public const string PendingBorrowedOperation = "XE2285";
+    public const string VarRequiresInitializer = "XE2286";
+    public const string InvalidVarInitializer = "XE2287";
+    public const string InvalidVarContext = "XE2288";
 }

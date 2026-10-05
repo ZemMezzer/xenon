@@ -8,6 +8,14 @@ public abstract record TypeSyntax : SyntaxNode
     public abstract string Name { get; }
 }
 
+// A declaration marker, never a resolvable runtime type.
+public sealed record InferredTypeSyntax(SyntaxToken VarKeyword) : TypeSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.InferredType;
+    public override SyntaxToken NameToken => VarKeyword;
+    public override string Name => VarKeyword.Text;
+}
+
 public sealed record NamedTypeSyntax(
     ImmutableArray<SyntaxToken> NameParts,
     ImmutableArray<SyntaxToken> DotTokens,
