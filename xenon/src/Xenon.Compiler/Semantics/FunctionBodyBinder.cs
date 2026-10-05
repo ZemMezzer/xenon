@@ -1081,7 +1081,39 @@ internal sealed partial class FunctionBodyBinder
     private BoundVariableDeclarationStatement BindVariableDeclaration(VariableDeclarationStatementSyntax syntax)
     {
         bool isConstant = syntax.Type.GetQualifier(SyntaxKind.ConstKeyword) is not null && !syntax.Type.Contains<PointerTypeSyntax>() && !syntax.Type.Contains<ReferenceTypeSyntax>();
-        TypeSymbol type = TypeResolver.Resolve(isConstant ? syntax.Type.WithoutQualifier(SyntaxKind.ConstKeyword) : syntax.Type, _fileScope, _diagnostics);
+        bool isInferred = syntax.Type.Contains<InferredTypeSyntax>();
+        BoundExpression? initializer = null;
+        TypeSymbol type;
+        if (isInferred)
+        {
+            // No expected type: the initializer's normal static type is the declaration type.
+            FunctionPointerTypeSymbol? previousPointer = _expectedFunctionPointerType;
+            FunctionValueTypeSymbol? previousValue = _expectedFunctionValueType;
+            _expectedFunctionPointerType = null;
+            _expectedFunctionValueType = null;
+            try
+            {
+                initializer = syntax.Initializer is null ? null : BindExpression(syntax.Initializer, preserveReference: true);
+            }
+            finally
+            {
+                _expectedFunctionPointerType = previousPointer;
+                _expectedFunctionValueType = previousValue;
+            }
+            type = initializer?.Type ?? BuiltinTypes.Error;
+            if (initializer is null)
+                _diagnostics.Report(syntax.Type.NameToken.Location,
+                    "a 'var' local declaration requires an initializer", DiagnosticIds.VarRequiresInitializer);
+            else if (TypeIdentity.AreSame(type, BuiltinTypes.Void) || TypeIdentity.AreSame(type, BuiltinTypes.Null))
+            {
+                _diagnostics.Report(syntax.Type.NameToken.Location,
+                    "a 'var' initializer must have a concrete value type", DiagnosticIds.InvalidVarInitializer);
+                type = BuiltinTypes.Error;
+            }
+            _semanticInfo.RecordType(syntax.Type, type);
+        }
+        else
+            type = TypeResolver.Resolve(isConstant ? syntax.Type.WithoutQualifier(SyntaxKind.ConstKeyword) : syntax.Type, _fileScope, _diagnostics);
         if (ContainsStaticStruct(type))
             _diagnostics.Report(syntax.Type.NameToken.Location,
                 "static structs cannot be used as local, pointer, reference, ownership, or array values",
@@ -1116,8 +1148,8 @@ internal sealed partial class FunctionBodyBinder
                 previousVariable?.Locations.Select(location => new RelatedDiagnosticLocation(location, "previous declaration")));
         }
 
-        BoundExpression? initializer = syntax.Initializer is null ? null :
-            BindExpressionWithExpectedType(syntax.Initializer, type);
+        if (!isInferred && syntax.Initializer is not null)
+            initializer = BindExpressionWithExpectedType(syntax.Initializer, type);
         bool isStorageDeclaration = TryGetStorageType(type, out StorageTypeSymbol storageType);
         bool isDirectPinDeclaration = !isStorageDeclaration && TypeFacts.IsPinned(type);
         if (type is ReferenceTypeSymbol && initializer is null)
@@ -1125,7 +1157,7 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(syntax.IdentifierToken.Location, "reference variables must be initialized",
                 DiagnosticIds.ReferenceRequiresInitializer);
         }
-        else if (syntax.Type.IsBindingReadonly() && initializer is null)
+        else if (!isInferred && syntax.Type.IsBindingReadonly() && initializer is null)
         {
             _diagnostics.Report(syntax.IdentifierToken.Location, "readonly local variables must be initialized",
                 DiagnosticIds.ReadonlyRequiresInitializer);
@@ -1276,7 +1308,9 @@ internal sealed partial class FunctionBodyBinder
         return result;
     }
 
-    private BoundExpression BindExpression(ExpressionSyntax syntax)
+    private BoundExpression BindExpression(ExpressionSyntax syntax) => BindExpression(syntax, preserveReference: false);
+
+    private BoundExpression BindExpression(ExpressionSyntax syntax, bool preserveReference)
     {
         _cancellationToken.ThrowIfCancellationRequested();
         bool validatePlaceUse = syntax switch
@@ -1297,7 +1331,7 @@ internal sealed partial class FunctionBodyBinder
                 LiteralExpressionSyntax literal => BindLiteralExpression(literal),
                 NameExpressionSyntax name => BindNameExpression(name),
                 ThisExpressionSyntax @this => BindThisExpression(@this),
-                ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression),
+                ParenthesizedExpressionSyntax parenthesized => BindExpression(parenthesized.Expression, preserveReference),
                 AwaitExpressionSyntax awaitExpression => BindAwaitExpression(awaitExpression),
                 MoveExpressionSyntax move => BindMoveExpression(move),
                 LockExpressionSyntax @lock => BindLockExpression(@lock),
@@ -1345,7 +1379,9 @@ internal sealed partial class FunctionBodyBinder
         _expressionLocations[expression] = GetLocation(syntax);
         _expressionSyntax[expression] = syntax;
 
-        BoundExpression result = DereferenceReference(expression);
+        // Value contexts dereference references. Declaration inference needs the
+        // expression's static type before this implicit value conversion.
+        BoundExpression result = preserveReference ? expression : DereferenceReference(expression);
         _expressionLocations[result] = GetLocation(syntax);
         _expressionSyntax[result] = syntax;
         _semanticInfo.Receivers[syntax] = new ReceiverInfo(

@@ -1162,10 +1162,22 @@ internal sealed class Parser
         return new ParameterSyntax(type, identifier);
     }
 
-    private TypeSyntax ParseType(bool allowArraySuffix = true)
+    private TypeSyntax ParseType(bool allowArraySuffix = true, bool allowInference = false)
     {
         SyntaxToken? readonlyKeyword = Current.Kind == SyntaxKind.ReadonlyKeyword ? NextToken() : null;
         SyntaxToken? constKeyword = Current.Kind == SyntaxKind.ConstKeyword ? NextToken() : null;
+        if (Current.Kind == SyntaxKind.VarKeyword)
+        {
+            SyntaxToken keyword = NextToken();
+            if (!allowInference || Current.Kind != SyntaxKind.IdentifierToken)
+                Diagnostics.Report(keyword.Location,
+                    "'var' is only valid in local variable declarations; it is not a type",
+                    DiagnosticIds.InvalidVarContext);
+            TypeSyntax inferred = new InferredTypeSyntax(keyword);
+            if (constKeyword is not null) inferred = new QualifiedTypeSyntax(inferred, constKeyword);
+            if (readonlyKeyword is not null) inferred = new QualifiedTypeSyntax(inferred, readonlyKeyword);
+            return inferred;
+        }
         if (Current.Kind == SyntaxKind.FunctionKeyword)
         {
             SyntaxToken functionKeyword = NextToken();
@@ -1554,7 +1566,7 @@ internal sealed class Parser
 
     private VariableDeclarationStatementSyntax ParseVariableDeclarationStatement()
     {
-        TypeSyntax type = ParseType();
+        TypeSyntax type = ParseType(allowInference: true);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
         SyntaxToken? equals = null;
         ExpressionSyntax? initializer = null;
@@ -2103,6 +2115,7 @@ internal sealed class Parser
     {
         int offset = Current.Kind is SyntaxKind.ConstKeyword or SyntaxKind.ReadonlyKeyword ? 1 : 0;
         SyntaxKind firstKind = Peek(offset).Kind;
+        if (firstKind == SyntaxKind.VarKeyword) return true;
         if (!SyntaxFacts.IsTypeName(firstKind))
         {
             return false;
@@ -2154,7 +2167,7 @@ internal sealed class Parser
                 else if (kind == SyntaxKind.GreaterGreaterToken) depth -= 2;
                 else if (kind is SyntaxKind.EndOfFileToken or SyntaxKind.SemicolonToken or
                          SyntaxKind.OpenBraceToken or SyntaxKind.CloseBraceToken) return false;
-                else if (!SyntaxFacts.IsTypeName(kind) && kind is not (SyntaxKind.ReadonlyKeyword or
+                else if (!SyntaxFacts.IsTypeName(kind) && kind is not (SyntaxKind.VarKeyword or SyntaxKind.ReadonlyKeyword or
                          SyntaxKind.ConstKeyword or SyntaxKind.DotToken or SyntaxKind.CommaToken or
                          SyntaxKind.StarToken or SyntaxKind.AmpersandToken or SyntaxKind.OpenBracketToken or
                          SyntaxKind.CloseBracketToken)) return false;

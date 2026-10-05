@@ -31,6 +31,7 @@ public static class SyntaxFacts
             ["culong"] = SyntaxKind.CULongKeyword,
             ["const"] = SyntaxKind.ConstKeyword,
             ["readonly"] = SyntaxKind.ReadonlyKeyword,
+            ["var"] = SyntaxKind.VarKeyword,
             ["struct"] = SyntaxKind.StructKeyword,
             ["interface"] = SyntaxKind.InterfaceKeyword,
             ["template"] = SyntaxKind.TemplateKeyword,
