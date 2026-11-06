@@ -70,10 +70,15 @@ public sealed partial class MirLowerer
         else if (construction.Constructor is { } constructor)
         {
             _current.Statements.Add(new MirAssign(target, new MirDefault(construction.ValueType), source));
-            _ = Call(Callee(constructor), construction.Arguments, source, Address(target, construction.ValueType, source));
+            var preparedFields = new List<TemporaryGuard>();
+            if (construction.ValueType is StructTypeSymbol constructedType)
+                AllocationConstructors(constructedType, target, null, source, preparedFields);
+            var arguments = Arguments(construction.Arguments);
+            foreach (TemporaryGuard guard in preparedFields) EndValueGuard(guard, source);
+            _ = CallValues(Callee(constructor), arguments, source, Address(target, construction.ValueType, source));
         }
         else if (construction.ValueType is StructTypeSymbol structure)
-            ConstructAggregateAt(new BoundStructConstructionExpression(structure, construction.Arguments)
+            ConstructDefaultAggregateAt(new BoundStructConstructionExpression(structure, construction.Arguments)
                 { IsDefaultInitialization = construction.IsDefaultInitialization }, target, source);
         else _current.Statements.Add(new MirAssign(target, new MirDefault(construction.ValueType), source));
         if (wrapper is not null)

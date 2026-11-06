@@ -25,12 +25,46 @@ internal sealed partial class MirReadonlyAnalysis
             HashSet<StructTypeSymbol>? interfaceTypes = null;
             if (call.InterfaceType is { } interfaceType)
                 storage = InterfaceReceiver(storage, interfaceType, out interfaceTypes);
-            if (callee.FunctionKind is FunctionKind.Constructor or FunctionKind.InstanceInitializer or
+            if (callee.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer or
                 FunctionKind.Destructor or FunctionKind.DestructorGlue or FunctionKind.OwnershipDestructor or FunctionKind.StorageDestructor)
                 return ContextualDispatch(callee, arguments, storage, site, interfaceTypes);
             return InvokeMember(callee, arguments, storage, site, interfaceTypes);
         }
         return IsAccessor(callee) && !callee.IsReadonly ? ContextualDispatch(callee, arguments, [], site) : Call(callee, arguments, site);
+    }
+
+    private readonly HashSet<object> _knownAllocations = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, Dictionary<FunctionSymbol, object>> _allocationProviders = new(ReferenceEqualityComparer.Instance);
+
+    private void RecordAllocation(MirIntrinsicCall call, MirEffectSite site, HashSet<object>[] arguments)
+    {
+        object allocation = Root(site);
+        _knownAllocations.Add(allocation);
+        if (call.Function?.AllocationOperation != AllocationOperation.Allocate) return;
+        HashSet<object> receiver = arguments[^1];
+        _ = ContextualDispatch(call.Function, [[], []], receiver, site);
+        StructTypeSymbol provider = (StructTypeSymbol)((PointerTypeSymbol)call.Arguments[^1].Type).ElementType;
+        if (!_allocationProviders.TryGetValue(allocation, out var providers))
+            _allocationProviders.Add(allocation, providers = []);
+        FunctionSymbol release = provider.DeallocationOperator!;
+        if (!providers.TryGetValue(release, out object? context)) providers.Add(release, context = new object());
+        _summaryLocations.Add(context);
+        Store([context], receiver);
+    }
+
+    private void ReleaseAllocation(MirIntrinsicCall call, MirEffectSite site, HashSet<object> allocation)
+    {
+        bool unknown = false;
+        foreach (object root in allocation.Select(Unwrap))
+        {
+            if (_allocationProviders.TryGetValue(root, out var providers))
+                foreach (var (release, context) in providers)
+                    _ = ContextualDispatch(release, [allocation], Read([context], release.ContainingStruct is { } owner ? new PointerTypeSymbol(owner, false) : call.Arguments[0].Type), site);
+            else if (!_knownAllocations.Contains(root)) unknown = true;
+        }
+        if (unknown)
+            foreach (FunctionSymbol release in call.AllocationReleases)
+                _ = ContextualCall(release, [allocation], [_external], site);
     }
 
     private HashSet<object> Intrinsic(MirIntrinsicCall call, MirEffectSite site)
@@ -40,10 +74,12 @@ internal sealed partial class MirReadonlyAnalysis
         switch (call.Intrinsic)
         {
             case MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray:
+                RecordAllocation(call, site, arguments);
                 object array = Root(site);
                 InitializeArrayElements(call, site);
                 return [array];
             case MirIntrinsicKind.Allocate or MirIntrinsicKind.Malloc or MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc:
+                RecordAllocation(call, site, arguments);
                 object allocated = Root(site);
                 _summaryLocations.Add(allocated);
                 return [allocated];
@@ -73,7 +109,11 @@ internal sealed partial class MirReadonlyAnalysis
                 StoreValue(arguments[0], right, swapped); StoreValue(arguments[1], left, swapped);
                 return [];
             case MirIntrinsicKind.Free:
-                if (arguments.Length != 0) CheckWrite(arguments[0], site);
+                if (arguments.Length != 0)
+                {
+                    CheckWrite(arguments[0], site);
+                    if (call.RestoresAllocator) ReleaseAllocation(call, site, arguments[0]);
+                }
                 return [];
             default: return [];
         }

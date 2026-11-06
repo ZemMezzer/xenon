@@ -214,7 +214,7 @@ internal static class LspCoreIntelligence
                 reference.Source.FileId == context.Document.SourceFileId);
             nodes[symbol] = new LspDocumentSymbol
             {
-                Name = symbol.Name,
+                Name = symbol.ToDisplayString(SymbolDisplayFormat.ShortName),
                 Detail = symbol.ToDisplayString(SymbolDisplayFormat.Signature),
                 Kind = SymbolKindNumber(EditorSymbolClassifier.GetKind(symbol)),
                 Range = ToRange(declaration.Source, symbol is NamespaceSymbol
@@ -263,6 +263,7 @@ internal static class LspCoreIntelligence
             ? model.GetCompletionSymbols(context.Document.SyntaxTree, position, context.CancellationToken)
             : model.GetCompletionSymbols(access, position, context.CancellationToken);
         var items = symbols.Where(EditorSymbolClassifier.IsEditorVisible).Where(symbol => symbol.Kind != SymbolKind.Error)
+            .Where(symbol => symbol is not FunctionSymbol { AllocationOperation: not AllocationOperation.None })
             .DistinctBy(symbol => (symbol.Name, EditorSymbolClassifier.GetKind(symbol),
                 symbol.ToDisplayString(SymbolDisplayFormat.Signature)))
             .Select(symbol => CompletionItem(symbol)).ToList();
@@ -408,7 +409,7 @@ internal static class LspCoreIntelligence
             SyntaxKind.IfKeyword or SyntaxKind.ElseKeyword or SyntaxKind.WhileKeyword or
             SyntaxKind.ForKeyword or SyntaxKind.BreakKeyword or SyntaxKind.ContinueKeyword or
             SyntaxKind.ReturnKeyword => 19,
-        SyntaxKind.UsingKeyword or SyntaxKind.NamespaceKeyword or SyntaxKind.StructKeyword or
+        SyntaxKind.UsingKeyword or SyntaxKind.NamespaceKeyword or SyntaxKind.StructKeyword or SyntaxKind.AllocatorKeyword or
             SyntaxKind.InterfaceKeyword or SyntaxKind.TemplateKeyword or SyntaxKind.WhereKeyword or
             SyntaxKind.EnumKeyword or SyntaxKind.VarKeyword => 20,
         SyntaxKind.GetKeyword or SyntaxKind.SetKeyword or SyntaxKind.BaseKeyword or
@@ -430,6 +431,7 @@ internal static class LspCoreIntelligence
         return keyword switch
         {
             "var" => "local variable type inference",
+            "allocator" => "allocator declaration",
             "unique" or "shared" or "weak" or "storage" or "pin" or "atomic" or "function" =>
                 "type-forming keyword",
             "new" or "move" or "lock" or "await" => "value-forming keyword",
@@ -519,7 +521,8 @@ internal static class LspCoreIntelligence
             occurrences.Add(declaration.Declaration);
             if (declaration.EditorKind == EditorSymbolKind.Struct)
                 occurrences.AddRange(symbols.FindMembers(member).Where(entry =>
-                        entry.FunctionKind is FunctionKind.Constructor or FunctionKind.Destructor)
+                        entry.FunctionKind is FunctionKind.Constructor or FunctionKind.Destructor ||
+                        entry.AllocationOperation != AllocationOperation.None)
                     .Select(entry => entry.Declaration));
         }
 
@@ -563,6 +566,8 @@ internal static class LspCoreIntelligence
     }
 
     private static Symbol? GetRenameTarget(Symbol? symbol) => symbol is FunctionSymbol
+        { AllocationOperation: not AllocationOperation.None, ContainingType: not null } allocation
+        ? allocation.ContainingType : symbol is FunctionSymbol
         { FunctionKind: FunctionKind.Constructor or FunctionKind.Destructor, ContainingType: not null } function
         ? function.ContainingType : symbol;
 

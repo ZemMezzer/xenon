@@ -1023,6 +1023,7 @@ internal sealed class XelibIrBuilder
                 if (value.IsPublic) result |= XelibSymbolFlags.Public;
                 if (value.IsStatic) result |= XelibSymbolFlags.Static;
                 if (value.IsReadonly) result |= XelibSymbolFlags.Readonly;
+                if (value.IsAllocatorField) result |= XelibSymbolFlags.AllocatorField;
                 if (value.IsThreadLocal) result |= XelibSymbolFlags.ThreadLocal;
                 if (value.HasInitializer) result |= XelibSymbolFlags.HasInitializer;
                 break;
@@ -1064,6 +1065,7 @@ internal sealed class XelibIrBuilder
                 if (value.IsReadonly) result |= XelibSymbolFlags.ReadonlyStruct;
                 if (value.IsStatic) result |= XelibSymbolFlags.StaticStruct;
                 if (value.IsSealed) result |= XelibSymbolFlags.Sealed;
+                if (value.IsAllocator) result |= XelibSymbolFlags.Allocator;
                 if (value.HasVirtualDispatch) result |= XelibSymbolFlags.HasVirtualDispatch;
                 break;
             case ParameterSymbol value when value.IsReadonly:

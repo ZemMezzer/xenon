@@ -91,7 +91,7 @@ public sealed partial class MirLifetimeAnalysis
             // References initialized to another field of the same object are
             // carried by that object's storage, not by a constructor temporary.
             if (store.Destination == -1 && store.Source.Kind == LifetimeDependencyKind.ReceiverBorrow &&
-                function.FunctionKind is FunctionKind.Constructor or FunctionKind.InstanceInitializer) continue;
+                function.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer) continue;
             MirLifetimeValue stored = Map(store.Source, call, state, captures);
             MirOperand? target = store.Destination == -1 ? call.Receiver :
                 store.Destination >= 0 && store.Destination < call.Arguments.Length ? call.Arguments[store.Destination] : null;

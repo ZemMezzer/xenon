@@ -1,0 +1,7 @@
+[project]
+name = "AllocatorStaticLibraryApp"
+type = "executable"
+[source]
+root = "src"
+[references]
+projects = ["../Library/Library.xeproj"]

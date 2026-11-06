@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <XenonNativePlatform Condition="'$(RuntimeIdentifier)' == 'win-x64'">win_x64</XenonNativePlatform>
+    <XenonNativePlatform Condition="'$(RuntimeIdentifier)' == 'win-arm64'">win_arm64</XenonNativePlatform>
+    <XenonNativePlatform Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">darwin_arm64</XenonNativePlatform>
+    <XenonLLVMRuntimeName Condition="$(RuntimeIdentifier.StartsWith('win-'))">libLLVM.dll</XenonLLVMRuntimeName>
+    <XenonLLVMRuntimeName Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">libLLVM.dylib</XenonLLVMRuntimeName>
+    <XenonLLVMRuntimeDirectory>$(MSBuildThisFileDirectory)../../build/$(XenonNativePlatform)/llvm-runtime/</XenonLLVMRuntimeDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(XenonLLVMRuntimeDirectory)$(XenonLLVMRuntimeName)" Link="$(XenonLLVMRuntimeName)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="RequirePatchedLLVMRuntime" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(XenonLLVMRuntimeDirectory)$(XenonLLVMRuntimeName)')" Text="Build the repository LLVM runtime before managed tests: cmake --build build/$(XenonNativePlatform)/cmake --config Release --target xenon-llvm-runtime. Configure that CMake directory first if needed (see README)." />
+  </Target>
+</Project>

@@ -229,9 +229,17 @@ public static class AccessibilityRules
 
     public static bool IsSameOrDerivedFrom(StructTypeSymbol candidate, StructTypeSymbol expected)
     {
+        expected = OpenDeclaration(expected);
         for (StructTypeSymbol? current = candidate; current is not null; current = current.BaseType)
-            if (TypeIdentity.AreSame(current, expected)) return true;
+            if (TypeIdentity.AreSame(OpenDeclaration(current), expected)) return true;
         return false;
+
+        // While binding Box<T>, its lexical owner may be the declaration Box,
+        // while the constructor's owner is Box applied to its own parameters.
+        static StructTypeSymbol OpenDeclaration(StructTypeSymbol type) =>
+            type.GenericDefinition is { } definition &&
+            type.TypeArguments.SequenceEqual<TypeSymbol>(definition.TypeParameters)
+                ? definition : type;
     }
 
     private static bool AreSamePrivateAccessDomain(
@@ -298,6 +306,7 @@ public enum FunctionKind
     OwnershipDestructor,
     StorageDestructor,
     FunctionValueDestructor,
+    AllocationConstructor,
 }
 
 public enum AccessorKind

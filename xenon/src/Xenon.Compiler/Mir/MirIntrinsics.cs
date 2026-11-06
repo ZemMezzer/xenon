@@ -42,6 +42,8 @@ public sealed record MirIntrinsicCall(MirIntrinsicKind Intrinsic, ImmutableArray
     TypeSymbol ResultType, MirPlace? Destination, MirBlockId Normal, MirBlockId Unwind,
     MirSourceInfo Source) : MirTerminator(Source)
 {
+    public bool RestoresAllocator { get; init; }
+    public ImmutableArray<FunctionSymbol> AllocationReleases { get; init; } = [];
     public MirStorageCheckPurpose StorageCheck { get; init; }
     public FunctionSymbol? Function { get; init; }
     public TypeSymbol? SubjectType { get; init; }

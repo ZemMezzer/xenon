@@ -172,6 +172,8 @@ internal static class LlvmFunctionEffectAnalysis
                         break;
                     case MirIntrinsicCall intrinsic:
                         result.MayAccessMemory = true;
+                        if (intrinsic.Function?.AllocationOperation == AllocationOperation.Allocate || !intrinsic.AllocationReleases.IsEmpty)
+                            result.MayThrow = true;
                         switch (intrinsic.Intrinsic)
                         {
                             case MirIntrinsicKind.Allocate or MirIntrinsicKind.Malloc or MirIntrinsicKind.Calloc or

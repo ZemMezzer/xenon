@@ -31,6 +31,7 @@ public static class XelibStableMappings
     {
         FunctionKind.Ordinary => XelibFunctionKind.Ordinary,
         FunctionKind.Method => XelibFunctionKind.Method,
+        FunctionKind.AllocationConstructor => XelibFunctionKind.AllocationConstructor,
         FunctionKind.Constructor => XelibFunctionKind.Constructor,
         FunctionKind.InstanceInitializer => XelibFunctionKind.InstanceInitializer,
         FunctionKind.ThreadLocalInitializer => XelibFunctionKind.ThreadLocalInitializer,
@@ -46,6 +47,7 @@ public static class XelibStableMappings
     {
         XelibFunctionKind.Ordinary => FunctionKind.Ordinary,
         XelibFunctionKind.Method => FunctionKind.Method,
+        XelibFunctionKind.AllocationConstructor => FunctionKind.AllocationConstructor,
         XelibFunctionKind.Constructor => FunctionKind.Constructor,
         XelibFunctionKind.InstanceInitializer => FunctionKind.InstanceInitializer,
         XelibFunctionKind.ThreadLocalInitializer => FunctionKind.ThreadLocalInitializer,

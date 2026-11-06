@@ -100,6 +100,8 @@ public enum XelibSymbolFlags : uint
     Sealed = 1 << 17,
     Lambda = 1 << 18,
     CapturingLambda = 1 << 19,
+    Allocator = 1 << 20,
+    AllocatorField = 1 << 21,
 }
 
 public enum XelibFunctionKind : ushort
@@ -114,6 +116,7 @@ public enum XelibFunctionKind : ushort
     OwnershipDestructor = 8,
     StorageDestructor = 9,
     FunctionValueDestructor = 10,
+    AllocationConstructor = 11,
 }
 
 public enum XelibCaptureKind : byte
@@ -367,6 +370,7 @@ public enum XelibBodyOpcode : ushort
     Delete = 84,
     RawAllocation = 85,
     Await = 86,
+    CompleteBaseInitialization = 87,
 }
 
 public enum XelibOperator : ushort

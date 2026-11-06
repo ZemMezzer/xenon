@@ -69,7 +69,7 @@ public sealed partial class MirLifetimeAnalysis
                             ? "resumable completion cannot retain stack-backed array storage" : "stack array cannot be passed to another function");
         if (_collect && terminator is MirIntrinsicCall intrinsic)
         {
-            if (intrinsic.Intrinsic == MirIntrinsicKind.Free && intrinsic.Arguments.Length > 0 &&
+            if (intrinsic.Intrinsic is MirIntrinsicKind.Free && intrinsic.Arguments.Length > 0 &&
                 intrinsic.Arguments[0].Type is ArrayTypeSymbol && !Operand(intrinsic.Arguments[0], state).StackArrayBacking.IsEmpty)
                 Report(intrinsic.Source, DiagnosticIds.StackArrayFree, "stack array cannot be freed");
             if (intrinsic.Intrinsic is MirIntrinsicKind.CompareExchange or MirIntrinsicKind.CompareExchangeOwned &&

@@ -505,6 +505,8 @@ public sealed class SemanticModel
         return symbol switch
         {
             DeclaredTypeSymbol type => type,
+            FunctionSymbol { AllocationOperation: not AllocationOperation.None, ContainingType: not null } function =>
+                function.ContainingType,
             FunctionSymbol { FunctionKind: FunctionKind.Constructor or FunctionKind.Destructor,
                 ContainingType: not null } function => function.ContainingType,
             FunctionSymbol function => function.ReturnType,

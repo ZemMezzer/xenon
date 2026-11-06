@@ -510,6 +510,17 @@ public sealed partial class Compilation
                         MarkType(destroyed, TypeReachabilityReason.VirtualDispatch);
                         break;
                     case MirIntrinsicCall intrinsic:
+                        if (intrinsic.Function?.AllocationOperation == AllocationOperation.Allocate &&
+                            intrinsic.Arguments.LastOrDefault()?.Type is PointerTypeSymbol { ElementType: StructTypeSymbol provider })
+                        {
+                            MarkType(provider, TypeReachabilityReason.VirtualDispatch);
+                            // Allocation codegen indexes slots using the operations' declaring
+                            // types, which can be imported ancestors of a generic provider.
+                            if (intrinsic.Function.ContainingStruct is { } allocationOwner)
+                                MarkType(allocationOwner, TypeReachabilityReason.VirtualDispatch);
+                            if (provider.DeallocationOperator?.ContainingStruct is { } releaseOwner)
+                                MarkType(releaseOwner, TypeReachabilityReason.VirtualDispatch);
+                        }
                         if (intrinsic.SubjectType is { } subject) MarkType(subject);
                         foreach (var capture in intrinsic.Captures)
                             MarkDestructionRequirement(capture.StorageType);

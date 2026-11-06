@@ -59,7 +59,7 @@ internal static class MirReferenceDiagnostics
     public static void AnalyzeAggregates(BoundFunction function, TypeFactory types, DiagnosticBag diagnostics,
         IReadOnlyDictionary<BoundExpression, TextLocation> locations, CancellationToken cancellation)
     {
-        bool constructor = function.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.InstanceInitializer;
+        bool constructor = function.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer;
         TypeSymbol resultType = constructor ? function.Symbol.ContainingType! : function.Symbol.ReturnType;
         var leaves = MirReferenceOrigins.ReferenceLeaves(resultType).ToArray();
         bool completion = function.Symbol.IsAsync && BoundTree.DescendantsAndSelf(function.Body).Any(node => node switch

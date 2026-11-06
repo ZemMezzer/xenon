@@ -26,6 +26,7 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
                 declaration.SecondaryAccessModifierToken, Accessibility.Public))
     {
         Declaration = declaration;
+        IsAllocator = declaration.IsAllocator;
         IsAbstract = declaration.IsAbstract;
         IsReadonly = declaration.IsReadonly;
         IsStatic = declaration.IsStatic;
@@ -125,6 +126,11 @@ public sealed class StructTypeSymbol : DeclaredTypeSymbol, IFieldStorageTypeSymb
     // The complete base subobject (including tail padding) occupies element zero.
     public int DeclaredFieldStart => (BaseType is null ? 0 : 1) + (IntroducesVirtualDispatch ? 1 : 0);
 
+    public bool IsAllocator { get; internal set; }
+    public FunctionSymbol? AllocationOperator => Methods.FirstOrDefault(m => m.AllocationOperation == AllocationOperation.Allocate) ?? BaseType?.AllocationOperator;
+    public FunctionSymbol? DeallocationOperator => Methods.FirstOrDefault(m => m.AllocationOperation == AllocationOperation.Deallocate) ?? BaseType?.DeallocationOperator;
+    public ImmutableArray<FunctionSymbol> AllocationConstructors => [.. Methods.Where(m => m.AllocationOperation == AllocationOperation.Construct)];
+    public bool RequiresAllocator => !AllocationConstructors.IsEmpty || BaseType?.RequiresAllocator == true;
     public bool IsAbstract { get; }
     public bool IsReadonly { get; }
     public bool IsStatic { get; }
@@ -323,7 +329,9 @@ public sealed class ConstantSymbol : Symbol
         Accessibility = declaration is ModuleConstantDeclarationSyntax module
             ? AccessibilityFacts.FromSyntax(module.AccessModifierToken,
                 module.SecondaryAccessModifierToken, Accessibility.Public)
-            : Accessibility.Public;
+            : declaration is TypeConstantDeclarationSyntax member
+                ? AccessibilityFacts.FromSyntax(member.AccessModifierToken, member.SecondaryAccessModifierToken, Accessibility.Public)
+                : Accessibility.Public;
         SetSourceOrigin(declaration);
     }
 
@@ -531,6 +539,8 @@ public sealed class PropertySymbol : Symbol
 
 public sealed class FieldSymbol : Symbol
 {
+    public bool IsAllocatorField { get; init; }
+
     internal FieldSymbol(
         string name,
         DeclaredTypeSymbol containingType,
@@ -551,6 +561,7 @@ public sealed class FieldSymbol : Symbol
             declaration.Type.GetQualifier(SyntaxKind.ReadonlyKeyword, TypeQualifierPosition.Postfix) is not null;
         ConstantValue = constantValue;
         Declaration = declaration;
+        IsAllocatorField = declaration.AllocatorKeyword is not null;
         IsThreadLocal = declaration.IsThreadLocal;
         HasInitializer = declaration.Initializer is not null;
         SetSourceOrigin(declaration);

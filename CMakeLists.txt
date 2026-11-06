@@ -64,7 +64,7 @@ set(_xenon_llvm_cmake_args
   -DBUILD_SHARED_LIBS:BOOL=OFF
   -DLLVM_TARGETS_TO_BUILD:STRING=X86|AArch64
   -DLLVM_BUILD_LLVM_DYLIB:BOOL=OFF
-  -DLLVM_BUILD_LLVM_C_DYLIB:BOOL=OFF
+  -DLLVM_BUILD_LLVM_C_DYLIB:BOOL=${WIN32}
   -DLLVM_LINK_LLVM_DYLIB:BOOL=OFF
   -DLLVM_BUILD_TOOLS:BOOL=OFF
   -DLLVM_BUILD_UTILS:BOOL=OFF
@@ -83,7 +83,16 @@ set(_xenon_llvm_cmake_args
   -DLLVM_ENABLE_LIBEDIT:BOOL=OFF
   -DLLVM_ENABLE_TERMINFO:BOOL=OFF
   -DLLVM_ENABLE_LIBPFM:BOOL=OFF
+  "-DCMAKE_PROJECT_LLVM_INCLUDE:FILEPATH=${CMAKE_SOURCE_DIR}/cmake/PatchedLLVM.cmake"
+  -DLLVM_DYLIB_COMPONENTS:STRING=support|core|analysis|bitreader|bitwriter|irreader|linker|passes|target|scalaropts|transformutils|vectorize|ipo|instcombine|coroutines|X86|AArch64
   ${XENON_LLVM_CMAKE_ARGS})
+if(NOT WIN32)
+  list(APPEND _xenon_llvm_cmake_args -DLLVM_BUILD_LLVM_DYLIB:BOOL=ON)
+endif()
+
+if(Python3_EXECUTABLE)
+  list(APPEND _xenon_llvm_cmake_args "-DPython3_EXECUTABLE:FILEPATH=${Python3_EXECUTABLE}")
+endif()
 
 ExternalProject_Add(llvm-static
   PREFIX "${CMAKE_BINARY_DIR}/llvm-prefix"
@@ -171,14 +180,33 @@ add_custom_target(xenon-compile-smoke
   USES_TERMINAL
   VERBATIM)
 
-# Managed testhosts cannot consume static archives, so the two LLVM-using test
-# projects carry an isolated private runtime asset. Production restore/publish
-# remains on the repository-built static LLVM path above.
+# Managed tests must use the same patched LLVM implementation as NativeAOT.
+# Build its C API shared library from the same targets, rather than a separate
+# unpatched NuGet runtime. Static production linking is unchanged.
+if(WIN32)
+  set(_xenon_runtime_target LLVM-C)
+  set(_xenon_runtime_source "${XENON_LLVM_BUILD_DIRECTORY}/Release/bin/LLVM-C.dll")
+  set(_xenon_runtime_name libLLVM.dll)
+else()
+  set(_xenon_runtime_target LLVM)
+  set(_xenon_runtime_source "${XENON_LLVM_BUILD_DIRECTORY}/lib/libLLVM.dylib")
+  set(_xenon_runtime_name libLLVM.dylib)
+endif()
+set(_xenon_runtime_directory "${XENON_PLATFORM_BUILD_DIRECTORY}/llvm-runtime")
+add_custom_target(xenon-llvm-runtime
+  COMMAND "${CMAKE_COMMAND}" --build "${XENON_LLVM_BUILD_DIRECTORY}" --config Release --target ${_xenon_runtime_target}
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${_xenon_runtime_directory}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_xenon_runtime_source}" "${_xenon_runtime_directory}/${_xenon_runtime_name}"
+  DEPENDS llvm-static
+  BYPRODUCTS "${_xenon_runtime_directory}/${_xenon_runtime_name}"
+  USES_TERMINAL VERBATIM)
+
 add_custom_target(xenon-tests
   COMMAND "${DOTNET_EXECUTABLE}" test "${CMAKE_SOURCE_DIR}/xenon/Xenon.sln"
     --configuration Release
     "-p:XenonRootBuildDirectory=${XENON_TEST_BUILD_DIRECTORY}"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/xenon"
+  DEPENDS xenon-llvm-runtime
   COMMENT "Running Xenon managed and end-to-end tests"
   USES_TERMINAL
   VERBATIM)

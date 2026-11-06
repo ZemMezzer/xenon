@@ -1,0 +1,23 @@
+namespace Allocators;
+allocator Heap {
+    public int allocations;
+    public int releases;
+    +Heap(nuint size, nuint alignment) { allocations++; return malloc(size, alignment); }
+    -Heap(void* block) { releases++; free(block); }
+}
+
+allocator Derived : Heap {
+    +Derived(nuint size, nuint alignment) { allocations += 2; return malloc(size, alignment); }
+    -Derived(void* block) { releases += 3; free(block); }
+}
+struct Base { public allocator Heap* heap; public @Base(Heap* h) { heap = h; } public virtual ~Base() { heap->releases += 10; } }
+struct Child : Base { public override ~Child() { heap->releases += 20; } }
+int Main() {
+    Derived* derived = new Derived();
+    Heap* heap = derived;
+    Base* value = new(heap) Child();
+    delete(value);
+    if (heap->allocations != 2 || heap->releases != 33) return 1;
+    delete(derived);
+    return 0;
+}

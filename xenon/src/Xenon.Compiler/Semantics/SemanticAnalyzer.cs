@@ -1051,6 +1051,14 @@ internal sealed class SemanticAnalyzer
                     fieldSyntax.Type,
                     scope,
                     _diagnostics);
+                if (fieldSyntax.AllocatorKeyword is not null && fieldType != BuiltinTypes.Error &&
+                    !AllocationRules.IsValidAllocatorFieldType(fieldType))
+                {
+                    _diagnostics.Report(fieldSyntax.Type.NameToken.Location,
+                        $"allocator field '{fieldSyntax.IdentifierToken.Text}' must be a pointer to an allocator type",
+                        DiagnosticIds.InvalidAllocatorFieldType);
+                    fieldType = BuiltinTypes.Error;
+                }
                 ValidateStaticStructValueType(fieldType, fieldSyntax.Type.NameToken.Location, "field");
                 if (TypeIdentity.AreSame(fieldType, BuiltinTypes.Void))
                 {
@@ -1066,6 +1074,10 @@ internal sealed class SemanticAnalyzer
                         DiagnosticIds.DuplicateDeclaration);
                 }
 
+                if (fieldSyntax.AllocatorKeyword is { } allocatorModifier && (type.IsReadonly || fieldSyntax.Initializer is not null))
+                    _diagnostics.Report(allocatorModifier.Location,
+                        "allocator fields cannot have declaration initializers or belong to a readonly struct; initialize them in @Type",
+                        DiagnosticIds.InvalidAllocatorField);
                 var field = new FieldSymbol(
                     fieldSyntax.IdentifierToken.Text,
                     type,
@@ -1384,6 +1396,15 @@ internal sealed class SemanticAnalyzer
 
     private BoundExpression? BindConstantExpressionCore(ExpressionSyntax syntax, ConstantSymbol context)
     {
+        BoundExpression? ReadConstant(ConstantSymbol value, TextLocation location)
+        {
+            if (!AccessibilityRules.IsAccessible(value, context))
+            {
+                _diagnostics.Report(location, $"constant '{value.Name}' is inaccessible", DiagnosticIds.InaccessibleSymbol);
+                return null;
+            }
+            return EvaluateConstant(value) ? value.BoundValue : null;
+        }
         switch (syntax)
         {
             case LiteralExpressionSyntax literal:
@@ -1400,13 +1421,13 @@ internal sealed class SemanticAnalyzer
                     _constantScopes[context].ResolveConstant(name.IdentifierToken.Text, name.IdentifierToken.Location, _diagnostics);
                 if (referenced is null) return null;
                 _semanticInfo.Symbols[name] = SymbolInfo.FromSymbol(referenced);
-                return EvaluateConstant(referenced) ? referenced.BoundValue : null;
+                return ReadConstant(referenced, name.IdentifierToken.Location);
             }
             case MemberAccessExpressionSyntax member when member.Receiver is NameExpressionSyntax typeName &&
                 _constantScopes[context].ResolveType(typeName.IdentifierToken.Text, typeName.IdentifierToken.Location, _diagnostics) is DeclaredTypeSymbol structType &&
                 structType.FindMember<ConstantSymbol>(member.MemberToken.Text) is ConstantSymbol associated:
                 RecordStaticConstantReference(member, typeName, structType, associated);
-                return EvaluateConstant(associated) ? associated.BoundValue : null;
+                return ReadConstant(associated, member.MemberToken.Location);
             case MemberAccessExpressionSyntax member:
             {
                 var parts = new List<SyntaxToken>();
@@ -1436,7 +1457,7 @@ internal sealed class SemanticAnalyzer
                     _semanticInfo.Receivers[member.Receiver] = new ReceiverInfo(receiverType, true, true, false);
                     _semanticInfo.Symbols[member.Receiver] = SymbolInfo.FromSymbol(receiverType);
                 }
-                return EvaluateConstant(referenced) ? referenced.BoundValue : null;
+                return ReadConstant(referenced, member.MemberToken.Location);
             }
             case UnaryExpressionSyntax unary:
             {
@@ -1996,7 +2017,9 @@ internal sealed class SemanticAnalyzer
                 TypeSymbol resolved = TypeResolver.Resolve(baseSyntax, _structScopes[declaration], _diagnostics);
                 if (resolved is StructTypeSymbol baseStruct)
                 {
-                    if (type.BaseType is not null)
+                    if (type.IsAllocator != baseStruct.IsAllocator)
+                        _diagnostics.Report(baseSyntax.NameToken.Location, "allocator and struct types cannot inherit from one another", DiagnosticIds.InvalidAllocatorDeclaration);
+                    else if (type.BaseType is not null)
                         _diagnostics.Report(baseSyntax.NameToken.Location, $"struct '{type.Name}' may inherit from at most one struct",
                             DiagnosticIds.MultipleStructBaseTypes);
                     else if (TypeIdentity.AreSame(baseStruct, type))
@@ -2414,6 +2437,16 @@ internal sealed class SemanticAnalyzer
             }
         }
         type.SetVirtualMethods(slots.ToImmutable());
+        if (type.IsAllocator)
+        {
+            bool allocationDeclared = type.Methods.Any(m => m.AllocationOperation == AllocationOperation.Allocate);
+            bool releaseDeclared = type.Methods.Any(m => m.AllocationOperation == AllocationOperation.Deallocate);
+            if (type.IsStatic || type.IsReadonly || allocationDeclared != releaseDeclared)
+                _diagnostics.Report(SymbolLocation(type), "allocator types must be mutable instances and declare or inherit allocation and deallocation as a pair", DiagnosticIds.InvalidAllocatorDeclaration);
+        }
+        if (type.IsAllocator && !type.IsAbstract &&
+            (type.AllocationOperator is null || type.DeallocationOperator is null))
+            _diagnostics.Report(SymbolLocation(type), "a concrete allocator requires both +Allocator(nuint, nuint) and -Allocator(void*) operations", DiagnosticIds.InvalidAllocatorDeclaration);
         if (!type.IsAbstract)
         {
             foreach (FunctionSymbol member in type.VirtualMethods.Where(method => method.IsAbstract)
@@ -2653,6 +2686,7 @@ internal sealed class SemanticAnalyzer
                     parameters,
                     methodSyntax);
 
+                ValidateAllocationOperation(method, methodSyntax);
                 if (method.IsOperator)
                     ValidateOperatorDeclaration(method, methodSyntax, methods);
 
@@ -2677,6 +2711,24 @@ internal sealed class SemanticAnalyzer
 
             type.SetMethods(methods.ToImmutable());
         }
+    }
+
+    private void ValidateAllocationOperation(FunctionSymbol method, MethodDeclarationSyntax syntax)
+    {
+        if (method.AllocationOperation == AllocationOperation.None) return;
+        bool valid = method.AllocationOperation switch
+        {
+            AllocationOperation.Allocate => method.ContainingStruct is { IsAllocator: true } && method.Parameters.Length == 2 && method.Parameters.All(p => TypeIdentity.AreSame(p.Type, BuiltinTypes.NUInt)),
+            AllocationOperation.Deallocate => method.ContainingStruct is { IsAllocator: true } && method.Parameters.Length == 1 && method.Parameters[0].Type is PointerTypeSymbol { ElementType: var t } && TypeIdentity.AreSame(t, BuiltinTypes.Void),
+            AllocationOperation.Construct => (method.Parameters.IsEmpty || method.Parameters.Length == 1 && method.Parameters[0].Type is PointerTypeSymbol { IsReadonly: false, ElementType: StructTypeSymbol { IsAllocator: true } }) && !method.IsVirtual && !method.IsOverride && !method.IsAbstract,
+            _ => false,
+        };
+        if (!valid)
+            _diagnostics.Report(syntax.IdentifierToken.Location,
+                method.AllocationOperation == AllocationOperation.Construct
+                    ? "allocation context constructor @Type requires zero parameters or one mutable allocator pointer and cannot be virtual, override, or abstract"
+                    : "allocator operators require +Allocator(nuint size, nuint alignment) returning void* and -Allocator(void* ptr) returning void",
+                DiagnosticIds.InvalidAllocatorDeclaration);
     }
 
     private void ValidateOperatorDeclaration(FunctionSymbol method, MethodDeclarationSyntax syntax,
@@ -3437,6 +3489,8 @@ internal sealed class SemanticAnalyzer
 
     private void ValidateStaticStructValueType(TypeSymbol type, TextLocation location, string use)
     {
+        if (AllocationRules.IsAllocatorValue(type))
+            _diagnostics.Report(location, $"allocator {use} must use a pointer; allocator values cannot be embedded or passed by value", DiagnosticIds.AllocatorRequiresHeap);
         if (!ContainsStaticStruct(type)) return;
         _diagnostics.Report(location,
             $"static structs cannot be used as a {use} value, pointer, reference, ownership, or array type",

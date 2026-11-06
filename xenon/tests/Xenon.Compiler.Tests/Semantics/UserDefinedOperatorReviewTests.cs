@@ -249,6 +249,7 @@ public sealed class UserDefinedOperatorReviewTests
         Assert.Throws<XelibFormatException>(() => XelibOperatorKinds.Decode("add", 1));
         Assert.Equal((ushort)1, XelibVersions.Container);
         Assert.Equal((ushort)1, XelibVersions.LibraryIr);
+        // Version tags remain frozen until Xenon 1.0.0.
         Assert.Equal((ushort)1, XelibVersions.Language);
     }
 

@@ -17,6 +17,7 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
     private readonly MirFunction _function;
     private readonly ImmutableHashSet<MirPlace> _places;
     private readonly Dictionary<MirPlace, ImmutableArray<MirPlace>> _fields = [];
+    private readonly HashSet<MirPlace> _requiresWholeInitialization = [];
     private readonly MirStorageOrigins _origins;
     private readonly MirDataflowResult<ImmutableDictionary<MirLocalId, MirStorageOrigin>> _originStates;
     private readonly Dictionary<MirStatement, ImmutableDictionary<MirLocalId, MirStorageOrigin>> _before = new(ReferenceEqualityComparer.Instance);
@@ -71,6 +72,10 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
         void Add(MirPlace place, TypeSymbol type, HashSet<TypeSymbol> ancestors)
         {
             places.Add(place);
+            if (AllocationRules.RequiresExplicitInitialization(type) &&
+                !(function.Locals.First(local => local.Id == place.Local).Kind == MirLocalKind.Receiver &&
+                  place.Projections is [MirDerefProjection]))
+                _requiresWholeInitialization.Add(place);
             if (!ancestors.Add(type)) return;
             if (type is IFieldStorageTypeSymbol structure)
             {
@@ -100,12 +105,14 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
             .Select(local => local.Id).ToHashSet();
         var state = _places.ToImmutableDictionary(place => place, place =>
             parameters.Contains(place.Local) ? MirInitialization.Initialized : MirInitialization.Uninitialized);
-        if (_function.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.InstanceInitializer &&
+        if (_function.Symbol.FunctionKind is FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer or FunctionKind.Constructor &&
             _function.Symbol.ContainingStruct is { } owner)
             foreach (MirLocal receiver in _function.Locals.Where(local => local.Kind == MirLocalKind.Receiver))
                 foreach (FieldSymbol field in owner.Fields)
                     state = Set(new MirPlace(receiver.Id).Project(new MirDerefProjection())
-                        .Project(new MirFieldProjection(field)), MirInitialization.Uninitialized, state);
+                        .Project(new MirFieldProjection(field)),
+                        field.IsAllocatorField && _function.Symbol.FunctionKind != FunctionKind.AllocationConstructor
+                            ? MirInitialization.Initialized : MirInitialization.Uninitialized, state);
         return state;
     }
 
@@ -155,6 +162,10 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
             MirInitialization merged = values.Aggregate(MirInitialization.None, (result, child) => result | child);
             if (merged.HasFlag(MirInitialization.Moved))
                 merged |= MirInitialization.PartiallyMoved;
+            // Writing subfields cannot establish the required allocation-constructor
+            // phase. Only a whole-value initialization can clear this obligation.
+            if (_requiresWholeInitialization.Contains(parent))
+                merged |= state.GetValueOrDefault(parent) & MirInitialization.Uninitialized;
             state = state.SetItem(parent, merged);
         }
         return state;
@@ -242,9 +253,10 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
         if (source.Terminator is MirCall { Callee: MirFunctionOperand { Function.FunctionKind: FunctionKind.Constructor },
             Receiver: MirCopy receiver })
             state = Write(receiver.Place.Project(new MirDerefProjection()), MirInitialization.Initialized, state, origins);
-        if (source.Terminator is MirCall { Callee: MirFunctionOperand { Function.FunctionKind: FunctionKind.InstanceInitializer } initializer,
+        if (source.Terminator is MirCall { Callee: MirFunctionOperand { Function.FunctionKind: FunctionKind.InstanceInitializer or FunctionKind.AllocationConstructor } initializer,
             Receiver: MirCopy initializedReceiver } && initializer.Function.ContainingStruct is { } owner)
-            foreach (FieldSymbol field in owner.Fields.Where(field => field.HasInitializer))
+            foreach (FieldSymbol field in owner.Fields.Where(field => initializer.Function.FunctionKind == FunctionKind.AllocationConstructor
+                         ? field.IsAllocatorField : field.HasInitializer))
                 state = Write(initializedReceiver.Place.Project(new MirDerefProjection()).Project(new MirFieldProjection(field)),
                     MirInitialization.Initialized, state, origins);
         if (source.Terminator is MirIntrinsicCall { Intrinsic: MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or

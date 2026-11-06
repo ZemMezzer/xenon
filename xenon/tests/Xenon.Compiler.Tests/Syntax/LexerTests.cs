@@ -174,7 +174,7 @@ public sealed class LexerTests
     [Fact]
     public void Lexer_ReportsSourceLineAndColumn()
     {
-        LexedSource tree = LexedSource.Lex(SourceText.From("namespace Example;\r\n@", "main.xe"));
+        LexedSource tree = LexedSource.Lex(SourceText.From("namespace Example;\r\n`", "main.xe"));
 
         var diagnostic = Assert.Single(tree.Diagnostics);
         Assert.Equal("main.xe", diagnostic.Location.Source.Path);
@@ -200,7 +200,7 @@ public sealed class LexerTests
     [Fact]
     public void Lexer_DoesNotHideInvalidTailAfterNul()
     {
-        const string source = "int Main() { return 0; }\0@@";
+        const string source = "int Main() { return 0; }\0``";
         LexedSource tree = LexedSource.Lex(SourceText.From(source));
         Assert.Equal(3, tree.Diagnostics.Count(diagnostic => diagnostic.Id == DiagnosticIds.InvalidCharacter));
         Assert.Equal(3, tree.Tokens.Count(token => token.Kind == SyntaxKind.BadToken));

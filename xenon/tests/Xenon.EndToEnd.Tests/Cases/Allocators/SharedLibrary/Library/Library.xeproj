@@ -1,0 +1,5 @@
+[project]
+name = "AllocatorSharedLibrary"
+type = "shared-library"
+[source]
+root = "src"

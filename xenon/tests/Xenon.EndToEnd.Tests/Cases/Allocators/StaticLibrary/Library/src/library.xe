@@ -1,0 +1,67 @@
+namespace AllocatorLibrary;
+public abstract allocator Base {
+    public int releases;
+    public abstract +Base(nuint s, nuint a);
+    public abstract -Base(void* p);
+}
+public allocator Heap : Base {
+    +Heap(nuint s, nuint a) { return malloc(s,a); }
+    -Heap(void* p) { releases++; free(p); }
+}
+int ValueNumber(Base* h, Heap* exact, Arena* arena) {
+    if (h == null) return 0;
+    if (arena != null) return 44;
+    if (exact != null) return 43;
+    return 42;
+}
+int ProviderKind(Base* parent, Heap* exact) {
+    if (parent == null) return 0;
+    if (exact == null) return 1;
+    return 2;
+}
+int DefaultKind(Base* parent) {
+    if (parent == null) return 1;
+    return 2;
+}
+public struct Value {
+    public allocator Base* heap;
+    private allocator Heap* exact;
+    private allocator Arena* arena;
+    public int number = ValueNumber(heap, exact, arena);
+    public @Value(Base* h) { heap = h; }
+    public @Value(Heap* h) { heap = h; exact = h; }
+    public @Value(Arena* h) { heap = h; arena = h; }
+    public Value() {}
+    public ~Value() { heap->releases += 10; }
+}
+public Value* Create(Base* h) { return new(h) Value(); }
+public template Constructible { Constructible(); }
+public T* Make<T>(Base* h) where T : Constructible { return new(h) T(); }
+
+public allocator Arena : Heap {
+    public allocator Base* parent;
+    private allocator Heap* exact;
+    public int phase = ProviderKind(parent, exact);
+    public @Arena(Base* provider) { parent = provider; }
+    public @Arena(Heap* provider) { parent = provider; exact = provider; }
+    public Arena() { phase += 10; }
+    +Arena(nuint size, nuint alignment) { return malloc(size, alignment); }
+    -Arena(void* block) { releases++; free(block); }
+}
+
+public struct DefaultValue {
+    public static int defaultCalls;
+    private allocator Base* parent;
+    public int number = DefaultKind(parent);
+    public @DefaultValue() { DefaultValue.defaultCalls++; }
+    public @DefaultValue(Base* h) { parent = h; }
+    public DefaultValue() { number += 10; }
+}
+public allocator DefaultHeap : Heap {
+    public static int defaultCalls;
+    private allocator Base* parent;
+    public int phase = 2 + DefaultKind(parent);
+    public @DefaultHeap() { DefaultHeap.defaultCalls++; }
+    public @DefaultHeap(Base* h) { parent = h; }
+}
+public T* MakeDefault<T>() where T : Constructible { return new T(); }

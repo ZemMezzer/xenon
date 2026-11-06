@@ -35,8 +35,10 @@ public sealed partial class MirLowerer
     {
         TemporaryGuard? guard = _arrayCreations.GetValueOrDefault(creation);
         if (guard is not null) PushArrayHistory(guard, source);
+        MirOperand? allocator = creation.Allocator is null ? null : Snapshot(Value(creation.Allocator), source);
+        FunctionSymbol? operation = allocator?.Type is PointerTypeSymbol { ElementType: StructTypeSymbol provider } ? provider.AllocationOperator : null;
         MirOperand array = Intrinsic(creation.Storage == ArrayStorageKind.Stack ? MirIntrinsicKind.AllocateStackArray : MirIntrinsicKind.AllocateHeapArray,
-            [.. creation.Dimensions.Select(d => Snapshot(Value(d), Source(d)))], creation.Type, source,
+            [.. creation.Dimensions.Select(d => Snapshot(Value(d), Source(d))), .. allocator is null ? System.Array.Empty<MirOperand>() : [allocator]], creation.Type, source, function: operation,
             fixedArrayLength: Xenon.Compiler.Semantics.ResumableFrameAnalysis.TryGetConstantLength(creation, out ulong fixedLength) ? fixedLength : null)!;
         if (creation.Storage == ArrayStorageKind.Heap)
         {
@@ -70,9 +72,13 @@ public sealed partial class MirLowerer
         MirPlace element = ((MirCopy)array).Place.Project(new MirLinearIndexProjection(new MirCopy(count, BuiltinTypes.Int)));
         _current.Statements.Add(new MirAssign(element, new MirDefault(creation.ElementType), source));
         StructTypeSymbol? structure = creation.ElementType is AtomicTypeSymbol atomic ? atomic.ElementType as StructTypeSymbol : creation.ElementType as StructTypeSymbol;
+        var preparedFields = new List<TemporaryGuard>();
         if (structure is not null)
-            ConstructAggregateAt(new BoundStructConstructionExpression(structure, []) { IsDefaultInitialization = true },
+            AllocationConstructors(structure, creation.ElementType is AtomicTypeSymbol ? element.Project(new MirAtomicStorageProjection()) : element, allocator, source, preparedFields);
+        if (structure is not null)
+            ConstructAggregateAt(new BoundStructConstructionExpression(structure, []),
                 creation.ElementType is AtomicTypeSymbol ? element.Project(new MirAtomicStorageProjection()) : element, source);
+        foreach (TemporaryGuard prepared in preparedFields) EndValueGuard(prepared, source);
         _current.Statements.Add(new MirAssign(count, new MirBinary(MirBinaryOperator.Add,
             new MirCopy(count, BuiltinTypes.Int), new MirConstant(1, BuiltinTypes.Int), BuiltinTypes.Int), source));
         Jump(test);
@@ -176,6 +182,6 @@ public sealed partial class MirLowerer
         return drop;
 
         MirIntrinsicCall FreeBuffer(Block next, Block failure) => new(MirIntrinsicKind.Free,
-            [guard.Allocation ?? new MirCopy(guard.Place, _locals[guard.Place.Local.Value].Type)], BuiltinTypes.Void, null, next.Id, failure.Id, source);
+            [guard.Allocation ?? new MirCopy(guard.Place, _locals[guard.Place.Local.Value].Type)], BuiltinTypes.Void, null, next.Id, failure.Id, source) { RestoresAllocator = true, AllocationReleases = AllocationReleases };
     }
 }

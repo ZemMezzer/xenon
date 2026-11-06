@@ -13,6 +13,37 @@ public sealed unsafe class LlvmOptimizerTests
     private static readonly LLVMDiagnosticHandler CountingHandler = CountDiagnostic;
 
     [Fact]
+    public void InductionVariableWideningPreservesCatchswitchTerminator()
+    {
+        using LLVMContextRef context = LLVMContextRef.Create();
+        byte[] ir = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "NativeLLVM", "indvars-catchswitch.ll"));
+        LLVMModuleRef module;
+        fixed (byte* data = ir)
+        {
+            var buffer = new LLVMMemoryBufferRef((nint)LLVMApi.CreateMemoryBufferWithMemoryRangeCopy(
+                (sbyte*)data, (nuint)ir.Length, null));
+            module = context.ParseIR(buffer);
+        }
+        using (module)
+        using (NativeTargetMachine target = NativeTargetMachine.Create(new LlvmTargetOptions("x86_64-pc-windows-msvc", 3)))
+        using (LLVMPassBuilderOptionsRef options = LLVMPassBuilderOptionsRef.Create())
+        {
+            LLVMApi.PassBuilderOptionsSetVerifyEach(options, 1);
+            nint pipeline = Marshal.StringToCoTaskMemUTF8("function(loop-simplify,lcssa,loop(indvars))");
+            try
+            {
+                LLVMErrorRef error = LLVMApi.RunPasses(module, (sbyte*)pipeline, target.Handle, options);
+                Assert.True(error == default, "The induction-variable regression pipeline must succeed with verification after every pass.");
+                string optimized = module.PrintToString();
+                Assert.Contains("catchswitch within none", optimized);
+                Assert.Contains("@cleanup", optimized);
+            }
+            finally { Marshal.FreeCoTaskMem(pipeline); }
+        }
+    }
+
+
+    [Fact]
     public void Run_RestoresPreviousDiagnosticHandlerAndContext()
     {
         var count = new StrongBox<int>();

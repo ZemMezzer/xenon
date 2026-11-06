@@ -323,8 +323,9 @@ public sealed partial class MirVerifier
                 bool pointerDifference = binary.Left.Type is PointerTypeSymbol && binary.Right.Type is PointerTypeSymbol &&
                     binary.Operator == MirBinaryOperator.Subtract;
                 bool pointerViews = binary.Left.Type is PointerTypeSymbol leftPointer && binary.Right.Type is PointerTypeSymbol rightPointer &&
-                    TypeIdentity.AreSame(leftPointer.ElementType, rightPointer.ElementType) &&
-                    binary.Operator is MirBinaryOperator.Equal or MirBinaryOperator.NotEqual or MirBinaryOperator.Subtract;
+                    (binary.Operator is MirBinaryOperator.Equal or MirBinaryOperator.NotEqual
+                        ? TypeFacts.CanCompareEquality(leftPointer, rightPointer)
+                        : binary.Operator == MirBinaryOperator.Subtract && TypeIdentity.AreSame(leftPointer.ElementType, rightPointer.ElementType));
                 if (!pointerOffset && !reversedPointerOffset && !pointerViews && binary.Operator is not (MirBinaryOperator.ShiftLeft or MirBinaryOperator.ShiftRight))
                     Same(binary.Right.Type, binary.Left.Type, "binary operand");
                 bool comparison = binary.Operator is MirBinaryOperator.Equal or MirBinaryOperator.NotEqual or

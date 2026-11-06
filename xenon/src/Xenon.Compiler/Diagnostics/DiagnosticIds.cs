@@ -3,6 +3,15 @@ namespace Xenon.Compiler.Diagnostics;
 /// <summary>Stable IDs are allocated by compiler phase; existing values are never reused.</summary>
 public static class DiagnosticIds
 {
+    public const string InvalidAllocatorFieldType = "XE0808";
+    public const string InvalidAllocatorField = "XE0804";
+    public const string InvalidAllocatorPhaseAccess = "XE0805";
+    public const string AllocatorFieldWriteOutsidePhase = "XE0806";
+    public const string AllocatorFieldRequiresInitialization = "XE0807";
+    public const string InvalidAllocatorDeclaration = "XE0800";
+    public const string InvalidAllocatorOperand = "XE0801";
+    public const string AllocatorRequiresHeap = "XE0802";
+    public const string AllocationConstructorMismatch = "XE0803";
     public const string InvalidCharacter = "XE0001";
     public const string InvalidNumber = "XE0002";
     public const string UnterminatedString = "XE0003";

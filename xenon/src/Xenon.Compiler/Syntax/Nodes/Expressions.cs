@@ -170,6 +170,7 @@ public sealed record NewExpressionSyntax(
     ImmutableArray<SyntaxToken> CommaTokens,
     SyntaxToken CloseDelimiterToken) : ExpressionSyntax
 {
+    public ExpressionSyntax? Allocator { get; init; }
     public override SyntaxKind Kind => SyntaxKind.NewExpression;
 
     public bool IsArrayAllocation => OpenDelimiterToken.Kind == SyntaxKind.OpenBracketToken;
