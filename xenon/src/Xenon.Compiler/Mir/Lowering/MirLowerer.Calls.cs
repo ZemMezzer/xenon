@@ -15,14 +15,28 @@ public sealed partial class MirLowerer
 
     private MirOperand? Intrinsic(MirIntrinsicKind intrinsic, ImmutableArray<MirOperand> arguments,
         TypeSymbol type, MirSourceInfo source, FunctionSymbol? function = null, TypeSymbol? subjectType = null,
-        ImmutableArray<CaptureVariableSymbol> captures = default, MirBinaryOperator? op = null, bool returnsOldValue = false, ulong? fixedArrayLength = null, FieldSymbol? field = null, MirStorageCheckPurpose storageCheck = MirStorageCheckPurpose.None)
+        ImmutableArray<CaptureVariableSymbol> captures = default, MirBinaryOperator? op = null, bool returnsOldValue = false, ulong? fixedArrayLength = null, FieldSymbol? field = null, MirStorageCheckPurpose storageCheck = MirStorageCheckPurpose.None, bool restoresAllocator = false)
     {
         MirPlace? result = TypeIdentity.AreSame(type, BuiltinTypes.Void) ? null : Temporary(type, source);
         Block next = NewBlock();
         End(new MirIntrinsicCall(intrinsic, arguments, type, result, next.Id, GuardedUnwind(_unwindTarget, source).Id, source)
-        { Function = function, SubjectType = subjectType, Captures = captures.IsDefault ? [] : captures, Operator = op, ReturnsOldValue = returnsOldValue, FixedArrayLength = fixedArrayLength, Field = field, StorageCheck = storageCheck });
+        { RestoresAllocator = restoresAllocator, AllocationReleases = restoresAllocator ? AllocationReleases : [], Function = function, SubjectType = subjectType, Captures = captures.IsDefault ? [] : captures, Operator = op, ReturnsOldValue = returnsOldValue, FixedArrayLength = fixedArrayLength, Field = field, StorageCheck = storageCheck });
         _current = next;
         return result is null ? null : new MirCopy(result, type);
+    }
+
+    private ImmutableArray<FunctionSymbol>? _allocationReleases;
+    private ImmutableArray<FunctionSymbol> AllocationReleases
+    {
+        get
+        {
+            if (_allocationReleases is { } cached) return cached;
+            NamespaceSymbol root = _bound.Symbol.ContainingNamespace;
+            while (root.Parent is { } parent) root = parent;
+            IEnumerable<StructTypeSymbol> Types(NamespaceSymbol scope) => scope.Structs.Concat(scope.Namespaces.SelectMany(Types));
+            return (_allocationReleases = [.. Types(root).Where(t => t.IsAllocator)
+                .Select(t => t.DeallocationOperator).OfType<FunctionSymbol>().Distinct()]).Value;
+        }
     }
 
     private MirOperand PointerReceiver(BoundExpression receiver, MirSourceInfo source)
@@ -79,8 +93,22 @@ public sealed partial class MirLowerer
     {
         MirPlace result = Temporary(construction.Type, source);
         _current.Statements.Add(new MirStorageLive(result.Local, source));
-        ConstructAggregateAt(construction, result, source);
+        ConstructDefaultAggregateAt(construction, result, source);
         return new MirCopy(result, construction.Type);
+    }
+
+    private void ConstructDefaultAggregateAt(BoundStructConstructionExpression construction, MirPlace result, MirSourceInfo source)
+    {
+        var preparedFields = new List<TemporaryGuard>();
+        bool hasContext = construction.StructType.RequiresAllocator;
+        if (hasContext || !construction.IsDefaultInitialization && construction.StructType.AllInstanceFields.Any(field => field.IsAllocatorField))
+        {
+            _current.Statements.Add(new MirAssign(result, new MirDefault(construction.Type), source));
+            if (hasContext) AllocationConstructors(construction.StructType, result, null, source, preparedFields);
+        }
+        // Storage must not be zeroed again after a context constructor has run.
+        ConstructAggregateAt(construction with { IsDefaultInitialization = construction.IsDefaultInitialization && !construction.StructType.RequiresAllocator }, result, source);
+        foreach (TemporaryGuard guard in preparedFields) EndValueGuard(guard, source);
     }
 
     private void ConstructAggregateAt(BoundStructConstructionExpression construction, MirPlace result, MirSourceInfo source)
@@ -89,16 +117,31 @@ public sealed partial class MirLowerer
             _current.Statements.Add(new MirAssign(result, new MirDefault(construction.Type), source));
         if (construction.StructType.HasVirtualDispatch)
             _current.Statements.Add(new MirInitializeDispatch(result, construction.StructType, source));
-        Initialize(construction.StructType);
+        var initializedFields = new List<TemporaryGuard>();
+        Initialize(construction.StructType, result);
         MirOperand[] values = Arguments(construction.Arguments).ToArray();
         for (int index = 0; index < values.Length; index++)
             _current.Statements.Add(new MirAssign(result.Project(new MirFieldProjection(construction.StructType.AllInstanceFields[index])), new MirUse(ConvertValue(values[index], construction.StructType.AllInstanceFields[index].Type, source)), source) { IsAggregateInitialization = true });
-        void Initialize(StructTypeSymbol type)
+        foreach (TemporaryGuard guard in initializedFields) EndValueGuard(guard, source);
+
+        void Initialize(StructTypeSymbol type, MirPlace place)
         {
-            if (type.BaseType is { } baseType) Initialize(baseType);
-            if (type.InstanceInitializer is { } initializer)
-                _ = Call(new MirFunctionOperand(initializer, _types.FunctionPointer(BuiltinTypes.Void, [])), [], source,
-                    Address(result, construction.Type, source));
+            if (type.BaseType is { } baseType) Initialize(baseType, place.Project(new MirBaseProjection(baseType)));
+            if (type.InstanceInitializer is not { } initializer) return;
+            _ = Call(new MirFunctionOperand(initializer, _types.FunctionPointer(BuiltinTypes.Void, [])), [], source,
+                Address(place, type, source));
+            // The initializer cleans up its own failure. Once it returns, its fields
+            // must survive subsequent initializers and argument evaluation, or unwind
+            // individually: the enclosing aggregate is not yet a complete object.
+            foreach (FieldSymbol field in type.Fields)
+                if (field.HasInitializer && TypeFacts.GetCompleteDestructor(field.Type) is { } destructor)
+                {
+                    var guard = new TemporaryGuard(DestructorPlace(place.Project(new MirFieldProjection(field)), field.Type),
+                        Temporary(BuiltinTypes.Bool, source), destructor);
+                    SetFlag(guard.Active, true, source);
+                    initializedFields.Add(guard);
+                    _valueGuards.Add(guard);
+                }
         }
     }
 
@@ -107,9 +150,13 @@ public sealed partial class MirLowerer
         MirPlace result = Temporary(construction.Type, source);
         _current.Statements.Add(new MirStorageLive(result.Local, source));
         _current.Statements.Add(new MirAssign(result, new MirDefault(construction.Type), source));
+        var preparedFields = new List<TemporaryGuard>();
+        AllocationConstructors(construction.StructType, result, null, source, preparedFields);
         var callee = new MirFunctionOperand(construction.Constructor,
             _types.FunctionPointer(BuiltinTypes.Void, construction.Constructor.Parameters.Select(p => p.Type)));
-        _ = Call(callee, construction.Arguments, source, Address(result, construction.Type, source));
+        var arguments = Arguments(construction.Arguments);
+        foreach (TemporaryGuard guard in preparedFields) EndValueGuard(guard, source);
+        _ = CallValues(callee, arguments, source, Address(result, construction.Type, source));
         return new MirCopy(result, construction.Type);
     }
 }

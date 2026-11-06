@@ -73,4 +73,5 @@ public enum BoundKind
     DeferredGenericMethodCallExpression,
     DeferredGenericOperationExpression,
     CapturedPlaceExpression,
+    CompleteBaseInitializationExpression,
 }

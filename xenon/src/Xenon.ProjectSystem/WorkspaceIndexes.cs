@@ -32,6 +32,7 @@ public sealed record SymbolIndexEntry(
     SourceReference Declaration)
 {
     public FunctionKind? FunctionKind { get; init; }
+    public AllocationOperation AllocationOperation { get; init; }
     public required EditorSymbolKind EditorKind { get; init; }
     public WorkspaceSymbolId? ContainingSymbolId { get; init; }
     public bool IsDefinition { get; init; }
@@ -288,9 +289,14 @@ internal static class WorkspaceIndexBuilder
                 if (!sourceMap.TryGetValue(source.FileId, out var owner) || owner.ProjectId != projectId) continue;
                 SourceReference declaration = CreateSourceReference(owner, syntaxReference.Location);
                 WorkspaceSymbolId id = CreateSymbolId(symbol, owner);
-                result.Add(new SymbolIndexEntry(id, symbol.Name, symbol.QualifiedName, symbol.Kind, declaration)
+                bool allocation = symbol is FunctionSymbol { AllocationOperation: not AllocationOperation.None };
+                result.Add(new SymbolIndexEntry(id,
+                    allocation ? symbol.ToDisplayString(SymbolDisplayFormat.ShortName) : symbol.Name,
+                    allocation ? symbol.ToDisplayString(SymbolDisplayFormat.QualifiedName) : symbol.QualifiedName,
+                    symbol.Kind, declaration)
                 {
                     FunctionKind = (symbol as FunctionSymbol)?.FunctionKind,
+                    AllocationOperation = (symbol as FunctionSymbol)?.AllocationOperation ?? AllocationOperation.None,
                     EditorKind = EditorSymbolClassifier.GetKind(symbol),
                     ContainingSymbolId = symbol.ContainingSymbol is { IsSourceDefined: true } containing &&
                         TryCreateSymbolId(containing, sourceMap, out WorkspaceSymbolId containingId)

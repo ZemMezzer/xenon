@@ -75,6 +75,7 @@ internal sealed class Lexer
             ':' => SyntaxKind.ColonToken,
             '.' => SyntaxKind.DotToken,
             '~' => SyntaxKind.TildeToken,
+            '@' => SyntaxKind.AtToken,
             '+' when Lookahead == '+' => SyntaxKind.PlusPlusToken,
             '+' when Lookahead == '=' => SyntaxKind.PlusEqualsToken,
             '+' => SyntaxKind.PlusToken,

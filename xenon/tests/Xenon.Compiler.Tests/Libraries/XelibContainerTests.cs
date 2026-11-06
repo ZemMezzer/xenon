@@ -396,6 +396,7 @@ public sealed class XelibContainerTests
     {
         Assert.Equal((ushort)1, XelibVersions.Container);
         Assert.Equal((ushort)1, XelibVersions.LibraryIr);
+        // Version tags stay frozen until Xenon 1.0.0.
         Assert.Equal((ushort)1, XelibVersions.Language);
         byte[] bytes = XelibContainer.Write([
             new XelibSection(XelibSectionKind.Manifest, XelibSectionFlags.Required,
@@ -1596,6 +1597,27 @@ public sealed class XelibContainerTests
         Assert.Equal(leftType.FullName, rightType.FullName);
         Assert.False(TypeIdentity.AreSame(leftType, rightType));
         Assert.NotEqual(leftType.Origin.LibraryContentIdentity, rightType.Origin.LibraryContentIdentity);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ImportedAllocatorFieldMustPointDirectlyToAnAllocator(bool metadataOnly)
+    {
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace Defensive; struct Value { public int count; }", "library.xe"));
+        byte[] image = XelibWriter.Write(library, new XelibWriteOptions("Defensive"));
+        XelibContainer container = XelibContainer.Read(image);
+        var symbols = XelibJson.Deserialize<ImmutableArray<XelibSymbolRecord>>(
+            container.GetRequiredSection(XelibSectionKind.Symbols).AsSpan(), null);
+        int index = Array.FindIndex(symbols.ToArray(), symbol => symbol.Kind == XelibSymbolKind.Field && symbol.Name == "count");
+        var field = symbols[index];
+        var invalid = symbols.SetItem(index, field with { Flags = field.Flags | XelibSymbolFlags.AllocatorField });
+
+        byte[] malformed = RewriteSection(image, XelibSectionKind.Symbols, XelibJson.Serialize(invalid));
+        var error = Assert.Throws<XelibFormatException>(() => XelibReader.Read(malformed, metadataOnly: metadataOnly));
+        Assert.Equal(XelibErrorCode.InvalidReference, error.Code);
+        Assert.Contains("allocator field 'count' must be a pointer to an allocator type", error.Message);
     }
 
     [Fact]

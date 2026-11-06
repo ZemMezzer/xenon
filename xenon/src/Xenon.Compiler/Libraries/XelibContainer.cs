@@ -5,6 +5,8 @@ namespace Xenon.Compiler.Libraries;
 
 public static class XelibVersions
 {
+    // Keep all format versions frozen at 1 until Xenon 1.0.0.
+    // Pre-1.0 internal format/ABI changes require rebuilding artifacts, not version bumps.
     public const ushort Container = 1;
     public const ushort LibraryIr = 1;
     public const ushort Language = 1;

@@ -9,6 +9,8 @@ public sealed class MirExceptionEffects
     private readonly Dictionary<FunctionSymbol, MirFunction> _bodies;
     private readonly Dictionary<FunctionSymbol, HashSet<TypeSymbol>> _effects;
     private readonly CancellationToken _cancellation;
+    private readonly Dictionary<MirIntrinsicCall, ImmutableHashSet<MirReferenceOrigin>> _releaseOrigins = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<MirFunction> _originBodies = new(ReferenceEqualityComparer.Instance);
 
     public MirExceptionEffects(IEnumerable<MirFunction> invocationBodies, CancellationToken cancellation = default)
     {
@@ -37,6 +39,14 @@ public sealed class MirExceptionEffects
 
     public HashSet<TypeSymbol> Escaping(MirFunction body)
     {
+        if (_originBodies.Add(body) && body.Blocks.Any(block => block.Terminator is MirIntrinsicCall { RestoresAllocator: true, AllocationReleases.IsEmpty: false }))
+        {
+            var origins = new MirReferenceOrigins(body);
+            var states = MirDataflow.Solve(new MirControlFlow(body), origins, _cancellation);
+            foreach (MirBasicBlock block in body.Blocks.Where(block => states.Graph.Reachable.Contains(block.Id)))
+                if (block.Terminator is MirIntrinsicCall { RestoresAllocator: true } release)
+                    _releaseOrigins[release] = origins.Operand(release.Arguments[0], states.Before[new(block.Id, block.Statements.Length)]).Roots;
+        }
         var analysis = new MirFlowFacts(_effects, CallEffects);
         var flow = MirDataflow.Solve(new MirControlFlow(body), analysis, _cancellation);
         var result = new HashSet<TypeSymbol>(TypeIdentity.Comparer);
@@ -48,6 +58,23 @@ public sealed class MirExceptionEffects
 
     private IEnumerable<TypeSymbol>? CallEffects(MirTerminator terminator)
     {
+        if (terminator is MirIntrinsicCall { Function.AllocationOperation: AllocationOperation.Allocate } allocation)
+            return _bodies.Keys.Where(f => f.AllocationOperation == AllocationOperation.Allocate &&
+                    f.ContainingStruct is { } candidate && allocation.Arguments[^1].Type is PointerTypeSymbol { ElementType: StructTypeSymbol provider } &&
+                    AllocationRules.IsAllocatorSubtype(candidate, provider)).Append(allocation.Function!)
+                .SelectMany(Effects).Distinct(TypeIdentity.Comparer).ToArray();
+        if (terminator is MirIntrinsicCall { RestoresAllocator: true } release)
+        {
+            IEnumerable<FunctionSymbol> targets = release.AllocationReleases;
+            if (_releaseOrigins.TryGetValue(release, out var roots) && !roots.IsEmpty && roots.All(root => root.AllocationKind == MirAllocationKind.Typed))
+            {
+                StructTypeSymbol[] providers = roots.Select(root => root.AllocatorType).OfType<StructTypeSymbol>().Distinct().ToArray();
+                targets = targets.Concat(_bodies.Keys.Where(f => f.AllocationOperation == AllocationOperation.Deallocate))
+                    .Where(f => providers.Any(provider => ReferenceEquals(f, provider.DeallocationOperator) ||
+                        f.ContainingStruct is { } candidate && AllocationRules.IsAllocatorSubtype(candidate, provider))).Distinct();
+            }
+            return targets.SelectMany(Effects).Distinct(TypeIdentity.Comparer).ToArray();
+        }
         if (terminator is not MirCall call) return null;
         if (call.Callee is MirFunctionOperand direct && call.InterfaceType is null)
         {

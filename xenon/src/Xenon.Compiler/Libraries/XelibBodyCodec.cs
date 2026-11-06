@@ -49,6 +49,7 @@ public static class XelibBodyCodec
                 foreach (FieldSymbol trackedField in value.TrackedPath) addSymbol(trackedField);
                 break;
             case BoundDestroyFieldsExpression value: addType(value.StructType); break;
+            case BoundCompleteBaseInitializationExpression value: addType(value.BaseType); break;
             case BoundOwnershipDestructionExpression value:
                 addType(value.OwnershipType);
                 if (value.ElementDestructor is { } ownershipDestructor) addSymbol(ownershipDestructor);
@@ -307,6 +308,8 @@ public static class XelibBodyCodec
             }
             case BoundCopyExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Copy, TypeId = typeId(value.Type), Children = [E(value.Source)] };
+            case BoundCompleteBaseInitializationExpression value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.CompleteBaseInitialization, TypeId = typeId(value.BaseType) };
             case BoundDestroyFieldsExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.DestroyFields, TypeId = typeId(value.StructType) };
             case BoundOwnershipDestructionExpression value:
@@ -462,7 +465,8 @@ public static class XelibBodyCodec
             case BoundArrayCreationExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.ArrayCreation, TypeId = typeId(value.ArrayType),
                     AuxTypeId = typeId(value.ElementType), ArrayStorage = XelibStableMappings.ToXelib(value.Storage),
-                    Children = value.Dimensions.Select(E).ToImmutableArray() };
+                    Integer = value.Allocator is null ? 0 : 1,
+                    Children = (value.Allocator is null ? value.Dimensions : [value.Allocator, .. value.Dimensions]).Select(E).ToImmutableArray() };
             case BoundArrayMetadataExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.ArrayMetadata, TypeId = typeId(value.Type),
                     Text = value.Member, Flag1 = value.Dimension is not null,
@@ -470,8 +474,8 @@ public static class XelibBodyCodec
             case BoundNewExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.New, TypeId = typeId(value.PointerType),
                     AuxTypeId = typeId(value.AllocatedType), Symbol = value.Constructor is null ? null : symbol(value.Constructor),
-                    Flag1 = value.IsPositionalInitialization, Flag2 = value.IsDefaultInitialization,
-                    Children = value.Arguments.Select(E).ToImmutableArray() };
+                    Flag1 = value.IsPositionalInitialization, Flag2 = value.IsDefaultInitialization, Integer = value.Allocator is null ? 0 : 1,
+                    Children = (value.Allocator is null ? value.Arguments : [value.Allocator, .. value.Arguments]).Select(E).ToImmutableArray() };
             case BoundFreeExpression value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.Free, TypeId = typeId(value.Type),
                     Children = [E(value.Pointer)] };
@@ -639,6 +643,8 @@ public static class XelibBodyCodec
                     ? Variable(node.LocalId, node.Symbol) : null,
                     TrackedPath = node.Symbols.Select(item => (FieldSymbol)symbol(item)).ToImmutableArray() };
             case XelibBodyOpcode.Copy: return new BoundCopyExpression(E(0));
+            case XelibBodyOpcode.CompleteBaseInitialization:
+                return new BoundCompleteBaseInitializationExpression((StructTypeSymbol)type(node.TypeId));
             case XelibBodyOpcode.DestroyFields:
             {
                 StructTypeSymbol destroyedType = (StructTypeSymbol)type(node.TypeId);
@@ -782,16 +788,16 @@ public static class XelibBodyCodec
                 node.Children.Select((_, i) => E(i)).ToImmutableArray());
             case XelibBodyOpcode.ArrayCreation:
             {
-                ImmutableArray<BoundExpression> dimensions = node.Children.Select((_, i) => E(i)).ToImmutableArray();
+                ImmutableArray<BoundExpression> dimensions = node.Children.Select((_, i) => E(i)).Skip((int)node.Integer).ToImmutableArray();
                 if (dimensions.IsEmpty) throw Invalid("array creation has no dimensions");
                 return new BoundArrayCreationExpression(type(node.AuxTypeId), dimensions[0],
-                    (ArrayTypeSymbol)type(node.TypeId), XelibStableMappings.FromXelib(node.ArrayStorage)) { Dimensions = dimensions };
+                    (ArrayTypeSymbol)type(node.TypeId), XelibStableMappings.FromXelib(node.ArrayStorage)) { Dimensions = dimensions, Allocator = node.Integer == 1 ? E(0) : null };
             }
             case XelibBodyOpcode.ArrayMetadata: return new BoundArrayMetadataExpression(E(0),
                 node.Text ?? throw Invalid("array metadata member is missing"), node.Flag1 ? E(1) : null);
             case XelibBodyOpcode.New: return new BoundNewExpression(type(node.AuxTypeId),
-                node.Symbol is null ? null : F(node.Symbol), node.Children.Select((_, i) => E(i)).ToImmutableArray(),
-                node.Flag1, (PointerTypeSymbol)type(node.TypeId)) { IsDefaultInitialization = node.Flag2 };
+                node.Symbol is null ? null : F(node.Symbol), node.Children.Select((_, i) => E(i)).Skip((int)node.Integer).ToImmutableArray(),
+                node.Flag1, (PointerTypeSymbol)type(node.TypeId)) { IsDefaultInitialization = node.Flag2, Allocator = node.Integer == 1 ? E(0) : null };
             case XelibBodyOpcode.Free: return new BoundFreeExpression(E(0));
             case XelibBodyOpcode.Delete: return new BoundDeleteExpression(E(0),
                 node.Symbol is null ? null : F(node.Symbol));

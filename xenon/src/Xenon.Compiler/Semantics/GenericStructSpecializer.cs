@@ -240,7 +240,7 @@ internal sealed class GenericStructSpecializer
         string name = $"{definition.Name}<{string.Join(",", typeArguments.Select(type => type.ToDisplayString(TypeDisplayFormat.FullyQualified)))}>";
         var specialized = new StructTypeSymbol(name, _resolveNamespace(definition.ContainingNamespace), definition.IsAbstract,
             SymbolOrigin.CompilerGenerated, definition.Documentation, definition.Accessibility,
-            definition.IsReadonly, definition.IsStatic, definition.IsSealed);
+            definition.IsReadonly, definition.IsStatic, definition.IsSealed) { IsAllocator = definition.IsAllocator };
         specialized.SetGenericSpecialization(definition, typeArguments);
         // Publish the skeleton before resolving fields so recursive constructed
         // types can find this in-progress specialization.
@@ -489,7 +489,7 @@ internal sealed class GenericStructSpecializer
             var result = new ConstantSymbol(source.Name,
                 Substitute(source.Type, substitutions, _originLocations[specialized]), specialized,
                 null, false, SymbolOrigin.CompilerGenerated, source.Documentation,
-                source.Implementation);
+                source.Implementation, source.Accessibility);
             result.SetGenericSpecialization(source);
             return result;
         }).ToImmutableArray();
@@ -558,6 +558,12 @@ internal sealed class GenericStructSpecializer
             var method = SpecializeFunction(source, specialized,
                 Substitute(source.ReturnType, substitutions, _originLocations[specialized]),
                 SubstituteParameters(source.Parameters, substitutions, _originLocations[specialized]));
+            if (method.AllocationOperation == AllocationOperation.Construct &&
+                methods.Any(previous => previous.AllocationOperation == AllocationOperation.Construct &&
+                    previous.HasSameOverloadSignature(method)))
+                _diagnostics.Report(_originLocations[specialized],
+                    $"allocation context constructors of '{specialized.ToDisplayString()}' have identical signatures after generic substitution",
+                    DiagnosticIds.InvalidOverload);
             AddFunction(source, method, specialized, methods);
         }
         specialized.SetMethods(methods.ToImmutable());
@@ -616,7 +622,7 @@ internal sealed class GenericStructSpecializer
             Substitute(source.Type, substitutions, _originLocations[owner]), source.Ordinal,
             source.Accessibility, source.IsStatic, source.IsReadonly, source.IsThreadLocal,
             source.HasInitializer, source.ConstantValue, SymbolOrigin.CompilerGenerated, source.Documentation,
-            source.Implementation);
+            source.Implementation) { IsAllocatorField = source.IsAllocatorField };
         field.SetGenericSpecialization(source);
         return field;
     }

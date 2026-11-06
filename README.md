@@ -4,6 +4,7 @@
 
 [![Tests](https://img.shields.io/github/actions/workflow/status/ZemMezzer/xenon/ci.yml?branch=main&label=tests)](https://github.com/ZemMezzer/xenon/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/ZemMezzer/xenon?display_name=tag&sort=date&label=release)](https://github.com/ZemMezzer/xenon/releases/latest)
+[![Current Version IR](https://img.shields.io/badge/IR_version-1-2563eb)](xenon/src/Xenon.Compiler/Libraries/XelibContainer.cs)
 [![Documentation](https://img.shields.io/badge/documentation-xenonlang.com-2563eb)](https://xenonlang.com/)
 [![License](https://img.shields.io/badge/license-Apache_2.0-D22128)](LICENSE)
 
@@ -14,6 +15,7 @@ Xenon is a native compiled programming language and toolchain built on LLVM. It 
 The repository contains the compiler, LLVM code generator, build driver, project system, command-line interface, and language server. Xenon currently supports:
 
 - native executables and static or shared libraries;
+- native `allocator` types, `new(provider)`, `@Type` allocation context constructors for structs and allocators, virtual storage dispatch and allocator-aware object/array cleanup;
 - structs, enums, interfaces, inheritance, properties, and rich built-in operators;
 - arrays, pointers, flow-sensitive exclusive/shared borrowing, explicit local/parameter/`this`-field `move`, single-owner `unique<T>`, reference-counted `shared<T>` and observing `weak<T>` (including owned arrays), restartable typed `storage<T>`, address-stable `pin<T>`, partial-move flow analysis, recursive copyability and ownership-aware copy/destructor glue, deterministic scope cleanup, and native `extern` functions;
 - multi-project builds through `.xeproj` files and project references;

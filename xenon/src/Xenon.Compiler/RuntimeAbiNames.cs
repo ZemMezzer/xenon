@@ -29,6 +29,7 @@ internal static class RuntimeAbiNames
     public const string EhTerminate = Prefix + "eh_terminate";
     public const string EhThrow = Prefix + "eh_throw";
     public const string Free = Prefix + "free";
+    public const string ReleaseAllocation = Prefix + "release_allocation";
     public const string Malloc = Prefix + "malloc";
     public const string ResumeContinuation = Prefix + "resume_continuation";
     public const string ResumeCreate = Prefix + "resume_create";

@@ -1116,7 +1116,8 @@ public sealed class LlvmIrGeneratorTests
 
         Assert.Contains("store %Example.Pair", llvmIr, StringComparison.Ordinal);
         Assert.Contains($"call ptr @__xenon_aligned_malloc(i{IntPtr.Size * 8} 8, i{IntPtr.Size * 8} 4)", llvmIr, StringComparison.Ordinal);
-        Assert.Contains("call void @__xenon_free", llvmIr, StringComparison.Ordinal);
+        // Typed delete restores the allocation provider; raw free retains its separate ABI.
+        Assert.Contains("call void @__xenon_release_allocation", llvmIr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2455,7 +2456,8 @@ public sealed class LlvmIrGeneratorTests
         Assert.Contains("index.inrange", ir, StringComparison.Ordinal);
         Assert.DoesNotContain("!invariant.load", ir, StringComparison.Ordinal);
         Assert.Contains("call void @llvm.trap()", ir, StringComparison.Ordinal);
-        Assert.Contains("call void @__xenon_free", ir, StringComparison.Ordinal);
+        // Typed delete restores the allocation provider; raw free retains its separate ABI.
+        Assert.Contains("call void @__xenon_release_allocation", ir, StringComparison.Ordinal);
     }
 
     [Fact]

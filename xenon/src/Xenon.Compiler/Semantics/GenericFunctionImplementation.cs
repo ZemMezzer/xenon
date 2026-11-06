@@ -287,18 +287,79 @@ internal sealed class LibraryGenericFunctionImplementation(
         GenericFunctionSpecializer specializer, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        TextLocation allocationLocation = specialization.SpecializationLocations.FirstOrDefault(
+            specialization.SpecializationOrigin.Source is not null ? specialization.SpecializationOrigin : TextLocation.None);
         TypeSymbol Type(int id) => specializer.StructSpecializer.Substitute(
             resolveType(id), substitutions);
         var specializedLambdas = new Dictionary<FunctionSymbol, FunctionSymbol>(ReferenceEqualityComparer.Instance);
         Symbol Symbol(XelibSymbolReference reference) => MapSymbol(resolveSymbol(reference), specialization,
             specializer.StructSpecializer, substitutions, SpecializeLambda);
-        return XelibBodyCodec.Decode(body, specialization, Type, Symbol,
+        BoundBlockStatement result = XelibBodyCodec.Decode(body, specialization, Type, Symbol,
             (receiver, requirement, arguments, isPointerAccess) =>
                 ResolveGenericMethod(receiver, requirement, arguments, isPointerAccess, specializer),
             (operation, receiver, requirement, arguments, value, operatorKind, isPointerAccess,
                 resultType, typeArguments) => ResolveGenericOperation(operation, receiver,
                 requirement, arguments, value, operatorKind, isPointerAccess, resultType,
-                typeArguments, specializer));
+                typeArguments, specializer, diagnostics, allocationLocation));
+        ValidateReboundReceivers(result);
+        if (specialization.FunctionKind == FunctionKind.AllocationConstructor)
+            FunctionBodyBinder.ValidateAllocatorPhase(specialization, result, diagnostics, allocationLocation);
+        ValidateConstructions(result);
+        return result;
+
+        void ValidateConstructions(BoundBlockStatement block)
+        {
+            foreach (BoundExpression expression in BoundTree.DescendantsAndSelf(block).OfType<BoundExpression>())
+            {
+                (TypeSymbol? type, BoundExpression? allocator, FunctionSymbol? constructor) = expression switch
+                {
+                    BoundNewExpression value => (value.AllocatedType, value.Allocator, value.Constructor),
+                    BoundArrayCreationExpression value => (value.ElementType, value.Allocator, null),
+                    BoundStructConstructionExpression value => (value.StructType, null, null),
+                    BoundConstructorCallExpression value => (value.StructType, null, value.Constructor),
+                    BoundStorageConstructExpression { Value: null } value => (value.ValueType, null, value.Constructor),
+                    _ => (null, null, null),
+                };
+                if (type is null) continue;
+                if (constructor is not null && !AccessibilityRules.IsAccessible(constructor, specialization))
+                    diagnostics.Report(allocationLocation,
+                        $"constructor '{SymbolDisplay.ToDisplayString(constructor, SymbolDisplayFormat.Diagnostic)}' is inaccessible due to its protection level",
+                        DiagnosticIds.InaccessibleSymbol);
+                if (expression is BoundArrayCreationExpression or BoundStructConstructionExpression { IsDefaultInitialization: true } or BoundNewExpression { IsDefaultInitialization: true } or BoundStorageConstructExpression { IsDefaultInitialization: true })
+                    foreach (StructTypeSymbol invalid in AllocationRules.InvalidDefaultFields(type))
+                        diagnostics.Report(allocationLocation, $"embedded value '{invalid.Name}' requires explicit initialization with a compatible allocator", DiagnosticIds.AllocationConstructorMismatch);
+                AllocationRules.ValidateConstruction(type, allocator?.Type, specialization, diagnostics, allocationLocation);
+                while (type is AtomicTypeSymbol atomic) type = atomic.ElementType;
+                if (type is StructTypeSymbol { IsAllocator: true } && expression is BoundStructConstructionExpression or BoundConstructorCallExpression or BoundStorageConstructExpression or BoundArrayCreationExpression { Storage: ArrayStorageKind.Stack })
+                    diagnostics.Report(allocationLocation, "allocator instances require heap construction", DiagnosticIds.AllocatorRequiresHeap);
+            }
+        }
+
+        // A deferred FieldGet can bind to an allocator field of the concrete
+        // receiver. Recheck uses that borrow its storage as a mutable receiver;
+        // the consumer does not have source to run the ordinary binder again.
+        void ValidateReboundReceivers(BoundNode node)
+        {
+            if (node is BoundReferenceConversionExpression { ReferenceType.IsReadonly: true,
+                    Source: BoundInterfaceConversionExpression view })
+            {
+                ValidateReboundReceivers(view.Source);
+                return;
+            }
+            BoundExpression? receiver = node switch
+            {
+                BoundMethodCallExpression { IsPointerAccess: false, Method.IsReadonly: false } call => call.Receiver,
+                BoundPropertySetExpression { IsPointerAccess: false } set => set.Receiver,
+                BoundIndexerSetExpression set => set.Receiver,
+                BoundCompoundAccessorAssignmentExpression { IsPointerAccess: false } set => set.Receiver,
+                BoundInterfaceConversionExpression conversion when conversion.InterfaceType.AllMethods.Any(member => !member.IsReadonly) => conversion.Source,
+                _ => null,
+            };
+            if (receiver is not null && AllocatorFieldStorage.Find(receiver) is { } field)
+                diagnostics.Report(allocationLocation, $"allocator field '{field.Name}' cannot provide mutable storage",
+                    DiagnosticIds.AllocatorFieldWriteOutsidePhase);
+            foreach (BoundNode child in BoundTree.Children(node)) ValidateReboundReceivers(child);
+        }
 
         FunctionSymbol SpecializeLambda(FunctionSymbol source)
         {
@@ -334,7 +395,9 @@ internal sealed class LibraryGenericFunctionImplementation(
                 (operation, receiver, requirement, arguments, value, operatorKind, isPointerAccess,
                     resultType, typeArguments) => ResolveGenericOperation(operation, receiver,
                     requirement, arguments, value, operatorKind, isPointerAccess, resultType,
-                    typeArguments, specializer));
+                    typeArguments, specializer, diagnostics, allocationLocation));
+            ValidateReboundReceivers(boundBody);
+            ValidateConstructions(boundBody);
             specializer.AddGeneratedFunctions([new BoundFunction(created, boundBody)]);
             return created;
         }
@@ -343,7 +406,8 @@ internal sealed class LibraryGenericFunctionImplementation(
     private BoundExpression ResolveGenericOperation(BoundDeferredGenericOperationKind operation,
         BoundExpression? receiver, Symbol requirement, ImmutableArray<BoundExpression> arguments,
         BoundExpression? value, SyntaxKind operatorKind, bool isPointerAccess, TypeSymbol resultType,
-        ImmutableArray<TypeSymbol> typeArguments, GenericFunctionSpecializer specializer)
+        ImmutableArray<TypeSymbol> typeArguments, GenericFunctionSpecializer specializer,
+        DiagnosticBag diagnostics, TextLocation location)
     {
         if (operation == BoundDeferredGenericOperationKind.OperatorCall)
         {
@@ -396,6 +460,7 @@ internal sealed class LibraryGenericFunctionImplementation(
                 IsPositionalInitialization: false, pointer)
             {
                 IsDefaultInitialization = constructor is null,
+                Allocator = receiver,
             };
         }
 
@@ -414,6 +479,13 @@ internal sealed class LibraryGenericFunctionImplementation(
             if (receiverType is not StructTypeSymbol structure ||
                 structure.FindField(requirement.Name) is not { } field)
                 throw InvalidGenericOperation(operation, requirement, receiverType);
+            if (operation == BoundDeferredGenericOperationKind.FieldSet && field.IsAllocatorField)
+            {
+                diagnostics.Report(location,
+                    $"allocator field '{field.Name}' is writable only in its owner's allocation context constructor",
+                    DiagnosticIds.AllocatorFieldWriteOutsidePhase);
+                return new BoundErrorExpression();
+            }
             var target = new BoundMemberAccessExpression(receiver, field, isPointerAccess);
             return operation == BoundDeferredGenericOperationKind.FieldGet
                 ? target
@@ -755,6 +827,10 @@ internal sealed class LibraryGenericFunctionImplementation(
         }
         if (specializedOwner is null) return null;
         source = structSpecializer.GetFunctionDefinition(source);
+        // Destructor glue is synthesized per concrete layout, not registered as
+        // a declared member. A portable body must not retain the open symbol.
+        if (source.FunctionKind == FunctionKind.DestructorGlue)
+            return specializedOwner.CompleteDestructor;
         return structSpecializer.FindSpecializedFunction(source, specializedOwner) ??
             (ReferenceEquals(source.ContainingStruct?.Destructor, source) ? specializedOwner.Destructor : null) ??
             (ReferenceEquals(source.ContainingStruct?.InstanceInitializer, source) ? specializedOwner.InstanceInitializer : null);
@@ -795,7 +871,10 @@ internal sealed class LibraryGenericStructImplementation(
     {
         if (initializerDefinition is null || initializerBody is null) return null;
         var initializer = new FunctionSymbol(FunctionKind.InstanceInitializer, specialization, [],
-            SymbolOrigin.CompilerGenerated, Accessibility.Private);
+            SymbolOrigin.CompilerGenerated, Accessibility.Private)
+        {
+            SpecializationOrigin = functionSpecializer.StructSpecializer.GetOriginLocation(specialization),
+        };
         specialization.SetInstanceInitializer(initializer);
         var implementation = new LibraryGenericFunctionImplementation(initializerDefinition,
             initializerBody, resolveType, resolveSymbol, lambdaBodies);
@@ -816,7 +895,10 @@ internal sealed class LibraryGenericStructImplementation(
             FieldSymbol? field = specialization.StaticFields.FirstOrDefault(candidate =>
                 candidate.Ordinal == ordinal && candidate.Name == entry.Field.Name);
             if (field is null) continue;
-            var initializer = new FunctionSymbol(field);
+            var initializer = new FunctionSymbol(field)
+            {
+                SpecializationOrigin = functionSpecializer.StructSpecializer.GetOriginLocation(specialization),
+            };
             var implementation = new LibraryGenericFunctionImplementation(entry.Definition,
                 entry.Body, resolveType, resolveSymbol, lambdaBodies);
             functions.Add(new BoundFunction(initializer, implementation.Bind(initializer,

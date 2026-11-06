@@ -78,7 +78,7 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
                 {
                     var value = origins.Operand(argument, state);
                     Access(value.Roots, value.Aliases.Union(value.Lineage), false,
-                        intrinsic.Intrinsic == MirIntrinsicKind.Free ? MirBorrowCheck.Free : MirBorrowCheck.Mutation,
+                        intrinsic.Intrinsic is MirIntrinsicKind.Free ? MirBorrowCheck.Free : MirBorrowCheck.Mutation,
                         intrinsic.Source, location, loans);
                 }
             }
@@ -88,7 +88,7 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
                 var state = flow.Output[block.Id];
                 var loans = Active(state, live.Before[location]).ToArray();
                 if (call.Receiver is { } receiver && call.Callee is MirFunctionOperand { Function: { } method } &&
-                    method.FunctionKind is not (FunctionKind.Constructor or FunctionKind.InstanceInitializer))
+                    method.FunctionKind is not (FunctionKind.Constructor or FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer))
                 {
                     var value = origins.Operand(receiver, state);
                     Access(value.Roots, value.Aliases.Union(value.Lineage), method.IsReadonly,

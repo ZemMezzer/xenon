@@ -40,7 +40,7 @@ public static class EditorSymbolClassifier
             EnumTypeSymbol => EditorSymbolKind.Enum,
             ConstantSymbol { ContainingSymbol: EnumTypeSymbol } => EditorSymbolKind.EnumMember,
             ConstantSymbol => EditorSymbolKind.Constant,
-            FunctionSymbol { FunctionKind: FunctionKind.Constructor } => EditorSymbolKind.Constructor,
+            FunctionSymbol { FunctionKind: FunctionKind.Constructor or FunctionKind.AllocationConstructor } => EditorSymbolKind.Constructor,
             FunctionSymbol { FunctionKind: FunctionKind.Destructor } => EditorSymbolKind.Destructor,
             FunctionSymbol { FunctionKind: FunctionKind.Method } => EditorSymbolKind.Method,
             FunctionSymbol => EditorSymbolKind.Function,

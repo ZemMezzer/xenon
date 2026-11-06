@@ -367,6 +367,7 @@ public sealed record BoundArrayCreationExpression(
     ArrayTypeSymbol ArrayType,
     ArrayStorageKind Storage) : BoundExpression(ArrayType)
 {
+    public BoundExpression? Allocator { get; init; }
     public override BoundKind Kind => BoundKind.ArrayCreationExpression;
     public ImmutableArray<BoundExpression> Dimensions { get; init; } = [Length];
 }
@@ -386,6 +387,7 @@ public sealed record BoundNewExpression(
     bool IsPositionalInitialization,
     PointerTypeSymbol PointerType) : BoundExpression(PointerType)
 {
+    public BoundExpression? Allocator { get; init; }
     public override BoundKind Kind => BoundKind.NewExpression;
     public StructTypeSymbol? StructType => AllocatedType as StructTypeSymbol;
     public bool IsDefaultInitialization { get; init; }
@@ -553,4 +555,10 @@ public sealed record BoundAwaitExpression(
     TypeSymbol ResultType) : BoundExpression(ResultType)
 {
     public override BoundKind Kind => BoundKind.AwaitExpression;
+}
+
+/// <summary>Transfers a prepared base subobject to complete-object cleanup after default initialization.</summary>
+public sealed record BoundCompleteBaseInitializationExpression(StructTypeSymbol BaseType) : BoundExpression(BuiltinTypes.Void)
+{
+    public override BoundKind Kind => BoundKind.CompleteBaseInitializationExpression;
 }

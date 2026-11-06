@@ -73,6 +73,10 @@ public static class SymbolDisplay
             {
                 AccessorKind.Getter => "get",
                 AccessorKind.Setter => "set",
+                _ when function.AllocationOperation != AllocationOperation.None =>
+                    (function.AllocationOperation switch {
+                        AllocationOperation.Construct => "@", AllocationOperation.Deallocate => "-", _ => "+" }) +
+                    function.ContainingType!.Name,
                 _ => part.Name,
             }
             : part.Name;
@@ -92,7 +96,8 @@ public static class SymbolDisplay
             name += $"<{string.Join(", ", function.TypeParameters.Select(parameter => parameter.Name))}>";
         string signature = $"{name}({Parameters(function.Parameters, format, !diagnostic)})";
         if (diagnostic) return signature;
-        if (function.FunctionKind is FunctionKind.Constructor or FunctionKind.Destructor)
+        if (function.FunctionKind is FunctionKind.Constructor or FunctionKind.Destructor ||
+            function.AllocationOperation != AllocationOperation.None)
             return signature;
         return (function.IsAsync ? "async " : "") + $"{function.ReturnType.ToDisplayString(format)} " +
                (function.IsReadonly ? "readonly " : "") + signature;
@@ -149,7 +154,8 @@ public static class SymbolDisplay
             else if (structure.IsSealed) modifiers += "sealed ";
             if (structure.IsAbstract) modifiers += "abstract ";
         }
-        return $"{modifiers}{type.DeclarationKind} {display}";
+        string kind = type is StructTypeSymbol { IsAllocator: true } ? "allocator" : type.DeclarationKind;
+        return $"{modifiers}{kind} {display}";
     }
 
     private static string Modifiers(Symbol symbol) => symbol switch
@@ -157,7 +163,8 @@ public static class SymbolDisplay
         NamespaceSymbol => "namespace ",
         FunctionSymbol function => MemberModifiers(function.Accessibility, function.IsStatic, function.IsAbstract,
             function.IsVirtual, function.IsOverride) + (function.IsExtern ? "extern " : function.IsExport ? "export " : ""),
-        FieldSymbol field => MemberModifiers(field.Accessibility, field.IsStatic) + (field.IsThreadLocal ? "threadlocal " : ""),
+        FieldSymbol field => MemberModifiers(field.Accessibility, field.IsStatic) +
+            (field.IsThreadLocal ? "threadlocal " : field.IsAllocatorField ? "allocator " : ""),
         PropertySymbol property => MemberModifiers(property.Accessibility, property.IsStatic,
             property.IsAbstract, property.IsVirtual, property.IsOverride),
         IndexerSymbol indexer => MemberModifiers(indexer.Accessibility, indexer.IsStatic,

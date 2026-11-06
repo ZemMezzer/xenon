@@ -5,6 +5,8 @@ namespace Xenon.Compiler.Mir.Analysis;
 
 public enum MirLifetimeAuthority { Owner, ReferenceParameter, StorageValue, ReferenceField }
 
+public enum MirAllocationKind { Unknown, Raw, Typed }
+
 public enum MirReferenceOriginKind { Local, Parameter, Receiver, Static, Unknown, RawPointee, UniquePointee, SharedPointee }
 
 /// <summary>A flattened shared ancestor of an inline unique handle; paths widen finitely.</summary>
@@ -13,6 +15,8 @@ public sealed record MirSharedOwner(string? Identity, bool IsFresh, TypeSymbol? 
 /// <summary>A storage origin and a finite projection path; independent of source syntax.</summary>
 public sealed record MirReferenceOrigin(MirReferenceOriginKind Kind, int Ordinal = -1, string Path = "")
 {
+    public MirAllocationKind AllocationKind { get; init; }
+    public StructTypeSymbol? AllocatorType { get; init; }
     public MirLifetimeAuthority Authority { get; init; }
     public bool IsReadonly { get; init; }
     public bool IsFresh { get; init; }
@@ -298,9 +302,25 @@ public sealed partial class MirReferenceOrigins(MirFunction function) :
                 foreach (var origin in callee.ReferenceReturnOrigins) result = result.Union(Map(origin, call, state));
                 foreach (var field in callee.ReferenceFieldOrigins)
                     result = result.Store(string.Join('/', field.FieldOrdinals), field.IsReadonly ? Readonly(Map(field.Origin, call, state)) : Map(field.Origin, call, state), false);
-                if (callee.FunctionKind is FunctionKind.Constructor or FunctionKind.InstanceInitializer && call.Receiver is MirCopy receiver)
-                    state = Write(receiver.Place.Project(new MirDerefProjection()),
-                        OwnedFields(callee.ContainingType!, receiver.Place.Local, "constructor-field").Union(result), state);
+                if (callee.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer && call.Receiver is MirCopy receiver)
+                {
+                    var initialized = OwnedFields(callee.ContainingType!, receiver.Place.Local, "constructor-field").Union(result);
+                    MirPlace place = receiver.Place.Project(new MirDerefProjection());
+                    if (callee.ContainingStruct is { } owner && owner.AllInstanceFields.Any(field => field.IsAllocatorField))
+                    {
+                        // The phases share one receiver. A summary for a later phase
+                        // cannot replace the bindings installed by an earlier one.
+                        foreach (FieldSymbol field in owner.AllInstanceFields.Where(field => callee.FunctionKind switch
+                                 {
+                                     FunctionKind.AllocationConstructor => field.IsAllocatorField && TypeIdentity.AreSame(field.ContainingType, owner),
+                                     FunctionKind.InstanceInitializer => field.HasInitializer && TypeIdentity.AreSame(field.ContainingType, owner),
+                                     _ => !field.IsAllocatorField,
+                                 }))
+                            state = Write(place.Project(new MirFieldProjection(field)),
+                                initialized.Project(field.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)), state);
+                    }
+                    else state = Write(place, initialized, state);
+                }
                 else if (callee.ReturnType is ReferenceTypeSymbol && result.Roots.IsEmpty && !callee.IsDefinition)
                     result = MirReferenceValue.Of(new(MirReferenceOriginKind.Unknown));
             }
@@ -324,6 +344,12 @@ public sealed partial class MirReferenceOrigins(MirFunction function) :
                 MirIntrinsicKind.AllocateStackArray => MirReferenceValue.Of(new(MirReferenceOriginKind.Local, output.Local.Value)),
                 _ => intrinsic.Arguments.Aggregate(MirReferenceValue.Empty, (value, argument) => value.Union(Operand(argument, state))),
             };
+            if (intrinsic.Intrinsic is MirIntrinsicKind.Allocate or MirIntrinsicKind.AllocateHeapArray or MirIntrinsicKind.Malloc or MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc)
+                result = result with { Roots = result.Roots.Select(root => root with
+                {
+                    AllocationKind = intrinsic.Intrinsic is MirIntrinsicKind.Allocate or MirIntrinsicKind.AllocateHeapArray ? MirAllocationKind.Typed : MirAllocationKind.Raw,
+                    AllocatorType = intrinsic.Function?.AllocationOperation == AllocationOperation.Allocate && intrinsic.Arguments[^1].Type is PointerTypeSymbol { ElementType: StructTypeSymbol provider } ? provider : null,
+                }).ToImmutableHashSet() };
             return Write(output, result, state);
         }
         return state;
@@ -359,7 +385,7 @@ public sealed partial class MirReferenceOrigins(MirFunction function) :
     public ImmutableArray<ReferenceFieldOrigin> ReferenceFields(CancellationToken cancellation = default,
         MirDataflowResult<ImmutableDictionary<MirLocalId, MirReferenceValue>>? facts = null)
     {
-        bool constructor = function.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.InstanceInitializer;
+        bool constructor = function.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer;
         TypeSymbol type = constructor ? function.Symbol.ContainingType! : function.ReturnType;
         var flow = facts ?? MirDataflow.Solve(MirFlowFacts.Graph(function, cancellation), this, cancellation);
         var result = new List<ReferenceFieldOrigin>();

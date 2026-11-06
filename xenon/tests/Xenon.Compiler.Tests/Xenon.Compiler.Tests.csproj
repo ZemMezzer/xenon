@@ -8,8 +8,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(MicrosoftNetTestSdkVersion)" />
-    <!-- Managed testhost cannot consume the static archives linked into NativeAOT. -->
-    <PackageReference Include="libLLVM" Version="$(LlvmSharpVersion)" PrivateAssets="all" />
     <PackageReference Include="xunit" Version="$(XunitVersion)" />
     <PackageReference Include="xunit.runner.visualstudio" Version="$(XunitRunnerVisualStudioVersion)">
       <PrivateAssets>all</PrivateAssets>
@@ -30,10 +28,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="../../../cmake/tests/indvars-catchswitch.ll" Link="NativeLLVM/indvars-catchswitch.ll" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Mir/Snapshots/**/*" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../Workspaces/**/*">
       <Link>Workspaces/%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+  <Import Project="../LLVM.Runtime.targets" />
 </Project>

@@ -67,7 +67,7 @@ public static class MirOwnershipChecks
                             locals[resolved.Local].Kind == MirLocalKind.Receiver &&
                             resolved.Projections.OfType<MirFieldProjection>().FirstOrDefault() is { } initialField &&
                             !TypeFacts.ContainsReferenceStorage(initialField.Field.Type) &&
-                            initialField.Field.Type is not PinTypeSymbol) continue;
+                            initialField.Field.Type is not PinTypeSymbol && !AllocationRules.RequiresExplicitInitialization(initialField.Field.Type)) continue;
                         if (read.IsUntrackedReplacementCheck)
                         {
                             if (status == MirOwnershipStatus.MaybeMoved)
@@ -88,7 +88,7 @@ public static class MirOwnershipChecks
                     }
                 }
             }
-            if (block.Terminator is MirReturn && function.Symbol.FunctionKind == FunctionKind.Constructor)
+            if (block.Terminator is MirReturn && function.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor)
             {
                 var location = new MirLocation(block.Id, block.Statements.Length);
                 RequiredFields(location, block.Terminator.Source, states.Before[location]);
@@ -102,7 +102,8 @@ public static class MirOwnershipChecks
                 function.Symbol.ContainingStruct is not { } owner) return;
             foreach (MirLocal receiver in function.Locals.Where(local => local.Kind == MirLocalKind.Receiver))
                 foreach (FieldSymbol field in owner.Fields.Where(field =>
-                    TypeFacts.ContainsReferenceStorage(field.Type) || field.Type is PinTypeSymbol))
+                    !field.IsAllocatorField && (TypeFacts.ContainsReferenceStorage(field.Type) ||
+                        field.Type is PinTypeSymbol || AllocationRules.RequiresExplicitInitialization(field.Type))))
                 {
                     MirPlace place = new MirPlace(receiver.Id).Project(new MirDerefProjection()).Project(new MirFieldProjection(field));
                     MirOwnershipStatus status = analysis.Status(place, state);

@@ -1,0 +1,43 @@
+namespace Allocators;
+allocator Heap {
+    public int bonus = 3;
+    public int allocations;
+    public int releases;
+    +Heap(nuint size, nuint alignment) { allocations++; return malloc(size, alignment); }
+    -Heap(void* block) { releases++; free(block); }
+}
+
+struct Value {
+    public allocator Heap* heap;
+    public int bonus = heap->bonus;
+    public int value = 2 + bonus;
+    private @Value(Heap* provider) { heap = provider; }
+    public Value(int extra) { value += extra; }
+    public static Value* Create(Heap* heap, int extra) { return new(heap) Value(extra); }
+    public static Value[] CreateArray(Heap* heap, int count) { return new(heap) Value[count]; }
+    public ~Value() { heap->releases += 10; }
+}
+int Main() {
+    Heap* heap = new Heap();
+    Value* value = Value.Create(heap, 7);
+    if (value->value != 12 || sizeof(Value) != sizeof(Heap*) + cast<nuint>(8)) return 1;
+    if (*cast<nuint*>(cast<void*>(&value)) % alignof(Value) != cast<nuint>(0)) return 2;
+    delete(value);
+    Value[] values = Value.CreateArray(heap, 3);
+    if (values[0].value != 5 || values[2].heap != heap) return 3;
+    delete(values);
+    Value*[] pointers = new(heap) Value*[4];
+    delete(pointers);
+    int[,] matrix = new(heap) int[2, 3];
+    matrix[1, 2] = 9;
+    if (matrix[1, 2] != 9) return 4;
+    delete(matrix);
+    Heap* child = new(heap) Heap();
+    int* number = new(child) int(8);
+    delete(number);
+    if (child->allocations != 1 || child->releases != 1) return 5;
+    delete(child);
+    if (heap->allocations != 5 || heap->releases != 45) return 6;
+    delete(heap);
+    return 0;
+}

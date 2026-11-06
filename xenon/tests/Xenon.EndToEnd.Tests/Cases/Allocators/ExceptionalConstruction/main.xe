@@ -1,0 +1,34 @@
+namespace Allocators;
+allocator Heap {
+    public int allocations;
+    public int releases;
+    +Heap(nuint size, nuint alignment) { allocations++; return malloc(size, alignment); }
+    -Heap(void* block) { releases++; free(block); }
+}
+
+struct Resource {
+    public Heap* heap;
+    public Resource(Heap* h) { heap = h; }
+    public ~Resource() { heap->releases += 10; }
+}
+struct Value {
+    private allocator Heap* provider;
+    public Resource resource = Resource(provider);
+    public @Value(Heap* h) { provider = h; }
+    public Value() { throw 7; }
+}
+struct Element {
+    public allocator Heap* heap;
+    public @Element(Heap* h) { heap = h; h->allocations++; if (h->allocations == 4) throw 9; }
+    public ~Element() { heap->releases += 10; }
+}
+int Main() {
+    Heap* heap = new Heap();
+    try { Value* value = new(heap) Value(); return 1; } catch (readonly int& error) { if (error != 7) return 2; }
+    if (heap->allocations != 1 || heap->releases != 11) return 3;
+    heap->allocations = 0; heap->releases = 0;
+    try { Element[] values = new(heap) Element[5]; return 4; } catch (readonly int& error) { if (error != 9) return 5; }
+    if (heap->allocations != 4 || heap->releases != 21) return 6;
+    delete(heap);
+    return 0;
+}

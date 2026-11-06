@@ -1450,7 +1450,10 @@ public sealed partial class LlvmIrGenerator
         }
         LLVMValueRef value = _module.AddFunction(implementationName, functionType);
         ApplyProvenFunctionAttributes(function, value);
-        bool wholeProgramDefinition = _wholeProgramFunctions.Contains(function);
+        // Abstract virtual slots have ABI stubs but no MIR bodies. Whole-program
+        // linking owns those stubs together with the imported type's vtable.
+        bool wholeProgramDefinition = _wholeProgramFunctions.Contains(function) ||
+            function.IsAbstract && function.ContainingStruct is { } owner && _wholeProgramTypes.Contains(owner);
         bool owned = _compilation.IsSymbolDefinedInCurrentArtifact(function) || wholeProgramDefinition;
         if (!owned)
         {
@@ -1461,19 +1464,19 @@ public sealed partial class LlvmIrGenerator
             // Cross-artifact callers use the native export thunk, never its implementation.
             value.Linkage = LLVMLinkage.LLVMInternalLinkage;
         }
-        else if (wholeProgramDefinition && !function.IsExport)
-        {
-            value.Linkage = LLVMLinkage.LLVMInternalLinkage;
-        }
         else if (function.IsAbstract)
         {
-            value.Linkage = _implementationAbiRoots.Contains(function)
+            value.Linkage = !wholeProgramDefinition && _implementationAbiRoots.Contains(function)
                 ? LLVMLinkage.LLVMExternalLinkage
                 : LLVMLinkage.LLVMInternalLinkage;
             using LLVMBuilderRef builder = _context.CreateBuilder();
             LLVMBasicBlockRef entry = value.AppendBasicBlock("entry");
             builder.PositionAtEnd(entry);
             builder.BuildUnreachable();
+        }
+        else if (wholeProgramDefinition && !function.IsExport)
+        {
+            value.Linkage = LLVMLinkage.LLVMInternalLinkage;
         }
         else if (!function.IsExtern && !function.IsExport &&
                  !IsExternallyVisible(function) &&
@@ -2056,10 +2059,9 @@ public sealed partial class LlvmIrGenerator
                 "Native symbols 'malloc', 'calloc', and 'free' are reserved for Xenon heap operations.");
         }
 
-        // Every Xenon heap allocation carries one hidden native-pointer word immediately
-        // before the aligned address. This is the only allocator metadata: it makes one
-        // deallocator work for ordinary and over-aligned blocks on every platform without
-        // a process-global allocation registry.
+        // Heap ABI: three pointer words precede the aligned address: original block,
+        // allocator receiver, and captured release operation. Native blocks have null
+        // receiver/callback. The object layout is independent of this header.
         LLVMTypeRef pointerType = LLVMTypeRef.CreatePointer(_context.Int8Type, 0);
         LLVMTypeRef sizeType = MapTargetInteger(BuiltinTypes.NUInt, _targetMachine.PointerBitWidth);
         LLVMTypeRef nativeMallocType = LLVMTypeRef.CreateFunction(pointerType, [sizeType], false);
@@ -2077,6 +2079,8 @@ public sealed partial class LlvmIrGenerator
         LLVMValueRef alignedMalloc = _module.AddFunction(RuntimeAbiNames.AlignedMalloc, alignedMallocType);
         LLVMValueRef calloc = _module.AddFunction(RuntimeAbiNames.Calloc, callocType);
         LLVMValueRef free = _module.AddFunction(RuntimeAbiNames.Free, freeType);
+        LLVMValueRef release = _module.AddFunction(RuntimeAbiNames.ReleaseAllocation, freeType);
+        release.Linkage = LLVMLinkage.LLVMInternalLinkage;
         malloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
         alignedMalloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
         calloc.Linkage = LLVMLinkage.LLVMInternalLinkage;
@@ -2090,11 +2094,12 @@ public sealed partial class LlvmIrGenerator
             allocSize: uint.MaxValue, alignmentParameterIndex: 2, family: "xenon"u8);
         ApplyAllocatorAttributes(calloc, "xenon"u8, allockind: 1 | 16, allocSize: 1);
         ApplyDeallocatorAttributes(free, "xenon"u8);
+        // Typed release invokes user code; raw free retains its no-throw contract.
 
         EmitMemoryRuntimeBodies(pointerType, sizeType,
             nativeMalloc, nativeMallocType, nativeFree, nativeFreeType,
             malloc, mallocType, alignedMalloc, alignedMallocType,
-            calloc, callocType, free);
+            calloc, callocType, free, release);
         _memoryRuntime = new LlvmMemoryRuntime(
             malloc,
             mallocType,
@@ -2103,6 +2108,7 @@ public sealed partial class LlvmIrGenerator
             calloc,
             callocType,
             free,
+            release,
             freeType,
             sizeType,
             _module.AddFunction("llvm.stacksave.p0", LLVMTypeRef.CreateFunction(pointerType, [], false)),
@@ -2214,7 +2220,7 @@ public sealed partial class LlvmIrGenerator
         LLVMTypeRef alignedMallocType,
         LLVMValueRef calloc,
         LLVMTypeRef callocType,
-        LLVMValueRef free)
+        LLVMValueRef free, LLVMValueRef releaseAllocation)
     {
         ulong pointerBytes = checked((ulong)GetPointerBitWidth() / 8);
         ulong defaultAlignment = Math.Max(pointerBytes, pointerBytes * 2);
@@ -2239,9 +2245,9 @@ public sealed partial class LlvmIrGenerator
                 builder.BuildAnd(alignment, oneLess, "alignment.power.bits"),
                 Size(0), "alignment.power");
             LLVMValueRef overheadFits = builder.BuildICmp(
-                LLVMIntPredicate.LLVMIntULE, alignment, Size(maximum - pointerBytes + 1),
+                LLVMIntPredicate.LLVMIntULE, alignment, Size(maximum - pointerBytes * 3 + 1),
                 "alignment.overhead.fits");
-            LLVMValueRef overhead = builder.BuildAdd(oneLess, Size(pointerBytes), "allocation.overhead");
+            LLVMValueRef overhead = builder.BuildAdd(oneLess, Size(pointerBytes * 3), "allocation.overhead");
             LLVMValueRef sizeFits = builder.BuildICmp(
                 LLVMIntPredicate.LLVMIntULE, size,
                 builder.BuildSub(Size(maximum), overhead, "allocation.maximum"),
@@ -2260,7 +2266,7 @@ public sealed partial class LlvmIrGenerator
             builder.PositionAtEnd(success);
             LLVMValueRef candidate = builder.BuildAdd(
                 builder.BuildPtrToInt(allocation, sizeType, "allocation.base.integer"),
-                Size(pointerBytes), "allocation.candidate");
+                Size(pointerBytes * 3), "allocation.candidate");
             LLVMValueRef alignedInteger = builder.BuildAnd(
                 builder.BuildAdd(candidate, oneLess, "allocation.rounded"),
                 builder.BuildNot(oneLess, "alignment.inverse.mask"), "allocation.aligned.integer");
@@ -2269,6 +2275,8 @@ public sealed partial class LlvmIrGenerator
                 builder.BuildSub(alignedInteger, Size(pointerBytes), "allocation.header.integer"),
                 pointerType, "allocation.header");
             builder.BuildStore(allocation, header);
+            for (ulong slot = 2; slot <= 3; slot++)
+                builder.BuildStore(Null(), builder.BuildIntToPtr(builder.BuildSub(alignedInteger, Size(pointerBytes * slot)), pointerType));
             builder.BuildRet(aligned);
 
             builder.PositionAtEnd(failure);
@@ -2321,6 +2329,22 @@ public sealed partial class LlvmIrGenerator
             LLVMBasicBlockRef done = free.AppendBasicBlock("done");
             builder.PositionAtEnd(entry);
             LLVMValueRef address = free.GetParam(0);
+            builder.BuildCondBr(builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, address, Null()), release, done);
+            builder.PositionAtEnd(release);
+            LLVMValueRef header = builder.BuildIntToPtr(builder.BuildSub(builder.BuildPtrToInt(address, sizeType), Size(pointerBytes)), pointerType);
+            builder.BuildCall2(nativeFreeType, nativeFree, new[] { builder.BuildLoad2(pointerType, header) }, string.Empty);
+            builder.BuildBr(done);
+            builder.PositionAtEnd(done);
+            builder.BuildRetVoid();
+        }
+        free = releaseAllocation;
+        using (LLVMBuilderRef builder = _context.CreateBuilder())
+        {
+            LLVMBasicBlockRef entry = free.AppendBasicBlock("entry");
+            LLVMBasicBlockRef release = free.AppendBasicBlock("release");
+            LLVMBasicBlockRef done = free.AppendBasicBlock("done");
+            builder.PositionAtEnd(entry);
+            LLVMValueRef address = free.GetParam(0);
             builder.BuildCondBr(builder.BuildICmp(LLVMIntPredicate.LLVMIntNE,
                 address, Null(), "free.nonnull"), release, done);
             builder.PositionAtEnd(release);
@@ -2329,7 +2353,18 @@ public sealed partial class LlvmIrGenerator
                 builder.BuildSub(addressInteger, Size(pointerBytes), "free.header.integer"),
                 pointerType, "free.header");
             LLVMValueRef allocation = builder.BuildLoad2(pointerType, header, "free.allocation");
+            LLVMValueRef context = builder.BuildLoad2(pointerType,
+                builder.BuildIntToPtr(builder.BuildSub(addressInteger, Size(pointerBytes * 2)), pointerType), "free.context");
+            LLVMValueRef callback = builder.BuildLoad2(pointerType,
+                builder.BuildIntToPtr(builder.BuildSub(addressInteger, Size(pointerBytes * 3)), pointerType), "free.callback");
+            LLVMBasicBlockRef nativeRelease = free.AppendBasicBlock("native.release");
+            LLVMBasicBlockRef customRelease = free.AppendBasicBlock("custom.release");
+            builder.BuildCondBr(builder.BuildICmp(LLVMIntPredicate.LLVMIntEQ, callback, Null()), nativeRelease, customRelease);
+            builder.PositionAtEnd(nativeRelease);
             builder.BuildCall2(nativeFreeType, nativeFree, new[] { allocation }, string.Empty);
+            builder.BuildBr(done);
+            builder.PositionAtEnd(customRelease);
+            builder.BuildCall2(LLVMTypeRef.CreateFunction(_context.VoidType, [pointerType, pointerType], false), callback, new[] { context, allocation }, string.Empty);
             builder.BuildBr(done);
             builder.PositionAtEnd(done);
             builder.BuildRetVoid();
@@ -2388,6 +2423,7 @@ public sealed partial class LlvmIrGenerator
         LLVMValueRef Calloc,
         LLVMTypeRef CallocType,
         LLVMValueRef Free,
+        LLVMValueRef ReleaseAllocation,
         LLVMTypeRef FreeType,
         LLVMTypeRef SizeType,
         LLVMValueRef StackSave,
@@ -3252,10 +3288,11 @@ public sealed partial class LlvmIrGenerator
             _builder.PositionAtEnd(end);
         }
 
-        private LLVMValueRef EmitDeallocation(LLVMValueRef address)
+        private LLVMValueRef EmitDeallocation(LLVMValueRef address, bool typed = false)
         {
             LlvmMemoryRuntime runtime = _getMemoryRuntime();
-            _builder.BuildCall2(runtime.FreeType, runtime.Free, new[] { address }, string.Empty);
+            if (typed) MirInvoke(runtime.FreeType, runtime.ReleaseAllocation, new[] { address }, string.Empty);
+            else _builder.BuildCall2(runtime.FreeType, runtime.Free, new[] { address }, string.Empty);
             return default;
         }
 

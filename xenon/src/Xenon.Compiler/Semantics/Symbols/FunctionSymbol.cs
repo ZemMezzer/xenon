@@ -17,6 +17,13 @@ public sealed class FunctionSymbol : Symbol
         if (location.Source is not null && location.Path != "<metadata>" && !SpecializationLocations.Any(existing => ReferenceEquals(existing.Source, location.Source) && existing.Span.Start == location.Span.Start))
             SpecializationLocations = SpecializationLocations.Add(location);
     }
+    public AllocationOperation AllocationOperation => Name switch
+    {
+        "$allocate" => AllocationOperation.Allocate,
+        "$deallocate" => AllocationOperation.Deallocate,
+        "$allocationConstructor" => AllocationOperation.Construct,
+        _ => AllocationOperation.None,
+    };
     public bool HasStackArrays { get; internal set; }
     public bool HasScalarCleanup { get; internal set; }
     public bool HasScopeCleanup => HasStackArrays || HasScalarCleanup;
@@ -125,18 +132,19 @@ public sealed class FunctionSymbol : Symbol
         MethodDeclarationSyntax declaration)
         : base(name, SymbolKind.Function, containingType)
     {
-        FunctionKind = FunctionKind.Method;
+        FunctionKind = name == "$allocationConstructor" ? FunctionKind.AllocationConstructor : FunctionKind.Method;
         ReturnType = returnType;
         Parameters = ParameterSymbol.Own(parameters, this);
         Declaration = declaration;
         Accessibility = AccessibilityFacts.FromSyntax(declaration.AccessModifierToken,
-            declaration.SecondaryAccessModifierToken, Accessibility.Private);
+            declaration.SecondaryAccessModifierToken,
+            declaration.AllocationOperatorToken is null ? Accessibility.Private : Accessibility.Public);
         IsAsync = declaration.IsAsync;
         IsStatic = declaration.IsStatic;
         OperatorKind = declaration.IsOperator
             ? OperatorFacts.FromSource(declaration.IdentifierToken.Text, parameters.Length) : null;
         IsVirtual = declaration.IsVirtual;
-        IsOverride = declaration.IsOverride;
+        _isOverride = declaration.IsOverride;
         IsAbstract = declaration.IsAbstract;
         IsReadonly = declaration.IsReadonly || containingType is StructTypeSymbol { IsReadonly: true } && !declaration.IsStatic;
         IsDefinition = declaration.Body is not null;
@@ -159,7 +167,7 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = containingProperty.Accessibility;
         IsStatic = containingProperty.IsStatic;
         IsVirtual = containingProperty.IsVirtual;
-        IsOverride = containingProperty.IsOverride;
+        _isOverride = containingProperty.IsOverride;
         IsAbstract = containingProperty.IsAbstract;
         AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
         IsReadonly = declaration.IsGetter && containingProperty.IsReadonly ||
@@ -183,7 +191,7 @@ public sealed class FunctionSymbol : Symbol
         Accessibility = containingIndexer.Accessibility;
         IsStatic = containingIndexer.IsStatic;
         IsVirtual = containingIndexer.IsVirtual;
-        IsOverride = containingIndexer.IsOverride;
+        _isOverride = containingIndexer.IsOverride;
         IsAbstract = containingIndexer.IsAbstract;
         AccessorKind = declaration.IsGetter ? AccessorKind.Getter : AccessorKind.Setter;
         IsReadonly = declaration.IsGetter && containingIndexer.IsReadonly ||
@@ -218,7 +226,7 @@ public sealed class FunctionSymbol : Symbol
         Declaration = declaration;
         Accessibility = accessibility;
         IsVirtual = declaration is DestructorDeclarationSyntax { IsVirtual: true };
-        IsOverride = declaration is DestructorDeclarationSyntax { IsOverride: true };
+        _isOverride = declaration is DestructorDeclarationSyntax { IsOverride: true };
         DelegatesToThisConstructor = declaration is ConstructorDeclarationSyntax { HasThisInitializer: true };
         IsDefinition = functionKind is FunctionKind.Constructor or FunctionKind.Destructor or
             FunctionKind.InstanceInitializer or FunctionKind.DestructorGlue;
@@ -260,7 +268,7 @@ public sealed class FunctionSymbol : Symbol
         IsStatic = isStatic;
         IsReadonly = isReadonly;
         IsVirtual = isVirtual;
-        IsOverride = isOverride;
+        _isOverride = isOverride;
         IsAbstract = isAbstract;
         IsExtern = isExtern;
         IsExport = isExport;
@@ -439,7 +447,7 @@ public sealed class FunctionSymbol : Symbol
 
     public string FullName => FunctionKind switch
     {
-        FunctionKind.Method when ContainingInterface is null => IsReadonly
+        FunctionKind.Method or FunctionKind.AllocationConstructor when ContainingInterface is null => IsReadonly
             ? $"{ContainingType!.FullName}.{Name}.__readonly"
             : $"{ContainingType!.FullName}.{Name}",
         FunctionKind.Method => $"{ContainingInterface!.FullName}.{Name}",
@@ -481,7 +489,16 @@ public sealed class FunctionSymbol : Symbol
 
     public bool IsStatic { get; }
     public bool IsVirtual { get; }
-    public bool IsOverride { get; }
+    private readonly bool _isOverride;
+    // Base members may be declared later in the source file. Resolve implicit
+    // allocator overrides after member discovery rather than freezing the answer
+    // while constructing this symbol. A contract-less abstract base has no slots.
+    public bool IsOverride => _isOverride || (AllocationOperation switch
+    {
+        AllocationOperation.Allocate => ContainingStruct?.BaseType?.AllocationOperator is not null,
+        AllocationOperation.Deallocate => ContainingStruct?.BaseType?.DeallocationOperator is not null,
+        _ => false,
+    });
     public bool IsAbstract { get; }
     public bool IsReadonly { get; }
 

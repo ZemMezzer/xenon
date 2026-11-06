@@ -35,6 +35,31 @@ internal static class MirSemanticDiagnostics
             var blocks = mir.Blocks.ToDictionary(block => block.Id);
             var locals = mir.Locals.ToDictionary(local => local.Id);
             var graph = MirFlowFacts.Graph(mir, cancellation, effects);
+            // Origins acquire an allocation family only at allocation intrinsics in
+            // this MIR body. Avoid a second dataflow solve for cleanup-only bodies
+            // that cannot contain a mismatched family.
+            MirIntrinsicCall[] memoryOperations = mir.Blocks.Select(block => block.Terminator).OfType<MirIntrinsicCall>().ToArray();
+            bool rawAllocation = memoryOperations.Any(call => call.Intrinsic is MirIntrinsicKind.Malloc or MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc);
+            bool customAllocation = memoryOperations.Any(call => call.Intrinsic is MirIntrinsicKind.Allocate or MirIntrinsicKind.AllocateHeapArray &&
+                call.Function?.AllocationOperation == AllocationOperation.Allocate);
+            if (memoryOperations.Any(call => call.Intrinsic == MirIntrinsicKind.Free && (call.RestoresAllocator ? rawAllocation : customAllocation)))
+            {
+                var origins = new MirReferenceOrigins(mir);
+                var originStates = MirDataflow.Solve(graph, origins, cancellation);
+                foreach (MirBasicBlock block in mir.Blocks.Where(block => graph.Reachable.Contains(block.Id)))
+                    if (block.Terminator is MirIntrinsicCall { Intrinsic: MirIntrinsicKind.Free } release)
+                    {
+                        var roots = origins.Operand(release.Arguments[0], originStates.Before[new(block.Id, block.Statements.Length)]).Roots;
+                        // Built-in new and raw free share the native storage ABI. Preserve
+                        // explicit destruct/free and trivial-array release; only a custom
+                        // allocation requires its captured deallocation callback.
+                        if (roots.Any(root => release.RestoresAllocator
+                            ? root.AllocationKind == MirAllocationKind.Raw
+                            : root.AllocationKind == MirAllocationKind.Typed && root.AllocatorType is not null))
+                            MirDiagnosticReporter.Report(diagnostics, mir, release.Source,
+                                release.RestoresAllocator ? "raw allocations require free; delete is reserved for typed allocations" : "custom allocator allocations require delete to restore the allocator", DiagnosticIds.InvalidFreeOperand, "allocation-family");
+                    }
+            }
             foreach (MirOwnershipViolation violation in MirOwnershipChecks.Check(mir, cancellation, effects))
             {
                 MirBasicBlock block = blocks[violation.Location.Block];
@@ -48,7 +73,7 @@ internal static class MirSemanticDiagnostics
                 string id = violation.Check == MirOwnershipCheck.ArgumentReservation ? DiagnosticIds.ArgumentLifetimeConflict :
                     violation.Check == MirOwnershipCheck.SelfMove ? DiagnosticIds.SelfMove :
                     violation.Check == MirOwnershipCheck.RequiredField
-                    ? field!.Type is PinTypeSymbol ? DiagnosticIds.PinnedRelocation : DiagnosticIds.ReferenceFieldNotInitialized :
+                    ? AllocationRules.RequiresExplicitInitialization(field!.Type) ? DiagnosticIds.AllocationConstructorMismatch : field.Type is PinTypeSymbol ? DiagnosticIds.PinnedRelocation : DiagnosticIds.ReferenceFieldNotInitialized :
                     violation.Check == MirOwnershipCheck.PinnedInitialization
                     ? ambiguousPin ? DiagnosticIds.AmbiguousConstructorFieldInitialization : DiagnosticIds.PinnedRelocation :
                     violation.Check == MirOwnershipCheck.UntrackedReplacement ? DiagnosticIds.ConditionalMoveReinitializationNotTracked :
@@ -65,7 +90,9 @@ internal static class MirSemanticDiagnostics
                     ? $"cannot reinitialize '{name}' after moving an overlapping place in an earlier argument; split the operations into separate statements"
                     : violation.Check == MirOwnershipCheck.SelfMove ? $"cannot move '{name}' into itself" :
                     violation.Check == MirOwnershipCheck.RequiredField
-                    ? field!.Type is PinTypeSymbol
+                    ? AllocationRules.RequiresExplicitInitialization(field!.Type)
+                        ? $"field '{field.Name}' requires explicit initialization of its allocator-dependent value before construction completes"
+                        : field.Type is PinTypeSymbol
                         ? $"pinned field '{field.Name}' must be constructed at its final address before the object is used or its constructor exits"
                         : $"field '{field.Name}' contains a reference and must be initialized before the object is used or its constructor exits"
                     : violation.Check == MirOwnershipCheck.PinnedInitialization

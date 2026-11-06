@@ -305,6 +305,25 @@ internal sealed class XelibSemanticReconstruction
         var genericBodyIds = generics.SelectMany(item =>
                 (item.BodyId == 0 ? Enumerable.Empty<int>() : [item.BodyId])
                 .Concat(StaticInitializers(item).Select(value => value.BodyId))).ToHashSet();
+        if (includeOrdinaryBodies && lambdaBodies.Count != 0)
+        {
+            // A lambda in a generic body has the enclosing declaration's type
+            // parameters. Decode its body only when specializing that declaration.
+            var lambdaRecords = bodies.Where(item => Symbol(item.FunctionSymbolId) is FunctionSymbol { IsLambda: true })
+                .ToDictionary(item => item.FunctionSymbolId);
+            var pending = new Queue<XelibBodyRecord>(bodies.Where(item => genericBodyIds.Contains(item.Id)));
+            while (pending.TryDequeue(out var item))
+                CollectGenericLambdas(item.Root);
+
+            void CollectGenericLambdas(XelibBodyNode node)
+            {
+                if (node.Symbol is { LocalId: > 0 } reference &&
+                    lambdaRecords.TryGetValue(reference.LocalId, out var lambda) && genericBodyIds.Add(lambda.Id))
+                    pending.Enqueue(lambda);
+                foreach (var child in node.Children) CollectGenericLambdas(child);
+                foreach (var temporary in node.Temporaries) CollectGenericLambdas(temporary.Value);
+            }
+        }
         _functions = includeOrdinaryBodies
             ? bodies.Where(item => !genericBodyIds.Contains(item.Id)).OrderBy(item => item.Id).Select(item =>
             {
@@ -426,7 +445,7 @@ internal sealed class XelibSemanticReconstruction
                 XelibSymbolKind.Struct => new StructTypeSymbol(record.Name, owner,
                     Has(record, XelibSymbolFlags.Abstract), Origin(record.Id), Documentation(record.Id),
                     Accessibility(record), Has(record, XelibSymbolFlags.ReadonlyStruct),
-                    Has(record, XelibSymbolFlags.StaticStruct), Has(record, XelibSymbolFlags.Sealed)),
+                    Has(record, XelibSymbolFlags.StaticStruct), Has(record, XelibSymbolFlags.Sealed)) { IsAllocator = Has(record, XelibSymbolFlags.Allocator) },
                 XelibSymbolKind.Interface => new InterfaceTypeSymbol(record.Name, owner,
                     Origin(record.Id), Documentation(record.Id), Accessibility(record)),
                 XelibSymbolKind.Enum => new EnumTypeSymbol(record.Name, owner,
@@ -630,7 +649,7 @@ internal sealed class XelibSemanticReconstruction
                     type.SetIndexers(Children<IndexerSymbol>(record.Id));
                     type.SetConstants(Children<ConstantSymbol>(record.Id));
                     type.SetMethods(Children<FunctionSymbol>(record.Id,
-                        static item => item.FunctionKind == FunctionKind.Method));
+                        static item => item.FunctionKind is FunctionKind.Method or FunctionKind.AllocationConstructor));
                     type.SetConstructors(Children<FunctionSymbol>(record.Id,
                         static item => item.FunctionKind == FunctionKind.Constructor));
                     if (Children<FunctionSymbol>(record.Id,
@@ -792,7 +811,7 @@ internal sealed class XelibSemanticReconstruction
             ? (StructTypeSymbol)Resolve(reference)
             : new StructTypeSymbol(definition.Name, definition.ContainingNamespace,
                 definition.IsAbstract, Origin(definition), definition.Documentation, definition.Accessibility,
-                definition.IsReadonly, definition.IsStatic, definition.IsSealed);
+                definition.IsReadonly, definition.IsStatic, definition.IsSealed) { IsAllocator = definition.IsAllocator };
         created.SetGenericSpecialization(definition, arguments);
         return created;
     }
@@ -864,11 +883,19 @@ internal sealed class XelibSemanticReconstruction
         }
     }
 
-    private FieldSymbol CreateField(XelibSymbolRecord record, DeclaredTypeSymbol owner) => new(
-        record.Name, owner, ResolveType(record.TypeId), record.Ordinal, Accessibility(record),
-        Has(record, XelibSymbolFlags.Static), Has(record, XelibSymbolFlags.Readonly),
-        Has(record, XelibSymbolFlags.ThreadLocal), Has(record, XelibSymbolFlags.HasInitializer),
-        ParseConstant(record.ConstantValue, ResolveType(record.TypeId)), Origin(record.Id), Documentation(record.Id));
+    private FieldSymbol CreateField(XelibSymbolRecord record, DeclaredTypeSymbol owner)
+    {
+        TypeSymbol type = ResolveType(record.TypeId);
+        bool isAllocatorField = Has(record, XelibSymbolFlags.AllocatorField);
+        if (isAllocatorField && !AllocationRules.IsValidAllocatorFieldType(type))
+            throw XelibReader.Invalid($"allocator field '{record.Name}' must be a pointer to an allocator type", _path);
+
+        return new FieldSymbol(record.Name, owner, type, record.Ordinal, Accessibility(record),
+            Has(record, XelibSymbolFlags.Static), Has(record, XelibSymbolFlags.Readonly),
+            Has(record, XelibSymbolFlags.ThreadLocal), Has(record, XelibSymbolFlags.HasInitializer),
+            ParseConstant(record.ConstantValue, type), Origin(record.Id), Documentation(record.Id))
+            { IsAllocatorField = isAllocatorField };
+    }
 
     private TemplateMethodRequirementSymbol CreateTemplateMethod(XelibSymbolRecord record,
         TemplateSymbol owner) => new(record.Name, owner, ResolveType(record.ReturnTypeId), Parameters(record),

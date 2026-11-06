@@ -23,6 +23,10 @@ public sealed partial class MirLowerer
                 return Intrinsic(MirIntrinsicKind.ConvertWeak, [Value(weak.Shared)], weak.Type, source);
             case BoundLockExpression locked:
                 return Intrinsic(MirIntrinsicKind.LockWeak, [Value(locked.Weak)], locked.Type, source);
+            case BoundCompleteBaseInitializationExpression:
+                foreach (TemporaryGuard prepared in _preparedBaseFields.Values) SetFlag(prepared.Active, false, source);
+                if (_constructionBase is { } baseGuard) SetFlag(baseGuard.Active, true, source);
+                return null;
             case BoundDestroyFieldsExpression destruction:
                 DestroyFields(source);
                 return null;
@@ -109,30 +113,75 @@ public sealed partial class MirLowerer
         }
     }
 
+    private void AllocationConstructors(StructTypeSymbol type, MirPlace place, MirOperand? allocator, MirSourceInfo source, List<TemporaryGuard> guards)
+    {
+        if (type.BaseType is { } parent)
+            AllocationConstructors(parent, place.Project(new MirBaseProjection(parent)), allocator, source, guards);
+        if (AllocationRules.SelectConstructor(type, allocator?.Type) is { } constructor)
+        {
+            _ = CallValues(new MirFunctionOperand(constructor,
+                _types.FunctionPointer(BuiltinTypes.Void, constructor.Parameters.Select(p => p.Type))),
+                allocator is null ? [] : [allocator], source, Address(place, type, source));
+            foreach (FieldSymbol field in type.Fields)
+                if (field.IsAllocatorField && TypeFacts.GetCompleteDestructor(field.Type) is { } destructor)
+                {
+                    var guard = new TemporaryGuard(DestructorPlace(place.Project(new MirFieldProjection(field)), field.Type), Temporary(BuiltinTypes.Bool, source), destructor);
+                    SetFlag(guard.Active, true, source);
+                    guards.Add(guard);
+                    _valueGuards.Add(guard);
+                }
+        }
+    }
+
     private MirOperand Allocate(BoundNewExpression allocation, MirSourceInfo source)
     {
-        MirOperand pointer = Intrinsic(MirIntrinsicKind.Allocate, [], allocation.Type, source, subjectType: allocation.AllocatedType)!;
+        MirOperand? allocator = allocation.Allocator is null ? null : Snapshot(Value(allocation.Allocator), source);
+        FunctionSymbol? operation = allocator?.Type is PointerTypeSymbol { ElementType: StructTypeSymbol provider } ? provider.AllocationOperator : null;
+        MirOperand pointer = Intrinsic(MirIntrinsicKind.Allocate, allocator is null ? [] : [allocator], allocation.Type, source, function: operation, subjectType: allocation.AllocatedType)!;
         Block outer = _unwindTarget, failed = NewBlock();
+        // This allocation owns the innermost cleanup scope. Its live fields must
+        // drop before releasing the block; enclosing fields/argument temporaries
+        // (which can keep its provider alive) must drop only after that release.
+        Block afterRelease = GuardedUnwind(outer, source);
+        var enclosingGuards = _valueGuards;
+        _valueGuards = [];
         _unwindTarget = failed;
         MirPlace place = ((MirCopy)pointer).Place.Project(new MirDerefProjection());
+        if (allocation.Constructor is not null || allocation.StructType is { RequiresAllocator: true })
+            _current.Statements.Add(new MirAssign(place, new MirDefault(allocation.AllocatedType), source));
+        var preparedFields = new List<TemporaryGuard>();
+        if (allocation.StructType is { } allocatedStructure)
+            AllocationConstructors(allocatedStructure, place, allocator, source, preparedFields);
         if (allocation.Constructor is { } constructor)
         {
-            _current.Statements.Add(new MirAssign(place, new MirDefault(allocation.AllocatedType), source));
-            _ = Call(new MirFunctionOperand(constructor, _types.FunctionPointer(BuiltinTypes.Void, constructor.Parameters.Select(p => p.Type))),
-                allocation.Arguments, source, pointer);
+            var arguments = Arguments(allocation.Arguments);
+            foreach (TemporaryGuard guard in preparedFields) EndValueGuard(guard, source);
+            _ = CallValues(new MirFunctionOperand(constructor, _types.FunctionPointer(BuiltinTypes.Void, constructor.Parameters.Select(p => p.Type))),
+                arguments, source, pointer);
         }
         else
         {
-            MirOperand value = allocation.StructType is { } structure
-                ? ConstructAggregate(new BoundStructConstructionExpression(structure, allocation.Arguments) { IsDefaultInitialization = allocation.IsDefaultInitialization }, source)
-                : allocation.Arguments.IsEmpty ? Save(new MirDefault(allocation.AllocatedType), source) : Arguments(allocation.Arguments)[0];
-            _current.Statements.Add(new MirAssign(place, new MirUse(value), source));
+            if (allocation.StructType is { RequiresAllocator: true } structure)
+                ConstructAggregateAt(new BoundStructConstructionExpression(structure, allocation.Arguments), place, source);
+            else
+            {
+                MirOperand value = allocation.StructType is { } plain
+                    ? ConstructAggregate(new BoundStructConstructionExpression(plain, allocation.Arguments) { IsDefaultInitialization = allocation.IsDefaultInitialization }, source)
+                    : allocation.Arguments.IsEmpty ? Save(new MirDefault(allocation.AllocatedType), source) : Arguments(allocation.Arguments)[0];
+                _current.Statements.Add(new MirAssign(place, new MirUse(value), source));
+            }
         }
+        foreach (TemporaryGuard guard in preparedFields) EndValueGuard(guard, source);
         Block normal = _current;
         _current = failed;
+        // Construction has already thrown. A release failure is a second exception
+        // during cleanup and must terminate, rather than replace the original one.
+        Block abort = NewBlock();
+        abort.Terminator = new MirAbort(source);
+        End(new MirIntrinsicCall(MirIntrinsicKind.Free, [pointer], BuiltinTypes.Void, null, afterRelease.Id, abort.Id, source)
+            { RestoresAllocator = true, AllocationReleases = AllocationReleases });
+        _valueGuards = enclosingGuards;
         _unwindTarget = outer;
-        _ = Intrinsic(MirIntrinsicKind.Free, [pointer], BuiltinTypes.Void, source);
-        Jump(outer);
         _current = normal;
         return pointer;
     }

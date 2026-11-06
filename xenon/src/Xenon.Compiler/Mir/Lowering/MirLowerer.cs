@@ -452,8 +452,15 @@ public sealed partial class MirLowerer
             case BoundInterfaceMethodCallExpression method:
                 return MethodCall(method.Method, method.Receiver, method.Arguments, method.IsPointerAccess, method.InterfaceType, source);
             case BoundBaseLifecycleCallExpression lifecycle:
-                MirOperand? lifecycleResult = Call(Callee(lifecycle.Function),
-                    lifecycle.Arguments, source, ThisAddress(_bound.Symbol.ContainingType!));
+                var lifecycleArguments = Arguments(lifecycle.Arguments);
+                if (lifecycle.Function.FunctionKind == FunctionKind.Constructor)
+                {
+                    foreach (TemporaryGuard prepared in _preparedBaseFields.Values) SetFlag(prepared.Active, false, source);
+                    if (TypeIdentity.AreSame(lifecycle.Function.ContainingType, _bound.Symbol.ContainingType))
+                        foreach (MirPlace flag in _constructionStates.Values) SetFlag(flag, false, source);
+                }
+                MirOperand? lifecycleResult = CallValues(Callee(lifecycle.Function),
+                    lifecycleArguments, source, ThisAddress(_bound.Symbol.ContainingType!));
                 LifecycleCompleted(lifecycle.Function);
                 return lifecycleResult;
             case BoundConstructorCallExpression constructor:
@@ -699,7 +706,7 @@ public sealed partial class MirLowerer
                 SetFlag(incomingArray.Active, true, source);
             }
             if (TypeFacts.RequiresDestruction(expression.Type) ||
-                _bound.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.InstanceInitializer)
+                _bound.Symbol.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor or FunctionKind.InstanceInitializer)
                 RecordStore(expression, target);
             AssignmentState ownership = Ownership(expression);
             Store(new MirAssign(target, new MirUse(value), source)

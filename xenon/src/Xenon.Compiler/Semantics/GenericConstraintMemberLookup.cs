@@ -66,7 +66,7 @@ internal static class GenericConstraintMemberLookup
     public static IEnumerable<GenericFieldMember> GetFields(GenericParameterSymbol parameter, string name) =>
         GetMembers(parameter).OfType<FieldSymbol>()
             .Where(field => field.Name == name)
-            .Select(field => new GenericFieldMember(field, field.Type, field.IsStatic, field.IsReadonly));
+            .Select(field => new GenericFieldMember(field, field.Type, field.IsStatic, field.IsReadonly || field.IsAllocatorField));
 
     public static IEnumerable<GenericMethodMember> GetMethods(GenericParameterSymbol parameter, string name,
         TypeFactory types, GenericStructSpecializer? specializer) => GetMembers(parameter).Where(member => member.Name == name).SelectMany<Symbol, GenericMethodMember>(member => member switch

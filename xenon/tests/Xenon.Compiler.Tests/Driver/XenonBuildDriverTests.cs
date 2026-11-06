@@ -3500,7 +3500,7 @@ public sealed class XenonBuildDriverTests
     {
         using var directory = new TemporaryProject();
         directory.WriteProject("NulTail", "executable",
-            "namespace NulTail; int Main() { return 0; }\0@@");
+            "namespace NulTail; int Main() { return 0; }\0``");
         XenonBuildResult result = new XenonBuildDriver().Build(new XenonBuildRequest(
             directory.ProjectFile, OutputRoot: directory.OutputRoot));
         Assert.False(result.Success);

@@ -33,6 +33,7 @@ public static class SyntaxFacts
             ["readonly"] = SyntaxKind.ReadonlyKeyword,
             ["var"] = SyntaxKind.VarKeyword,
             ["struct"] = SyntaxKind.StructKeyword,
+            ["allocator"] = SyntaxKind.AllocatorKeyword,
             ["interface"] = SyntaxKind.InterfaceKeyword,
             ["template"] = SyntaxKind.TemplateKeyword,
             ["where"] = SyntaxKind.WhereKeyword,

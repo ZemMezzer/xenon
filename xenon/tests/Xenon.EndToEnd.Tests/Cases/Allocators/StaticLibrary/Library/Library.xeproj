@@ -1,0 +1,5 @@
+[project]
+name = "AllocatorStaticLibrary"
+type = "static-library"
+[source]
+root = "src"

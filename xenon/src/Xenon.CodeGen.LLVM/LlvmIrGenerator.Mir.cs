@@ -75,7 +75,7 @@ public sealed partial class LlvmIrGenerator
                     !_functionEffects.TryGetValue(direct.Function, out LlvmFunctionEffects effects) || effects.MayThrow,
                 MirDrop { IsVirtual: false, Destructor: { } destructor } =>
                     !_functionEffects.TryGetValue(destructor, out LlvmFunctionEffects effects) || effects.MayThrow,
-                MirIntrinsicCall intrinsic => intrinsic.Intrinsic == MirIntrinsicKind.EnsureThreadLocal,
+                MirIntrinsicCall intrinsic => intrinsic.Intrinsic == MirIntrinsicKind.EnsureThreadLocal || !intrinsic.AllocationReleases.IsEmpty || intrinsic.Function?.AllocationOperation == AllocationOperation.Allocate,
                 _ => true,
             };
         }

@@ -320,7 +320,7 @@ internal sealed partial class FunctionBodyBinder
         foreach (ParameterSymbol parameter in _function.Parameters)
             if (TypeFacts.GetCompleteDestructor(parameter.Type) is not null)
                 ValidateDestructorAccessibility(parameter.Type, body.OpenBraceToken.Location);
-        if (_function.FunctionKind == FunctionKind.Constructor && _function.ContainingType is StructTypeSymbol owner)
+        if (_function.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor && _function.ContainingType is StructTypeSymbol owner)
         {
             // Reference-field assignment chooses between binding the reference
             // and writing its referent. This is contextual typing only; MIR owns
@@ -328,9 +328,9 @@ internal sealed partial class FunctionBodyBinder
             foreach (FieldSymbol field in owner.Fields.Where(field => field.Type is ReferenceTypeSymbol))
             {
                 _constructorReferenceFields.Add(field);
-                if (field.HasInitializer) _boundReferenceFields.Add(field);
+                if (_function.FunctionKind == FunctionKind.Constructor && (field.HasInitializer || field.IsAllocatorField)) _boundReferenceFields.Add(field);
             }
-            if (owner.BaseType is { Constructors.IsEmpty: true } defaultBase)
+            if (_function.FunctionKind == FunctionKind.Constructor && owner.BaseType is { Constructors.IsEmpty: true } defaultBase)
                 ValidateDefaultInitialization(defaultBase, body.OpenBraceToken.Location);
         }
         BoundStatement? baseConstructorCall = null;
@@ -429,6 +429,8 @@ internal sealed partial class FunctionBodyBinder
         }
 
         BoundBlockStatement boundBody = BindBlockStatement(body, createScope: false);
+        if (_function.FunctionKind == FunctionKind.AllocationConstructor)
+            ValidateAllocatorPhase(_function, boundBody, _diagnostics, body.OpenBraceToken.Location, _expressionLocations);
         RecordScope(body, _scope);
         if (_function.FunctionKind == FunctionKind.Constructor &&
             _function.ContainingType is StructTypeSymbol constructedType)
@@ -437,7 +439,10 @@ internal sealed partial class FunctionBodyBinder
             if (baseConstructorCall is not null)
                 statements.Add(baseConstructorCall);
             else if (constructedType.BaseType is StructTypeSymbol defaultBase)
+            {
                 AddDefaultInstanceInitializerCalls(defaultBase, statements);
+                statements.Add(new BoundExpressionStatement(new BoundCompleteBaseInitializationExpression(defaultBase)));
+            }
             if (!callsThisConstructor && constructedType.InstanceInitializer is FunctionSymbol initializer)
             {
                 statements.Add(new BoundExpressionStatement(
@@ -1114,6 +1119,8 @@ internal sealed partial class FunctionBodyBinder
         }
         else
             type = TypeResolver.Resolve(isConstant ? syntax.Type.WithoutQualifier(SyntaxKind.ConstKeyword) : syntax.Type, _fileScope, _diagnostics);
+        if (AllocationRules.IsAllocatorValue(type))
+            _diagnostics.Report(syntax.Type.NameToken.Location, "allocator local variables must be pointers to heap instances", DiagnosticIds.AllocatorRequiresHeap);
         if (ContainsStaticStruct(type))
             _diagnostics.Report(syntax.Type.NameToken.Location,
                 "static structs cannot be used as local, pointer, reference, ownership, or array values",
@@ -1357,6 +1364,12 @@ internal sealed partial class FunctionBodyBinder
         {
             if (isMemberAccess) _memberAccessBindingDepth--;
         }
+        if (expression is BoundStructConstructionExpression or BoundConstructorCallExpression && expression.Type is StructTypeSymbol created)
+        {
+            if (created.IsAllocator)
+                _diagnostics.Report(GetLocation(syntax), "allocator instances must be created in the heap using new", DiagnosticIds.AllocatorRequiresHeap);
+            ValidateAllocationConstruction(created, null, GetLocation(syntax));
+        }
         _semanticInfo.Types[syntax] = new TypeInfo(expression.Type, expression.Type);
         if (GetReferencedSymbol(expression) is { } referenced)
         {
@@ -1500,6 +1513,11 @@ internal sealed partial class FunctionBodyBinder
         if (_function.ContainingType is { } containingType)
         {
             ConstantSymbol? associatedConstant = containingType.FindMember<ConstantSymbol>(syntax.IdentifierToken.Text);
+            if (associatedConstant is not null && !IsAccessible(associatedConstant))
+            {
+                _diagnostics.Report(syntax.IdentifierToken.Location, $"constant '{associatedConstant.Name}' is inaccessible", DiagnosticIds.InaccessibleSymbol);
+                return new BoundErrorExpression();
+            }
             if (associatedConstant?.BoundValue is { } associatedValue)
             {
                 _semanticInfo.Symbols[syntax] = SymbolInfo.FromSymbol(associatedConstant);
@@ -2091,10 +2109,17 @@ internal sealed partial class FunctionBodyBinder
         finally { _initializationTarget = previousTarget; }
         BoundExpression rawTarget = target is BoundReferenceDereferenceExpression reference ? reference.Reference : target;
         BoundMemberAccessExpression? fieldTarget = rawTarget as BoundMemberAccessExpression;
+        if (fieldTarget is { Field.IsAllocatorField: true } && !CanWriteAllocatorField(fieldTarget))
+        {
+            _diagnostics.Report(GetLocation(syntax.Target),
+                $"allocator field '{fieldTarget.Field.Name}' can only be assigned by its owning @Type constructor",
+                DiagnosticIds.AllocatorFieldWriteOutsidePhase);
+            return new BoundErrorExpression();
+        }
 
         bool initializesField = isSimpleAssignment &&
             fieldTarget is { Receiver: BoundThisExpression } &&
-            _function.FunctionKind == FunctionKind.Constructor &&
+            _function.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor &&
             TypeIdentity.AreSame(fieldTarget.Field.ContainingType, _function.ContainingType) &&
             _constructorReferenceFields.Contains(fieldTarget.Field) &&
             !_boundReferenceFields.Contains(fieldTarget.Field);
@@ -2458,6 +2483,11 @@ internal sealed partial class FunctionBodyBinder
             if (resolvedStaticType is DeclaredTypeSymbol staticType)
             {
                 ConstantSymbol? constant = staticType.FindMember<ConstantSymbol>(syntax.MemberToken.Text);
+                if (constant is not null && !IsAccessible(constant))
+                {
+                    _diagnostics.Report(syntax.MemberToken.Location, $"constant '{constant.Name}' is inaccessible", DiagnosticIds.InaccessibleSymbol);
+                    return new BoundErrorExpression();
+                }
                 if (constant?.BoundValue is { } constantValue)
                 {
                     RecordStaticReceiver(syntax.Receiver, staticType);
@@ -2575,7 +2605,7 @@ internal sealed partial class FunctionBodyBinder
             RecordSymbolAndType(syntax, property, property.Type);
             bool receiverIsReadonly =
                 (pointerAccess && receiver.Type is PointerTypeSymbol { IsReadonly: true }) ||
-                (!pointerAccess && IsAddressable(receiver) && !IsWritable(receiver));
+                (!pointerAccess && IsReadonlyValueStorage(receiver));
             return BindPropertyGet(
                 receiver,
                 property,
@@ -2905,7 +2935,7 @@ internal sealed partial class FunctionBodyBinder
 
         if (receiver.Type is DeclaredTypeSymbol structType && structType is not InterfaceTypeSymbol)
         {
-            bool receiverIsReadonly = IsAddressable(receiver) && !IsWritable(receiver);
+            bool receiverIsReadonly = IsReadonlyValueStorage(receiver);
             IndexerSymbol[] indexerCandidates = structType.LookupMembers("this").OfType<IndexerSymbol>()
                 .DistinctBy(indexer => TypeSignature.Indexer(indexer.Parameters, indexer.IsReadonly))
                 .Where(candidate => candidate.Getter is not null)
@@ -3318,6 +3348,12 @@ internal sealed partial class FunctionBodyBinder
             _diagnostics.Report(elementLocation, "static structs cannot be used as array elements",
                 DiagnosticIds.InvalidBaseType);
             return new BoundErrorExpression();
+        }
+        if (storage == ArrayStorageKind.Stack)
+        {
+            if (AllocationRules.IsAllocatorValue(elementType))
+                _diagnostics.Report(elementLocation, "allocator instances cannot be stored in stack arrays", DiagnosticIds.AllocatorRequiresHeap);
+            ValidateAllocationConstruction(elementType, null, elementLocation);
         }
         ValidateArrayElementType(elementType, elementLocation);
         if (storage == ArrayStorageKind.Stack)
@@ -4681,7 +4717,7 @@ internal sealed partial class FunctionBodyBinder
 
         bool hasReadonlyReceiver =
             (pointerAccess && receiver.Type is PointerTypeSymbol { IsReadonly: true }) ||
-            (!pointerAccess && IsAddressable(receiver) && !IsWritable(receiver));
+            (!pointerAccess && IsReadonlyValueStorage(receiver));
 
         FunctionSymbol[] methodCandidates = GetMethodOverloads(structType, target.MemberToken.Text,
             isStatic: false);
@@ -4922,6 +4958,34 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundExpression BindNewExpression(NewExpressionSyntax syntax)
     {
+        BoundExpression? allocator = syntax.Allocator is null ? null : BindExpression(syntax.Allocator);
+        if (allocator is not null && allocator.Type is not PointerTypeSymbol { IsReadonly: false, ElementType: StructTypeSymbol { IsAllocator: true } })
+        {
+            _diagnostics.Report(GetLocation(syntax.Allocator!), "new(allocator) requires a mutable pointer to an allocator type", DiagnosticIds.InvalidAllocatorOperand);
+            return new BoundErrorExpression();
+        }
+        BoundExpression result = BindNewExpressionCore(syntax);
+        TypeSymbol? allocatedType = result switch
+        {
+            BoundNewExpression value => value.AllocatedType,
+            BoundArrayCreationExpression value => value.ElementType,
+            _ => null,
+        };
+        ValidateAllocationConstruction(allocatedType, allocator, syntax.NewKeyword.Location);
+        return result switch
+        {
+            BoundNewExpression value => value with { Allocator = allocator },
+            BoundArrayCreationExpression value => value with { Allocator = allocator },
+            BoundDeferredGenericOperationExpression { Operation: BoundDeferredGenericOperationKind.Allocation } value => value with { Receiver = allocator },
+            _ => result,
+        };
+    }
+
+    private void ValidateAllocationConstruction(TypeSymbol? type, BoundExpression? allocator, TextLocation location)
+        => AllocationRules.ValidateConstruction(type, allocator?.Type, LexicalAccessContext, _diagnostics, location);
+
+    private BoundExpression BindNewExpressionCore(NewExpressionSyntax syntax)
+    {
         TypeSymbol type = TypeResolver.Resolve(syntax.Type, _fileScope, _diagnostics);
 
         if (syntax.IsArrayAllocation)
@@ -5062,6 +5126,8 @@ internal sealed partial class FunctionBodyBinder
     private BoundExpression BindFreeExpression(FreeExpressionSyntax syntax)
     {
         BoundExpression pointer = BindExpression(syntax.Pointer);
+        if (pointer is BoundNewExpression { Allocator: not null } or BoundArrayCreationExpression { Allocator: not null })
+            _diagnostics.Report(syntax.FreeKeyword.Location, "custom allocator allocations require delete to restore the allocator", DiagnosticIds.InvalidFreeOperand);
         if (TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Null))
             pointer = ContextualizeNull(pointer, _fileScope.TypeFactory.PointerTo(BuiltinTypes.Void));
 
@@ -5230,7 +5296,7 @@ internal sealed partial class FunctionBodyBinder
         PreserveDeferredDependentMoves(arguments);
         ImmutableArray<FieldSymbol> fields = structType.AllInstanceFields;
         bool hasMissingRequiredFields = arguments.Length < fields.Length &&
-            fields.Skip(arguments.Length).Any(field => field.Initializer is null);
+            fields.Skip(arguments.Length).Any(field => field.Initializer is null && !field.IsAllocatorField);
         bool valid = arguments.Length <= fields.Length && !hasMissingRequiredFields;
         if (!valid)
         {
@@ -5245,6 +5311,13 @@ internal sealed partial class FunctionBodyBinder
         for (int index = 0; index < count; index++)
         {
             FieldSymbol field = fields[index];
+            if (field.IsAllocatorField)
+            {
+                valid = false;
+                _diagnostics.Report(GetLocation(argumentSyntax[index]),
+                    $"positional construction cannot initialize allocator field '{field.Name}'; use its owner's allocation context constructor",
+                    DiagnosticIds.AllocatorFieldWriteOutsidePhase);
+            }
             TypeSymbol fieldType = field.Type;
             BoundExpression argument = arguments[index] switch
             {
@@ -6052,9 +6125,29 @@ internal sealed partial class FunctionBodyBinder
 
         expression = ReadAtomicValue(expression);
         expression = ContextualizeNull(expression, targetType);
+        if (targetType is InterfaceTypeSymbol mutableView && expression.Type is InterfaceTypeSymbol &&
+            expression is (BoundReferenceDereferenceExpression { ReferenceType.IsReadonly: true } or
+                BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken, Operand.Type: PointerTypeSymbol { IsReadonly: true } } or
+                BoundIndexExpression { Receiver.Type: PointerTypeSymbol { IsReadonly: true } }) &&
+            mutableView.AllMethods.Any(member => !member.IsReadonly))
+        {
+            _diagnostics.Report(copyLocation, "cannot copy a mutable interface view out of a readonly interface reference",
+                DiagnosticIds.WriteThroughReadonlyReceiver);
+            return new BoundErrorExpression();
+        }
         if (targetType is InterfaceTypeSymbol @interface &&
             expression.Type is StructTypeSymbol source && source.Implements(@interface))
         {
+            // An interface value borrows the original object's address, even when
+            // passed by value. Do not expose readonly storage through a mutable view.
+            if (IsReadonlyValueStorage(expression) &&
+                @interface.AllMethods.Any(member => !member.IsReadonly))
+            {
+                _diagnostics.Report(copyLocation,
+                    $"cannot create a mutable interface view of readonly '{source.Name}' storage",
+                    DiagnosticIds.WriteThroughReadonlyReceiver);
+                return new BoundErrorExpression();
+            }
             expression = new BoundInterfaceConversionExpression(expression, source, @interface);
         }
         return ApplyCopySemantics(expression, copyLocation);
@@ -6126,6 +6219,8 @@ internal sealed partial class FunctionBodyBinder
 
     private void ValidateDefaultInitialization(TypeSymbol type, TextLocation location)
     {
+        foreach (StructTypeSymbol invalid in AllocationRules.InvalidDefaultFields(type))
+            _diagnostics.Report(location, $"embedded value '{invalid.Name}' requires explicit initialization with a compatible allocator", DiagnosticIds.AllocationConstructorMismatch);
         if (type is ReferenceTypeSymbol)
             _diagnostics.Report(location, $"reference type '{type.Name}' cannot be default-initialized",
                 DiagnosticIds.ReferenceCannotDefaultInitialize);
@@ -6133,6 +6228,7 @@ internal sealed partial class FunctionBodyBinder
         {
             foreach (FieldSymbol field in structure.AllInstanceFields)
             {
+                if (field.IsAllocatorField && field.ContainingType is StructTypeSymbol owner && !owner.AllocationConstructors.IsEmpty) continue;
                 if (!field.HasInitializer && TypeFacts.ContainsReferenceStorage(field.Type))
                     _diagnostics.Report(location, $"field '{field.Name}' contains a reference and requires explicit initialization",
                         DiagnosticIds.ReferenceFieldRequiresExplicitInitialization);
@@ -6155,7 +6251,7 @@ internal sealed partial class FunctionBodyBinder
                 IsStatic: false,
                 IsReadonly: receiver.Type is PointerTypeSymbol { IsReadonly: true } or
                     ReferenceTypeSymbol { IsReadonly: true } ||
-                    IsAddressable(receiver) && !IsWritable(receiver),
+                    IsReadonlyValueStorage(receiver),
                 IsWritable: IsWritable(receiver));
             return receiver;
         }
@@ -6390,6 +6486,7 @@ internal sealed partial class FunctionBodyBinder
                 TransferAll(call.Arguments);
                 break;
             case BoundArrayCreationExpression array:
+                if (array.Allocator is not null) Visit(array.Allocator);
                 foreach (BoundExpression dimension in array.Dimensions) Visit(dimension);
                 break;
             case BoundArrayMetadataExpression metadata:
@@ -6397,6 +6494,7 @@ internal sealed partial class FunctionBodyBinder
                 if (metadata.Dimension is { } metadataDimension) Visit(metadataDimension);
                 break;
             case BoundNewExpression allocation:
+                if (allocation.Allocator is not null) Visit(allocation.Allocator);
                 TransferAll(allocation.Arguments);
                 break;
             case BoundFreeExpression free:
@@ -7336,6 +7434,7 @@ internal sealed partial class FunctionBodyBinder
             BoundReferenceDereferenceExpression { ReferenceType.IsReadonly: true } => false,
             BoundLifetimeValueExpression value => IsWritable(value.Source),
             BoundIndexExpression { Receiver.Type: PointerTypeSymbol { IsReadonly: true } } => false,
+            BoundMemberAccessExpression { Field.IsAllocatorField: true } member => CanWriteAllocatorField(member),
             BoundMemberAccessExpression { Field.IsReadonly: true } member => CanInitializeReadonlyField(member),
             BoundMemberAccessExpression
             {
@@ -7380,12 +7479,15 @@ internal sealed partial class FunctionBodyBinder
         return AccessibilityRules.IsAccessible(symbol, LexicalAccessContext, receiverType);
     }
 
+    private bool IsReadonlyValueStorage(BoundExpression expression) =>
+        AllocatorFieldStorage.Find(expression) is not null || IsAddressable(expression) && !IsWritable(expression);
+
     private bool IsReadonlyReceiver(BoundExpression receiver, bool pointerAccess) =>
         (pointerAccess && receiver.Type is PointerTypeSymbol { IsReadonly: true }) ||
-        (!pointerAccess && IsAddressable(receiver) && !IsWritable(receiver));
+        (!pointerAccess && IsReadonlyValueStorage(receiver));
 
     private bool CanInitializeReadonlyField(BoundMemberAccessExpression member) =>
-        _function.FunctionKind == FunctionKind.Constructor &&
+        _function.FunctionKind is FunctionKind.Constructor or FunctionKind.AllocationConstructor &&
         TypeIdentity.AreSame(_function.ContainingType, member.Field.ContainingType) &&
         member.Receiver is BoundThisExpression;
 

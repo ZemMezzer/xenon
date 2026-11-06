@@ -44,8 +44,11 @@ public sealed partial class LlvmIrGenerator
                     EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntULT, args[1],
                         LLVMValueRef.CreateConstInt(args[1].TypeOf, (ulong)((ArrayTypeSymbol)operation.Arguments[0].Type).Rank), "dimension.valid"));
                     return ReadDimension(args[0], args[1]);
-                case MirIntrinsicKind.Allocate: return EmitAllocation(SizeConstant(Math.Max(1UL, _getAbiSize(operation.SubjectType!))), "allocate", SizeConstant(_getAbiAlignment(operation.SubjectType!)));
-                case MirIntrinsicKind.Free: return EmitDeallocation(args[0]);
+                case MirIntrinsicKind.Allocate:
+                    return operation.Function is null
+                        ? EmitAllocation(SizeConstant(Math.Max(1UL, _getAbiSize(operation.SubjectType!))), "allocate", SizeConstant(_getAbiAlignment(operation.SubjectType!)))
+                        : EmitCustomAllocation(operation, args[0], SizeConstant(Math.Max(1UL, _getAbiSize(operation.SubjectType!))), _getAbiAlignment(operation.SubjectType!));
+                case MirIntrinsicKind.Free: return EmitDeallocation(args[0], operation.RestoresAllocator);
                 case MirIntrinsicKind.Malloc:
                     return _builder.BuildCall2(_getMemoryRuntime().MallocType, _getMemoryRuntime().Malloc, args, "malloc");
                 case MirIntrinsicKind.AlignedMalloc:
@@ -262,7 +265,7 @@ public sealed partial class LlvmIrGenerator
 
         private LLVMValueRef MirArrayAllocation(MirIntrinsicCall expression)
         {
-            LLVMValueRef[] dimensions = expression.Arguments.Select(dimension =>
+            LLVMValueRef[] dimensions = expression.Arguments.Take(((ArrayTypeSymbol)expression.ResultType).Rank).Select(dimension =>
             {
                 LLVMValueRef value = MirValue(dimension);
                 LLVMTypeRef sourceType = _mapType(dimension.Type);
@@ -305,9 +308,12 @@ public sealed partial class LlvmIrGenerator
             }
             else
             {
-                address = EmitZeroedAllocation(allocationSize,
-                    $"{((ArrayTypeSymbol)expression.ResultType).ElementType.Name}.heap.array",
-                    SizeConstant(Math.Max(4u, _getAbiAlignment(((ArrayTypeSymbol)expression.ResultType).ElementType))));
+                uint alignment = Math.Max(4u, _getAbiAlignment(((ArrayTypeSymbol)expression.ResultType).ElementType));
+                address = expression.Function is null
+                    ? EmitZeroedAllocation(allocationSize, "heap.array", SizeConstant(alignment))
+                    : EmitCustomAllocation(expression, MirValue(expression.Arguments[^1]), allocationSize, alignment);
+                if (expression.Function is not null)
+                    LLVMApi.BuildMemSet(_builder, address, LLVMValueRef.CreateConstInt(_context.Int8Type, 0), allocationSize, alignment);
             }
             _builder.BuildStore(ToInt32(length), address);
             for (int i = 0; i < dimensions.Length; i++)

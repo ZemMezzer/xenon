@@ -155,7 +155,7 @@ public sealed class MirFlowFacts(IReadOnlyDictionary<FunctionSymbol, HashSet<Typ
         if (edge.Kind == MirEdgeKind.Unwind)
         {
             if (source.Terminator is MirIntrinsicCall primitive &&
-                primitive.Intrinsic != MirIntrinsicKind.EnsureThreadLocal) return Bottom;
+                primitive.Intrinsic != MirIntrinsicKind.EnsureThreadLocal && primitive.AllocationReleases.IsEmpty && primitive.Function?.AllocationOperation != AllocationOperation.Allocate) return Bottom;
             if (!externalCallsMayUnwind && source.Terminator is MirCall { Callee: MirFunctionOperand { Function.IsExtern: true } }) return Bottom;
             if (callEffects?.Invoke(source.Terminator) is { } dynamicEffects)
             {

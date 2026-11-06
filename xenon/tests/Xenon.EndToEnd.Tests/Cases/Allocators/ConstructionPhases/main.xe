@@ -1,0 +1,71 @@
+namespace Allocators;
+allocator Heap {
+    public int released;
+    public int prepared;
+    public int selection = 2;
+    +Heap(nuint size, nuint alignment) { return malloc(size, alignment); }
+    -Heap(void* block) { released++; free(block); }
+}
+struct Resource {
+    public Heap* heap;
+    public Resource(Heap* h) { heap = h; }
+    public ~Resource() { heap->released += 10; }
+}
+int Argument(int mode) { if (mode == 1) throw 1; return mode; }
+struct Base {
+    private allocator Heap* firstProvider;
+    public Resource first = Resource(firstProvider);
+    public @Base(Heap* h) { firstProvider = h; h->prepared++; }
+    public Base(int mode) { }
+    public virtual ~Base() { first.heap->released += 100; }
+}
+struct Child : Base {
+    private allocator Heap* secondProvider;
+    public Resource second = Resource(secondProvider);
+    public @Child(Heap* h) { secondProvider = h; h->prepared++; }
+    public Child(int mode) : base(Argument(mode)) { if (mode == 2) throw 2; }
+    public Child() : this(0) { }
+}
+allocator DerivedHeap : Heap { }
+struct Choice {
+    public allocator Heap* baseChoice;
+    public allocator DerivedHeap* exactChoice;
+    public @Choice(Heap* h) { baseChoice = h; }
+    public @Choice(DerivedHeap* h) { exactChoice = h; }
+}
+struct ImplicitBase {
+    private allocator Heap* provider;
+    public int value = provider->selection;
+    public Resource resource = Resource(provider);
+    public @ImplicitBase(Heap* h) { provider = h; }
+    public virtual ~ImplicitBase() { resource.heap->released += 100; }
+}
+struct ImplicitChild : ImplicitBase {
+    public ImplicitChild(bool fail) { if (fail) throw 3; }
+}
+int Main() {
+    Heap* h = new Heap();
+    try { Child* c = new(h) Child(1); return 1; } catch (readonly int& e) { if (e != 1) return 2; }
+    if (h->released != 1 || h->prepared != 2) return 3;
+    h->released = 0; h->prepared = 0;
+    try { Child* c = new(h) Child(2); return 4; } catch (readonly int& e) { if (e != 2) return 5; }
+    if (h->released != 121 || h->prepared != 2) return 6;
+    h->released = 0; h->prepared = 0;
+    Child* c = new(h) Child();
+    delete(c);
+    if (h->released != 121 || h->prepared != 2) return 7;
+    DerivedHeap* derived = new DerivedHeap();
+    Choice* selected = new(derived) Choice();
+    if (selected->exactChoice != derived || selected->baseChoice != null) return 8;
+    delete(selected); delete(derived);
+    h->released = 0;
+    ImplicitChild* implicitValue = new(h) ImplicitChild(false);
+    if (implicitValue->value != 2) return 9;
+    delete(implicitValue);
+    if (h->released != 111) return 10;
+    h->released = 0;
+    try { ImplicitChild* failed = new(h) ImplicitChild(true); return 11; } catch (readonly int& e) { if (e != 3) return 12; }
+    if (h->released != 111) return 13;
+    delete(h);
+    return 0;
+}

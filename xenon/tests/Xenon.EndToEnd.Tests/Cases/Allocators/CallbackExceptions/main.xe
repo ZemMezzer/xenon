@@ -1,0 +1,31 @@
+namespace Allocators;
+allocator Heap {
+    public int mode;
+    public int calls;
+    public int releases;
+    public int destroyed;
+    +Heap(nuint s, nuint a) { calls++; if (mode == 1) throw 17; return malloc(s,a); }
+    -Heap(void* p) { releases++; free(p); if (mode == 2) throw 18; }
+}
+struct Element {
+    public allocator Heap* heap;
+    public int id = heap->calls;
+    internal @Element(Heap* h) { heap = h; h->calls++; }
+    public ~Element() { heap->destroyed++; if (id == 4) throw 19; }
+}
+int Main() {
+    Heap* h = new Heap();
+    h->mode = 1;
+    try { int* p = new(h) int(); return 1; } catch (readonly int& e) { if (e != 17) return 2; }
+    if (h->calls != 1 || h->releases != 0) return 3;
+    h->mode = 2;
+    int* p = new(h) int();
+    try { delete(p); return 4; } catch (readonly int& e) { if (e != 18) return 5; }
+    if (h->releases != 1) return 6;
+    h->mode = 0; h->calls = 0;
+    Element[] a = new(h) Element[3];
+    try { delete(a); return 7; } catch (readonly int& e) { if (e != 19) return 8; }
+    if (h->destroyed != 3 || h->releases != 2) return 9;
+    delete(h);
+    return 0;
+}

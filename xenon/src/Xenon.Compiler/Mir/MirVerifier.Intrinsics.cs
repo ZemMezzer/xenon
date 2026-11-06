@@ -6,6 +6,7 @@ public sealed partial class MirVerifier
 {
     private void Intrinsic(MirIntrinsicCall operation)
     {
+        if (operation.RestoresAllocator && operation.Intrinsic != MirIntrinsicKind.Free) Error("only deallocation can restore an allocator");
         if (operation.RetainedInFrame && (_function.Coroutine is null ||
             operation.Intrinsic != MirIntrinsicKind.AllocateStackArray || operation.FixedArrayLength is null))
             Error("frame allocation requires a fixed stack array in a transformed coroutine");
@@ -20,9 +21,10 @@ public sealed partial class MirVerifier
         if (!validStorageCheck) Error("storage check purpose does not match intrinsic");
         int arity = operation.Intrinsic switch
         {
-            MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray => operation.ResultType is ArrayTypeSymbol array ? array.Rank : -1,
+            MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray => operation.ResultType is ArrayTypeSymbol array ? array.Rank + (operation.Function is null ? 0 : 1) : -1,
             MirIntrinsicKind.ArrayDimension => 2,
-            MirIntrinsicKind.ClosureControl or MirIntrinsicKind.CreateContinuation or MirIntrinsicKind.EnsureThreadLocal or MirIntrinsicKind.Allocate => 0,
+            MirIntrinsicKind.ClosureControl or MirIntrinsicKind.CreateContinuation or MirIntrinsicKind.EnsureThreadLocal => 0,
+            MirIntrinsicKind.Allocate => operation.Function is null ? 0 : 1,
             MirIntrinsicKind.CoroutineCreate or MirIntrinsicKind.AsyncRootCreate => 0,
             MirIntrinsicKind.MakeCallable => operation.Captures.Length,
             MirIntrinsicKind.AlignedMalloc or MirIntrinsicKind.Calloc or MirIntrinsicKind.Swap or MirIntrinsicKind.AtomicInitialize or MirIntrinsicKind.AtomicStore or MirIntrinsicKind.AtomicUpdate or MirIntrinsicKind.AtomicExchange => 2,
@@ -30,6 +32,9 @@ public sealed partial class MirVerifier
             _ => 1,
         };
         if (operation.Arguments.Length != arity) { Error($"{operation.Intrinsic} argument count mismatch"); return; }
+        if (operation.Function is { AllocationOperation: AllocationOperation.Allocate } &&
+            operation.Arguments.LastOrDefault()?.Type is not PointerTypeSymbol { IsReadonly: false, ElementType: StructTypeSymbol { IsAllocator: true } })
+            Error("custom allocation requires an allocator pointer");
         MirOperand? first = operation.Arguments.FirstOrDefault();
         switch (operation.Intrinsic)
         {
@@ -98,7 +103,7 @@ public sealed partial class MirVerifier
                 Same(first!.Type, operation.ResultType, "clone value");
                 break;
             case MirIntrinsicKind.AllocateStackArray or MirIntrinsicKind.AllocateHeapArray:
-                foreach (MirOperand dimension in operation.Arguments)
+                foreach (MirOperand dimension in operation.Arguments.Take(((ArrayTypeSymbol)operation.ResultType).Rank))
                     if (dimension.Type is not PrimitiveTypeSymbol { IsInteger: true }) Error("array dimension must be an integer");
                 break;
             case MirIntrinsicKind.ArrayLength or MirIntrinsicKind.ArrayRank or MirIntrinsicKind.ArrayDimension:

@@ -83,6 +83,7 @@ public enum SyntaxKind
     ReadonlyKeyword,
     VarKeyword,
     StructKeyword,
+    AllocatorKeyword,
     InterfaceKeyword,
     TemplateKeyword,
     WhereKeyword,
@@ -212,4 +213,5 @@ public enum SyntaxKind
     LambdaExpression,
     LambdaCapture,
     AwaitExpression,
+    AtToken,
 }

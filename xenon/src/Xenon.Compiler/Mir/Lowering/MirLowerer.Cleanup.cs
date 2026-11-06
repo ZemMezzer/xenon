@@ -7,7 +7,7 @@ public sealed partial class MirLowerer
 {
     private sealed record LexicalCleanup(List<TemporaryGuard> Guards, MirLocalId[] Locals, MirOperand? Stack, MirSourceInfo Source);
     private readonly Dictionary<MirPlace, TemporaryGuard> _ownedPlaces = [];
-    private readonly List<TemporaryGuard> _valueGuards = [];
+    private List<TemporaryGuard> _valueGuards = [];
     private bool _parametersRegistered;
     private bool _hasDynamicCleanupOrder;
     private List<TemporaryGuard> _pendingReturnGuards = [];

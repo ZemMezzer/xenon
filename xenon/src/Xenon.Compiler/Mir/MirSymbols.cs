@@ -24,6 +24,10 @@ public static class MirSymbols
             if (block.Terminator is MirIntrinsicCall intrinsic)
             {
                 if (intrinsic.Function is { } target) yield return target;
+                if (intrinsic.Function?.AllocationOperation == AllocationOperation.Allocate &&
+                    intrinsic.Arguments.LastOrDefault()?.Type is PointerTypeSymbol { ElementType: StructTypeSymbol provider } &&
+                    provider.DeallocationOperator is { } release) yield return release;
+                foreach (FunctionSymbol releaseTarget in intrinsic.AllocationReleases) yield return releaseTarget;
                 if (intrinsic.Field is { } field) yield return field;
             }
             if (block.Terminator is MirThrow { Exception: { } exception } &&

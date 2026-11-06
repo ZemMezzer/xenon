@@ -102,6 +102,7 @@ public sealed record FieldDeclarationSyntax(
     SyntaxToken SemicolonToken) : TypeMemberDeclarationSyntax
 {
     public override SyntaxKind Kind => SyntaxKind.FieldDeclaration;
+    public SyntaxToken? AllocatorKeyword { get; init; }
 
     public bool IsPublic => AccessModifierToken?.Kind == SyntaxKind.PublicKeyword;
 
@@ -132,6 +133,7 @@ public sealed record TypeConstantDeclarationSyntax(
     ExpressionSyntax Initializer,
     SyntaxToken SemicolonToken) : TypeMemberDeclarationSyntax
 {
+    public SyntaxToken? AccessModifierToken { get; init; }
     public override SyntaxKind Kind => SyntaxKind.ConstantDeclaration;
 }
 
@@ -217,6 +219,8 @@ public sealed record MethodDeclarationSyntax(
 {
     public SyntaxToken? AsyncKeyword { get; init; }
     public bool IsAsync => AsyncKeyword is not null;
+    public SyntaxToken? AllocationOperatorToken { get; init; }
+    public SyntaxToken? AllocationContextToken { get; init; }
     public SyntaxToken? OperatorKeyword { get; init; }
     public bool IsOperator => OperatorKeyword is not null;
     public override SyntaxKind Kind => SyntaxKind.MethodDeclaration;
@@ -294,6 +298,7 @@ public sealed record StructDeclarationSyntax(
     public bool IsReadonly => ReadonlyKeyword is not null;
     public bool IsStatic => StaticKeyword is not null;
     public bool IsSealed => SealedKeyword is not null;
+    public bool IsAllocator => StructKeyword.Kind == SyntaxKind.AllocatorKeyword;
     public override SyntaxKind Kind => SyntaxKind.StructDeclaration;
 
     public ImmutableArray<FieldDeclarationSyntax> Fields =>

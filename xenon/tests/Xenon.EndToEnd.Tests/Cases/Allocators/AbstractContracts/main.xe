@@ -1,0 +1,33 @@
+namespace Allocators;
+// The concrete type is deliberately declared before its contract-less base.
+allocator Concrete : Empty {
+    public int calls;
+    +Concrete(nuint s, nuint a) { calls++; return malloc(s,a); }
+    -Concrete(void* p) { calls++; free(p); }
+}
+abstract allocator Empty {}
+abstract allocator Base {
+    public abstract +Base(nuint s, nuint a);
+    public abstract -Base(void* p);
+}
+allocator Derived : Base {
+    public int calls;
+    +Derived(nuint s, nuint a) { calls++; return malloc(s,a); }
+    -Derived(void* p) { calls++; free(p); }
+}
+int Main() {
+    Concrete* c = new Concrete();
+    int* first = new(c) int(7);
+    if (*first != 7) return 1;
+    delete(first);
+    if (c->calls != 2) return 2;
+    delete(c);
+    Derived* d = new Derived();
+    Base* h = d;
+    int* second = new(h) int(9);
+    if (*second != 9) return 3;
+    delete(second);
+    if (d->calls != 2) return 4;
+    delete(d);
+    return 0;
+}
