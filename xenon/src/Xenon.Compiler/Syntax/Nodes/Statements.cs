@@ -67,6 +67,7 @@ public sealed record VariableDeclarationStatementSyntax(
     ExpressionSyntax? Initializer,
     SyntaxToken SemicolonToken) : StatementSyntax
 {
+    public SyntaxToken? UsingKeyword { get; init; }
     public override SyntaxKind Kind => SyntaxKind.VariableDeclarationStatement;
 }
 

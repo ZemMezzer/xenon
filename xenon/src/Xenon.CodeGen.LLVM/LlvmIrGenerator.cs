@@ -198,8 +198,16 @@ public sealed partial class LlvmIrGenerator
     public static bool RequiresNativeExceptionRuntime(Compilation compilation)
     {
         ArgumentNullException.ThrowIfNull(compilation);
-        foreach (MirFunction function in compilation.GetMirFunctions(lowered: false))
+        var functions = compilation.GetMirFunctions(lowered: false);
+        foreach (MirFunction function in functions)
             if (function.HasExceptionRegions || function.Blocks.Any(block => block.Terminator is MirThrow)) return true;
+        if (functions.Any(function => function.HasScopeExitCleanup))
+        {
+            // Keep unknown/extern calls conservative. A proven non-throwing using
+            // scope alone must not select the native exception runtime.
+            var effects = LlvmFunctionEffectAnalysis.Analyze(functions);
+            return functions.Any(function => function.HasScopeExitCleanup && effects[function.Symbol].MayThrow);
+        }
         return false;
     }
 

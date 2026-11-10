@@ -1,5 +1,6 @@
 using LLVMSharp.Interop;
 using Xenon.Compiler.Mir;
+using Xenon.Compiler.Mir.Analysis;
 using Xenon.Compiler.Semantics.Symbols;
 using Xenon.Compiler.Syntax;
 
@@ -21,7 +22,32 @@ public sealed partial class LlvmIrGenerator
             _mir = function;
             var graph = new MirControlFlow(function, (block, edge) =>
                 edge.Kind != MirEdgeKind.Unwind || MirMayUnwind(block.Terminator));
-            foreach (MirLocal local in function.Locals)
+            // Unwind-only cleanup temporaries do not need stack slots when all
+            // incoming calls are proven nounwind. Use the same graph as emission.
+            var used = new HashSet<MirLocalId>();
+            var liveness = new MirLiveness();
+            foreach (MirBasicBlock block in function.Blocks.Where(block => graph.Reachable.Contains(block.Id)))
+            {
+                used.UnionWith(liveness.Terminator(block.Terminator, []));
+                MirPlace? destination = block.Terminator switch
+                {
+                    MirCall call => call.Destination,
+                    MirIntrinsicCall call => call.Destination,
+                    _ => null,
+                };
+                if (destination is not null)
+                {
+                    used.Add(destination.Local);
+                    used.UnionWith(MirOperands.Indices(destination).SelectMany(MirOperands.Places).Select(place => place.Local));
+                }
+                foreach (MirStatement statement in block.Statements)
+                {
+                    used.UnionWith(liveness.Statement(statement, []));
+                    if (statement is MirAssign assignment) used.Add(assignment.Destination.Local);
+                }
+            }
+            if (function.Resumable is { } body) used.Add(body.Result);
+            foreach (MirLocal local in function.Locals.Where(local => local.Kind != MirLocalKind.Temporary || used.Contains(local.Id)))
             {
                 LLVMValueRef address;
                 if (local.Kind == MirLocalKind.Parameter && local.Variable is { } parameter)

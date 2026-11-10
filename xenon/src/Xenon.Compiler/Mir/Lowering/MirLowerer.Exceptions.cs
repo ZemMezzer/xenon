@@ -10,6 +10,7 @@ public sealed partial class MirLowerer
         bool Abandon, Block Unwind, Block Rethrow)
     {
         public LexicalCleanup? Cleanup { get; init; }
+        public BoundExpression? Expression { get; init; }
         public ExitTarget[] Breaks { get; init; } = [];
         public ExitTarget[] Continues { get; init; } = [];
     }
@@ -76,6 +77,7 @@ public sealed partial class MirLowerer
                     try { Statement(finalizer); }
                     finally { Restore(_breaks, breaks); Restore(_continues, continues); }
                 }
+                if (action.Expression is { } expression) _ = Expression(expression);
             }
         }
         finally

@@ -94,7 +94,7 @@ public sealed partial class MirLowerer
                 ? new MirReturn(null, lowering._functionSource) : new MirUnreachable(lowering._functionSource));
         MirFunction result = new(function.Symbol, [.. lowering._locals],
             [.. lowering._blocks.Select(block => new MirBasicBlock(block.Id, [.. block.Statements],
-                block.Terminator ?? new MirUnreachable(builder._functionSource)))], new(0), lowering._functionSource) { Scopes = [.. lowering._scopes], UnwindExit = lowering._unwind.Id, ResumableBodyEntry = lowering._resumableBodyEntry, HasDynamicCleanupOrder = lowering._hasDynamicCleanupOrder, HasExceptionRegions = lowering._hasExceptionRegions };
+                block.Terminator ?? new MirUnreachable(builder._functionSource)))], new(0), lowering._functionSource) { Scopes = [.. lowering._scopes], UnwindExit = lowering._unwind.Id, ResumableBodyEntry = lowering._resumableBodyEntry, HasDynamicCleanupOrder = lowering._hasDynamicCleanupOrder, HasExceptionRegions = lowering._hasExceptionRegions, HasScopeExitCleanup = lowering._hasScopeExitCleanup };
         if (initialization is not null)
             result = result with { ReturnType = BuiltinTypes.Void, Resumable = new(initialization, lowering.Variable(lowering._resumableResultInput!).Local) };
         MirVerifier.VerifyOrThrow(result);
@@ -187,6 +187,9 @@ public sealed partial class MirLowerer
         }
         switch (statement)
         {
+            case BoundBlockStatement { ExitCleanup: { } cleanup } block when Unwrap(cleanup) is BoundDeleteExpression:
+                ScopeExitCleanup(block, cleanup);
+                break;
             case BoundBlockStatement { ExitCleanup: { } cleanup } block:
                 Try(new BoundTryStatement(block with { ExitCleanup = null }, [], new BoundBlockStatement([new BoundExpressionStatement(cleanup)])), isSourceRegion: false);
                 break;

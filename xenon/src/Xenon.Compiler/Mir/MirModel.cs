@@ -42,6 +42,8 @@ public sealed record MirFunction(FunctionSymbol Symbol, ImmutableArray<MirLocal>
     public Analysis.MirCoroutineLayout? Coroutine { get; init; }
     public bool HasDynamicCleanupOrder { get; init; }
     public bool HasExceptionRegions { get; init; }
+    // Implicit cleanup needs native EH only when calls in the function may throw.
+    public bool HasScopeExitCleanup { get; init; }
     public MirBlockId? UnwindExit { get; init; }
     public MirBlockId? ResumableBodyEntry { get; init; }
     public ImmutableArray<MirScope> Scopes { get; init; } = [new(0, null)];
