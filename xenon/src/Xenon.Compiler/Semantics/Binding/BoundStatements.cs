@@ -52,6 +52,9 @@ public static class BoundControlFlow
         BoundBreakStatement or BoundReturnStatement or BoundContinueStatement or BoundThrowStatement => true,
         BoundBlockStatement block => block.Statements.Any(TerminatesSection),
         BoundIfStatement { ElseStatement: not null } conditional => TerminatesSection(conditional.ThenStatement) && TerminatesSection(conditional.ElseStatement),
+        BoundTryStatement region =>
+            (region.FinallyBody is not null && TerminatesSection(region.FinallyBody)) ||
+            (TerminatesSection(region.Body) && region.Catches.All(handler => TerminatesSection(handler.Body))),
         _ => AlwaysReturns(statement),
     };
 
@@ -78,7 +81,8 @@ public sealed record BoundBlockStatement(
 {
     public bool IsResumable { get; init; }
     public bool RequiresSuspensionStateMachine { get; init; }
-    // Function-level finalization, after local scope cleanup on every exit.
+    // Finalization after this block's local cleanup on every exit. Also used for
+    // function-level lifecycle cleanup and using declarations' lexical tails.
     public BoundExpression? ExitCleanup { get; init; }
     // A stack value allocated in this lexical scope was relocated to an
     // enclosing local.  Cleanup still runs here, but stackrestore is deferred

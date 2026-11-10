@@ -1424,7 +1424,7 @@ internal sealed class Parser
             return ParseContinueStatement();
         }
 
-        if (IsVariableDeclaration())
+        if (Current.Kind == SyntaxKind.UsingKeyword || IsVariableDeclaration())
         {
             return ParseVariableDeclarationStatement();
         }
@@ -1623,6 +1623,7 @@ internal sealed class Parser
 
     private VariableDeclarationStatementSyntax ParseVariableDeclarationStatement()
     {
+        SyntaxToken? usingKeyword = Current.Kind == SyntaxKind.UsingKeyword ? NextToken() : null;
         TypeSyntax type = ParseType(allowInference: true);
         SyntaxToken identifier = MatchToken(SyntaxKind.IdentifierToken);
         SyntaxToken? equals = null;
@@ -1635,7 +1636,7 @@ internal sealed class Parser
         }
 
         SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
-        return new VariableDeclarationStatementSyntax(type, identifier, equals, initializer, semicolon);
+        return new VariableDeclarationStatementSyntax(type, identifier, equals, initializer, semicolon) { UsingKeyword = usingKeyword };
     }
 
     private ExpressionStatementSyntax ParseExpressionStatement()

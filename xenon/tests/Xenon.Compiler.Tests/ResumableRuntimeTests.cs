@@ -6,7 +6,7 @@ namespace Xenon.Compiler.Tests;
 
 public sealed class ResumableRuntimeTests
 {
-    private const string Protocol = """
+    internal const string Protocol = """
         namespace Example;
         struct ResultState { public int Status; public int Value; }
         struct Result

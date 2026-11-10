@@ -592,12 +592,7 @@ internal sealed partial class FunctionBodyBinder
         }
 
 
-        var statements = ImmutableArray.CreateBuilder<BoundStatement>();
-        foreach (StatementSyntax statement in syntax.Statements)
-        {
-            _cancellationToken.ThrowIfCancellationRequested();
-            statements.Add(BindStatement(statement));
-        }
+        BoundBlockStatement body = BindStatementList(syntax.Statements);
 
 
         RecordScope(syntax, _scope);
@@ -607,13 +602,13 @@ internal sealed partial class FunctionBodyBinder
             _scope = previous;
         }
 
-        return new BoundBlockStatement(statements.ToImmutable());
+        return body;
     }
 
     private BoundStatement BindStatement(StatementSyntax syntax) => syntax switch
     {
         BlockStatementSyntax block => BindBlockStatement(block),
-        VariableDeclarationStatementSyntax variable => BindVariableDeclaration(variable),
+        VariableDeclarationStatementSyntax variable => BindLocalStatement(variable),
         ReturnStatementSyntax @return => BindReturnStatement(@return),
         ExpressionStatementSyntax expression => new BoundExpressionStatement(BindDiscardedExpression(expression.Expression)),
         IfStatementSyntax @if => BindIfStatement(@if),
@@ -988,7 +983,7 @@ internal sealed partial class FunctionBodyBinder
             }
             BoundScope previous = _scope;
             _scope = new BoundScope(previous);
-            var body = new BoundBlockStatement(section.Statements.Select(BindStatement).ToImmutableArray());
+            var body = BindStatementList(section.Statements);
             int sectionEnd = sectionIndex + 1 < syntax.Sections.Length
                 ? syntax.Sections[sectionIndex + 1].Label.Location.Span.Start
                 : syntax.CloseBraceToken?.Location.Span.Start ??
@@ -1119,6 +1114,14 @@ internal sealed partial class FunctionBodyBinder
         }
         else
             type = TypeResolver.Resolve(isConstant ? syntax.Type.WithoutQualifier(SyntaxKind.ConstKeyword) : syntax.Type, _fileScope, _diagnostics);
+        if (syntax.UsingKeyword is not null && !isInferred && type is StructTypeSymbol)
+        {
+            type = _fileScope.TypeFactory.PointerTo(type);
+            _semanticInfo.RecordType(syntax.Type, type);
+        }
+        if (syntax.UsingKeyword is not null && syntax.Initializer is null)
+            _diagnostics.Report(syntax.IdentifierToken.Location,
+                "a 'using' local declaration requires an initializer", DiagnosticIds.UsingRequiresInitializer);
         if (AllocationRules.IsAllocatorValue(type))
             _diagnostics.Report(syntax.Type.NameToken.Location, "allocator local variables must be pointers to heap instances", DiagnosticIds.AllocatorRequiresHeap);
         if (ContainsStaticStruct(type))
@@ -1134,7 +1137,8 @@ internal sealed partial class FunctionBodyBinder
                 DiagnosticIds.InvalidLocalType);
         }
 
-        var variable = new LocalVariableSymbol(syntax.IdentifierToken.Text, type, _function, isConstant || syntax.Type.IsBindingReadonly(), syntax);
+        var variable = new LocalVariableSymbol(syntax.IdentifierToken.Text, type, _function,
+            isConstant || syntax.Type.IsBindingReadonly() || syntax.UsingKeyword is not null, syntax);
         _semanticInfo.Declarations[syntax] = variable;
         if (TypeFacts.GetCompleteDestructor(type) is { } destructor)
         {
@@ -2181,7 +2185,11 @@ internal sealed partial class FunctionBodyBinder
         {
             if (!TypeIdentity.AreSame(target.Type, BuiltinTypes.Error))
             {
-                _diagnostics.Report(GetLocation(syntax.Target), "left side of assignment must be writable",
+                string message = target is BoundVariableExpression
+                    { Variable: LocalVariableSymbol { Declaration: VariableDeclarationStatementSyntax { UsingKeyword: not null } } }
+                    ? "a 'using' local cannot be reassigned"
+                    : "left side of assignment must be writable";
+                _diagnostics.Report(GetLocation(syntax.Target), message,
                     DiagnosticIds.InvalidAssignmentTarget);
             }
 
@@ -5157,7 +5165,11 @@ internal sealed partial class FunctionBodyBinder
             return new BoundErrorExpression();
         }
 
-        BoundExpression pointer = arguments[0];
+        return BindDeleteOperand(arguments[0], name.IdentifierToken.Location);
+    }
+
+    private BoundExpression BindDeleteOperand(BoundExpression pointer, TextLocation location)
+    {
         bool nullLiteral = TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Null);
         if (nullLiteral)
             pointer = ContextualizeNull(pointer, _fileScope.TypeFactory.PointerTo(BuiltinTypes.Byte));
@@ -5168,14 +5180,14 @@ internal sealed partial class FunctionBodyBinder
         {
             if (pointerType.IsReadonly)
             {
-                _diagnostics.Report(name.IdentifierToken.Location,
+                _diagnostics.Report(location,
                     "cannot delete through a readonly pointer because deletion ends the pointee lifetime",
                     DiagnosticIds.FreeThroughReadonlyPointer);
                 return new BoundErrorExpression();
             }
             if (TypeIdentity.AreSame(pointerType.ElementType, BuiltinTypes.Void))
             {
-                _diagnostics.Report(name.IdentifierToken.Location,
+                _diagnostics.Report(location,
                     "'delete' cannot destroy a void pointer; use 'free(pointer)' for raw memory",
                     DiagnosticIds.InvalidFreeOperand);
                 return new BoundErrorExpression();
@@ -5191,14 +5203,14 @@ internal sealed partial class FunctionBodyBinder
         else
         {
             if (!TypeIdentity.AreSame(pointer.Type, BuiltinTypes.Error))
-                _diagnostics.Report(name.IdentifierToken.Location,
+                _diagnostics.Report(location,
                     $"'delete' requires a heap pointer or heap array, but has type '{pointer.Type.ToDisplayString()}'",
                     DiagnosticIds.InvalidFreeOperand);
             return new BoundErrorExpression();
         }
 
 
-        ValidateDestructorAccessibility(destroyedType, name.IdentifierToken.Location);
+        ValidateDestructorAccessibility(destroyedType, location);
         return new BoundDeleteExpression(pointer, destructor);
     }
 
@@ -7432,6 +7444,11 @@ internal sealed partial class FunctionBodyBinder
             BoundStaticFieldExpression field => !field.Field.IsReadonly,
             BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken, Operand.Type: PointerTypeSymbol { IsReadonly: true } } => false,
             BoundReferenceDereferenceExpression { ReferenceType.IsReadonly: true } => false,
+            BoundReferenceDereferenceExpression
+            {
+                Reference: BoundVariableExpression
+                { Variable: LocalVariableSymbol { Declaration: VariableDeclarationStatementSyntax { UsingKeyword: not null } } },
+            } => false,
             BoundLifetimeValueExpression value => IsWritable(value.Source),
             BoundIndexExpression { Receiver.Type: PointerTypeSymbol { IsReadonly: true } } => false,
             BoundMemberAccessExpression { Field.IsAllocatorField: true } member => CanWriteAllocatorField(member),
