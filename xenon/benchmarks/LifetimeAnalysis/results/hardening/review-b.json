@@ -1,0 +1,104 @@
+[
+  {
+    "Name": "callable-wildcard-copy",
+    "Expected": "XE2232",
+    "Actual": [
+      "XE2232"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "callable-wildcard-direct",
+    "Expected": "XE2232",
+    "Actual": [
+      "XE2232"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "offset-distinct",
+    "Expected": "",
+    "Actual": [],
+    "Passed": true
+  },
+  {
+    "Name": "offset-sibling",
+    "Expected": "XE2232",
+    "Actual": [
+      "XE2232"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "pair-alias",
+    "Expected": "XE2232",
+    "Actual": [
+      "XE2232"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "pair-distinct",
+    "Expected": "",
+    "Actual": [],
+    "Passed": true
+  },
+  {
+    "Name": "recursive-unknown",
+    "Expected": "XE2230",
+    "Actual": [
+      "XE2230"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "recursive-unrelated",
+    "Expected": "",
+    "Actual": [],
+    "Passed": true
+  },
+  {
+    "Name": "struct-array-call",
+    "Expected": "XE2230",
+    "Actual": [
+      "XE2230"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "struct-array-direct",
+    "Expected": "XE2232",
+    "Actual": [
+      "XE2232"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "typed-pointer-slots-safe",
+    "Expected": "",
+    "Actual": [],
+    "Passed": true
+  },
+  {
+    "Name": "typed-pointer-slots",
+    "Expected": "XE2232",
+    "Actual": [
+      "XE2232"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "wildcard-aggregate-copy",
+    "Expected": "XE2232",
+    "Actual": [
+      "XE2232"
+    ],
+    "Passed": true
+  },
+  {
+    "Name": "callable-wildcard-copy-safe",
+    "Expected": "",
+    "Actual": [],
+    "Passed": true
+  }
+]

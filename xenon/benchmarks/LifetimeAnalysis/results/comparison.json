@@ -1,0 +1,98 @@
+[
+  {
+    "Scenario": "frees10",
+    "BeforeMs": 112.957,
+    "AfterMs": 58.6818,
+    "BeforeRangeMs": "95.5079-164.0637",
+    "AfterRangeMs": "55.1511-126.9909",
+    "Speedup": 1.9249068706140573,
+    "BeforeAllocatedMB": 20.425632,
+    "AfterAllocatedMB": 11.174984,
+    "BeforePeakMiB": 68.4140625,
+    "AfterPeakMiB": 62.91015625
+  },
+  {
+    "Scenario": "frees50",
+    "BeforeMs": 720.1816,
+    "AfterMs": 436.006,
+    "BeforeRangeMs": "669.4268-1379.1528",
+    "AfterRangeMs": "296.7063-924.5501",
+    "Speedup": 1.6517699297716089,
+    "BeforeAllocatedMB": 621.616168,
+    "AfterAllocatedMB": 131.666248,
+    "BeforePeakMiB": 89.0546875,
+    "AfterPeakMiB": 80.0234375
+  },
+  {
+    "Scenario": "frees130",
+    "BeforeMs": 8936.8556,
+    "AfterMs": 3020.5223,
+    "BeforeRangeMs": "8782.3413-10692.6561",
+    "AfterRangeMs": "2192.8484-4782.4756",
+    "Speedup": 2.95871200818481,
+    "BeforeAllocatedMB": 8245.376848,
+    "AfterAllocatedMB": 1131.752336,
+    "BeforePeakMiB": 125.0546875,
+    "AfterPeakMiB": 105.71484375
+  },
+  {
+    "Scenario": "frees250",
+    "BeforeMs": 69106.5564,
+    "AfterMs": 16375.093,
+    "BeforeRangeMs": "67485.909-70336.4594",
+    "AfterRangeMs": "16067.976-17905.5978",
+    "Speedup": 4.220223750790301,
+    "BeforeAllocatedMB": 53864.513768,
+    "AfterAllocatedMB": 5688.964816,
+    "BeforePeakMiB": 171.22265625,
+    "AfterPeakMiB": 160.05859375
+  },
+  {
+    "Scenario": "chain70",
+    "BeforeMs": 186.5548,
+    "AfterMs": 164.6488,
+    "BeforeRangeMs": "170.9661-218.4732",
+    "AfterRangeMs": "137.8428-218.9579",
+    "Speedup": 1.133046824513753,
+    "BeforeAllocatedMB": 37.718584,
+    "AfterAllocatedMB": 32.37508,
+    "BeforePeakMiB": 70.23828125,
+    "AfterPeakMiB": 68.54296875
+  },
+  {
+    "Scenario": "nested",
+    "BeforeMs": 42.9045,
+    "AfterMs": 37.5491,
+    "BeforeRangeMs": "40.479-137.5614",
+    "AfterRangeMs": "33.7263-133.1929",
+    "Speedup": 1.1426239244083078,
+    "BeforeAllocatedMB": 9.242008,
+    "AfterAllocatedMB": 7.79124,
+    "BeforePeakMiB": 61.48828125,
+    "AfterPeakMiB": 59.5078125
+  },
+  {
+    "Scenario": "recursive",
+    "BeforeMs": 21.4566,
+    "AfterMs": 21.7842,
+    "BeforeRangeMs": "20.22-91.0603",
+    "AfterRangeMs": "20.2941-95.6711",
+    "Speedup": 0.9849615776572013,
+    "BeforeAllocatedMB": 5.023776,
+    "AfterAllocatedMB": 4.646456,
+    "BeforePeakMiB": 53.90625,
+    "AfterPeakMiB": 53.23828125
+  },
+  {
+    "Scenario": "async",
+    "BeforeMs": 67.5147,
+    "AfterMs": 70.9602,
+    "BeforeRangeMs": "65.578-230.7444",
+    "AfterRangeMs": "68.9699-228.2393",
+    "Speedup": 0.9514446126138315,
+    "BeforeAllocatedMB": 15.994352,
+    "AfterAllocatedMB": 15.999888,
+    "BeforePeakMiB": 69.03125,
+    "AfterPeakMiB": 68.8046875
+  }
+]

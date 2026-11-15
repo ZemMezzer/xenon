@@ -17,6 +17,8 @@ public readonly record struct MirBlockId(int Value)
 /// <summary>Source provenance survives lowering, cloning and transformations.</summary>
 public sealed record MirSourceInfo(TextLocation Location, int Scope = 0, int? OriginId = null)
 {
+    // Diagnostic metadata only; the cleanup operations and their ordering are unchanged.
+    public bool IsAutomaticCleanup { get; init; }
     public bool IsFallback { get; init; }
     public int? DiagnosticOriginId { get; init; }
     public static MirSourceInfo Generated { get; } = new(TextLocation.None) { IsFallback = true };

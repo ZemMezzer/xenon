@@ -1,0 +1,23 @@
+namespace PointerLifetimeCalls;
+
+void Destroy(int* p) { delete(p); }
+int MaybeDestroy(int* p, bool release) {
+    if (release) { Destroy(p); return 1; }
+    return 0;
+}
+void Reset(int* p) { destruct(*p); *p = 14; }
+
+int Main() {
+    int sum = 0;
+    for (int i = 0; i < 4; i++) {
+        int* p = new int();
+        Reset(p);
+        int* alias = p + (2 - 2);
+        int status = MaybeDestroy(p, i == 3);
+        if (status == 0) {
+            sum += *alias;
+            Destroy(p);
+        }
+    }
+    return sum;
+}

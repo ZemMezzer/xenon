@@ -1,0 +1,4 @@
+{"stage":"warmup","elapsedMs":760.5636}
+{"stage":"sample","iteration":0,"elapsedMs":73.6668,"cpuMs":78.125,"allocatedBytes":16123888,"peakWorkingSetBytes":73199616,"ids":["XE2285","XE2284"]}
+{"stage":"sample","iteration":1,"elapsedMs":69.2813,"cpuMs":62.5,"allocatedBytes":16001072,"peakWorkingSetBytes":73228288,"ids":["XE2285","XE2284"]}
+{"stage":"sample","iteration":2,"elapsedMs":92.2952,"cpuMs":156.25,"allocatedBytes":15996664,"peakWorkingSetBytes":74539008,"ids":["XE2285","XE2284"]}

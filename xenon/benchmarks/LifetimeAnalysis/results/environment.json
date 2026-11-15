@@ -1,0 +1,11 @@
+{
+  "HarnessSHA256": "841838F503D7F6F4ABCC49494B175F0EA2E32B580EF7F630C31F992D236C751D",
+  "Cpu": "AMD Ryzen 9 5900X",
+  "PhysicalCores": 12,
+  "LogicalProcessors": 24,
+  "Sdk": "10.0.302",
+  "Runtime": "10.0.10",
+  "Configuration": "Release",
+  "SamplesPerScenario": 3,
+  "ConcurrentAcceptanceTests": false
+}

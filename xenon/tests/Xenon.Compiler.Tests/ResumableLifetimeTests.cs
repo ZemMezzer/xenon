@@ -27,6 +27,48 @@ public sealed class ResumableLifetimeTests
         public async Result ArrayBorrow(int[]& values) { await Operation(); return values[0]; }
         """;
     private static Compilation Compile(string source) => Compilation.Create(SourceText.From(Protocol + source, "lifetimes.xe"));
+
+    [Theory]
+    [InlineData("int value = 42; return Read(&value);")]
+    [InlineData("int value = 42; int* p = &value; int* alias = p; return Read(alias);")]
+    public void RawStorageRetainedByAsyncStateCannotEscape(string body)
+    {
+        var compilation = Compile("async Result Read(int* p) { await Operation(); return *p; } Result Make() { " + body + " }");
+        Assert.True(compilation.HasErrors);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error &&
+            diagnostic.Id is DiagnosticIds.ValueLifetimeEscape or DiagnosticIds.PendingBorrowedOperation);
+    }
+
+    [Theory]
+    [InlineData("async Result Read(int* p) { await Operation(); return *p; } Result Make() { return Read(new int()); }")]
+    [InlineData("async Result Read(int* p) { int value = *p; await Operation(); return value; } Result Make() { int value = 42; return Read(&value); }")]
+    [InlineData("async Result Make() { int value = 42; int* p = &value; await Operation(); return *p; }")]
+    [InlineData("async Result Read(int* p) { await Operation(); return *p; } async Result Make() { int value = 42; return await Read(&value); }")]
+    [InlineData("async Result Read(int* p) { p = new int(); await Operation(); int value = *p; delete(p); return value; } Result Make() { int value = 42; return Read(&value); }")]
+    [InlineData("int* Fresh(int* unused) { return new int(); } async Result Read(int* p) { await Operation(); return *p; } Result Make() { int value = 42; return Read(Fresh(&value)); }")]
+    [InlineData("extern int* Unknown(int* p); async Result Read(int* p) { await Operation(); return *p; } Result Make() { int value = 42; return Read(Unknown(&value)); }")]
+    [InlineData("struct Holder { public int* P; } async Result Read(Holder h) { h.P = new int(); await Operation(); return *h.P; } Result Make() { int value = 42; Holder h = Holder(); h.P = &value; return Read(h); }")]
+    public void StableRawStorageAcrossSuspensionIsAllowed(string source) => Valid(Compile(source));
+
+    [Theory]
+    [InlineData("int value = 42; h.Inner.Value = &value;", false)]
+    [InlineData("h.Inner.Value = new int();", true)]
+    public void NestedRawStorageRetainedByAsyncState(string initialization, bool valid)
+    {
+        var compilation = Compile("struct Holder { public int* Value; } struct Outer { public Holder Inner; } " +
+            "async Result Read(Outer h) { await Operation(); return *h.Inner.Value; } " +
+            "Result Make() { Outer h = Outer(); " + initialization + " return Read(h); }");
+        Assert.Equal(valid, !compilation.HasErrors);
+        if (!valid) Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.ValueLifetimeEscape);
+    }
+
+    [Fact]
+    public void RawAliasWrapperDoesNotHideAsyncRetention()
+    {
+        var compilation = Compile("int* Same(int* p) { return p; } async Result Read(int* p) { await Operation(); return *p; } Result Make() { int value = 42; return Read(Same(&value)); }");
+        Assert.True(compilation.HasErrors);
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.ValueLifetimeEscape);
+    }
     private static void Valid(Compilation compilation)
     {
         Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));

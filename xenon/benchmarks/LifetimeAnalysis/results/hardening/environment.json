@@ -1,0 +1,18 @@
+{
+  "date": "2026-11-15",
+  "harnessSHA256": "5FED0896DBA684983D36CE42878FECAF06E0CAC550C044B0910EA34287FF6A47",
+  "diagnosticCorpusSHA256": "1E2FDC56997F871275E064171E740C12C796AB733019E5D66335E043DEEA7097",
+  "cpu": "AMD Ryzen 9 5900X",
+  "physicalCores": 12,
+  "logicalProcessors": 24,
+  "os": "Windows 10.0.26200 x64",
+  "sdk": "10.0.302",
+  "runtime": "10.0.10",
+  "configuration": "Release",
+  "scenarioWarmup": "full",
+  "samplesPerScenario": 3,
+  "baseline1000ConcurrentBuildsAndTests": true,
+  "otherBaselinesConcurrentTests": false,
+  "finalBenchmarksConcurrentTests": false,
+  "profileTimesInclusive": true
+}

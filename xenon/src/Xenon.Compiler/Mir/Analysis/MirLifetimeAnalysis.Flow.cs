@@ -91,6 +91,21 @@ public sealed partial class MirLifetimeAnalysis
                 if (_collect && _frame?.Suspensions.TryGetValue(_terminators[terminator].Block, out var suspension) == true)
                     foreach (MirLocalId local in suspension.Live)
                     {
+                        // The lowered frame retains raw input storage only when
+                        // that input (or a transitive alias) survives suspension.
+                        // This is a result dependency, not a loan on every T*.
+                        if (_frame.Liveness.Output[_location.Block].Contains(local) && MirPointerLifetimeAnalysis.CarriesPointer(_locals[local].Type))
+                        {
+                            EnsureRawOrigins();
+                            var raw = _rawOrigins!.Read(new(local), _rawValues!.Output[_location.Block]);
+                            foreach (var root in RawRoots(raw, _locals[local].Type))
+                            {
+                                int? parameter = root.HandleParameter ?? (root.Kind == MirReferenceOriginKind.Parameter ? root.Ordinal : null);
+                                if (parameter is { } ordinal && _function.Symbol.Parameters[ordinal].Type is PointerTypeSymbol or IFieldStorageTypeSymbol)
+                                    _returns.Add(new(LifetimeDependencyKind.ParameterBorrow, ordinal,
+                                        _function.Symbol.Parameters[ordinal].Type is PointerTypeSymbol ? "" : "*"));
+                            }
+                        }
                         if (_locals[local].Kind == MirLocalKind.Receiver) _returns.Add(new(LifetimeDependencyKind.ReceiverBorrow));
                         foreach (ValueLifetimeDependency dependency in state.Values.GetValueOrDefault(local, MirLifetimeValue.Empty).Dependencies)
                             if (dependency.Input is { } input) _returns.Add(input);

@@ -6,6 +6,8 @@ namespace Xenon.Compiler.Mir.Analysis;
 
 public sealed partial class MirLifetimeAnalysis
 {
+    private Dictionary<MirLocalId, HashSet<MirReferenceOrigin>>? _automaticRawOwners;
+    private MirDataflowResult<ImmutableDictionary<MirPlace, MirInitialization>>? _rawOwnerMoves;
     private MirLifetimeValue BorrowOperand(MirOperand operand, MirLifetimeState state)
     {
         MirLifetimeValue value = Operand(operand, state);
@@ -18,6 +20,110 @@ public sealed partial class MirLifetimeAnalysis
         };
     }
 
+    private MirLifetimeValue RawStorage(MirOperand operand)
+    {
+        EnsureRawOrigins();
+        EnsureAutomaticRawOwners();
+        var rawState = _rawValues!.Before[_location];
+        var value = _rawOrigins!.Operand(operand, rawState);
+        return MirLifetimeValue.Union(RawRoots(value, operand.Type).Select(root =>
+        {
+            // A raw view does not keep a unique owner alive. Recover the
+            // current owning carrier from allocation provenance, including
+            // aliases created before an ownership move. Unknown heap pointers
+            // intentionally acquire no invented owner dependency.
+            var owners = _locals.Values.Where(local => local.Variable is not null &&
+                rawState.TryGetValue(local.Id, out var owned) &&
+                (UniqueLeaves(local.Type, owned, new(local.Id), []).Any(candidate =>
+                    SameAllocation(candidate.Root, root) && MayOwn(candidate.Place)) ||
+                 _automaticRawOwners!.TryGetValue(local.Id, out var cleaned) && cleaned.Any(candidate => SameAllocation(candidate, root)) &&
+                 owned.Roots.Any(candidate => SameAllocation(candidate, root))))
+                .Select(local => MirLifetimeValue.Local(_owners[local.Id])).ToArray();
+            if (owners.Length != 0) return MirLifetimeValue.Union(owners);
+            int? parameter = root.HandleParameter ?? (root.Kind == MirReferenceOriginKind.Parameter ? root.Ordinal : null);
+            if (parameter is { } ordinal)
+                return MirLifetimeValue.Empty with { Dependencies = [new(null, new(LifetimeDependencyKind.ParameterBorrow, ordinal,
+                    _function.Symbol.Parameters[ordinal].Type is PointerTypeSymbol ? "" : "*"))] };
+            return root.Kind == MirReferenceOriginKind.Local && _owners.TryGetValue(new(root.Ordinal), out var owner)
+                ? MirLifetimeValue.Local(owner) : MirLifetimeValue.Empty;
+        }));
+    }
+
+    private bool MayOwn(MirPlace place)
+    {
+        // Provenance intentionally survives moves so existing raw aliases keep
+        // their allocation identity. Ownership does not: use the established
+        // projection-sensitive move analysis to discard moved-from carriers.
+        _rawOwnerMoves ??= MirMoveAnalysis.Analyze(_function, _cancellation);
+        var initialization = _rawOwnerMoves.Before[_location].GetValueOrDefault(place);
+        return (initialization & MirInitialization.Initialized) != 0 &&
+            (initialization & MirInitialization.Reserved) == 0;
+    }
+
+    private void EnsureAutomaticRawOwners()
+    {
+        if (_automaticRawOwners is not null) return;
+        _automaticRawOwners = [];
+        if (!_function.HasScopeExitCleanup) return;
+        var copies = _function.Blocks.SelectMany(block => block.Statements).OfType<MirAssign>()
+            .Where(assign => assign.Destination.Projections.IsEmpty)
+            .ToLookup(assign => assign.Destination.Local);
+        foreach (var block in _function.Blocks.Where(block => _graph.Reachable.Contains(block.Id)))
+        {
+            if (block.Terminator is not MirIntrinsicCall { Intrinsic: MirIntrinsicKind.Free, Source.IsAutomaticCleanup: true } free ||
+                free.Arguments.Length == 0) continue;
+            var value = _rawOrigins!.Operand(free.Arguments[0], _rawValues!.Output[block.Id]);
+            foreach (var owner in Carriers(free.Arguments[0], []))
+            {
+                if (!_automaticRawOwners.TryGetValue(owner, out var roots)) _automaticRawOwners[owner] = roots = [];
+                roots.UnionWith(value.Roots);
+            }
+        }
+
+        IEnumerable<MirLocalId> Carriers(MirOperand operand, HashSet<MirLocalId> seen)
+        {
+            if (operand is not MirCopy { Place: { Projections.IsEmpty: true } place } || !seen.Add(place.Local)) yield break;
+            if (_locals[place.Local].Variable is not null)
+            {
+                yield return place.Local;
+                yield break;
+            }
+            foreach (var assignment in copies[place.Local])
+            {
+                MirOperand? input = assignment.Value switch { MirUse use => use.Operand, MirCast cast => cast.Operand, _ => null };
+                if (input is not null)
+                    foreach (var carrier in Carriers(input, seen)) yield return carrier;
+            }
+        }
+    }
+
+    private static bool SameAllocation(MirReferenceOrigin left, MirReferenceOrigin right) =>
+        left.Kind == right.Kind && left.Ordinal == right.Ordinal && left.HandleIdentity == right.HandleIdentity &&
+        left.AllocationSite == right.AllocationSite && left.AllocationContext == right.AllocationContext &&
+        left.PriorInstance == right.PriorInstance && left.Kind is not (MirReferenceOriginKind.Unknown or MirReferenceOriginKind.Static);
+
+    private static IEnumerable<(MirPlace Place, MirReferenceOrigin Root)> UniqueLeaves(TypeSymbol type,
+        MirReferenceValue value, MirPlace place, HashSet<TypeSymbol> seen)
+    {
+        while (type is LifetimeModifierTypeSymbol modifier)
+        {
+            type = modifier.ElementType;
+            place = place.Project(new MirLifetimeProjection());
+        }
+        if (type is UniqueTypeSymbol)
+        {
+            foreach (var root in value.Roots) yield return (place, root);
+        }
+        else if (type is IFieldStorageTypeSymbol structure && seen.Add(type))
+        {
+            foreach (var field in structure.AllInstanceFields)
+                foreach (var root in UniqueLeaves(field.Type, value.Project(field.Ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    place.Project(new MirFieldProjection(field)), seen))
+                    yield return root;
+            seen.Remove(type);
+        }
+    }
+
     private MirLifetimeValue Map(LifetimeDependency dependency, MirCall call, MirLifetimeState state,
         ImmutableArray<MirLifetimeValue> captures)
     {
@@ -27,7 +133,9 @@ public sealed partial class MirLifetimeAnalysis
                 Operand(call.Arguments[dependency.Ordinal], state).AsValue(
                     call.Arguments[dependency.Ordinal].Type is ReferenceTypeSymbol reference ? reference.ElementType : call.Arguments[dependency.Ordinal].Type),
             LifetimeDependencyKind.ParameterBorrow when dependency.Ordinal >= 0 && dependency.Ordinal < call.Arguments.Length =>
-                BorrowOperand(call.Arguments[dependency.Ordinal], state),
+                call.Arguments[dependency.Ordinal].Type is PointerTypeSymbol || dependency.FieldPath == "*" &&
+                    MirPointerLifetimeAnalysis.CarriesPointer(call.Arguments[dependency.Ordinal].Type) ? RawStorage(call.Arguments[dependency.Ordinal]) :
+                    BorrowOperand(call.Arguments[dependency.Ordinal], state),
             LifetimeDependencyKind.ReceiverValue when call.Receiver is MirCopy receiver => Read(receiver.Place.Project(new MirDerefProjection()), state),
             LifetimeDependencyKind.ReceiverBorrow when call.Receiver is { } receiver => BorrowOperand(receiver, state),
             LifetimeDependencyKind.CaptureValue or LifetimeDependencyKind.CaptureBorrow when dependency.Ordinal >= 0 && dependency.Ordinal < captures.Length =>

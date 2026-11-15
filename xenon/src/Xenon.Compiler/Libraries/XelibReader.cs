@@ -272,6 +272,13 @@ internal sealed class XelibSemanticReconstruction
         CompleteRelations();
         CompleteConstraints();
         CompleteConstantExpressions();
+        foreach (var record in _symbolRecords)
+            if (record.LifetimeSummary is { } summary)
+            {
+                if (Symbol(record.Id) is not FunctionSymbol function)
+                    throw XelibReader.Invalid("lifetime summary requires a function", _path);
+                XelibLifetimeSummary.Read(summary, function, ResolveType, ParseConstant);
+            }
     }
 
     public void ReconstructBodies(ImmutableArray<XelibBodyRecord> bodies,

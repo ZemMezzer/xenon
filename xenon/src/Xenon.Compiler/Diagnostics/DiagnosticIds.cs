@@ -261,4 +261,7 @@ public static class DiagnosticIds
     public const string InvalidVarContext = "XE2288";
     public const string UsingRequiresInitializer = "XE2289";
     public const string InvalidUsingContext = "XE2290";
+    public const string PointerUseAfterFree = "XE2291";
+    public const string PointerDoubleFree = "XE2292";
+    public const string DanglingPointerEscape = "XE2293";
 }

@@ -1,0 +1,7 @@
+{
+  "input": "main.xe",
+  "profiles": ["debug", "release"],
+  "compileOnly": true,
+  "expectedBuildSuccess": false,
+  "expectedDiagnostics": [{ "id": "XE2291", "message": "cannot use 'p': the operation requires a live object, but the referenced storage has been freed on a control-flow path" }]
+}

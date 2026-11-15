@@ -34,12 +34,12 @@ internal static class MirDiagnosticReporter
     }
 
     internal static void Report(DiagnosticBag diagnostics, MirFunction function, MirSourceInfo source,
-        string message, string id, string violation = "") =>
+        string message, string id, string violation = "", IEnumerable<RelatedDiagnosticLocation>? related = null) =>
         Report(diagnostics, function.Symbol, source.IsFallback ? TextLocation.None : source.Location,
-            message, id, source.IsFallback ? $"{violation}:origin={source.DiagnosticOriginId ?? source.OriginId}" : violation);
+            message, id, source.IsFallback ? $"{violation}:origin={source.DiagnosticOriginId ?? source.OriginId}" : violation, related);
 
     internal static void Report(DiagnosticBag diagnostics, FunctionSymbol function, TextLocation source,
-        string message, string id, string violation = "")
+        string message, string id, string violation = "", IEnumerable<RelatedDiagnosticLocation>? related = null)
     {
         var definition = MirDiagnosticSource.Definition(function);
         var location = MirDiagnosticSource.Resolve(function, source);
@@ -60,9 +60,9 @@ internal static class MirDiagnosticReporter
             if (entries.Any(entry => entry.Key == key && ReferenceEquals(entry.Function, function) && entry.CallSite == site)) continue;
             var primary = MirDiagnosticSource.IsSource(source) || definition.Locations.Any(MirDiagnosticSource.IsSource)
                 ? location : MirDiagnosticSource.Resolve(function, source, site);
-            var related = MirDiagnosticSource.IsSource(site)
+            var specialization = MirDiagnosticSource.IsSource(site)
                 ? new[] { new RelatedDiagnosticLocation(site, $"while specializing {MirDiagnosticSource.Context(function)}") } : [];
-            var diagnostic = diagnostics.ReportDiagnostic(primary, message, id, related);
+            var diagnostic = diagnostics.ReportDiagnostic(primary, message, id, specialization.Concat(related ?? []));
             entries.Add(new(key, function, site, diagnostic));
         }
     }

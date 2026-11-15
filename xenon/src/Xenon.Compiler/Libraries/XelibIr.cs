@@ -256,6 +256,7 @@ public sealed record XelibSymbolRecord
     public ImmutableArray<XelibReferenceFieldOriginRecord> ReferenceFieldOrigins { get; init; } = [];
     public ImmutableArray<XelibLifetimeDependencyRecord> ResultLifetimeDependencies { get; init; } = [];
     public ImmutableArray<XelibLifetimeStoreRecord> LifetimeStores { get; init; } = [];
+    public XelibLifetimeSummaryRecord? LifetimeSummary { get; init; }
     public bool IsAsync { get; init; }
     public bool ReturnsResumableOperation { get; init; }
     public bool CreatesResumableOperation { get; init; }

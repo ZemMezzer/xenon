@@ -608,6 +608,8 @@ internal sealed class XelibIrBuilder
             case TypeSymbol type: AddType(type); break;
             case FunctionSymbol function:
                 AddType(function.ReturnType);
+                if (function.MirLifetimeSummary is { } summary)
+                    foreach (var type in XelibLifetimeSummary.Types(summary)) AddType(type);
                 foreach (ParameterSymbol parameter in function.Parameters) AddType(parameter.Type);
                 foreach (CaptureVariableSymbol capture in function.LambdaCaptures)
                 {
@@ -772,6 +774,7 @@ internal sealed class XelibIrBuilder
             },
             FunctionSymbol value => record with
             {
+                LifetimeSummary = XelibLifetimeSummary.Write(value, TypeId),
                 ReturnTypeId = TypeId(value.ReturnType),
                 ParameterIds = value.Parameters.Select(Id).ToImmutableArray(),
                 TypeParameterIds = value.TypeParameters.Select(Id).ToImmutableArray(),

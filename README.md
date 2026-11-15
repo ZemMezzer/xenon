@@ -23,6 +23,19 @@ The repository contains the compiler, LLVM code generator, build driver, project
 - editor tooling through the built-in Language Server Protocol implementation.
 - first-class function values, explicit capture lists, ownership-aware closures, and raw function pointers for native callbacks.
 
+Raw pointers retain systems-language semantics: unknown provenance does not require
+annotations or runtime checks. The compiler rejects proven use-after-free,
+double-free and dangling escapes using MIR provenance and cleanup control flow.
+Zero-offset arithmetic retains object identity; available function bodies supply
+guarded argument-destruction summaries, including normal and exceptional exits.
+Conditional reconstruction, target selection and recursive call components retain
+their supported path relationships. Checked loans also consume invalidating call
+operations, and async results retain known borrowed storage dependencies.
+Optional versioned lifetime summaries preserve supported effects across `xelib`
+boundaries without requiring dependency bodies or changing the native ABI.
+See the [pointer lifetime analysis notes](xenon/src/Xenon.Compiler/Mir/Analysis/PointerLifetimes.md) for supported
+proofs, ownership behavior, review findings and remaining analysis limits.
+
 ## Quick start
 
 Download the archive for your platform from the **[latest GitHub release](https://github.com/ZemMezzer/xenon/releases/latest)**. On Windows, add the directory containing `xenon.exe` to your `PATH`. On macOS, add the directory containing the standalone `xenon` executable to your `PATH`, as described below.

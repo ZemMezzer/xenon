@@ -1041,7 +1041,7 @@ public sealed class OwnershipCompletionTests
     }
 
     [Fact]
-    public void Analyzer_RawPointerLifetimeAuthorityIsTypeBasedAcrossReturnsFieldsAndExternalValues()
+    public void Analyzer_RejectsProvenRawPointerLifetimeViolationsAcrossReturnsAndFields()
     {
         Compilation compilation = Create("""
             namespace Example;
@@ -1076,7 +1076,9 @@ public sealed class OwnershipCompletionTests
             }
             """);
 
-        Assert.Empty(compilation.Diagnostics);
+        Assert.True(compilation.HasErrors);
+        Assert.Equal(2, compilation.Diagnostics.Length);
+        Assert.All(compilation.Diagnostics, diagnostic => Assert.Equal(DiagnosticIds.PointerUseAfterFree, diagnostic.Id));
     }
 
     [Fact]

@@ -6022,16 +6022,18 @@ public sealed class NativeLinkerTests
                 Pair* first = &pairs[0]; Pair* last = first + 2;
                 if (last - first != cast<nint>(2) || last != &pairs[2]) return 8;
                 Cursor.Data = start;
-                int* prior = (*Cursor.Address())++;
-                if (Cursor.Calls != 1 || prior != start || Cursor.Data != start + 1) return 9;
-                Cursor cursor = Cursor(); cursor.Current += cast<sbyte>(1); cursor.Current -= 1;
-                if (Cursor.Data != start + 1) return 10;
-                cursor.Bits = cast<long>(1); cursor.Bits <<= 33;
-                if (cursor.Bits != (cast<long>(1) << 33)) return 11;
-                byte large = cast<byte>(255);
-                if ((start + large) - start != cast<nint>(255)) return 12;
-                if ((start - cast<sbyte>(-128)) - start != cast<nint>(128)) return 13;
-                return 42;
+                try {
+                    int* prior = (*Cursor.Address())++;
+                    if (Cursor.Calls != 1 || prior != start || Cursor.Data != start + 1) return 9;
+                    Cursor cursor = Cursor(); cursor.Current += cast<sbyte>(1); cursor.Current -= 1;
+                    if (Cursor.Data != start + 1) return 10;
+                    cursor.Bits = cast<long>(1); cursor.Bits <<= 33;
+                    if (cursor.Bits != (cast<long>(1) << 33)) return 11;
+                    byte large = cast<byte>(255);
+                    if ((start + large) - start != cast<nint>(255)) return 12;
+                    if ((start - cast<sbyte>(-128)) - start != cast<nint>(128)) return 13;
+                    return 42;
+                } finally { Cursor.Data = null; }
             }
             """, optimization));
     }

@@ -1,0 +1,9 @@
+namespace RawAliasBorrow;
+extern void Observe(readonly int& r);
+void Test() {
+    int value = 0;
+    int* alias = &value;
+    readonly int& borrow = value;
+    *alias = 42;
+    Observe(borrow);
+}

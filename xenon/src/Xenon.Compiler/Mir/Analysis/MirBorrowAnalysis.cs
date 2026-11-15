@@ -5,30 +5,40 @@ namespace Xenon.Compiler.Mir.Analysis;
 
 public enum MirBorrowCheck { Read, Mutation, Borrow, Move, Destruct, Free, DestructionOrder, AggregateEscape }
 public sealed record MirBorrowViolation(MirLocation Location, MirSourceInfo Source, MirBorrowCheck Check,
-    MirReferenceOrigin Place, MirLocalId Alias);
+    MirReferenceOrigin Place, MirLocalId Alias, string? Detail = null);
 
 /// <summary>Loan conflicts at MIR accesses, using reaching origins and backward storage liveness.</summary>
-public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken cancellation = default)
+public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken cancellation = default,
+    IReadOnlyDictionary<FunctionSymbol, MirLifetimeSummary>? lifetimeSummaries = null,
+    IReadOnlyDictionary<FunctionSymbol, MirReferenceValue>? pointerReturns = null)
 {
     private sealed record Loan(MirLocalId Alias, MirReferenceOrigin Place, bool IsReadonly);
     private readonly Dictionary<MirLocalId, MirLocal> _locals = function.Locals.ToDictionary(local => local.Id);
     public ImmutableArray<MirBorrowViolation> Check()
     {
-        var graph = MirFlowFacts.Graph(function, cancellation);
-        var origins = new MirReferenceOrigins(function);
+        var graph = MirFlowFacts.Graph(function, cancellation, precisePointerFacts: lifetimeSummaries is not null);
+        var origins = new MirReferenceOrigins(function, pointerLifetimes: lifetimeSummaries is not null, pointerReturns: pointerReturns,
+            checkedPointerIdentities: lifetimeSummaries is not null);
         var flow = MirDataflow.Solve(graph, origins, cancellation);
         var live = MirDataflow.Solve(graph, new MirLiveness(), cancellation);
         var violations = new HashSet<MirBorrowViolation>();
+        var facts = lifetimeSummaries is null ? null : new MirFlowFacts(precisePointerFacts: true);
+        var feasible = facts is null ? null : MirDataflow.Solve(graph, facts, cancellation);
         foreach (MirBasicBlock block in function.Blocks.Where(block => graph.Reachable.Contains(block.Id)))
         {
             cancellation.ThrowIfCancellationRequested();
+            if (lifetimeSummaries is not null && block.Terminator is MirCall effectCall)
+            {
+                var location = new MirLocation(block.Id, block.Statements.Length);
+                CheckCall(effectCall, flow.Output[block.Id], location, Active(flow.Output[block.Id], live.Before[location]).ToArray(), []);
+            }
             for (int index = 0; index < block.Statements.Length; index++)
             {
                 var location = new MirLocation(block.Id, index);
                 if (block.Statements[index] is not MirAssign assign) continue;
                 var state = flow.Before[location];
                 var loans = Active(state, live.Before[location]).ToArray();
-                if (assign.Value is MirBorrow { Kind: not MirBorrowKind.Raw } borrow)
+                if (MirLifetimeOperations.Of(assign) == MirLifetimeTransition.BorrowCreation && assign.Value is MirBorrow borrow)
                     Access(origins.Address(borrow.Place, state), origins.ThroughAliases(borrow.Place, state),
                         borrow.Kind == MirBorrowKind.Shared, MirBorrowCheck.Borrow, assign.Source, location, loans);
                 else if (assign.IsSemanticRead)
@@ -94,6 +104,9 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
                     Access(value.Roots, value.Aliases.Union(value.Lineage), method.IsReadonly,
                         method.IsReadonly ? MirBorrowCheck.Read : MirBorrowCheck.Mutation, call.Source, location, loans);
                 }
+                // The established reference-argument checks remain in their
+                // original pass; receiver accesses also need precise raw aliases.
+                if (lifetimeSummaries is not null) continue;
                 var arguments = call.Arguments.SelectMany((operand, index) =>
                 {
                     var value = origins.Operand(operand, state);
@@ -116,8 +129,71 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
                             }
             }
         }
-        violations.UnionWith(MirReferenceSafety.Check(function, flow, origins));
+        if (lifetimeSummaries is null) violations.UnionWith(MirReferenceSafety.Check(function, flow, origins));
         return [.. violations];
+
+        void CheckCall(MirCall context, ImmutableDictionary<MirLocalId, MirReferenceValue> state, MirLocation location,
+            Loan[] loans, HashSet<FunctionSymbol> visiting, MirReferenceValue? callable = null)
+        {
+            foreach (var call in origins.BoundCalls(context, state, callable))
+            {
+                var callee = MirPointerLifetimeAnalysis.DirectCallee(call);
+                if (callee is not null && !visiting.Add(callee))
+                {
+                    Access(origins.CallablePayload(callable ?? origins.Operand(context.Callee, state), state), [], false,
+                        MirBorrowCheck.Borrow, context.Source, location, loans, detail: "recursive callable coverage");
+                    continue;
+                }
+                MirLifetimeSummary? summary = null;
+                if (callee is not null) lifetimeSummaries!.TryGetValue(callee, out summary);
+                string name = callee?.FullName ?? "indirect call";
+                foreach (var effect in (summary?.Effects ?? []).Where(effect => effect.Phase == MirLifetimeEffectPhase.Operation &&
+                    (effect.InvalidatesBorrow || effect.Kind is MirLifetimeTransition.PlacementReconstruction or MirLifetimeTransition.StorageRead))
+                    .OrderBy(MirPointerLifetimeAnalysis.EffectKey, StringComparer.Ordinal))
+                {
+                    if (!Possible(effect.Guard)) continue;
+                    var value = origins.MapPointerEffect(call.Arguments[effect.Parameter], effect, state);
+                    var argument = origins.Operand(call.Arguments[effect.Parameter], state);
+                    bool read = effect.Kind == MirLifetimeTransition.StorageRead;
+                    Access(value.Roots, call.Arguments[effect.Parameter].Type is ReferenceTypeSymbol ? argument.Aliases.Union(argument.Lineage) : [], read,
+                        read ? MirBorrowCheck.Read : effect.Storage ? MirBorrowCheck.Free :
+                        effect.Kind == MirLifetimeTransition.PlacementReconstruction ? MirBorrowCheck.Mutation : MirBorrowCheck.Destruct,
+                        context.Source, location, loans, detail: name);
+                }
+                foreach (var uncertainty in MirLifetimeOperations.Coverage(call, summary))
+                {
+                    if (!Possible(uncertainty.Guard)) continue;
+                    var operand = call.Arguments[uncertainty.Parameter];
+                    var value = origins.MapPointerParameter(operand, uncertainty.Path, state);
+                    if (uncertainty.Reason == "callable-invocation" || value.CallableTargets.GetValueOrDefault("", []).Count != 0)
+                    {
+                        if (value.CallableTargets.Count != 0)
+                            CheckCall(origins.DeferredInvocation(context, operand), state, location, loans, visiting, value);
+                        else Access(origins.CallablePayload(value, state), [], false, MirBorrowCheck.Borrow,
+                            context.Source, location, loans, detail: name + ": unknown callable payload");
+                        continue;
+                    }
+                    var argument = origins.Operand(operand, state);
+                    IEnumerable<MirReferenceOrigin> targets = value.CallableTargets.Count != 0 ? origins.CallablePayload(value, state) :
+                        value.Roots.Concat(value.Fields.Values.SelectMany(roots => roots));
+                    if (uncertainty.UnknownOffset) targets = targets.Select(root => root with { UnknownObjectOffset = true });
+                    bool read = uncertainty.Transition == MirLifetimeTransition.StorageRead;
+                    Access(targets, operand.Type is ReferenceTypeSymbol ? argument.Aliases.Union(argument.Lineage) : [], read,
+                        read ? MirBorrowCheck.Read : MirBorrowCheck.Borrow, context.Source, location, loans,
+                        detail: $"{name}: {(summary?.IsImported == true ? "imported contract, " : "")}{uncertainty.Reason} (parameter {uncertainty.Parameter}, path '{uncertainty.Path}')");
+                }
+                if (callee is not null) visiting.Remove(callee);
+
+                bool Possible(MirPointerParameterGuard? guard)
+                {
+                    var possible = feasible!.Output[location.Block];
+                    for (; guard is not null && possible.Reachable; guard = guard.Next)
+                        possible = guard.Operator is { } op ? facts!.AssumeComparison(call.Arguments[guard.Parameter], op, guard.Constant!, guard.Value, possible) :
+                            facts!.Assume(call.Arguments[guard.Parameter], guard.Value, possible);
+                    return possible.Reachable;
+                }
+            }
+        }
 
         IEnumerable<Loan> Active(ImmutableDictionary<MirLocalId, MirReferenceValue> state, ImmutableHashSet<MirLocalId> alive)
         {
@@ -139,7 +215,7 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
             }
         }
         void Access(IEnumerable<MirReferenceOrigin> places, ImmutableHashSet<MirLocalId> through, bool shared,
-            MirBorrowCheck check, MirSourceInfo source, MirLocation location, Loan[] loans, HashSet<MirReferenceOrigin>? arguments = null)
+            MirBorrowCheck check, MirSourceInfo source, MirLocation location, Loan[] loans, HashSet<MirReferenceOrigin>? arguments = null, string? detail = null)
         {
             foreach (var place in places.Where(Tracked))
             {
@@ -147,7 +223,7 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
                     !(shared && loan.IsReadonly) && Overlaps(place, loan.Place) &&
                     // The argument's own ephemeral borrow is consumed by this call.
                     !(arguments is not null && _locals[loan.Alias].Kind == MirLocalKind.Temporary && arguments.Contains(loan.Place)));
-                if (conflict is not null) violations.Add(new(location, source, check, place with { Authority = MirLifetimeAuthority.Owner, IsReadonly = false }, conflict.Alias));
+                if (conflict is not null) violations.Add(new(location, source, check, place with { Authority = MirLifetimeAuthority.Owner, IsReadonly = false }, conflict.Alias, detail));
             }
         }
     }
@@ -188,7 +264,14 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
         if (left.Kind != right.Kind) return false;
         if (left.Kind is MirReferenceOriginKind.RawPointee or MirReferenceOriginKind.UniquePointee or MirReferenceOriginKind.SharedPointee)
         {
-            if (left.PointeeType is not null && right.PointeeType is not null && !TypeIdentity.AreSame(left.PointeeType, right.PointeeType)) return false;
+            // One aggregate factory result can contain several allocations with
+            // the same caller carrier identity. Concrete allocation sites and
+            // contexts distinguish them; opaque handles retain may-alias rules.
+            if (left.AllocationSite is not null && right.AllocationSite is not null &&
+                (left.AllocationSite != right.AllocationSite || left.AllocationContext != right.AllocationContext)) return false;
+            // A cast changes the access type, not the allocation identity.
+            if (left.HandleIdentity != right.HandleIdentity && left.PointeeType is not null && right.PointeeType is not null &&
+                !TypeIdentity.AreSame(left.PointeeType, right.PointeeType)) return false;
             if (left.Kind == MirReferenceOriginKind.UniquePointee &&
                 left.SharedOwner is { } leftOwner && right.SharedOwner is { } rightOwner)
             {
@@ -202,6 +285,10 @@ public sealed class MirBorrowAnalysis(MirFunction function, CancellationToken ca
                 !(left.Kind == MirReferenceOriginKind.SharedPointee && (!left.IsFresh || !right.IsFresh))) return false;
         }
         else if (left.Ordinal != right.Ordinal) return false;
+        // Relative raw arithmetic may reach another subobject (including one
+        // before the current pointer). It retains allocation identity, but no
+        // field/index path can prove disjointness within that allocation.
+        if (left.UnknownObjectOffset || right.UnknownObjectOffset) return true;
         string[] a = left.Path.Split('/', StringSplitOptions.RemoveEmptyEntries), b = right.Path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         return a.Zip(b).All(pair => pair.First == "*" || pair.Second == "*" || pair.First == pair.Second);
     }

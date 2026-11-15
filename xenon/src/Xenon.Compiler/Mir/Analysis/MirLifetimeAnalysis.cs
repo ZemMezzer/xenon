@@ -18,6 +18,8 @@ public sealed partial class MirLifetimeAnalysis : IMirDataflowAnalysis<MirLifeti
     private readonly MirDataflowResult<ImmutableDictionary<MirLocalId, MirStorageOrigin>> _addresses;
     private readonly MirControlFlow _graph;
     private readonly MirFrameAnalysis? _frame;
+    private MirReferenceOrigins? _rawOrigins;
+    private MirDataflowResult<ImmutableDictionary<MirLocalId, MirReferenceValue>>? _rawValues;
     private readonly CancellationToken _cancellation;
     private readonly HashSet<LifetimeDependency> _returns = [];
     private readonly HashSet<LifetimeStore> _stores = [];
@@ -67,6 +69,19 @@ public sealed partial class MirLifetimeAnalysis : IMirDataflowAnalysis<MirLifeti
         _collect = false;
         return flow;
     }
+
+    private void EnsureRawOrigins()
+    {
+        if (_rawOrigins is not null) return;
+        var returns = _function.Blocks.Select(block => block.Terminator).OfType<MirCall>()
+            .Select(call => call.Callee).OfType<MirFunctionOperand>().Select(callee => callee.Function).Distinct()
+            .Where(callee => callee.MirPointerReturnSummary is not null).ToDictionary(callee => callee, callee => callee.MirPointerReturnSummary!);
+        _rawOrigins = new(_function, pointerLifetimes: true, pointerReturns: returns, symbolicPointerParameters: true);
+        _rawValues = MirDataflow.Solve(_graph, _rawOrigins, _cancellation);
+    }
+
+    private IEnumerable<MirReferenceOrigin> RawRoots(MirReferenceValue value, TypeSymbol type) =>
+        type is PointerTypeSymbol ? value.Roots : value.Fields.Values.SelectMany(roots => roots);
 
     public MirLifetimeState Boundary(MirControlFlow graph, MirBasicBlock block)
     {

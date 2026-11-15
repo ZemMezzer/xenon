@@ -1,0 +1,32 @@
+[
+  {
+    "Suite": "Compiler",
+    "Total": 4686,
+    "Executed": 4686,
+    "Passed": 4686,
+    "Failed": 0,
+    "Skipped": 0,
+    "ExitCode": 0,
+    "WallSeconds": 1256.2557092
+  },
+  {
+    "Suite": "EndToEnd",
+    "Total": 294,
+    "Executed": 294,
+    "Passed": 294,
+    "Failed": 0,
+    "Skipped": 0,
+    "ExitCode": 0,
+    "WallSeconds": 1922.4312348
+  },
+  {
+    "Suite": "LanguageServer",
+    "Total": 173,
+    "Executed": 173,
+    "Passed": 173,
+    "Failed": 0,
+    "Skipped": 0,
+    "ExitCode": 0,
+    "WallSeconds": 8.9623747
+  }
+]

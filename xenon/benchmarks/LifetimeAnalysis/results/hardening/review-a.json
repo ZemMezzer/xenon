@@ -1,0 +1,124 @@
+{
+  "review": "A scoped final repeat",
+  "utc": "2026-11-15T04:24:26.8359557Z",
+  "dll": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.Compiler\\Release\\net10.0\\Xenon.Compiler.dll",
+  "sha256": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+  "scope": "Existing confirmed owner, capture, read and missing invoker contract cases only; no compiler edits or builds",
+  "passed": 11,
+  "total": 11,
+  "cases": [
+    {
+      "name": "owner_transferred",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "owner_not_transferred",
+      "passed": true,
+      "expected": [
+        "XE2284",
+        "XE2285"
+      ],
+      "diagnostics": [
+        {
+          "id": "XE2284",
+          "message": "value assigned to 'task' depends on local 'p', which does not outlive the destination"
+        },
+        {
+          "id": "XE2285",
+          "message": "resumable operation borrowing 'p' must complete before that owner is destroyed; await the operation on every exit"
+        }
+      ]
+    },
+    {
+      "name": "closure_write",
+      "passed": true,
+      "expected": [
+        "XE2232"
+      ],
+      "diagnostics": [
+        {
+          "id": "XE2232",
+          "message": "cannot call 'T.<lambda_BA4A3EB96F75D43C0AC1B88ED0AD341C99C58F1F43D74C79EEF912968949A8D5_93>$capture_effects': it mutates storage and invalidates the active checked borrow through 'r'"
+        }
+      ]
+    },
+    {
+      "name": "closure_read_shared",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "closure_read_exclusive",
+      "passed": true,
+      "expected": [
+        "XE2231"
+      ],
+      "diagnostics": [
+        {
+          "id": "XE2231",
+          "message": "cannot call 'T.<lambda_47AF4EF04832932BA99D111BD81FDCB5384A5931E4A0C021A18B87E2D2724A04_92>$capture_effects': it may read storage exclusively borrowed through 'r'"
+        }
+      ]
+    },
+    {
+      "name": "ordinary_read_shared",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "ordinary_read_exclusive",
+      "passed": true,
+      "expected": [
+        "XE2231"
+      ],
+      "diagnostics": [
+        {
+          "id": "XE2231",
+          "message": "cannot call 'T.Read': it may read storage exclusively borrowed through 'r'"
+        }
+      ]
+    },
+    {
+      "name": "raw_capture_outside_mutation",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "raw_capture_scope_escape",
+      "passed": true,
+      "expected": [
+        "XE2293"
+      ],
+      "diagnostics": [
+        {
+          "id": "XE2293",
+          "message": "cannot return 'pointer': pointer refers to storage destroyed before the function returns on a control-flow path"
+        }
+      ]
+    },
+    {
+      "name": "unknown_invoker_reader",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "unknown_invoker_writer",
+      "passed": true,
+      "expected": [
+        "XE2232"
+      ],
+      "diagnostics": [
+        {
+          "id": "XE2232",
+          "message": "cannot call 'Test.<lambda_B3767139CA700023A340E198D493CF837D351D86D7DAC2ECAEA24A1FF65F2E35_106>$capture_effects': it mutates storage and invalidates the active checked borrow through 'r'"
+        }
+      ]
+    }
+  ]
+}

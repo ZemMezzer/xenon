@@ -1,0 +1,17 @@
+namespace BorrowHardening;
+struct H { public int* P; public int* Q; }
+int Observe(readonly int& value) { return value; }
+void Write(int* value) { *value = 21; }
+int Main() {
+    H* h = new H();
+    h->P = new int(20);
+    h->Q = new int(0);
+    readonly int& borrow = *h->P;
+    Write(h->Q);
+    int sum = Observe(borrow) + *h->Q;
+    *h->P = 42;
+    delete(h->P);
+    delete(h->Q);
+    delete(h);
+    return sum + 1;
+}

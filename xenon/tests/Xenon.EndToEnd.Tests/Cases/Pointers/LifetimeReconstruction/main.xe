@@ -1,0 +1,20 @@
+namespace LifetimeReconstruction;
+
+void Rebuild(int* p) { *p = 14; }
+void Wrapper(int* p) { Rebuild(p); }
+void Reset(int* p, bool restore) { destruct(*p); if (restore) Wrapper(p); }
+void Choose(int* a, int* b, bool first) { int* selected; if (first) selected = a; else selected = b; delete(selected); }
+void Recursive(int* p, int count) { delete(p); if (count > 0) Recursive(new int(), count - 1); }
+
+int Main() {
+    int* p = new int();
+    Reset(p, true);
+    int sum = *p;
+    Choose(new int(), p, true);
+    sum += *p;
+    destruct(*p);
+    Wrapper(p);
+    sum += *p;
+    Recursive(p, 2);
+    return sum;
+}

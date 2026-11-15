@@ -1,0 +1,68 @@
+[
+  {
+    "phase": "CFG",
+    "calls": 364,
+    "ms": 208.758,
+    "allocatedBytes": 139362416
+  },
+  {
+    "phase": "Dataflow:MirStorageOrigins",
+    "calls": 21,
+    "ms": 124.7496,
+    "allocatedBytes": 9839144
+  },
+  {
+    "phase": "Dataflow:MirFlowFacts",
+    "calls": 66,
+    "ms": 728.9746,
+    "allocatedBytes": 105873448
+  },
+  {
+    "phase": "Dataflow:MirMoveAnalysis",
+    "calls": 11,
+    "ms": 225.1005,
+    "allocatedBytes": 8214712
+  },
+  {
+    "phase": "Dataflow:MirLifetimeAnalysis",
+    "calls": 10,
+    "ms": 48.4469,
+    "allocatedBytes": 3069392
+  },
+  {
+    "phase": "Dataflow:MirReferenceOrigins",
+    "calls": 15,
+    "ms": 262.4037,
+    "allocatedBytes": 35870848
+  },
+  {
+    "phase": "SummarizeEffects",
+    "calls": 10,
+    "ms": 17159.3274,
+    "allocatedBytes": 8257602592
+  },
+  {
+    "phase": "Dataflow:MirPointerLifetimeAnalysis",
+    "calls": 5,
+    "ms": 115.5029,
+    "allocatedBytes": 24613664
+  },
+  {
+    "phase": "PointerAll",
+    "calls": 2,
+    "ms": 17908.4385,
+    "allocatedBytes": 8377857736
+  },
+  {
+    "phase": "SupportedPath",
+    "calls": 520,
+    "ms": 9929.7714,
+    "allocatedBytes": 6103995176
+  },
+  {
+    "phase": "Dataflow:DeathWitness",
+    "calls": 261,
+    "ms": 6844.7516,
+    "allocatedBytes": 1997633584
+  }
+]

@@ -1,0 +1,376 @@
+[
+  {
+    "scenario": "frees10",
+    "before": {
+      "wallMs": 53.2996,
+      "minMs": 51.0616,
+      "maxMs": 57.1487,
+      "cpuMs": 46.875,
+      "allocatedBytes": 11167848,
+      "peakWorkingSetBytes": 70520832.0,
+      "shape": {
+        "blocks": 53,
+        "statements": 64,
+        "destructionEffects": 20
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 42.8653,
+      "minMs": 39.5273,
+      "maxMs": 45.7253,
+      "cpuMs": 31.25,
+      "allocatedBytes": 8919424,
+      "peakWorkingSetBytes": 68435968.0,
+      "shape": {
+        "blocks": 53,
+        "statements": 64,
+        "destructionEffects": 20
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 1.2434206689326799,
+    "allocationRatio": 1.2520817487766027,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "frees50",
+    "before": {
+      "wallMs": 354.0442,
+      "minMs": 337.5711,
+      "maxMs": 492.908,
+      "cpuMs": 500,
+      "allocatedBytes": 131683912,
+      "peakWorkingSetBytes": 87547904.0,
+      "shape": {
+        "blocks": 213,
+        "statements": 264,
+        "destructionEffects": 100
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 255.3012,
+      "minMs": 225.4641,
+      "maxMs": 398.7978,
+      "cpuMs": 281.25,
+      "allocatedBytes": 49862416,
+      "peakWorkingSetBytes": 82882560.0,
+      "shape": {
+        "blocks": 213,
+        "statements": 264,
+        "destructionEffects": 100
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 1.3867706066403134,
+    "allocationRatio": 2.6409452762978836,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "frees130",
+    "before": {
+      "wallMs": 1960.5094,
+      "minMs": 1722.7336,
+      "maxMs": 1989.9807,
+      "cpuMs": 2515.625,
+      "allocatedBytes": 1078457376,
+      "peakWorkingSetBytes": 112041984.0,
+      "shape": {
+        "blocks": 533,
+        "statements": 664,
+        "destructionEffects": 260
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 477.6121,
+      "minMs": 416.3296,
+      "maxMs": 782.3145,
+      "cpuMs": 703.125,
+      "allocatedBytes": 184600224,
+      "peakWorkingSetBytes": 105095168.0,
+      "shape": {
+        "blocks": 533,
+        "statements": 664,
+        "destructionEffects": 260
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 4.1048151837024225,
+    "allocationRatio": 5.842123875212632,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "frees250",
+    "before": {
+      "wallMs": 12687.9972,
+      "minMs": 12466.8477,
+      "maxMs": 12943.3664,
+      "cpuMs": 13062.5,
+      "allocatedBytes": 5624269336,
+      "peakWorkingSetBytes": 160059392.0,
+      "shape": {
+        "blocks": 1013,
+        "statements": 1264,
+        "destructionEffects": 500
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 1282.8301,
+      "minMs": 1207.5305,
+      "maxMs": 1403.9119,
+      "cpuMs": 1750,
+      "allocatedBytes": 524323112,
+      "peakWorkingSetBytes": 141795328.0,
+      "shape": {
+        "blocks": 1013,
+        "statements": 1264,
+        "destructionEffects": 500
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 9.890629476187065,
+    "allocationRatio": 10.726724051027528,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "frees500",
+    "before": {
+      "wallMs": 131423.2643,
+      "minMs": 130628.5866,
+      "maxMs": 139922.0227,
+      "cpuMs": 133703.125,
+      "allocatedBytes": 34526123696,
+      "peakWorkingSetBytes": 349462528.0,
+      "shape": {
+        "blocks": 2013,
+        "statements": 2514,
+        "destructionEffects": 1000
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 5053.1252,
+      "minMs": 4931.5826,
+      "maxMs": 5242.6057,
+      "cpuMs": 5437.5,
+      "allocatedBytes": 1721813608,
+      "peakWorkingSetBytes": 272273408.0,
+      "shape": {
+        "blocks": 2013,
+        "statements": 2514,
+        "destructionEffects": 1000
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 26.008313488848447,
+    "allocationRatio": 20.05218424083915,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "frees1000",
+    "before": {
+      "wallMs": 1079608.6548,
+      "minMs": 1072661.7305,
+      "maxMs": 1106783.9243,
+      "cpuMs": 1102203.125,
+      "allocatedBytes": 247861658072,
+      "peakWorkingSetBytes": 1098457088.0,
+      "shape": {
+        "blocks": 4013,
+        "statements": 5014,
+        "destructionEffects": 2000
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 21076.5524,
+      "minMs": 20810.6237,
+      "maxMs": 21145.0132,
+      "cpuMs": 21515.625,
+      "allocatedBytes": 6169402496,
+      "peakWorkingSetBytes": 717099008.0,
+      "shape": {
+        "blocks": 4013,
+        "statements": 5014,
+        "destructionEffects": 2000
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 51.22320929489398,
+    "allocationRatio": 40.175958406458946,
+    "baselineConcurrent": true
+  },
+  {
+    "scenario": "chain70",
+    "before": {
+      "wallMs": 145.3306,
+      "minMs": 144.5571,
+      "maxMs": 145.3803,
+      "cpuMs": 171.875,
+      "allocatedBytes": 32268504,
+      "peakWorkingSetBytes": 74903552.0,
+      "shape": {
+        "blocks": 224,
+        "statements": 157,
+        "destructionEffects": 140
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 135.216,
+      "minMs": 128.2671,
+      "maxMs": 140.7787,
+      "cpuMs": 140.625,
+      "allocatedBytes": 32454864,
+      "peakWorkingSetBytes": 74555392.0,
+      "shape": {
+        "blocks": 224,
+        "statements": 157,
+        "destructionEffects": 140
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 1.0748032777186132,
+    "allocationRatio": 0.9942578714857656,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "nested",
+    "before": {
+      "wallMs": 34.0037,
+      "minMs": 32.5465,
+      "maxMs": 37.8581,
+      "cpuMs": 31.25,
+      "allocatedBytes": 7681400,
+      "peakWorkingSetBytes": 67473408.0,
+      "shape": {
+        "blocks": 24,
+        "statements": 29,
+        "destructionEffects": 9
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 34.0524,
+      "minMs": 32.7959,
+      "maxMs": 39.0022,
+      "cpuMs": 31.25,
+      "allocatedBytes": 7726552,
+      "peakWorkingSetBytes": 67686400.0,
+      "shape": {
+        "blocks": 24,
+        "statements": 29,
+        "destructionEffects": 9
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 0.998569851170549,
+    "allocationRatio": 0.9941562549504618,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "recursive",
+    "before": {
+      "wallMs": 21.4674,
+      "minMs": 19.3628,
+      "maxMs": 25.3067,
+      "cpuMs": 15.625,
+      "allocatedBytes": 4627872,
+      "peakWorkingSetBytes": 64090112.0,
+      "shape": {
+        "blocks": 24,
+        "statements": 26,
+        "destructionEffects": 8
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 21.0085,
+      "minMs": 20.0354,
+      "maxMs": 25.4031,
+      "cpuMs": 15.625,
+      "allocatedBytes": 4649272,
+      "peakWorkingSetBytes": 64323584.0,
+      "shape": {
+        "blocks": 24,
+        "statements": 26,
+        "destructionEffects": 8
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 1.0218435395197183,
+    "allocationRatio": 0.9953971288408163,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "deep",
+    "before": {
+      "wallMs": 12.3018,
+      "minMs": 11.7569,
+      "maxMs": 15.7894,
+      "cpuMs": 15.625,
+      "allocatedBytes": 3106808,
+      "peakWorkingSetBytes": 60731392.0,
+      "shape": {
+        "blocks": 13,
+        "statements": 23,
+        "destructionEffects": 0
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 12.5504,
+      "minMs": 11.2316,
+      "maxMs": 16.1901,
+      "cpuMs": 15.625,
+      "allocatedBytes": 3074848,
+      "peakWorkingSetBytes": 60874752.0,
+      "shape": {
+        "blocks": 13,
+        "statements": 23,
+        "destructionEffects": 0
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 0.9801918663946966,
+    "allocationRatio": 1.0103940097201554,
+    "baselineConcurrent": false
+  },
+  {
+    "scenario": "async",
+    "before": {
+      "wallMs": 73.6668,
+      "minMs": 69.2813,
+      "maxMs": 92.2952,
+      "cpuMs": 78.125,
+      "allocatedBytes": 16001072,
+      "peakWorkingSetBytes": 74539008.0,
+      "shape": {
+        "blocks": 118,
+        "statements": 124,
+        "destructionEffects": 0
+      },
+      "sampleCount": 3
+    },
+    "after": {
+      "wallMs": 64.0987,
+      "minMs": 63.5594,
+      "maxMs": 67.2724,
+      "cpuMs": 62.5,
+      "allocatedBytes": 16045528,
+      "peakWorkingSetBytes": 72921088.0,
+      "shape": {
+        "blocks": 118,
+        "statements": 124,
+        "destructionEffects": 0
+      },
+      "sampleCount": 3
+    },
+    "wallRatio": 1.149271358077465,
+    "allocationRatio": 0.9972293837884301,
+    "baselineConcurrent": false
+  }
+]

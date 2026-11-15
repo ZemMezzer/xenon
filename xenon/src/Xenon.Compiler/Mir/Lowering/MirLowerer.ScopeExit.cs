@@ -5,10 +5,12 @@ namespace Xenon.Compiler.Mir.Lowering;
 public sealed partial class MirLowerer
 {
     private bool _hasScopeExitCleanup;
+    private readonly HashSet<BoundExpression> _scopeExitDeletes = new(ReferenceEqualityComparer.Instance);
 
     private void ScopeExitCleanup(BoundBlockStatement block, BoundExpression cleanup)
     {
         _hasScopeExitCleanup = true;
+        _scopeExitDeletes.Add(Unwrap(cleanup));
         Block outerUnwind = _unwindTarget, outerRethrow = _rethrowTarget;
         Block failure = NewBlock();
         Block rethrow = ReferenceEquals(outerUnwind, outerRethrow) ? failure : NewBlock();

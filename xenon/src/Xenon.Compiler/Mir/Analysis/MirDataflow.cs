@@ -51,8 +51,10 @@ public static class MirDataflow
         return postorder;
     }
     public static MirDataflowResult<T> Solve<T>(MirControlFlow graph, IMirDataflowAnalysis<T> analysis,
-        CancellationToken cancellation = default)
+        CancellationToken cancellation = default, bool captureLocations = true)
     {
+        using var profile = MirAnalysisProfile.Start(analysis.GetType().Name, graph.Function);
+        long iterations = 0;
         var input = graph.Blocks.Keys.ToDictionary(id => id, _ => analysis.Bottom);
         var output = graph.Blocks.Keys.ToDictionary(id => id, _ => analysis.Bottom);
         bool forward = analysis.Direction == MirDataflowDirection.Forward;
@@ -63,6 +65,7 @@ public static class MirDataflow
         var queued = order.ToHashSet();
         while (queue.TryDequeue(out MirBlockId id, out _))
         {
+            iterations++;
             cancellation.ThrowIfCancellationRequested();
             queued.Remove(id);
             MirBasicBlock block = graph.Blocks[id];
@@ -87,8 +90,10 @@ public static class MirDataflow
 
         var before = ImmutableDictionary.CreateBuilder<MirLocation, T>();
         var after = ImmutableDictionary.CreateBuilder<MirLocation, T>();
-        foreach (MirBasicBlock block in graph.Function.Blocks.Where(block => graph.Reachable.Contains(block.Id)))
-            Transfer(block, forward ? input[block.Id] : output[block.Id], before, after);
+        if (captureLocations)
+            foreach (MirBasicBlock block in graph.Function.Blocks.Where(block => graph.Reachable.Contains(block.Id)))
+                Transfer(block, forward ? input[block.Id] : output[block.Id], before, after);
+        if (profile is not null) profile.Iterations = iterations;
         return new(graph, input.ToImmutableDictionary(), output.ToImmutableDictionary(), before.ToImmutable(), after.ToImmutable());
 
         T Join(IEnumerable<T> states)

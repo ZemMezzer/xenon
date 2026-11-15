@@ -1,0 +1,94 @@
+{
+  "compilerSha256": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+  "sourceHashesUnchanged": true,
+  "suites": [
+    {
+      "suite": "Compiler",
+      "total": 4814,
+      "executed": 4814,
+      "passed": 4814,
+      "failed": 0,
+      "notExecuted": 0,
+      "wallMs": 968367.1706,
+      "exitCode": 0
+    },
+    {
+      "suite": "EndToEnd",
+      "total": 298,
+      "executed": 298,
+      "passed": 298,
+      "failed": 0,
+      "notExecuted": 0,
+      "wallMs": 1487761.789,
+      "exitCode": 0
+    },
+    {
+      "suite": "LanguageServer",
+      "total": 173,
+      "executed": 173,
+      "passed": 173,
+      "failed": 0,
+      "notExecuted": 0,
+      "wallMs": 10037.254,
+      "exitCode": 0
+    },
+    {
+      "suite": "FocusedDebug",
+      "total": 475,
+      "executed": 475,
+      "passed": 475,
+      "failed": 0,
+      "notExecuted": 0,
+      "wallMs": 30109.4856,
+      "exitCode": 0
+    }
+  ],
+  "uniqueFullSuitePassed": 5285.0,
+  "releaseCompilerCopies": [
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.Cli\\Release\\net10.0\\win-x64\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.CodeGen.LLVM\\Release\\net10.0\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.Compiler\\Release\\net10.0\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.Compiler.Tests\\Release\\net10.0\\win-x64\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.Driver\\Release\\net10.0\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.EndToEnd.Tests\\Release\\net10.0\\win-x64\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.LanguageServer\\Release\\net10.0\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.LanguageServer.Tests\\Release\\net10.0\\win-x64\\Xenon.Compiler.dll"
+    },
+    {
+      "Algorithm": "SHA256",
+      "Hash": "BAB59BF65A441214AB4DCF1ED87BF98E1C2E107214C8EA1D6D86EDE3C22A3AB7",
+      "Path": "D:\\Projects\\SoloProjects\\Xenon\\xenon.lang\\build\\local\\xenon\\bin\\Xenon.ProjectSystem\\Release\\net10.0\\Xenon.Compiler.dll"
+    }
+  ]
+}

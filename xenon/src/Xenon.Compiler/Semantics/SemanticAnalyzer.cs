@@ -200,6 +200,11 @@ internal sealed class SemanticAnalyzer
         if (!_diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
             ValueLifetimeAnalyzer.Analyze(functions.ToImmutable(), _genericImplementations.ToImmutable(),
                 _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
+        // Allocation proofs require well-typed MIR. Preserve primary binding,
+        // move and borrow errors rather than lowering an already-invalid program
+        // again or reporting cascading pointer failures for the same violation.
+        if (!_diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+            MirPointerLifetimeDiagnostics.Analyze(ownershipBodies, _typeFactory, _diagnostics, _expressionLocations, _cancellationToken);
 
         RecordDeclarations(_globalNamespace);
         return new SemanticModel(_globalNamespace, _typeFactory, functions.ToImmutable(), _diagnostics.ToImmutableArray(),

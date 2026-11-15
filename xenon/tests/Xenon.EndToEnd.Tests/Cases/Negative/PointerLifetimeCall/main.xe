@@ -1,0 +1,8 @@
+namespace PointerLifetimeCall;
+void Destroy(int* p) { delete(p); }
+void Forward(int* p) { Destroy(p); }
+int Main() {
+    int* p = new int();
+    Forward(p);
+    return *p;
+}

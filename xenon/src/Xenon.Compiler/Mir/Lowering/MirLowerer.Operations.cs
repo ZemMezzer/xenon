@@ -69,7 +69,8 @@ public sealed partial class MirLowerer
             case BoundFreeExpression free:
                 return Intrinsic(MirIntrinsicKind.Free, [Value(free.Pointer)], BuiltinTypes.Void, source);
             case BoundDeleteExpression deletion:
-                DeleteValue(Snapshot(Value(deletion.Pointer), source), deletion.Destructor, source);
+                DeleteValue(Snapshot(Value(deletion.Pointer), source), deletion.Destructor,
+                    _scopeExitDeletes.Contains(deletion) ? source with { IsAutomaticCleanup = true } : source);
                 return null;
             case BoundFunctionValueExpression callable:
                 return Intrinsic(MirIntrinsicKind.MakeCallable, Arguments([.. callable.Captures.Select(c => c.Initializer)]), callable.Type, source,

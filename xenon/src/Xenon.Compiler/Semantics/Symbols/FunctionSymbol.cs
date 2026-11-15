@@ -30,6 +30,11 @@ public sealed class FunctionSymbol : Symbol
     public bool DelegatesToThisConstructor { get; }
     public ImmutableArray<ReceiverMoveEffect> ReceiverMoveEffects { get; private set; } = [];
     public ImmutableArray<LifetimeDependency> ResultLifetimeDependencies { get; internal set; } = [];
+    public Xenon.Compiler.Mir.Analysis.MirLifetimeSummary? MirLifetimeSummary { get; internal set; }
+    public Xenon.Compiler.Mir.Analysis.MirReferenceValue? MirPointerReturnSummary { get; internal set; }
+    // Analysis-only lambda view with captures appended as ordinary parameters.
+    // It is never emitted or serialized as part of the public function contract.
+    internal FunctionSymbol? MirCaptureFunction { get; set; }
     public ImmutableArray<LifetimeStore> LifetimeStores { get; internal set; } = [];
     public bool IsAsync { get; internal set; }
     public bool ReturnsResumableOperation { get; internal set; }

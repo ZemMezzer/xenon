@@ -1,0 +1,6 @@
+{
+  "status": "timeout",
+  "timeoutSeconds": 600,
+  "progressFile": "hardening-before-frees1000-progress.jsonl",
+  "scenario": "frees1000"
+}

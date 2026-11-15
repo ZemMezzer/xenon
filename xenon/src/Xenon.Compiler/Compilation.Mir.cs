@@ -7,6 +7,22 @@ namespace Xenon.Compiler;
 
 public sealed partial class Compilation
 {
+    /// <summary>Deterministic compile-time lifetime coverage, including resource limits.</summary>
+    public string DumpLifetimeAnalysis()
+    {
+        var text = new System.Text.StringBuilder();
+        foreach (var function in SemanticModel.Functions.Select(body => body.Symbol).Distinct().OrderBy(MirPointerLifetimeAnalysis.FunctionKey, StringComparer.Ordinal))
+            if (function.MirLifetimeSummary is { } summary)
+            {
+                text.Append(MirPointerLifetimeAnalysis.FunctionKey(function)).Append(": ")
+                    .Append(summary.Complete ? "complete" : "incomplete").Append("; effects=").Append(summary.Effects.Count)
+                    .Append("; exits=").Append(summary.Exits.Count).Append("; contexts=").Append(summary.Contexts);
+                text.Append("; uncertain-targets=").Append(summary.Uncertainties?.Count.ToString() ?? "legacy");
+                foreach (var reason in summary.IncompleteReasons) text.Append("; ").Append(reason);
+                text.Append('\n');
+            }
+        return text.ToString();
+    }
     private readonly object _mirLock = new();
     private ImmutableArray<MirFunction> _initialMir;
     private ImmutableArray<MirFunction> _loweredMir;

@@ -1,0 +1,140 @@
+{
+  "compilerSha256": "CB6FD7232057B368AF78905D4E1C4C88EAC2C950F3F4C37F5BE4066902175B07",
+  "passed": true,
+  "cases": [
+    {
+      "name": "valid-alias",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "use-after-free",
+      "passed": true,
+      "expected": [
+        "XE2291"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2291",
+          "start": 146
+        }
+      ]
+    },
+    {
+      "name": "conditional-use",
+      "passed": true,
+      "expected": [
+        "XE2291"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2291",
+          "start": 179
+        }
+      ]
+    },
+    {
+      "name": "conditional-valid",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "double-free",
+      "passed": true,
+      "expected": [
+        "XE2292"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2292",
+          "start": 138
+        }
+      ]
+    },
+    {
+      "name": "placement",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "checked-borrow",
+      "passed": true,
+      "expected": [
+        "XE2232"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2232",
+          "start": 170
+        }
+      ]
+    },
+    {
+      "name": "independent-borrow",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "ownership-transfer",
+      "passed": true,
+      "expected": [
+        "XE2215"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2215",
+          "start": 174
+        }
+      ]
+    },
+    {
+      "name": "multiple-targets",
+      "passed": true,
+      "expected": [
+        "XE2291"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2291",
+          "start": 225
+        }
+      ]
+    },
+    {
+      "name": "recursive",
+      "passed": true,
+      "expected": [
+        "XE2291"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2291",
+          "start": 220
+        }
+      ]
+    },
+    {
+      "name": "unknown-raw",
+      "passed": true,
+      "expected": [],
+      "diagnostics": []
+    },
+    {
+      "name": "imported-free",
+      "passed": true,
+      "expected": [
+        "XE2291"
+      ],
+      "diagnostics": [
+        {
+          "Id": "XE2291",
+          "start": 70
+        }
+      ]
+    }
+  ]
+}

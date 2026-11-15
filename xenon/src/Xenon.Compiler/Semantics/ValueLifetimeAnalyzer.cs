@@ -38,6 +38,13 @@ internal static class ValueLifetimeAnalyzer
                 pair => pair.expression, pair => pair.id, (IEqualityComparer<BoundExpression>)ReferenceEqualityComparer.Instance);
             return new Input(body, MirLowerer.Lower(body, types, locations, cancellation, origins, diagnosticRecovery: true), expressions);
         }).ToArray();
+        // Reuse raw return provenance for retained async storage. Frame selection
+        // uses may-dependencies; an unsafe lifetime error requires actual origins.
+        if (inputs.Any(input => input.Mir.Blocks.Any(block => block.Terminator is MirSuspend ||
+            block.Terminator is MirCall { Callee: MirFunctionOperand callee } && callee.Function.ResultLifetimeDependencies.Any(dependency =>
+                dependency.Kind == LifetimeDependencyKind.ParameterBorrow && dependency.Ordinal >= 0 &&
+                callee.Function.Parameters[dependency.Ordinal].Type is PointerTypeSymbol))))
+            _ = MirPointerLifetimeAnalysis.BuildReturnSummaries([.. inputs.Select(input => input.Mir)], cancellation);
         foreach (Input input in inputs.Where(input => input.Bound.Body.IsResumable))
         {
             var frame = new MirFrameAnalysis(input.Mir, cancellation);

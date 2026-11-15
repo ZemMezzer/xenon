@@ -13,7 +13,7 @@ public sealed partial class MirReferenceOrigins
         OwnershipTypeSymbol owner => owner.ElementType,
         _ => null,
     };
-    private static MirReferenceValue Handle(TypeSymbol type, MirLocalId local, string identity, bool fresh = false, int? parameter = null) =>
+    private MirReferenceValue Handle(TypeSymbol type, MirLocalId local, string identity, bool fresh = false, int? parameter = null) =>
         MirReferenceValue.Of(new(type switch
         {
             UniqueTypeSymbol => MirReferenceOriginKind.UniquePointee,
@@ -23,16 +23,31 @@ public sealed partial class MirReferenceOrigins
         {
             IsFresh = fresh, HandleParameter = parameter, HandleIdentity = identity + ":" + local.Value,
             PointeeType = Element(type),
+            AllocationSite = pointerLifetimes && fresh ? new(function.Symbol, local) : null,
         });
     // Loading a handle crosses from its carrier storage to a separate pointee.
     // Map existing roots instead of inventing one for an empty dataflow value.
     // Keep identities finite when a loop repeatedly follows a handle field.
-    private static MirReferenceValue OpaqueHandle(TypeSymbol type, MirReferenceValue carriers) =>
+    private MirReferenceValue OpaqueHandle(TypeSymbol type, MirReferenceValue carriers) =>
         carriers.Roots.Aggregate(MirReferenceValue.Empty, (value, carrier) =>
             value.Union(LoadedHandle(type, carrier)));
 
-    private static MirReferenceValue LoadedHandle(TypeSymbol type, MirReferenceOrigin carrier)
+    private MirReferenceValue LoadedHandle(TypeSymbol type, MirReferenceOrigin carrier)
     {
+        // These are may-alias abstractions for borrow checking, not exact heap
+        // identities. Recursive/opaque fields cannot prove allocation death.
+        // Explicitly stored fields are loaded before reaching this fallback.
+        if (pointerLifetimes)
+        {
+            if (symbolicPointerParameters && (carrier.HandleParameter is not null || carrier.Kind == MirReferenceOriginKind.Parameter))
+                return MirReferenceValue.Of(new(MirReferenceOriginKind.RawPointee, carrier.Ordinal, MirReferenceOrigin.Append(carrier.Path, "^"))
+                {
+                    HandleParameter = carrier.HandleParameter ?? carrier.Ordinal,
+                    HandleIdentity = "formal-load:" + (carrier.HandleParameter ?? carrier.Ordinal) + ":" + MirReferenceOrigin.Append(carrier.Path, "^"),
+                    PointeeType = Element(type),
+                });
+            if (!checkedPointerIdentities) return MirReferenceValue.Of(new(MirReferenceOriginKind.Unknown));
+        }
         if (carrier.Kind == MirReferenceOriginKind.Unknown) return MirReferenceValue.Of(carrier);
         var value = Handle(type, new(carrier.Ordinal), $"loaded:{carrier.Kind}:{carrier.Path}");
         if (type is not UniqueTypeSymbol) return value;
@@ -50,7 +65,7 @@ public sealed partial class MirReferenceOrigins
 
     // Seed opaque owning fields at value creation. Read must preserve lattice bottom:
     // manufacturing an origin only when a read is empty makes loop transfer non-monotone.
-    private static MirReferenceValue OwnedFields(TypeSymbol type, MirLocalId site, string identity)
+    private MirReferenceValue OwnedFields(TypeSymbol type, MirLocalId site, string identity, int? parameter = null)
     {
         MirReferenceValue result = MirReferenceValue.Empty;
         Visit(type, "", []);
@@ -59,7 +74,9 @@ public sealed partial class MirReferenceOrigins
         {
             if (IsHandle(current))
             {
-                result = result.Store(path, Handle(current, site, identity + ":" + path), true);
+                var handle = Handle(current, site, identity + ":" + path, parameter: parameter);
+                if (parameter is not null) handle = handle with { Roots = handle.Roots.Select(root => root with { Path = path }).ToImmutableHashSet() };
+                result = result.Store(path, handle, true);
                 return;
             }
             if (current is LifetimeModifierTypeSymbol modifier) { Visit(modifier.ElementType, path, seen); return; }
@@ -69,7 +86,7 @@ public sealed partial class MirReferenceOrigins
             seen.Remove(current);
         }
     }
-    private static MirReferenceValue StoredHandle(TypeSymbol type, MirLocalId local, MirReferenceValue value) =>
+    private MirReferenceValue StoredHandle(TypeSymbol type, MirLocalId local, MirReferenceValue value) =>
         !value.Roots.IsEmpty && value.Roots.All(root => IsPointee(root) || root.Kind == MirReferenceOriginKind.Unknown) ? value : Handle(type, local, "storage");
     private MirReferenceValue Cast(MirCast cast, ImmutableDictionary<MirLocalId, MirReferenceValue> state)
     {

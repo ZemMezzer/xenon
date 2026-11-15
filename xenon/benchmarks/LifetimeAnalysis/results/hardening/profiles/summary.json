@@ -1,0 +1,751 @@
+[
+  {
+    "scenario": "frees10",
+    "wallMs": 46.3182,
+    "allocatedBytes": 9122432,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 1,
+        "inclusiveMs": 0.1594,
+        "inclusiveAllocatedBytes": 27928.0,
+        "processedBlocks": 5.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 33,
+        "inclusiveMs": 17.49,
+        "inclusiveAllocatedBytes": 3719480.0,
+        "processedBlocks": 489.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 6,
+        "inclusiveMs": 1.6349,
+        "inclusiveAllocatedBytes": 306496.0,
+        "processedBlocks": 94.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 6,
+        "inclusiveMs": 2.6404,
+        "inclusiveAllocatedBytes": 303912.0,
+        "processedBlocks": 51.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 3,
+        "inclusiveMs": 3.2082,
+        "inclusiveAllocatedBytes": 543624.0,
+        "processedBlocks": 47.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 6,
+        "inclusiveMs": 4.0181000000000004,
+        "inclusiveAllocatedBytes": 747008.0,
+        "processedBlocks": 94.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 12,
+        "inclusiveMs": 3.2014,
+        "inclusiveAllocatedBytes": 755104.0,
+        "processedBlocks": 146.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 3,
+        "inclusiveMs": 3.4682,
+        "inclusiveAllocatedBytes": 635888.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 10,
+        "inclusiveMs": 0.5451,
+        "inclusiveAllocatedBytes": 116904.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "frees50",
+    "wallMs": 394.505,
+    "allocatedBytes": 50073936,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 1,
+        "inclusiveMs": 0.1729,
+        "inclusiveAllocatedBytes": 27928.0,
+        "processedBlocks": 5.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 33,
+        "inclusiveMs": 162.94060000000002,
+        "inclusiveAllocatedBytes": 21572168.0,
+        "processedBlocks": 2089.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 6,
+        "inclusiveMs": 6.9419,
+        "inclusiveAllocatedBytes": 1219888.0,
+        "processedBlocks": 414.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 6,
+        "inclusiveMs": 42.292199999999994,
+        "inclusiveAllocatedBytes": 1876080.0,
+        "processedBlocks": 211.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 3,
+        "inclusiveMs": 41.307,
+        "inclusiveAllocatedBytes": 5258176.0,
+        "processedBlocks": 207.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 6,
+        "inclusiveMs": 58.557,
+        "inclusiveAllocatedBytes": 6144496.0,
+        "processedBlocks": 414.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 12,
+        "inclusiveMs": 31.3824,
+        "inclusiveAllocatedBytes": 3439544.0,
+        "processedBlocks": 626.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 3,
+        "inclusiveMs": 48.769099999999995,
+        "inclusiveAllocatedBytes": 4773064.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 50,
+        "inclusiveMs": 11.8828,
+        "inclusiveAllocatedBytes": 1465992.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "frees130",
+    "wallMs": 804.6084,
+    "allocatedBytes": 185932016,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 1,
+        "inclusiveMs": 0.0584,
+        "inclusiveAllocatedBytes": 27928.0,
+        "processedBlocks": 5.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 33,
+        "inclusiveMs": 220.53060000000002,
+        "inclusiveAllocatedBytes": 76625384.0,
+        "processedBlocks": 5289.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 6,
+        "inclusiveMs": 8.6619,
+        "inclusiveAllocatedBytes": 2998368.0,
+        "processedBlocks": 1054.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 6,
+        "inclusiveMs": 90.1192,
+        "inclusiveAllocatedBytes": 8136208.0,
+        "processedBlocks": 531.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 3,
+        "inclusiveMs": 125.7796,
+        "inclusiveAllocatedBytes": 27872520.0,
+        "processedBlocks": 527.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 6,
+        "inclusiveMs": 147.2915,
+        "inclusiveAllocatedBytes": 30371360.0,
+        "processedBlocks": 1054.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 12,
+        "inclusiveMs": 77.9477,
+        "inclusiveAllocatedBytes": 9613968.0,
+        "processedBlocks": 1586.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 3,
+        "inclusiveMs": 46.3145,
+        "inclusiveAllocatedBytes": 20550880.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 130,
+        "inclusiveMs": 18.064500000000002,
+        "inclusiveAllocatedBytes": 8505048.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "frees250",
+    "wallMs": 1504.6178,
+    "allocatedBytes": 528629088,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 1,
+        "inclusiveMs": 0.0378,
+        "inclusiveAllocatedBytes": 27824.0,
+        "processedBlocks": 5.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 33,
+        "inclusiveMs": 504.5649,
+        "inclusiveAllocatedBytes": 211129600.0,
+        "processedBlocks": 10089.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 6,
+        "inclusiveMs": 24.0886,
+        "inclusiveAllocatedBytes": 5717040.0,
+        "processedBlocks": 2014.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 6,
+        "inclusiveMs": 173.68449999999999,
+        "inclusiveAllocatedBytes": 25291320.0,
+        "processedBlocks": 1011.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 3,
+        "inclusiveMs": 263.8054,
+        "inclusiveAllocatedBytes": 94740512.0,
+        "processedBlocks": 1007.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 6,
+        "inclusiveMs": 226.46130000000002,
+        "inclusiveAllocatedBytes": 100243376.0,
+        "processedBlocks": 2014.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 12,
+        "inclusiveMs": 43.825700000000005,
+        "inclusiveAllocatedBytes": 20962408.0,
+        "processedBlocks": 3026.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 3,
+        "inclusiveMs": 190.2524,
+        "inclusiveAllocatedBytes": 63758912.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 250,
+        "inclusiveMs": 93.45300000000003,
+        "inclusiveAllocatedBytes": 29446000.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "frees500",
+    "wallMs": 5171.0847,
+    "allocatedBytes": 1707660408,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 1,
+        "inclusiveMs": 0.0526,
+        "inclusiveAllocatedBytes": 24304.0,
+        "processedBlocks": 5.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 33,
+        "inclusiveMs": 2090.9989,
+        "inclusiveAllocatedBytes": 622557896.0,
+        "processedBlocks": 20089.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 6,
+        "inclusiveMs": 20.1698,
+        "inclusiveAllocatedBytes": 11434848.0,
+        "processedBlocks": 4014.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 6,
+        "inclusiveMs": 882.9105,
+        "inclusiveAllocatedBytes": 90790696.0,
+        "processedBlocks": 2011.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 3,
+        "inclusiveMs": 660.1739,
+        "inclusiveAllocatedBytes": 360692112.0,
+        "processedBlocks": 2007.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 6,
+        "inclusiveMs": 891.3791,
+        "inclusiveAllocatedBytes": 374935376.0,
+        "processedBlocks": 4014.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 12,
+        "inclusiveMs": 131.5652,
+        "inclusiveAllocatedBytes": 52280408.0,
+        "processedBlocks": 6026.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 3,
+        "inclusiveMs": 665.7534,
+        "inclusiveAllocatedBytes": 218664000.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 500,
+        "inclusiveMs": 145.29240000000007,
+        "inclusiveAllocatedBytes": 113213736.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "frees1000",
+    "wallMs": 20910.5473,
+    "allocatedBytes": 6169677296,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 1,
+        "inclusiveMs": 0.0439,
+        "inclusiveAllocatedBytes": 27888.0,
+        "processedBlocks": 5.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 33,
+        "inclusiveMs": 9129.527599999998,
+        "inclusiveAllocatedBytes": 2209561000.0,
+        "processedBlocks": 40089.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 6,
+        "inclusiveMs": 41.02850000000001,
+        "inclusiveAllocatedBytes": 21356160.0,
+        "processedBlocks": 8014.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 6,
+        "inclusiveMs": 4060.3435,
+        "inclusiveAllocatedBytes": 341297192.0,
+        "processedBlocks": 4011.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 3,
+        "inclusiveMs": 2657.6396,
+        "inclusiveAllocatedBytes": 1405373616.0,
+        "processedBlocks": 4007.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 6,
+        "inclusiveMs": 3559.4649,
+        "inclusiveAllocatedBytes": 1445352944.0,
+        "processedBlocks": 8014.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 12,
+        "inclusiveMs": 484.0144,
+        "inclusiveAllocatedBytes": 142256672.0,
+        "processedBlocks": 12026.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 3,
+        "inclusiveMs": 2358.5989000000004,
+        "inclusiveAllocatedBytes": 820079304.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 1000,
+        "inclusiveMs": 369.1480999999999,
+        "inclusiveAllocatedBytes": 442672392.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "chain70",
+    "wallMs": 155.9925,
+    "allocatedBytes": 32782600,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 70,
+        "inclusiveMs": 2.2371999999999987,
+        "inclusiveAllocatedBytes": 368512.0,
+        "processedBlocks": 143.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 723,
+        "inclusiveMs": 48.889100000000056,
+        "inclusiveAllocatedBytes": 9530632.0,
+        "processedBlocks": 2061.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 144,
+        "inclusiveMs": 9.282000000000002,
+        "inclusiveAllocatedBytes": 1185344.0,
+        "processedBlocks": 298.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 75,
+        "inclusiveMs": 5.2962000000000025,
+        "inclusiveAllocatedBytes": 883120.0,
+        "processedBlocks": 222.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 72,
+        "inclusiveMs": 7.021299999999998,
+        "inclusiveAllocatedBytes": 1356688.0,
+        "processedBlocks": 149.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 144,
+        "inclusiveMs": 10.538900000000007,
+        "inclusiveAllocatedBytes": 2085648.0,
+        "processedBlocks": 298.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 219,
+        "inclusiveMs": 12.940700000000003,
+        "inclusiveAllocatedBytes": 2986376.0,
+        "processedBlocks": 521.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 72,
+        "inclusiveMs": 12.936500000000002,
+        "inclusiveAllocatedBytes": 2262568.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 208,
+        "inclusiveMs": 0.6768999999999994,
+        "inclusiveAllocatedBytes": 164304.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "nested",
+    "wallMs": 40.3207,
+    "allocatedBytes": 7960368,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 12,
+        "inclusiveMs": 1.9640000000000002,
+        "inclusiveAllocatedBytes": 382928.0,
+        "processedBlocks": 90.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 68,
+        "inclusiveMs": 10.410399999999997,
+        "inclusiveAllocatedBytes": 2410720.0,
+        "processedBlocks": 495.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 6,
+        "inclusiveMs": 0.8823000000000001,
+        "inclusiveAllocatedBytes": 160512.0,
+        "processedBlocks": 40.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 16,
+        "inclusiveMs": 3.6584000000000003,
+        "inclusiveAllocatedBytes": 604928.0,
+        "processedBlocks": 113.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 3,
+        "inclusiveMs": 0.9266,
+        "inclusiveAllocatedBytes": 187112.0,
+        "processedBlocks": 20.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 21,
+        "inclusiveMs": 3.920000000000001,
+        "inclusiveAllocatedBytes": 842184.0,
+        "processedBlocks": 166.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 22,
+        "inclusiveMs": 2.9854000000000003,
+        "inclusiveAllocatedBytes": 691848.0,
+        "processedBlocks": 153.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 7,
+        "inclusiveMs": 3.6398000000000006,
+        "inclusiveAllocatedBytes": 717096.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 15,
+        "inclusiveMs": 0.18390000000000004,
+        "inclusiveAllocatedBytes": 37432.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "recursive",
+    "wallMs": 26.8294,
+    "allocatedBytes": 4781040,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 12,
+        "inclusiveMs": 0.6397999999999999,
+        "inclusiveAllocatedBytes": 123280.0,
+        "processedBlocks": 38.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 51,
+        "inclusiveMs": 7.510500000000001,
+        "inclusiveAllocatedBytes": 1661248.0,
+        "processedBlocks": 244.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 8,
+        "inclusiveMs": 0.7869,
+        "inclusiveAllocatedBytes": 141392.0,
+        "processedBlocks": 34.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 7,
+        "inclusiveMs": 0.7418999999999999,
+        "inclusiveAllocatedBytes": 135072.0,
+        "processedBlocks": 23.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 4,
+        "inclusiveMs": 0.9461,
+        "inclusiveAllocatedBytes": 166736.0,
+        "processedBlocks": 17.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 12,
+        "inclusiveMs": 1.7368000000000001,
+        "inclusiveAllocatedBytes": 374104.0,
+        "processedBlocks": 55.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 15,
+        "inclusiveMs": 1.7248,
+        "inclusiveAllocatedBytes": 304000.0,
+        "processedBlocks": 57.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 8,
+        "inclusiveMs": 3.449,
+        "inclusiveAllocatedBytes": 641520.0,
+        "processedBlocks": 0.0
+      },
+      {
+        "phase": "SupportedPath",
+        "calls": 27,
+        "inclusiveMs": 0.2846000000000001,
+        "inclusiveAllocatedBytes": 53552.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "deep",
+    "wallMs": 18.0273,
+    "allocatedBytes": 3156568,
+    "phases": [
+      {
+        "phase": "DeathWitness",
+        "calls": 1,
+        "inclusiveMs": 0.1629,
+        "inclusiveAllocatedBytes": 28056.0,
+        "processedBlocks": 4.0
+      },
+      {
+        "phase": "MirFlowFacts",
+        "calls": 23,
+        "inclusiveMs": 3.5328999999999997,
+        "inclusiveAllocatedBytes": 815416.0,
+        "processedBlocks": 91.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 4,
+        "inclusiveMs": 0.664,
+        "inclusiveAllocatedBytes": 133184.0,
+        "processedBlocks": 16.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 5,
+        "inclusiveMs": 1.0997999999999999,
+        "inclusiveAllocatedBytes": 150712.0,
+        "processedBlocks": 11.0
+      },
+      {
+        "phase": "MirPointerLifetimeAnalysis",
+        "calls": 2,
+        "inclusiveMs": 0.5599,
+        "inclusiveAllocatedBytes": 151912.0,
+        "processedBlocks": 8.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 4,
+        "inclusiveMs": 0.885,
+        "inclusiveAllocatedBytes": 256176.0,
+        "processedBlocks": 16.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 9,
+        "inclusiveMs": 1.3034000000000001,
+        "inclusiveAllocatedBytes": 191608.0,
+        "processedBlocks": 28.0
+      },
+      {
+        "phase": "SummarizeEffects",
+        "calls": 2,
+        "inclusiveMs": 0.5334,
+        "inclusiveAllocatedBytes": 99192.0,
+        "processedBlocks": 0.0
+      }
+    ]
+  },
+  {
+    "scenario": "async",
+    "wallMs": 70.9673,
+    "allocatedBytes": 16206792,
+    "phases": [
+      {
+        "phase": "MirFlowFacts",
+        "calls": 81,
+        "inclusiveMs": 22.4482,
+        "inclusiveAllocatedBytes": 5839840.0,
+        "processedBlocks": 1255.0
+      },
+      {
+        "phase": "MirLifetimeAnalysis",
+        "calls": 27,
+        "inclusiveMs": 5.753800000000001,
+        "inclusiveAllocatedBytes": 1067352.0,
+        "processedBlocks": 198.0
+      },
+      {
+        "phase": "MirLiveness",
+        "calls": 7,
+        "inclusiveMs": 3.0816,
+        "inclusiveAllocatedBytes": 672952.0,
+        "processedBlocks": 211.0
+      },
+      {
+        "phase": "MirMoveAnalysis",
+        "calls": 12,
+        "inclusiveMs": 4.829199999999999,
+        "inclusiveAllocatedBytes": 570984.0,
+        "processedBlocks": 127.0
+      },
+      {
+        "phase": "MirReferenceOrigins",
+        "calls": 12,
+        "inclusiveMs": 5.3892,
+        "inclusiveAllocatedBytes": 1121608.0,
+        "processedBlocks": 222.0
+      },
+      {
+        "phase": "MirStorageOrigins",
+        "calls": 43,
+        "inclusiveMs": 9.695100000000002,
+        "inclusiveAllocatedBytes": 2296920.0,
+        "processedBlocks": 551.0
+      },
+      {
+        "phase": "MirStorageStateAnalysis",
+        "calls": 2,
+        "inclusiveMs": 0.44120000000000004,
+        "inclusiveAllocatedBytes": 79456.0,
+        "processedBlocks": 36.0
+      }
+    ]
+  }
+]

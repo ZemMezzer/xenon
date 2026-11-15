@@ -26,9 +26,11 @@ int Main()
     Pair[] pairs = Pair[3]; Pair* first = &pairs[0]; Pair* last = first + 2;
     if (last - first != cast<nint>(2) || last != &pairs[2]) return 8;
     Cursor.Data = start;
-    int* prior = (*Cursor.Address())++;
-    if (Cursor.Calls != 1 || prior != start || Cursor.Data != start + 1) return 9;
-    Cursor cursor = Cursor(); cursor.Current += cast<sbyte>(1); cursor.Current -= 1;
-    if (Cursor.Data != start + 1) return 10;
-    return 42;
+    try {
+        int* prior = (*Cursor.Address())++;
+        if (Cursor.Calls != 1 || prior != start || Cursor.Data != start + 1) return 9;
+        Cursor cursor = Cursor(); cursor.Current += cast<sbyte>(1); cursor.Current -= 1;
+        if (Cursor.Data != start + 1) return 10;
+        return 42;
+    } finally { Cursor.Data = null; }
 }
