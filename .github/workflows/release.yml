@@ -72,11 +72,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the LLVM submodule revision.' }
           "revision=$revision" >> $env:GITHUB_OUTPUT
 
+      - name: Identify LLVM build environment
+        id: llvm-environment
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ImageOS) -or [string]::IsNullOrWhiteSpace($env:ImageVersion)) {
+            throw 'The hosted runner image identity is required to safely reuse the LLVM build cache.'
+          }
+          $cmakeVersion = & cmake --version
+          if ($LASTEXITCODE -ne 0) { throw 'Could not determine the CMake version.' }
+          "image=$env:ImageOS-$env:ImageVersion" >> $env:GITHUB_OUTPUT
+          "cmake=$($cmakeVersion[0] -replace '^cmake version ', '')" >> $env:GITHUB_OUTPUT
+
+      # CMake stores absolute compiler paths. Never restore across image/toolchain
+      # upgrades (including through a broader restore-keys prefix).
       - name: Restore LLVM build cache
         uses: actions/cache@v4
         with:
           path: build/${{ matrix.platform }}/llvm
-          key: llvm-build-v2-${{ matrix.runner }}-${{ runner.arch }}-${{ matrix.platform }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('Build.bat', 'Build.sh', 'CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/*.cmake') }}
+          key: llvm-build-v3-${{ matrix.runner }}-${{ runner.arch }}-${{ matrix.platform }}-${{ matrix.generator || 'default' }}-${{ steps.llvm-environment.outputs.image }}-${{ steps.llvm-environment.outputs.cmake }}-${{ steps.llvm-revision.outputs.revision }}-${{ hashFiles('Build.bat', 'Build.sh', 'CMakeLists.txt', 'pipelines/**/*.cmake', 'cmake/*.cmake') }}
 
       - name: Build release on Windows
         if: runner.os == 'Windows'
