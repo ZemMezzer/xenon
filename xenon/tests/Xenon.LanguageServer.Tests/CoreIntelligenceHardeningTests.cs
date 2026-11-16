@@ -743,6 +743,68 @@ public sealed class CoreIntelligenceHardeningTests
     }
 
     [Fact]
+    public async Task GenericTypeArgumentsReceiveSemanticTokensInDeclarationsAndConstruction()
+    {
+        const string source = """
+            namespace App;
+            struct Ptr {}
+            struct Storage<T> { public Storage(T& reference) {} }
+            void Use(Ptr& reference)
+            {
+                Storage<Ptr>* strg = new Storage<Ptr>(reference);
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+        var pointers = tokens.Where(token => token.Text == "Ptr").ToArray();
+        Assert.Equal(4, pointers.Length);
+        Assert.All(pointers, token => Assert.Equal(1, token.Type));
+    }
+
+    [Theory]
+    [InlineData("Ptr", "Ptr", 1)]
+    [InlineData("Storage<Ptr>", "Ptr", 1)]
+    [InlineData("Ptr*", "Ptr", 1)]
+    [InlineData("Ptr[]", "Ptr", 1)]
+    [InlineData("IValue<Ptr>", "Ptr", 1)]
+    [InlineData("IValue<Ptr>", "IValue", 2)]
+    [InlineData("State", "State", 3)]
+    [InlineData("T", "T", 13)]
+    public async Task GenericTypeArgumentsPreserveTheirSemanticTokenKinds(
+        string argument, string name, int expectedType)
+    {
+        string source = $$"""
+            namespace App;
+            struct Ptr {}
+            enum State { Ready }
+            interface IValue<TValue> {}
+            struct Storage<TValue> { public Storage() {} }
+            void Use<T>()
+            {
+                Storage<{{argument}}>* strg = new Storage<{{argument}}>();
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+        var arguments = tokens.Where(token => token.Text == name).ToArray();
+        Assert.Equal(3, arguments.Length); // declaration and both generic arguments
+        Assert.All(arguments, token => Assert.Equal(expectedType, token.Type));
+        Assert.All(arguments.Skip(1), token => Assert.Equal(0, token.Modifiers));
+    }
+
+    [Fact]
     public async Task GenericParameterValueConstructionIsExposedAsAConstructor()
     {
         const string source = """

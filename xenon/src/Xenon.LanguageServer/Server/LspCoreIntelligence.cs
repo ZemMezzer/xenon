@@ -781,11 +781,11 @@ internal static class LspCoreIntelligence
 
     private static int CallEnd(SyntaxNode node) => node switch
     {
-        CallExpressionSyntax call => call.CloseParenthesisToken.IsMissing ? call.CloseParenthesisToken.Location.Span.Start : call.CloseParenthesisToken.Location.Span.End,
-        NewExpressionSyntax creation => creation.CloseDelimiterToken.IsMissing ? creation.CloseDelimiterToken.Location.Span.Start : creation.CloseDelimiterToken.Location.Span.End,
-        IndexExpressionSyntax index => index.CloseBracketToken.IsMissing ? index.CloseBracketToken.Location.Span.Start : index.CloseBracketToken.Location.Span.End,
+        CallExpressionSyntax call => call.CloseParenthesisToken.Location.Span.Start,
+        NewExpressionSyntax creation => creation.CloseDelimiterToken.Location.Span.Start,
+        IndexExpressionSyntax index => index.CloseBracketToken.Location.Span.Start,
         ConstructorDeclarationSyntax { BaseCloseParenthesisToken: { } close } =>
-            close.IsMissing ? close.Location.Span.Start : close.Location.Span.End,
+            close.Location.Span.Start,
         _ => -1,
     };
 

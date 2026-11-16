@@ -213,11 +213,16 @@ public sealed class SemanticModel
             foreach (GenericParameterSymbol parameter in genericType.TypeParameters)
                 if (names.Add(parameter.Name)) result.Add(parameter);
         if (function?.ContainingType is DeclaredTypeSymbol containingType)
-            foreach (Symbol member in AllMembers(containingType)
+            foreach (IGrouping<string, Symbol> group in WithoutHiddenMethodOverloads(AllMembers(containingType))
                 .Where(member => IsUnqualifiedCompletionMember(member, function))
                 .Where(member => IsAccessible(member, containingType))
-                .OrderBy(member => member.Name, StringComparer.Ordinal))
-                if (names.Add(member.Name)) result.Add(member);
+                .OrderBy(member => member.Name, StringComparer.Ordinal)
+                .GroupBy(member => member.Name, StringComparer.Ordinal))
+            {
+                if (!names.Add(group.Key)) continue;
+                if (group.First() is FunctionSymbol) result.AddRange(group.OfType<FunctionSymbol>());
+                else result.Add(group.First());
+            }
 
         if (_semanticInfo.FileScopes.TryGetValue(tree.Source, out FileSymbolScope? fileScope))
         {
@@ -290,11 +295,16 @@ public sealed class SemanticModel
         if (receiver.Kind == CompletionReceiverKind.Value &&
             _semanticInfo.Receivers.TryGetValue(access.Receiver, out ReceiverInfo value))
         {
-            TypeSymbol sourceType = GetTypeInfo(access.Receiver, cancellationToken).Type;
-            bool requiresArrow = sourceType is PointerTypeSymbol or UniqueTypeSymbol or SharedTypeSymbol;
-            if (access.OperatorToken.Kind == SyntaxKind.ArrowToken != requiresArrow)
+            // Match the binder's implicit reference/lifetime conversions and its
+            // special handling of this, which accepts both '.' and '->'.
+            ExpressionSyntax receiverSyntax = access.Receiver;
+            while (receiverSyntax is ParenthesizedExpressionSyntax parenthesized)
+                receiverSyntax = parenthesized.Expression;
+            bool requiresArrow = value.Type is PointerTypeSymbol or UniqueTypeSymbol or SharedTypeSymbol;
+            if (receiverSyntax is not ThisExpressionSyntax &&
+                access.OperatorToken.Kind == SyntaxKind.ArrowToken != requiresArrow)
                 return [];
-            if (sourceType is WeakTypeSymbol && access.OperatorToken.Kind != SyntaxKind.DotToken)
+            if (value.Type is WeakTypeSymbol && access.OperatorToken.Kind != SyntaxKind.DotToken)
                 return [];
             // Completion is an API-discovery surface. Keep accessible members visible even
             // when a subsequent use may be rejected for mutating a readonly receiver; the
@@ -358,7 +368,17 @@ public sealed class SemanticModel
         if (receiverType is ArrayTypeSymbol array)
             return options.AccessKind == MemberAccessKind.Static ? [] : _semanticInfo.GetArrayMembers(array).Cast<Symbol>()
                 .OrderBy(member => member.Name, StringComparer.Ordinal).ToImmutableArray();
-        if (receiverType is GenericParameterSymbol genericParameter)
+        GenericParameterSymbol? genericParameter = receiverType switch
+        {
+            GenericParameterSymbol parameter => parameter,
+            PointerTypeSymbol { ElementType: GenericParameterSymbol parameter } => parameter,
+            ReferenceTypeSymbol { ElementType: GenericParameterSymbol parameter } => parameter,
+            UniqueTypeSymbol { ElementType: GenericParameterSymbol parameter } => parameter,
+            SharedTypeSymbol { ElementType: GenericParameterSymbol parameter } => parameter,
+            LifetimeModifierTypeSymbol { ElementType: GenericParameterSymbol parameter } => parameter,
+            _ => null,
+        };
+        if (genericParameter is not null)
             return GenericConstraintMemberLookup.GetMembers(genericParameter)
                 .Where(member => member.IsUserVisible && !EditorSymbolClassifier.HasReservedName(member))
                 .Where(member => IsApplicableMember(member, options))
@@ -381,7 +401,7 @@ public sealed class SemanticModel
         };
         if (type is null) return [];
         DeclaredTypeSymbol? withinType = GetContainingTypeAtPosition(position);
-        return AllMembers(type).Distinct()
+        return WithoutHiddenMethodOverloads(AllMembers(type)).Distinct()
             .Where(member => member.IsUserVisible && !EditorSymbolClassifier.HasReservedName(member))
             .Where(member => IsApplicableMember(member, options))
             .Where(member => options.IncludeInaccessible || IsAccessible(member, withinType, type))
@@ -603,6 +623,24 @@ public sealed class SemanticModel
         _ => type.GetMembers(),
     };
 
+    private static IEnumerable<Symbol> WithoutHiddenMethodOverloads(IEnumerable<Symbol> members)
+    {
+        // AllMembers visits derived declarations first. Use the same signature
+        // comparison as binding, so parameter names do not duplicate overrides.
+        var methods = new Dictionary<string, List<FunctionSymbol>>(StringComparer.Ordinal);
+        foreach (Symbol member in members)
+        {
+            if (member is FunctionSymbol { FunctionKind: FunctionKind.Method } method)
+            {
+                if (!methods.TryGetValue(method.Name, out List<FunctionSymbol>? overloads))
+                    methods[method.Name] = overloads = [];
+                if (overloads.Any(existing => existing.HasSameSignature(method))) continue;
+                overloads.Add(method);
+            }
+            yield return member;
+        }
+    }
+
     private static bool IsUnqualifiedCompletionMember(Symbol member, FunctionSymbol function) => member switch
     {
         ConstantSymbol => true,
@@ -629,7 +667,8 @@ public sealed class SemanticModel
         ConstantSymbol => options.AccessKind != MemberAccessKind.Instance,
         PropertySymbol property => options.AccessKind != MemberAccessKind.Static &&
             (!options.IsReadonlyReceiver || property.Getter?.IsReadonly == true),
-        InterfacePropertySymbol property => !options.IsReadonlyReceiver || property.Getter?.IsReadonly == true,
+        InterfacePropertySymbol property => options.AccessKind != MemberAccessKind.Static &&
+            (!options.IsReadonlyReceiver || property.Getter?.IsReadonly == true),
         SyntheticMemberSymbol synthetic => options.AccessKind != MemberAccessKind.Static &&
             (!options.IsReadonlyReceiver || synthetic.IsReadonly),
         IndexerSymbol indexer => options.AccessKind != MemberAccessKind.Static &&
