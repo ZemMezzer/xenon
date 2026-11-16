@@ -70,7 +70,8 @@ public sealed partial class MirPointerLifetimeAnalysis
     // Summaries describe witnessed exits, not merely a reachable free. A free
     // followed only by a throw cannot invalidate the caller's normal successor.
     internal ImmutableHashSet<MirLifetimeEffect> SummarizeEffects(CancellationToken cancellation,
-        IReadOnlyDictionary<FunctionSymbol, MirLifetimeSummary>? summaries = null, bool shareStorageExitProof = true)
+        IReadOnlyDictionary<FunctionSymbol, MirLifetimeSummary>? summaries = null, bool shareStorageExitProof = true,
+        bool sharePlacementExitProof = true)
     {
         using var profile = MirAnalysisProfile.Start("SummarizeEffects", _function);
         var facts = new MirFlowFacts(precisePointerFacts: true, entryGuard: _entryGuard, lifetimeExits: _lifetimeExits);
@@ -81,6 +82,11 @@ public sealed partial class MirPointerLifetimeAnalysis
         // still come from each event's own supported-path proof. Object deaths,
         // loops, calls, unwind and value-returning bodies retain DeathWitness.
         bool normalVoidExit = shareStorageExitProof && HasOnlyFiniteVoidExits();
+        // Table initializers reconstruct many independent elements. If the
+        // complete feasible body is a single non-destructive path to a void
+        // return, every placement shares that exit proof. Branches, loops,
+        // unknown calls and destruction still require individual witnesses.
+        bool placementVoidExit = sharePlacementExitProof && HasSingleNonDestructiveVoidPath();
         // Edge feasibility depends only on the frozen flow result. All targets
         // in this summary share it; do not rebuild immutable predicate maps for
         // each destruction candidate during reverse reachability.
@@ -311,6 +317,31 @@ public sealed partial class MirPointerLifetimeAnalysis
             return visited == nodes.Count;
         }
 
+        bool HasSingleNonDestructiveVoidPath()
+        {
+            if (_destructionTargets.Count != 0 ||
+                _callEffects.Values.SelectMany(effects => effects).Any(effect => effect.Effect.InvalidatesBorrow)) return false;
+            var visited = new HashSet<MirBlockId>();
+            var id = _function.Entry;
+            while (visited.Add(id))
+            {
+                cancellation.ThrowIfCancellationRequested();
+                var block = _graph.Blocks[id];
+                var state = feasible.Output[id];
+                if (!state.Reachable) return false;
+                if (block.Terminator is MirReturn returned) return returned.Value is null;
+                if (block.Terminator is MirCall call &&
+                    (DirectCallee(call) is not { } callee || summaries is null ||
+                     !summaries.TryGetValue(callee, out var summary) || !summary.Complete ||
+                     summary.Effects.Any(effect => effect.InvalidatesBorrow))) return false;
+                if (block.Terminator is not (MirCall or MirGoto or MirSwitch)) return false;
+                var edges = block.Terminator.Successors.Where(edge => facts.Edge(block, edge, state).Reachable).Distinct().ToArray();
+                if (edges.Length != 1 || edges[0].Kind != MirEdgeKind.Normal) return false;
+                id = edges[0].Target;
+            }
+            return false;
+        }
+
         void Uncertain(IEnumerable<MirReferenceOrigin> roots, MirFlowState state, MirLifetimeTransition transition,
             string reason = "unresolved-target", bool unknownOffset = false)
         {
@@ -356,6 +387,12 @@ public sealed partial class MirPointerLifetimeAnalysis
             result.Add(new(parameter.Value, root.Path, false, false, Conditions(seed), MirEdgeKind.Normal, source,
                 Phase: MirLifetimeEffectPhase.Operation, Transition: MirLifetimeTransition.PlacementReconstruction));
             if (callEffect?.Effect.Phase == MirLifetimeEffectPhase.Operation) return;
+            if (placementVoidExit)
+            {
+                result.Add(new(parameter.Value, root.Path, false, false, Conditions(seed), MirEdgeKind.Normal, source,
+                    Transition: MirLifetimeTransition.PlacementReconstruction));
+                return;
+            }
             var entry = new MirBlockId(_function.Blocks.Max(node => node.Id.Value) + 1);
             var tail = new MirBasicBlock(entry, [.. block.Statements.Skip(index + 1)], block.Terminator);
             if (callEffect is not null)

@@ -80,7 +80,7 @@ public sealed record MirReferenceValue(ImmutableHashSet<MirReferenceOrigin> Root
         foreach (var (path, targets) in other.CallableTargets) callables[path] = callables.GetValueOrDefault(path, []).Union(targets);
         return new(Roots.Union(other.Roots), fields.ToImmutable()) { Aliases = Aliases.Union(other.Aliases), Lineage = Lineage.Union(other.Lineage), CallableTargets = callables.ToImmutable() };
     }
-    public bool Same(MirReferenceValue other) => Aliases.SetEquals(other.Aliases) && Lineage.SetEquals(other.Lineage) && Roots.SetEquals(other.Roots) && Fields.Count == other.Fields.Count &&
+    public bool Same(MirReferenceValue other) => ReferenceEquals(this, other) || Aliases.SetEquals(other.Aliases) && Lineage.SetEquals(other.Lineage) && Roots.SetEquals(other.Roots) && Fields.Count == other.Fields.Count &&
         Fields.All(pair => other.Fields.TryGetValue(pair.Key, out var roots) && roots.SetEquals(pair.Value)) &&
         CallableTargets.Count == other.CallableTargets.Count && CallableTargets.All(pair => other.CallableTargets.TryGetValue(pair.Key, out var targets) && targets.SetEquals(pair.Value));
     public MirReferenceValue Project(string path)
@@ -220,7 +220,7 @@ public sealed partial class MirReferenceOrigins(MirFunction function, bool point
         return result.ToImmutable();
     }
     public bool Same(ImmutableDictionary<MirLocalId, MirReferenceValue> left, ImmutableDictionary<MirLocalId, MirReferenceValue> right) =>
-        left.Count == right.Count && left.All(pair => right.TryGetValue(pair.Key, out var value) && pair.Value.Same(value));
+        ReferenceEquals(left, right) || left.Count == right.Count && left.All(pair => right.TryGetValue(pair.Key, out var value) && pair.Value.Same(value));
 
     private MirLocalId? StorageKey(MirReferenceOrigin address) => address.Kind switch
     {

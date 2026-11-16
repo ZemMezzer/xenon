@@ -372,6 +372,11 @@ internal static class LspCoreIntelligence
     private static void AddLanguageTokens(SyntaxTree tree,
         List<(TextSpan Span, int Type, int Modifiers, int Priority)> tokens)
     {
+        // The declaration map stores the innermost namespace for this syntax
+        // node. Every identifier in its qualified name is still a namespace.
+        foreach (SyntaxToken part in tree.Root.Namespace.NameParts)
+            tokens.Add((part.Location.Span, 0, 1, 3));
+
         foreach (SyntaxToken token in tree.Tokens)
         {
             int type = LanguageTokenType(token.Kind);

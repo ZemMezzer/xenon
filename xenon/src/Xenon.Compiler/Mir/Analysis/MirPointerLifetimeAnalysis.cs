@@ -218,7 +218,7 @@ public sealed partial class MirPointerLifetimeAnalysis : IMirDataflowAnalysis<Im
     {
         var flow = MirDataflow.Solve(_graph, this, cancellation);
         var facts = new MirFlowFacts(precisePointerFacts: true, lifetimeExits: _lifetimeExits);
-        var feasible = MirDataflow.Solve(_graph, facts, cancellation);
+        MirDataflowResult<MirFlowState>? feasible = null;
         var witnesses = new Dictionary<(MirLocation, MirReferenceOrigin), ImmutableArray<MirDataflowResult<MirFlowState>>>();
         var definitions = _function.Blocks.SelectMany(block => block.Statements).OfType<MirAssign>()
             .Where(assign => assign.Destination.Projections.IsEmpty).GroupBy(assign => assign.Destination.Local)
@@ -325,6 +325,9 @@ public sealed partial class MirPointerLifetimeAnalysis : IMirDataflowAnalysis<Im
                 var block = _graph.Blocks[death.Block];
                 var entry = new MirBlockId(_function.Blocks.Max(block => block.Id.Value) + 1);
                 var tail = new MirBasicBlock(entry, [.. block.Statements.Skip(death.Statement + 1)], block.Terminator);
+                // Statement-level witness facts are needed only for an actual
+                // dead-pointer candidate, not every valid function.
+                feasible ??= MirDataflow.Solve(_graph, facts, cancellation);
                 var seed = feasible.After[death];
                 MirEdge? initialEdge = null;
                 if (callDeath is not null)

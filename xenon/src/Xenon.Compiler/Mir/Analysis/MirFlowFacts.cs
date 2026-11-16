@@ -67,7 +67,7 @@ public sealed class MirFlowFacts(IReadOnlyDictionary<FunctionSymbol, HashSet<Typ
         IReadOnlyDictionary<FunctionSymbol, ImmutableHashSet<MirLifetimeExit>>? lifetimeExits = null)
     {
         var analysis = new MirFlowFacts(effects, externalCallsMayUnwind: externalCallsMayUnwind, precisePointerFacts: precisePointerFacts, entryGuard: entryGuard, lifetimeExits: lifetimeExits);
-        var facts = MirDataflow.Solve(new MirControlFlow(function), analysis, cancellation);
+        var facts = MirDataflow.Solve(new MirControlFlow(function), analysis, cancellation, captureLocations: false);
         return new(function, (block, edge) => analysis.Edge(block, edge, facts.Output[block.Id]).Reachable);
     }
 
@@ -105,7 +105,7 @@ public sealed class MirFlowFacts(IReadOnlyDictionary<FunctionSymbol, HashSet<Typ
         };
     }
 
-    public bool Same(MirFlowState left, MirFlowState right) => left.Reachable == right.Reachable &&
+    public bool Same(MirFlowState left, MirFlowState right) => ReferenceEquals(left, right) || left.Reachable == right.Reachable &&
         left.BooleanAliases.Count == right.BooleanAliases.Count && left.BooleanAliases.All(pair =>
             right.BooleanAliases.TryGetValue(pair.Key, out var value) && pair.Value == value) &&
         left.AddressAliases.Count == right.AddressAliases.Count && left.AddressAliases.All(pair =>

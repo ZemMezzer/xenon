@@ -16,6 +16,8 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
 {
     private readonly MirFunction _function;
     private readonly ImmutableHashSet<MirPlace> _places;
+    private readonly Dictionary<MirLocalId, MirPlace[]> _placesByLocal;
+    private readonly Dictionary<MirLocalId, KeyValuePair<MirPlace, ImmutableArray<MirPlace>>[]> _fieldsByLocal;
     private readonly Dictionary<MirPlace, ImmutableArray<MirPlace>> _fields = [];
     private readonly HashSet<MirPlace> _requiresWholeInitialization = [];
     private readonly MirStorageOrigins _origins;
@@ -63,6 +65,11 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
             if (Destination(block.Terminator) is { } destination) Track(destination);
         }
         _places = places.ToImmutableHashSet();
+        // An assignment only affects projections rooted in its own local.
+        // Index once instead of scanning every temporary on every transfer.
+        _placesByLocal = _places.GroupBy(place => place.Local).ToDictionary(group => group.Key, group => group.ToArray());
+        _fieldsByLocal = _fields.GroupBy(pair => pair.Key.Local).ToDictionary(group => group.Key,
+            group => group.OrderByDescending(pair => pair.Key.Projections.Length).ToArray());
 
         void Track(MirPlace place)
         {
@@ -128,7 +135,7 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
 
     public bool Same(ImmutableDictionary<MirPlace, MirInitialization> left,
         ImmutableDictionary<MirPlace, MirInitialization> right) =>
-        left.Count == right.Count && left.All(pair => right.GetValueOrDefault(pair.Key) == pair.Value);
+        ReferenceEquals(left, right) || left.Count == right.Count && left.All(pair => right.GetValueOrDefault(pair.Key) == pair.Value);
 
     public MirOwnershipStatus Status(MirPlace place, ImmutableDictionary<MirPlace, MirInitialization> state)
     {
@@ -138,8 +145,8 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
         // A deferred argument move reserves the source until argument evaluation
         // succeeds. Its ancestors are unavailable as complete values, but their
         // real initialization state must survive an exceptional rollback.
-        if (state.Any(pair => !pair.Key.Equals(place) && place.IsPrefixOf(pair.Key) &&
-            pair.Value.HasFlag(MirInitialization.Reserved))) return MirOwnershipStatus.PartiallyMoved;
+        if (_placesByLocal.GetValueOrDefault(place.Local, []).Any(candidate => !candidate.Equals(place) && place.IsPrefixOf(candidate) &&
+            state.GetValueOrDefault(candidate).HasFlag(MirInitialization.Reserved))) return MirOwnershipStatus.PartiallyMoved;
         return value switch
         {
             MirInitialization.Initialized => MirOwnershipStatus.Initialized,
@@ -154,9 +161,9 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
         ImmutableDictionary<MirPlace, MirInitialization> state)
     {
         if (state.IsEmpty) return state; // No reachable predecessor has supplied a state yet.
-        foreach (MirPlace target in _places.Where(place.IsPrefixOf)) state = state.SetItem(target, value);
-        foreach (var (parent, children) in _fields.Where(pair => !pair.Key.Equals(place) && pair.Key.IsPrefixOf(place))
-            .OrderByDescending(pair => pair.Key.Projections.Length))
+        foreach (MirPlace target in _placesByLocal.GetValueOrDefault(place.Local, []).Where(place.IsPrefixOf)) state = state.SetItem(target, value);
+        foreach (var (parent, children) in _fieldsByLocal.GetValueOrDefault(place.Local, [])
+            .Where(pair => !pair.Key.Equals(place) && pair.Key.IsPrefixOf(place)))
         {
             MirInitialization[] values = children.Select(child => state.GetValueOrDefault(child)).ToArray();
             MirInitialization merged = values.Aggregate(MirInitialization.None, (result, child) => result | child);
@@ -218,7 +225,7 @@ public sealed class MirMoveAnalysis : IMirDataflowAnalysis<ImmutableDictionary<M
         if (assign.Value is MirDefault)
             state = DefaultStorage(assign.Destination, assign.Value.Type, state, []);
         if (assign.ReservedMove is { } reserved)
-            foreach (MirPlace place in _places.Where(reserved.IsPrefixOf))
+            foreach (MirPlace place in _placesByLocal.GetValueOrDefault(reserved.Local, []).Where(reserved.IsPrefixOf))
                 state = state.SetItem(place, state.GetValueOrDefault(place) | MirInitialization.Reserved);
         return state;
     }

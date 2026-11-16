@@ -48,7 +48,7 @@ public sealed class MirExceptionEffects
                     _releaseOrigins[release] = origins.Operand(release.Arguments[0], states.Before[new(block.Id, block.Statements.Length)]).Roots;
         }
         var analysis = new MirFlowFacts(_effects, CallEffects);
-        var flow = MirDataflow.Solve(new MirControlFlow(body), analysis, _cancellation);
+        var flow = MirDataflow.Solve(new MirControlFlow(body), analysis, _cancellation, captureLocations: false);
         var result = new HashSet<TypeSymbol>(TypeIdentity.Comparer);
         foreach (MirBasicBlock block in body.Blocks)
             if ((block.Terminator is MirResumeUnwind || block.Id == body.UnwindExit) && flow.Output[block.Id].Reachable)
