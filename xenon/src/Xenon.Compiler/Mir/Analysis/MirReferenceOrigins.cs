@@ -285,6 +285,7 @@ public sealed partial class MirReferenceOrigins(MirFunction function, bool point
                 MirDerefProjection when Element(type) is { } element => element,
                 MirFieldProjection field => field.Field.Type,
                 MirLifetimeProjection when type is LifetimeModifierTypeSymbol modifier => modifier.ElementType,
+                MirOwnerStorageProjection when type is OwnershipTypeSymbol owner => owner.StorageType,
                 MirIndexProjection or MirLinearIndexProjection when type is PointerTypeSymbol pointer => pointer.ElementType,
                 MirIndexProjection or MirLinearIndexProjection when type is ArrayTypeSymbol array => array.ElementType,
                 _ => type,

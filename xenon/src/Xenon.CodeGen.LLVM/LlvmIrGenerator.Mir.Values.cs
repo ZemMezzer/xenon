@@ -54,7 +54,7 @@ public sealed partial class LlvmIrGenerator
                     LLVMValueRef map = _builder.BuildLoad2(ResumePointer, table, "interface.map");
                     LLVMValueRef targetTable = EmitInterfaceTableLookup(map, targetInterface);
                     LLVMValueRef converted = _builder.BuildInsertValue(_builder.BuildInsertValue(_mapType(targetInterface).Poison, data, 0), targetTable, 1);
-                    LLVMValueRef slot = _builder.BuildAlloca(_mapType(targetInterface), "interface.upcast");
+                    LLVMValueRef slot = _builder.BuildEntryAlloca(_mapType(targetInterface), "interface.upcast");
                     _builder.BuildStore(converted, slot);
                     return slot;
                 }

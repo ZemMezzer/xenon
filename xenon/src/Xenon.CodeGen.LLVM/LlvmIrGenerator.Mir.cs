@@ -145,7 +145,7 @@ public sealed partial class LlvmIrGenerator
                         if (owner is SharedTypeSymbol or WeakTypeSymbol)
                             address = _builder.BuildLoad2(_mapType(owner.StorageType), OwnershipControlField(address, 2, "owner.data"), "owner.storage");
                         type = owner.StorageType;
-                        LLVMValueRef slot = _builder.BuildAlloca(_mapType(type), "owner.storage.address");
+                        LLVMValueRef slot = _builder.BuildEntryAlloca(_mapType(type), "owner.storage.address");
                         _builder.BuildStore(address, slot);
                         address = slot;
                         break;

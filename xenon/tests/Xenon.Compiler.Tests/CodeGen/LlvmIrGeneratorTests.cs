@@ -12,6 +12,47 @@ namespace Xenon.Compiler.Tests.CodeGen;
 
 public sealed class LlvmIrGeneratorTests
 {
+    [Fact]
+    public void Generator_KeepsOwnerArrayAndCAbiScratchSlotsOutsideLoops()
+    {
+        Compilation compilation = CreateCompilation("""
+            namespace Example;
+            struct Point { public float X; public float Y; public float Z; }
+            extern Point Transform(Point value);
+            float Run(int count)
+            {
+                unique<float[]> values = new float[4];
+                float total = 0.0f;
+                for (int i = 0; i < count; i++)
+                {
+                    values[i % 4] = cast<float>(i);
+                    Point point = Point { values[i % 4], 0.0f, 0.0f };
+                    point = Transform(point);
+                    total += point.X;
+                }
+                return total;
+            }
+            """);
+        Assert.Empty(compilation.Diagnostics);
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation,
+            new LlvmTargetOptions("x86_64-pc-windows-msvc"), "loop-scratch");
+        string block = string.Empty;
+        bool foundOwnerSlot = false;
+        foreach (string line in ir.Split('\n'))
+        {
+            if (line.Length > 0 && !char.IsWhiteSpace(line[0]) && line.Contains(':'))
+                block = line.Split(':')[0];
+            if (!line.Contains(" = alloca ", StringComparison.Ordinal))
+                continue;
+            if (line.Contains("owner.storage.address", StringComparison.Ordinal))
+                foundOwnerSlot = true;
+            if (line.Contains("owner.storage.address", StringComparison.Ordinal) ||
+                line.Contains("abi.", StringComparison.Ordinal))
+                Assert.Equal("entry", block);
+        }
+        Assert.True(foundOwnerSlot);
+    }
+
     private static MirFunction Lowered(Compilation compilation, string name) =>
         MirLowerer.Lower(compilation.SemanticModel.Functions.Single(function => function.Symbol.FullName == name),
             compilation.SemanticModel.TypeFactory, compilation.SemanticModel.ExpressionLocations);
