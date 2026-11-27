@@ -167,8 +167,15 @@ internal sealed class SemanticInfoStore
                 break;
             case NamedTypeSyntax { TypeArguments: { } arguments }:
                 Types[arguments] = new TypeInfo(BuiltinTypes.Error, BuiltinTypes.Error);
-                foreach (TypeSyntax argument in arguments.Arguments)
-                    RecordType(argument, BuiltinTypes.Error);
+                ImmutableArray<TypeSymbol> typeArguments = type switch
+                {
+                    StructTypeSymbol structure => structure.TypeArguments,
+                    InterfaceTypeSymbol @interface => @interface.TypeArguments,
+                    _ => [],
+                };
+                for (int i = 0; i < arguments.Arguments.Length; i++)
+                    RecordType(arguments.Arguments[i],
+                        i < typeArguments.Length ? typeArguments[i] : BuiltinTypes.Error);
                 break;
         }
     }

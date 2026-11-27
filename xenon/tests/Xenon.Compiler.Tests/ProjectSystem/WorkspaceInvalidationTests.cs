@@ -6,6 +6,51 @@ namespace Xenon.Compiler.Tests.ProjectSystem;
 public sealed class WorkspaceInvalidationTests
 {
     [Fact]
+    public async Task IdenticalDependencyOverlayPreservesCompilationsAcrossDiamond()
+    {
+        using var directory = new WorkspaceTestDirectory();
+        directory.WriteProject("Core", "static-library", sources: [("core.xe",
+            "namespace Core; public int Value() { return 1; }")]);
+        directory.WriteProject("Left", "static-library", ["../Core/Core.xeproj"], ("left.xe",
+            "using Core; namespace Left; public int LeftValue() { return Value(); }"));
+        directory.WriteProject("Right", "static-library", ["../Core/Core.xeproj"], ("right.xe",
+            "using Core; namespace Right; public int RightValue() { return Value(); }"));
+        directory.WriteProject("App", "executable", ["../Left/Left.xeproj", "../Right/Right.xeproj"], ("main.xe",
+            "using Left; using Right; namespace App; int Main() { return LeftValue() + RightValue(); }"));
+        using Workspace workspace = directory.CreateWorkspace();
+        WorkspaceSnapshot before = workspace.CurrentSnapshot;
+        var cached = new Dictionary<ProjectId, Compilation>();
+        foreach (ProjectSnapshot project in before.Projects)
+            cached.Add(project.Id, await project.GetCompilationAsync());
+        DocumentSnapshot document = Assert.Single(Find(before, "Core").Documents);
+
+        WorkspaceSnapshot opened = workspace.OpenDocument(document.Id, document.EffectiveText.Text,
+            new DocumentVersion(1));
+        Assert.True(opened.GetDocument(document.Id).IsOpen);
+        Assert.False(before.GetDocument(document.Id).IsOpen);
+        Assert.Equal(0, opened.Metrics.CompilationsRebuilt);
+        foreach (ProjectSnapshot project in opened.Projects)
+        {
+            Assert.Same(cached[project.Id], await project.GetCompilationAsync());
+            foreach (ProjectSnapshot reference in project.ProjectReferences)
+                Assert.Same(opened.GetProject(reference.Id), reference);
+        }
+
+        WorkspaceSnapshot closed = workspace.CloseDocument(document.Id, new DocumentVersion(1));
+        foreach (ProjectSnapshot project in closed.Projects)
+            Assert.Same(cached[project.Id], await project.GetCompilationAsync());
+
+        // A real declaration edit must still invalidate every dependant.
+        WorkspaceSnapshot edited = workspace.OpenDocument(document.Id,
+            "namespace Core; public int Renamed() { return 2; }", new DocumentVersion(2));
+        foreach (ProjectSnapshot project in edited.Projects)
+            Assert.NotSame(cached[project.Id], await project.GetCompilationAsync());
+        Assert.True((await Find(edited, "Left").GetCompilationAsync()).HasErrors);
+        Assert.True((await Find(edited, "Right").GetCompilationAsync()).HasErrors);
+        Assert.False(cached[before.RootProject.Id].HasErrors);
+    }
+
+    [Fact]
     public async Task IdenticalOverlayReusesExactCompilationAndSemanticModel()
     {
         using var directory = new WorkspaceTestDirectory();

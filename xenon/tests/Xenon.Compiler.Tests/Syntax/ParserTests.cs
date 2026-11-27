@@ -8,6 +8,33 @@ namespace Xenon.Compiler.Tests.Syntax;
 public sealed class ParserTests
 {
     [Fact]
+    public void Parser_CaseLabelCanPrecedePointerMemberAssignment()
+    {
+        SyntaxTree tree = Parse("namespace Example; void Run(int value, Item* item) { switch (value) { case 1: item->Value = 2; return; default: return; } }");
+        Assert.Empty(tree.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("for (int i = 0; i < count; i++) { int next = Read(offset); if (next > (count - 4)) return; }")]
+    [InlineData("if (count < 0 || count > (Read(offset) - 4) / 8) return;")]
+    [InlineData("if ((count < other) || (count > (other + 1))) return;")]
+    public void Parser_DoesNotScanRelationalExpressionsAsGenericArguments(string body)
+    {
+        SyntaxTree tree = Parse("namespace Example; void Run(int count, int other, int offset) { " + body + " }");
+        Assert.Empty(tree.Diagnostics);
+    }
+
+    [Theory]
+    [InlineData("Call<function int(int, int)>(value);")]
+    [InlineData("Call<Container<readonly int*[]>>(value);")]
+    [InlineData("Container<function void(int)> .Create();")]
+    public void Parser_PreservesComplexGenericCallLookahead(string body)
+    {
+        SyntaxTree tree = Parse("namespace Example; void Run() { " + body + " }");
+        Assert.Empty(tree.Diagnostics);
+    }
+
+    [Fact]
     public void Parser_PreservesThreadLocalStaticFieldModifierInEitherOrder()
     {
         SyntaxTree tree = Parse("namespace Example; struct State { public static threadlocal int First; threadlocal static int Second; }");

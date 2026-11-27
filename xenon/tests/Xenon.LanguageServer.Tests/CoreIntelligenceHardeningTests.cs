@@ -13,6 +13,27 @@ namespace Xenon.LanguageServer.Tests;
 public sealed class CoreIntelligenceHardeningTests
 {
     [Theory]
+    [InlineData("Doom.Core")]
+    [InlineData("Doom.Core.Images")]
+    public async Task EveryQualifiedNamespacePartHasNamespaceTokens(string name)
+    {
+        string source = $"namespace {name}; struct Item {{}}";
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("namespace.xe", source)).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+        JsonElement result = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, result.GetProperty("data"));
+        foreach (string part in name.Split('.'))
+        {
+            var token = Assert.Single(tokens, token => token.Text == part);
+            Assert.Equal(0, token.Type);
+            Assert.Equal(1, token.Modifiers & 1);
+        }
+        Assert.Equal(1, Assert.Single(tokens, token => token.Text == "Item").Type);
+    }
+
+    [Theory]
     [InlineData("var count = 10u;", "count = 20u;", "uint count")]
     [InlineData("readonly var count = 10u;", "count;", "uint count")]
     [InlineData("var count = Item();", "count;", "Item count")]
@@ -740,6 +761,68 @@ public sealed class CoreIntelligenceHardeningTests
         Assert.Equal(2, tokens.Count(token => token.Text == "value"));
         Assert.All(tokens.Where(token => token.Text == "value"),
             token => Assert.Equal(14, token.Type)); // contextual modifier
+    }
+
+    [Fact]
+    public async Task GenericTypeArgumentsReceiveSemanticTokensInDeclarationsAndConstruction()
+    {
+        const string source = """
+            namespace App;
+            struct Ptr {}
+            struct Storage<T> { public Storage(T& reference) {} }
+            void Use(Ptr& reference)
+            {
+                Storage<Ptr>* strg = new Storage<Ptr>(reference);
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+        var pointers = tokens.Where(token => token.Text == "Ptr").ToArray();
+        Assert.Equal(4, pointers.Length);
+        Assert.All(pointers, token => Assert.Equal(1, token.Type));
+    }
+
+    [Theory]
+    [InlineData("Ptr", "Ptr", 1)]
+    [InlineData("Storage<Ptr>", "Ptr", 1)]
+    [InlineData("Ptr*", "Ptr", 1)]
+    [InlineData("Ptr[]", "Ptr", 1)]
+    [InlineData("IValue<Ptr>", "Ptr", 1)]
+    [InlineData("IValue<Ptr>", "IValue", 2)]
+    [InlineData("State", "State", 3)]
+    [InlineData("T", "T", 13)]
+    public async Task GenericTypeArgumentsPreserveTheirSemanticTokenKinds(
+        string argument, string name, int expectedType)
+    {
+        string source = $$"""
+            namespace App;
+            struct Ptr {}
+            enum State { Ready }
+            interface IValue<TValue> {}
+            struct Storage<TValue> { public Storage() {} }
+            void Use<T>()
+            {
+                Storage<{{argument}}>* strg = new Storage<{{argument}}>();
+            }
+            """;
+        using var directory = new TestDirectory();
+        string file = directory.Write("main.xe", source);
+        string uri = DocumentUri.FromPath(file).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+        var arguments = tokens.Where(token => token.Text == name).ToArray();
+        Assert.Equal(3, arguments.Length); // declaration and both generic arguments
+        Assert.All(arguments, token => Assert.Equal(expectedType, token.Type));
+        Assert.All(arguments.Skip(1), token => Assert.Equal(0, token.Modifiers));
     }
 
     [Fact]

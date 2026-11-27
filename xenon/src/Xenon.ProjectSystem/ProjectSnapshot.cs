@@ -18,6 +18,7 @@ public sealed class ProjectSnapshot
     private readonly ImmutableHashSet<DocumentId> _symbolDocumentsToRebuild;
     private readonly ImmutableHashSet<DocumentId> _referenceDocumentsToRebuild;
     private Compilation? _compilation;
+    private readonly SemaphoreSlim _compilationGate = new(1, 1);
     private ProjectSymbolIndex? _symbolIndex;
     private ProjectReferenceIndex? _referenceIndex;
 
@@ -90,21 +91,35 @@ public sealed class ProjectSnapshot
         Compilation? cached = Volatile.Read(ref _compilation);
         if (cached is not null) return cached;
 
-        var dependencies = new Dictionary<string, Compilation>(ProjectPath.Comparer);
-        foreach (ProjectSnapshot reference in ProjectReferences)
+        // Diagnostics for several open files can request this same snapshot at
+        // once. Publish-once alone still performs every expensive bind in parallel.
+        // Serialize creation; a canceled creator releases the gate so another
+        // request can retry with its own cancellation token.
+        await _compilationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
+            cached = Volatile.Read(ref _compilation);
+            if (cached is not null) return cached;
+            var dependencies = new Dictionary<string, Compilation>(ProjectPath.Comparer);
+            foreach (ProjectSnapshot reference in ProjectReferences)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                dependencies.Add(reference.Configuration.Identity,
+                    await reference.GetCompilationAsync(cancellationToken).ConfigureAwait(false));
+            }
+            await Task.Yield();
             cancellationToken.ThrowIfCancellationRequested();
-            dependencies.Add(reference.Configuration.Identity,
-                await reference.GetCompilationAsync(cancellationToken).ConfigureAwait(false));
+            Compilation created = XenonProjectCompilationFactory.Create(Configuration, _profileName,
+                Documents.Select(document => document.SyntaxTree), dependencies, cancellationToken,
+                metadataOnlyXelib: true, targetTriple: _targetTriple);
+            cancellationToken.ThrowIfCancellationRequested();
+            Volatile.Write(ref _compilation, created);
+            return created;
         }
-        await Task.Yield();
-        cancellationToken.ThrowIfCancellationRequested();
-        Compilation created = XenonProjectCompilationFactory.Create(Configuration, _profileName,
-            Documents.Select(document => document.SyntaxTree), dependencies, cancellationToken,
-            metadataOnlyXelib: true, targetTriple: _targetTriple);
-        cancellationToken.ThrowIfCancellationRequested();
-        Compilation? winner = Interlocked.CompareExchange(ref _compilation, created, null);
-        return winner ?? created;
+        finally
+        {
+            _compilationGate.Release();
+        }
     }
 
     public async Task<SemanticModel> GetSemanticModelAsync(DocumentId documentId,

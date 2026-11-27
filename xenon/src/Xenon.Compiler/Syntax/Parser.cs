@@ -1718,7 +1718,9 @@ internal sealed class Parser
             }
 
             if (parenthesisDepth != 0 || bracketDepth != 0 || braceDepth != 0) continue;
-            if (kind is SyntaxKind.CompareExchangeArrowToken or SyntaxKind.ArrowToken) return true;
+            // '->' is ordinary pointer member access in the statement after
+            // a case label. Only the unambiguous '-->' belongs to CAS.
+            if (kind == SyntaxKind.CompareExchangeArrowToken) return true;
             if (kind is SyntaxKind.ColonToken or SyntaxKind.SemicolonToken or SyntaxKind.CommaToken or
                 SyntaxKind.CloseParenthesisToken or SyntaxKind.CloseBracketToken or SyntaxKind.CloseBraceToken or
                 SyntaxKind.CaseKeyword or SyntaxKind.DefaultKeyword or SyntaxKind.EndOfFileToken)
@@ -1882,6 +1884,7 @@ internal sealed class Parser
     private bool IsTypeArgumentListFollowedBy(SyntaxKind followingKind)
     {
         int depth = 0;
+        int parentheses = 0;
         for (int offset = 0; ; offset++)
         {
             SyntaxKind kind = Peek(offset).Kind;
@@ -1901,6 +1904,22 @@ internal sealed class Parser
             }
             else
             {
+                // A relational '<' must not scan across statements or expressions
+                // looking for an unrelated '>(...)'. Function types may contain
+                // balanced parentheses, but an enclosing expression's ')' ends
+                // the candidate type argument list.
+                if (kind == SyntaxKind.OpenParenthesisToken) parentheses++;
+                else if (kind == SyntaxKind.CloseParenthesisToken)
+                {
+                    if (parentheses == 0) return false;
+                    parentheses--;
+                }
+                else if (!SyntaxFacts.IsTypeName(kind) && kind is not (
+                    SyntaxKind.ReadonlyKeyword or SyntaxKind.ConstKeyword or
+                    SyntaxKind.FunctionKeyword or SyntaxKind.DotToken or
+                    SyntaxKind.StarToken or SyntaxKind.AmpersandToken or
+                    SyntaxKind.CommaToken or SyntaxKind.OpenBracketToken or
+                    SyntaxKind.CloseBracketToken)) return false;
                 continue;
             }
 

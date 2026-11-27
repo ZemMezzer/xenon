@@ -65,7 +65,7 @@ public sealed partial class LlvmIrGenerator
                 EmitRuntimeCheck(_builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, invoke,
                     LLVMValueRef.CreateConstPointerNull(invoke.TypeOf), "function.valid"));
             bool returnsVoid = TypeIdentity.AreSame(callable.ReturnType, BuiltinTypes.Void);
-            LLVMValueRef resultAddress = returnsVoid ? default : _builder.BuildAlloca(_mapType(callable.ReturnType), "function.result");
+            LLVMValueRef resultAddress = returnsVoid ? default : _builder.BuildEntryAlloca(_mapType(callable.ReturnType), "function.result");
             LLVMBasicBlockRef direct = _llvmFunction.AppendBasicBlock("function.direct");
             LLVMBasicBlockRef closure = _llvmFunction.AppendBasicBlock("function.closure");
             LLVMBasicBlockRef end = _llvmFunction.AppendBasicBlock("function.end");

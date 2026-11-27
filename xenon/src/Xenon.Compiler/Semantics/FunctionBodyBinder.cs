@@ -6205,6 +6205,7 @@ internal sealed partial class FunctionBodyBinder
         BoundStaticFieldExpression => true,
         BoundIndexExpression => true,
         BoundReferenceDereferenceExpression => true,
+        BoundUnaryExpression { OperatorKind: SyntaxKind.StarToken } => true,
         BoundLifetimeValueExpression value => IsAddressable(value.Source),
         BoundAssignmentExpression => true,
         BoundInterfaceConversionExpression conversion => IsValueCopySource(conversion.Source),

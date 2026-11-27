@@ -372,6 +372,11 @@ internal static class LspCoreIntelligence
     private static void AddLanguageTokens(SyntaxTree tree,
         List<(TextSpan Span, int Type, int Modifiers, int Priority)> tokens)
     {
+        // The declaration map stores the innermost namespace for this syntax
+        // node. Every identifier in its qualified name is still a namespace.
+        foreach (SyntaxToken part in tree.Root.Namespace.NameParts)
+            tokens.Add((part.Location.Span, 0, 1, 3));
+
         foreach (SyntaxToken token in tree.Tokens)
         {
             int type = LanguageTokenType(token.Kind);
@@ -781,11 +786,11 @@ internal static class LspCoreIntelligence
 
     private static int CallEnd(SyntaxNode node) => node switch
     {
-        CallExpressionSyntax call => call.CloseParenthesisToken.IsMissing ? call.CloseParenthesisToken.Location.Span.Start : call.CloseParenthesisToken.Location.Span.End,
-        NewExpressionSyntax creation => creation.CloseDelimiterToken.IsMissing ? creation.CloseDelimiterToken.Location.Span.Start : creation.CloseDelimiterToken.Location.Span.End,
-        IndexExpressionSyntax index => index.CloseBracketToken.IsMissing ? index.CloseBracketToken.Location.Span.Start : index.CloseBracketToken.Location.Span.End,
+        CallExpressionSyntax call => call.CloseParenthesisToken.Location.Span.Start,
+        NewExpressionSyntax creation => creation.CloseDelimiterToken.Location.Span.Start,
+        IndexExpressionSyntax index => index.CloseBracketToken.Location.Span.Start,
         ConstructorDeclarationSyntax { BaseCloseParenthesisToken: { } close } =>
-            close.IsMissing ? close.Location.Span.Start : close.Location.Span.End,
+            close.Location.Span.Start,
         _ => -1,
     };
 

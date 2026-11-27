@@ -481,6 +481,20 @@ public sealed partial class Compilation
             }
         }
 
+        void MarkDefaultDispatch(TypeSymbol type)
+        {
+            if (type is LifetimeModifierTypeSymbol modifier)
+            {
+                MarkDefaultDispatch(modifier.ElementType);
+                return;
+            }
+            if (type is not StructTypeSymbol structure) return;
+            if (structure.HasVirtualDispatch)
+                MarkType(structure, TypeReachabilityReason.VirtualDispatch);
+            foreach (FieldSymbol field in structure.AllInstanceFields)
+                MarkDefaultDispatch(field.Type);
+        }
+
         void InspectMir(MirFunction function)
         {
             MarkType(function.ReturnType);
@@ -493,6 +507,9 @@ public sealed partial class Compilation
                     {
                         case MirInitializeDispatch dispatch:
                             MarkType(dispatch.Type, TypeReachabilityReason.VirtualDispatch);
+                            break;
+                        case MirAssign { Value: MirDefault value }:
+                            MarkDefaultDispatch(value.Type);
                             break;
                         case MirAssign { Value: MirInterfaceView view }:
                             MarkType(view.SourceType, TypeReachabilityReason.InterfaceDispatch);

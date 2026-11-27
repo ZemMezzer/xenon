@@ -495,6 +495,7 @@ public sealed class Workspace : IDisposable
                     (pair.Key, document.Id))))
             .ToImmutableDictionary(pair => pair.Key, pair => pair.Value);
         var built = new Dictionary<ProjectId, ProjectSnapshot>();
+        var unchangedCompilationInputs = new HashSet<ProjectId>();
         int invalidated = 0, reused = 0, compilationsRebuilt = 0, compilationsReused = 0;
         int semanticReused = 0, symbolRebuilt = 0, symbolDocumentsReused = 0;
         int referenceRebuilt = 0, referenceDocumentsReused = 0;
@@ -514,6 +515,7 @@ public sealed class Workspace : IDisposable
             if (!directChanged && !dependencyChanged)
             {
                 built.Add(id, old);
+                unchangedCompilationInputs.Add(id);
                 reused++;
                 compilationsReused++;
                 semanticReused += old.Documents.Length;
@@ -525,10 +527,17 @@ public sealed class Workspace : IDisposable
             invalidated++;
             ImmutableArray<DocumentSnapshot> projectDocuments = documents[id];
             DocumentChangeKind kind = mutation?.Kind ?? DocumentChangeKind.None;
-            bool sameCompilationInputs = !dependencyChanged && mutation is not { ConfigurationChanged: true } &&
+            // Opening/closing an unchanged editor overlay creates new document
+            // generations, but must not invalidate the entire dependency graph.
+            // Keep snapshots current while reusing compilation inputs transitively.
+            bool sameDependencyInputs = old.ProjectReferences.Length == references.Length &&
+                old.ProjectReferences.Zip(references).All(pair =>
+                    pair.First.Id == pair.Second.Id && unchangedCompilationInputs.Contains(pair.Second.Id));
+            bool sameCompilationInputs = sameDependencyInputs && mutation is not { ConfigurationChanged: true } &&
                 old.LibraryFingerprint == ProjectSnapshot.CreateLibraryFingerprint(configuration) &&
                 old.Documents.Length == projectDocuments.Length && old.Documents.Zip(projectDocuments)
                     .All(pair => ReferenceEquals(pair.First.SyntaxTree, pair.Second.SyntaxTree));
+            if (sameCompilationInputs) unchangedCompilationInputs.Add(id);
             Compilation? reusableCompilation = sameCompilationInputs ? old.TryGetCachedCompilation() : null;
             if (reusableCompilation is null) compilationsRebuilt++;
             else

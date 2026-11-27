@@ -512,7 +512,7 @@ internal sealed unsafe class LlvmCAbiMarshaller
             }
 
             LLVMTypeRef storageType = GetParameterStorageType(parameter);
-            LLVMValueRef storage = _builder.BuildAlloca(storageType, "abi.argument.storage");
+            LLVMValueRef storage = _builder.BuildEntryAlloca(storageType, "abi.argument.storage");
             if (parameter.PhysicalTypes.Length == 1)
             {
                 _builder.BuildStore(function.GetParam(physicalIndex++), storage);
@@ -548,7 +548,7 @@ internal sealed unsafe class LlvmCAbiMarshaller
         LLVMValueRef resultStorage = default;
         if (plan.Return.IsIndirect)
         {
-            resultStorage = _builder.BuildAlloca(plan.Return.LogicalLlvmType, "abi.result.storage");
+            resultStorage = _builder.BuildEntryAlloca(plan.Return.LogicalLlvmType, "abi.result.storage");
             physical.Add(resultStorage);
         }
 
@@ -568,7 +568,7 @@ internal sealed unsafe class LlvmCAbiMarshaller
             return _builder.BuildLoad2(plan.Return.LogicalLlvmType, resultStorage, name);
         if (plan.Return.IsIdentity)
             return call;
-        LLVMValueRef storage = _builder.BuildAlloca(plan.Return.PhysicalType, "abi.result.coerce");
+        LLVMValueRef storage = _builder.BuildEntryAlloca(plan.Return.PhysicalType, "abi.result.coerce");
         _builder.BuildStore(call, storage);
         return _builder.BuildLoad2(plan.Return.LogicalLlvmType, storage, name);
     }
@@ -594,7 +594,7 @@ internal sealed unsafe class LlvmCAbiMarshaller
             _builder.BuildRet(logicalResult);
             return;
         }
-        LLVMValueRef storage = _builder.BuildAlloca(plan.Return.PhysicalType, "abi.return.coerce");
+        LLVMValueRef storage = _builder.BuildEntryAlloca(plan.Return.PhysicalType, "abi.return.coerce");
         _builder.BuildStore(logicalResult, storage);
         _builder.BuildRet(_builder.BuildLoad2(plan.Return.PhysicalType, storage, "abi.return"));
     }
@@ -617,14 +617,14 @@ internal sealed unsafe class LlvmCAbiMarshaller
         }
         if (parameter.IsIndirect)
         {
-            LLVMValueRef storage = _builder.BuildAlloca(parameter.LogicalLlvmType, "abi.argument.copy");
+            LLVMValueRef storage = _builder.BuildEntryAlloca(parameter.LogicalLlvmType, "abi.argument.copy");
             _builder.BuildStore(logical, storage);
             physical.Add(storage);
             return;
         }
 
         LLVMTypeRef storageType = GetParameterStorageType(parameter);
-        LLVMValueRef storageAddress = _builder.BuildAlloca(storageType, "abi.argument.coerce");
+        LLVMValueRef storageAddress = _builder.BuildEntryAlloca(storageType, "abi.argument.coerce");
         _builder.BuildStore(logical, storageAddress);
         if (parameter.PhysicalTypes.Length == 1)
         {

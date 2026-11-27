@@ -147,8 +147,39 @@ public sealed class MirStorageOrigins(MirFunction function) :
                 },
                 _ => BuiltinTypes.Error,
             };
+            if (source.Terminator is MirCall && resultType is PointerTypeSymbol resultPointer)
+            {
+                // Input owners are conservative lifetime dependencies, not proof
+                // that the returned pointer addresses the receiver itself. For
+                // example, Vector<T>.Get returns T*, never Vector<T>*.
+                origin = origin with
+                {
+                    Addresses = origin.Addresses.Where(address =>
+                        TypeIdentity.AreSame(AddressType(address), resultPointer.ElementType)).ToImmutableHashSet()
+                };
+            }
             state = Write(destination, CarriesStorage(resultType) ? origin : MirStorageOrigin.Empty, state);
         }
         return state;
+    }
+
+    private TypeSymbol AddressType(MirPlace place)
+    {
+        TypeSymbol type = function.Locals.First(local => local.Id == place.Local).Type;
+        foreach (MirProjection projection in place.Projections)
+        {
+            type = projection switch
+            {
+                MirFieldProjection field => field.Field.Type,
+                MirDerefProjection when type is PointerTypeSymbol pointer => pointer.ElementType,
+                MirDerefProjection when type is ReferenceTypeSymbol reference => reference.ElementType,
+                MirLifetimeProjection when type is LifetimeModifierTypeSymbol lifetime => lifetime.ElementType,
+                MirOwnerStorageProjection when type is OwnershipTypeSymbol owner => owner.StorageType,
+                MirIndexProjection or MirLinearIndexProjection when type is ArrayTypeSymbol array => array.ElementType,
+                MirIndexProjection when type is PointerTypeSymbol pointer => pointer.ElementType,
+                _ => BuiltinTypes.Error,
+            };
+        }
+        return type;
     }
 }

@@ -22,7 +22,7 @@ public sealed partial class MirPointerLifetimeAnalysis
             {
                 cancellation.ThrowIfCancellationRequested();
                 var origins = new MirReferenceOrigins(body, pointerLifetimes: true, pointerReturns: summaries, symbolicPointerParameters: true);
-                var flow = MirDataflow.Solve(graphs[body.Symbol], origins, cancellation);
+                var flow = MirDataflow.Solve(graphs[body.Symbol], origins, cancellation, captureLocations: false);
                 var summary = MirReferenceValue.Empty;
                 foreach (var block in body.Blocks.Where(block => flow.Graph.Reachable.Contains(block.Id)))
                     if (block.Terminator is MirReturn { Value: { } value }) summary = summary.Union(origins.Operand(value, flow.Output[block.Id]));

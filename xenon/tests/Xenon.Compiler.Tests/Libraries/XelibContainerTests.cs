@@ -15,6 +15,31 @@ namespace Xenon.Compiler.Tests.Libraries;
 
 public sealed class XelibContainerTests
 {
+    [Fact]
+    public void NestedDefaultValueRetainsImportedDispatchTable()
+    {
+        Compilation library = Compilation.Create(SourceText.From("""
+            namespace NestedDefault;
+            public interface IValue { int Read(); }
+            public sealed struct Value : IValue
+            {
+                public int Data;
+                public int Read() { return Data; }
+            }
+            """));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("NestedDefault")));
+        Compilation application = Compilation.Create(new CompilationOptions(), [reference], SourceText.From("""
+            using NestedDefault;
+            namespace App;
+            struct Container { public Value Item; }
+            int Main() { Container value = Container(); return value.Item.Data; }
+            """));
+        Assert.False(application.HasErrors, string.Join(Environment.NewLine, application.Diagnostics));
+        string ir = new LlvmIrGenerator().GenerateForTarget(application, LlvmTargetOptions.CreateHost());
+        Assert.Contains("vtable", ir, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("", true)]
     [InlineData("public ReadonlyView(T* data) { _data = data; }", false)]

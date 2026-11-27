@@ -9,6 +9,77 @@ namespace Xenon.Compiler.Tests.Mir;
 
 public sealed class MirHandleLifetimeTests
 {
+    [Fact]
+    public void CopyThroughRawPointerRetainsNestedSharedFields()
+    {
+        var compilation = Compilation.Create(SourceText.From("""
+            namespace PointerCopy;
+            struct Text { public shared<int> Buffer; }
+            struct Layer { public Text Name; public int Flags; }
+            Layer Copy(Layer* source) { return *source; }
+            """));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+        MirFunction copy = compilation.GetMirFunctions().Single(body => body.Symbol.Name == "Copy");
+        Assert.Contains(copy.Blocks.Select(block => block.Terminator),
+            terminator => terminator is MirIntrinsicCall { Intrinsic: MirIntrinsicKind.CloneValue });
+        string ir = new LlvmIrGenerator().GenerateForTarget(compilation, LlvmTargetOptions.CreateHost());
+        Assert.Contains("shared.retain", ir, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CopyThroughRawPointerStillRejectsUniqueFields()
+    {
+        var compilation = Compilation.Create(SourceText.From("""
+            namespace PointerCopy;
+            struct Value { public unique<int> Buffer; }
+            Value Copy(Value* source) { return *source; }
+            """));
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == DiagnosticIds.ValueNotCopyable);
+    }
+
+    [Fact]
+    public void ContainerElementPointerDoesNotAliasContainerFields()
+    {
+        var compilation = Compilation.Create(SourceText.From("""
+            namespace ElementPointer;
+            struct Item { public int Value; }
+            struct Buffer {
+                public Item* Data;
+                public Item* Get() { return Data; }
+            }
+            int Read(Item* data) {
+                Buffer buffer = Buffer { data };
+                return buffer.Get()->Value;
+            }
+            """));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Theory]
+    [InlineData("shared<byte[]>", "readonly byte*")]
+    [InlineData("unique<storage<int>[]>", "int*")]
+    public void PointerIntoOwnedArrayFieldDoesNotReferToTemporaryHandle(string owner, string result)
+    {
+        var compilation = Compilation.Create(SourceText.From($$"""
+            namespace OwnerArrayPointer;
+            struct Buffer {
+                public {{owner}} Data;
+                public {{result}} Get(int index) { return &Data[index]; }
+            }
+            """, "owned-array-pointer.xe"));
+        Assert.False(compilation.HasErrors, string.Join(Environment.NewLine, compilation.Diagnostics));
+    }
+
+    [Fact]
+    public void PointerIntoLocalOwnedArrayCannotEscapeItsOwner()
+    {
+        var compilation = Compilation.Create(SourceText.From("""
+            namespace OwnerArrayPointer;
+            int* Bad() { unique<int[]> values = new int[2]; return &values[0]; }
+            """));
+        Assert.True(compilation.HasErrors);
+    }
+
     [Theory]
     [InlineData("shared<State>", "readonly Box&")]
     [InlineData("shared<State>", "Box&")]
