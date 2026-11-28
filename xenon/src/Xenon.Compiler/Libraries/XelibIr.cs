@@ -304,6 +304,7 @@ public enum XelibBodyOpcode : ushort
     Try = 12,
     Catch = 13,
     Throw = 14,
+    DoWhile = 15,
     Literal = 20,
     Variable = 21,
     This = 22,

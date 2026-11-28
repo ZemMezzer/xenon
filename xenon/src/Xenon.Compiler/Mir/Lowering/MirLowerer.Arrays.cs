@@ -20,6 +20,7 @@ public sealed partial class MirLowerer
                 BoundThrowStatement { Expression: { } value } => [value],
                 BoundIfStatement value => [value.Condition],
                 BoundWhileStatement value => [value.Condition],
+                BoundDoWhileStatement value => [value.Condition],
                 BoundForStatement value => new BoundNode?[] { value.Condition, value.Increment }.OfType<BoundNode>(),
                 BoundSwitchStatement value => [value.Expression],
                 _ => [],

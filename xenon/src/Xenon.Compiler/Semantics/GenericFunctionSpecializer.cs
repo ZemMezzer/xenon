@@ -173,6 +173,9 @@ internal sealed class GenericFunctionSpecializer
             case BoundWhileStatement loop:
                 ValidateLibraryExceptionTypes(loop.Body, location);
                 break;
+            case BoundDoWhileStatement loop:
+                ValidateLibraryExceptionTypes(loop.Body, location);
+                break;
             case BoundForStatement loop:
                 if (loop.Initializer is not null)
                     ValidateLibraryExceptionTypes(loop.Initializer, location);

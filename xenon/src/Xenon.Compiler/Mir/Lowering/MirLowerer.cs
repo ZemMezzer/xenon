@@ -236,13 +236,16 @@ public sealed partial class MirLowerer
                 break;
             }
             case BoundWhileStatement loop:
-                Loop(null, loop.Condition, null, loop.Body);
+                Loop(loop.Condition, null, loop.Body);
+                break;
+            case BoundDoWhileStatement loop:
+                Loop(loop.Condition, null, loop.Body, bodyFirst: true);
                 break;
             case BoundForStatement { Initializer: { } loopInitializer } loop:
                 ScopedBlock(new BoundBlockStatement([loopInitializer, loop with { Initializer = null }]));
                 break;
             case BoundForStatement loop:
-                Loop(null, loop.Condition, loop.Increment, loop.Body);
+                Loop(loop.Condition, loop.Increment, loop.Body);
                 break;
             case BoundBreakStatement when _diagnosticRecovery && _breaks.Count == 0: break;
             case BoundContinueStatement when _diagnosticRecovery && _continues.Count == 0: break;
@@ -266,11 +269,10 @@ public sealed partial class MirLowerer
         }
     }
 
-    private void Loop(BoundStatement? initializer, BoundExpression? condition, BoundExpression? increment, BoundStatement body)
+    private void Loop(BoundExpression? condition, BoundExpression? increment, BoundStatement body, bool bodyFirst = false)
     {
-        if (initializer is not null) Statement(initializer);
         Block test = NewBlock(), iteration = NewBlock(), step = NewBlock(), exit = NewBlock();
-        Jump(test);
+        Jump(bodyFirst ? iteration : test);
         _current = test;
         if (condition is null) Jump(iteration);
         else Condition(condition, iteration, exit);

@@ -108,6 +108,18 @@ public sealed record WhileStatementSyntax(
     public override SyntaxKind Kind => SyntaxKind.WhileStatement;
 }
 
+public sealed record DoWhileStatementSyntax(
+    SyntaxToken DoKeyword,
+    StatementSyntax Body,
+    SyntaxToken WhileKeyword,
+    SyntaxToken OpenParenthesisToken,
+    ExpressionSyntax Condition,
+    SyntaxToken CloseParenthesisToken,
+    SyntaxToken SemicolonToken) : StatementSyntax
+{
+    public override SyntaxKind Kind => SyntaxKind.DoWhileStatement;
+}
+
 public sealed record ForStatementSyntax(
     SyntaxToken ForKeyword,
     SyntaxToken OpenParenthesisToken,

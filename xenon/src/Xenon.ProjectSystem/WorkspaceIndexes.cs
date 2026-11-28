@@ -490,6 +490,10 @@ internal static class WorkspaceIndexBuilder
                 foreach (VariableDeclarationStatementSyntax declaration in EnumerateLocalDeclarations(@while.Body))
                     yield return declaration;
                 break;
+            case DoWhileStatementSyntax loop:
+                foreach (VariableDeclarationStatementSyntax declaration in EnumerateLocalDeclarations(loop.Body))
+                    yield return declaration;
+                break;
             case ForStatementSyntax @for:
                 if (@for.Initializer is not null)
                     foreach (VariableDeclarationStatementSyntax declaration in EnumerateLocalDeclarations(@for.Initializer))

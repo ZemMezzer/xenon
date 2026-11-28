@@ -58,6 +58,7 @@ public static class SyntaxFacts
             ["if"] = SyntaxKind.IfKeyword,
             ["else"] = SyntaxKind.ElseKeyword,
             ["while"] = SyntaxKind.WhileKeyword,
+            ["do"] = SyntaxKind.DoKeyword,
             ["for"] = SyntaxKind.ForKeyword,
             ["break"] = SyntaxKind.BreakKeyword,
             ["continue"] = SyntaxKind.ContinueKeyword,

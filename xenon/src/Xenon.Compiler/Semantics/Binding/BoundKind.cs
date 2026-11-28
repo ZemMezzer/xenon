@@ -8,6 +8,7 @@ public enum BoundKind
     ExpressionStatement,
     IfStatement,
     WhileStatement,
+    DoWhileStatement,
     ForStatement,
     SwitchStatement,
     ArrayMetadataExpression,

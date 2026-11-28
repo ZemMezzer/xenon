@@ -1409,6 +1409,11 @@ internal sealed class Parser
             return ParseWhileStatement();
         }
 
+        if (Current.Kind == SyntaxKind.DoKeyword)
+        {
+            return ParseDoWhileStatement();
+        }
+
         if (Current.Kind == SyntaxKind.ForKeyword)
         {
             return ParseForStatement();
@@ -1558,6 +1563,18 @@ internal sealed class Parser
         SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
         StatementSyntax body = ParseStatement();
         return new WhileStatementSyntax(whileKeyword, openParenthesis, condition, closeParenthesis, body);
+    }
+
+    private DoWhileStatementSyntax ParseDoWhileStatement()
+    {
+        SyntaxToken doKeyword = MatchToken(SyntaxKind.DoKeyword);
+        StatementSyntax body = ParseStatement();
+        SyntaxToken whileKeyword = MatchToken(SyntaxKind.WhileKeyword);
+        SyntaxToken openParenthesis = MatchToken(SyntaxKind.OpenParenthesisToken);
+        ExpressionSyntax condition = ParseExpression();
+        SyntaxToken closeParenthesis = MatchToken(SyntaxKind.CloseParenthesisToken);
+        SyntaxToken semicolon = MatchToken(SyntaxKind.SemicolonToken);
+        return new DoWhileStatementSyntax(doKeyword, body, whileKeyword, openParenthesis, condition, closeParenthesis, semicolon);
     }
 
     private ForStatementSyntax ParseForStatement()

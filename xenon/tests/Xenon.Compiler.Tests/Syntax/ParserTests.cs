@@ -8,6 +8,17 @@ namespace Xenon.Compiler.Tests.Syntax;
 public sealed class ParserTests
 {
     [Fact]
+    public void Parser_RecoversAtStatementAfterMissingDoWhileSemicolon()
+    {
+        SyntaxTree tree = Parse("namespace Example; void Run() { do {} while (false) return; }");
+        Assert.Single(tree.Diagnostics);
+        var function = Assert.IsType<FunctionDeclarationSyntax>(Assert.Single(tree.Root.Members));
+        var loop = Assert.IsType<DoWhileStatementSyntax>(function.Body!.Statements[0]);
+        Assert.True(loop.SemicolonToken.IsMissing);
+        Assert.IsType<ReturnStatementSyntax>(function.Body.Statements[1]);
+    }
+
+    [Fact]
     public void Parser_CaseLabelCanPrecedePointerMemberAssignment()
     {
         SyntaxTree tree = Parse("namespace Example; void Run(int value, Item* item) { switch (value) { case 1: item->Value = 2; return; default: return; } }");
