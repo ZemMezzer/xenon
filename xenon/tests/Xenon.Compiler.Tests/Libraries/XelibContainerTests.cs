@@ -16,6 +16,20 @@ namespace Xenon.Compiler.Tests.Libraries;
 public sealed class XelibContainerTests
 {
     [Fact]
+    public void DoWhileRoundTripsThroughLibraryBody()
+    {
+        Compilation library = Compilation.Create(SourceText.From(
+            "namespace Loops; public int Count(int limit) { int n = 0; do n++; while (n < limit); return n; }"));
+        LibraryCompilationReference reference = XelibReader.Read(
+            XelibWriter.Write(library, new XelibWriteOptions("Loops")));
+        Compilation app = Compilation.Create(new CompilationOptions(), [reference], SourceText.From(
+            "using Loops; namespace App; int Main() { return Count(0); }"));
+        Assert.Empty(app.Diagnostics);
+        var count = Assert.Single(app.GetStaticImplementationFunctions(), function => function.Symbol.Name == "Count");
+        Assert.Contains(count.Body.Statements, statement => statement is BoundDoWhileStatement);
+    }
+
+    [Fact]
     public void NestedDefaultValueRetainsImportedDispatchTable()
     {
         Compilation library = Compilation.Create(SourceText.From("""

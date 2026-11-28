@@ -36,43 +36,56 @@ public sealed record BoundThrowStatement(BoundExpression? Expression) : BoundSta
 
 public static class BoundControlFlow
 {
-    public static bool AlwaysReturns(BoundStatement statement) => statement switch
-    {
-        BoundReturnStatement or BoundThrowStatement => true,
-        BoundBlockStatement block => BlockReturns(block),
-        BoundIfStatement { ElseStatement: not null } conditional => AlwaysReturns(conditional.ThenStatement) && AlwaysReturns(conditional.ElseStatement),
-        BoundSwitchStatement selection => selection.Sections.Any(section => section.Value is null) &&
-            selection.Sections.All(section => section.Body.Statements.IsEmpty || AlwaysReturns(section.Body)),
-        BoundTryStatement @try => TryAlwaysReturns(@try),
-        _ => false,
-    };
+    [Flags]
+    private enum Exit { None = 0, Fallthrough = 1, Break = 2, Continue = 4 }
 
-    public static bool TerminatesSection(BoundStatement statement) => statement switch
-    {
-        BoundBreakStatement or BoundReturnStatement or BoundContinueStatement or BoundThrowStatement => true,
-        BoundBlockStatement block => block.Statements.Any(TerminatesSection),
-        BoundIfStatement { ElseStatement: not null } conditional => TerminatesSection(conditional.ThenStatement) && TerminatesSection(conditional.ElseStatement),
-        BoundTryStatement region =>
-            (region.FinallyBody is not null && TerminatesSection(region.FinallyBody)) ||
-            (TerminatesSection(region.Body) && region.Catches.All(handler => TerminatesSection(handler.Body))),
-        _ => AlwaysReturns(statement),
-    };
+    public static bool AlwaysReturns(BoundStatement statement) => PossibleExits(statement) == Exit.None;
 
-    private static bool BlockReturns(BoundBlockStatement block)
+    public static bool TerminatesSection(BoundStatement statement) =>
+        (PossibleExits(statement) & Exit.Fallthrough) == 0;
+
+    // Track exits that can reach another statement. Return and throw leave the function
+    // or protected region, so neither contributes a fallthrough, break or continue.
+    private static Exit PossibleExits(BoundStatement statement)
     {
-        foreach (BoundStatement statement in block.Statements)
+        switch (statement)
         {
-            if (AlwaysReturns(statement)) return true;
-            if (TerminatesSection(statement)) return false;
+            case BoundReturnStatement or BoundThrowStatement: return Exit.None;
+            case BoundBreakStatement: return Exit.Break;
+            case BoundContinueStatement: return Exit.Continue;
+            case BoundBlockStatement block:
+                Exit exits = Exit.Fallthrough;
+                foreach (BoundStatement child in block.Statements)
+                {
+                    if ((exits & Exit.Fallthrough) == 0) break;
+                    exits = (exits & ~Exit.Fallthrough) | PossibleExits(child);
+                }
+                return exits;
+            case BoundIfStatement conditional:
+                return PossibleExits(conditional.ThenStatement) |
+                    (conditional.ElseStatement is { } other ? PossibleExits(other) : Exit.Fallthrough);
+            case BoundDoWhileStatement loop:
+                return PossibleExits(loop.Body) == Exit.None ? Exit.None : Exit.Fallthrough;
+            case BoundSwitchStatement selection:
+                Exit sections = selection.Sections.Any(section => section.Value is null) ? Exit.None : Exit.Fallthrough;
+                Exit next = Exit.Fallthrough;
+                for (int i = selection.Sections.Length - 1; i >= 0; i--)
+                {
+                    BoundBlockStatement body = selection.Sections[i].Body;
+                    if (!body.Statements.IsEmpty) next = PossibleExits(body);
+                    sections |= next;
+                }
+                if ((sections & Exit.Break) != 0) sections = (sections & ~Exit.Break) | Exit.Fallthrough;
+                return sections;
+            case BoundTryStatement region:
+                Exit finalizer = region.FinallyBody is { } cleanup ? PossibleExits(cleanup) : Exit.Fallthrough;
+                if ((finalizer & Exit.Fallthrough) == 0) return finalizer;
+                Exit handlers = PossibleExits(region.Body);
+                foreach (var handler in region.Catches) handlers |= PossibleExits(handler.Body);
+                return handlers | (finalizer & ~Exit.Fallthrough);
+            default:
+                return Exit.Fallthrough;
         }
-        return false;
-    }
-
-    private static bool TryAlwaysReturns(BoundTryStatement statement)
-    {
-        if (statement.FinallyBody is not null && AlwaysReturns(statement.FinallyBody)) return true;
-        return AlwaysReturns(statement.Body) &&
-            statement.Catches.All(@catch => AlwaysReturns(@catch.Body));
     }
 }
 
@@ -123,6 +136,13 @@ public sealed record BoundWhileStatement(
     BoundStatement Body) : BoundStatement
 {
     public override BoundKind Kind => BoundKind.WhileStatement;
+}
+
+public sealed record BoundDoWhileStatement(
+    BoundStatement Body,
+    BoundExpression Condition) : BoundStatement
+{
+    public override BoundKind Kind => BoundKind.DoWhileStatement;
 }
 
 public sealed record BoundForStatement(

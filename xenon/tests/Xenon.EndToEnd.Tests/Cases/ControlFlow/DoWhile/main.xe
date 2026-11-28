@@ -1,0 +1,33 @@
+namespace ControlFlow;
+
+int Once()
+{
+    do return 42; while (false);
+}
+
+int Main()
+{
+    int runs = 0;
+    do runs++; while (false);
+    if (runs != 1) return 1;
+
+    int checks = 0;
+    do
+    {
+        runs++;
+        if (runs < 4) continue;
+        break;
+    } while (++checks < 5);
+    if (runs != 4 || checks != 2) return 2;
+
+    int outer = 0;
+    int inner = 0;
+    do
+    {
+        do { inner++; break; } while (true);
+        outer++;
+        continue;
+    } while (outer < 3);
+    if (inner != 3) return 3;
+    return Once();
+}

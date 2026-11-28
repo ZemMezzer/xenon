@@ -9,6 +9,17 @@ namespace Xenon.Compiler.Tests.Semantics;
 
 public sealed class SemanticAnalyzerTests
 {
+    [Theory]
+    [InlineData("do {} while (1); return 0;", DiagnosticIds.InvalidCondition)]
+    [InlineData("do { bool local = false; } while (local); return 0;", DiagnosticIds.UnknownIdentifier)]
+    [InlineData("do { if (flag) break; return 1; } while (flag);", DiagnosticIds.MissingReturn)]
+    [InlineData("do { if (flag) continue; return 1; } while (flag);", DiagnosticIds.MissingReturn)]
+    public void Analyzer_ReportsInvalidDoWhile(string body, string diagnosticId)
+    {
+        var compilation = CreateCompilation("namespace Example; int F(bool flag) { " + body + " }");
+        Assert.Contains(compilation.Diagnostics, diagnostic => diagnostic.Id == diagnosticId);
+    }
+
 
     [Theory]
     [InlineData("int x = 0; x /= 1.5f;")]

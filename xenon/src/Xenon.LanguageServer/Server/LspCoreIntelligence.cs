@@ -411,7 +411,7 @@ internal static class LspCoreIntelligence
         SyntaxKind.NewKeyword or SyntaxKind.MoveKeyword or SyntaxKind.LockKeyword or SyntaxKind.AwaitKeyword => 17,
         SyntaxKind.FreeKeyword => 18,
         SyntaxKind.SwitchKeyword or SyntaxKind.CaseKeyword or SyntaxKind.DefaultKeyword or
-            SyntaxKind.IfKeyword or SyntaxKind.ElseKeyword or SyntaxKind.WhileKeyword or
+            SyntaxKind.IfKeyword or SyntaxKind.ElseKeyword or SyntaxKind.WhileKeyword or SyntaxKind.DoKeyword or
             SyntaxKind.ForKeyword or SyntaxKind.BreakKeyword or SyntaxKind.ContinueKeyword or
             SyntaxKind.ReturnKeyword => 19,
         SyntaxKind.UsingKeyword or SyntaxKind.NamespaceKeyword or SyntaxKind.StructKeyword or SyntaxKind.AllocatorKeyword or

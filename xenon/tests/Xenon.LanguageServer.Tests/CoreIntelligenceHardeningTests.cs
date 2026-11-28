@@ -519,6 +519,20 @@ public sealed class CoreIntelligenceHardeningTests
     }
 
     [Fact]
+    public async Task DoWhileKeywordsReceiveControlFlowTokens()
+    {
+        const string source = "namespace App; void Run() { do {} while (false); }";
+        using var directory = new TestDirectory();
+        string uri = DocumentUri.FromPath(directory.Write("main.xe", source)).AbsoluteUri;
+        await using var session = await CreateSessionAsync(uri, null, source);
+        JsonElement response = Result(await session.HandleRequestAsync("textDocument/semanticTokens/full",
+            LspTestProtocol.Json(new { textDocument = new { uri } }), default));
+        var tokens = DecodeTokens(source, response.GetProperty("data"));
+        Assert.Equal(19, tokens.Single(token => token.Text == "do").Type);
+        Assert.Equal(19, tokens.Single(token => token.Text == "while").Type);
+    }
+
+    [Fact]
     public async Task CompletionUsesReferencedProjectNamespacesAndCompilerKeywordSet()
     {
         using var directory = new TestDirectory();

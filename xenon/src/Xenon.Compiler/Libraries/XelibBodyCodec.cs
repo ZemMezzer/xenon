@@ -246,6 +246,9 @@ public static class XelibBodyCodec
             case BoundWhileStatement value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.While,
                     Children = [E(value.Condition), E(value.Body)] };
+            case BoundDoWhileStatement value:
+                return new XelibBodyNode { Opcode = XelibBodyOpcode.DoWhile,
+                    Children = [E(value.Body), E(value.Condition)] };
             case BoundForStatement value:
                 return new XelibBodyNode { Opcode = XelibBodyOpcode.For,
                     Flag1 = value.Initializer is not null, Flag2 = value.Condition is not null,
@@ -562,6 +565,7 @@ public static class XelibBodyCodec
             case XelibBodyOpcode.ExpressionStatement: return new BoundExpressionStatement(E(0));
             case XelibBodyOpcode.If: return new BoundIfStatement(E(0), S(1), node.Flag1 ? S(2) : null);
             case XelibBodyOpcode.While: return new BoundWhileStatement(E(0), S(1));
+            case XelibBodyOpcode.DoWhile: return new BoundDoWhileStatement(S(0), E(1));
             case XelibBodyOpcode.For:
             {
                 int index = 0;
@@ -866,7 +870,7 @@ public static class XelibBodyCodec
     {
         int minimum = node.Opcode switch
         {
-            XelibBodyOpcode.ExpressionStatement or XelibBodyOpcode.While or XelibBodyOpcode.Unary or
+            XelibBodyOpcode.ExpressionStatement or XelibBodyOpcode.Unary or
             XelibBodyOpcode.Move or XelibBodyOpcode.Copy or XelibBodyOpcode.UniqueAdoption or
             XelibBodyOpcode.SharedAdoption or XelibBodyOpcode.WeakConversion or XelibBodyOpcode.Lock or
             XelibBodyOpcode.FullExpression or XelibBodyOpcode.MemberAccess or XelibBodyOpcode.Cast or
@@ -874,6 +878,7 @@ public static class XelibBodyCodec
             XelibBodyOpcode.ReferenceDereference or XelibBodyOpcode.LifetimeValue or
             XelibBodyOpcode.ExplicitDestruct or XelibBodyOpcode.StorageMove or XelibBodyOpcode.Free or
             XelibBodyOpcode.Delete or XelibBodyOpcode.RawAllocation => 1,
+            XelibBodyOpcode.While or XelibBodyOpcode.DoWhile or
             XelibBodyOpcode.Await or XelibBodyOpcode.If or XelibBodyOpcode.Binary or XelibBodyOpcode.Assignment or
             XelibBodyOpcode.Swap or XelibBodyOpcode.PropertySet or XelibBodyOpcode.InterfacePropertySet => 2,
             XelibBodyOpcode.CompareExchange => 3,

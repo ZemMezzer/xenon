@@ -27,6 +27,13 @@ internal sealed partial class FunctionBodyBinder
     private int _switchDepth;
     private int _catchDepth;
     private readonly Stack<(int LoopDepth, List<HashSet<FieldSymbol>> Exits)> _switchExits = [];
+    private sealed class DoWhileBindings(int loopDepth)
+    {
+        public int LoopDepth { get; } = loopDepth;
+        public ReferenceBindingState? Breaks { get; set; }
+        public ReferenceBindingState? Continues { get; set; }
+    }
+    private readonly Stack<DoWhileBindings> _doWhileExits = [];
     private bool _bindingBaseConstructorArguments;
     private bool _suppressIntegerOperationDiagnostics;
 
@@ -613,6 +620,7 @@ internal sealed partial class FunctionBodyBinder
         ExpressionStatementSyntax expression => new BoundExpressionStatement(BindDiscardedExpression(expression.Expression)),
         IfStatementSyntax @if => BindIfStatement(@if),
         WhileStatementSyntax @while => BindWhileStatement(@while),
+        DoWhileStatementSyntax loop => BindDoWhileStatement(loop),
         ForStatementSyntax @for => BindForStatement(@for),
         SwitchStatementSyntax @switch => BindSwitchStatement(@switch),
         BreakStatementSyntax @break => BindBreakStatement(@break),
@@ -899,6 +907,28 @@ internal sealed partial class FunctionBodyBinder
         return new BoundWhileStatement(condition, body);
     }
 
+    private BoundDoWhileStatement BindDoWhileStatement(DoWhileStatementSyntax syntax)
+    {
+        _loopDepth++;
+        var exits = new DoWhileBindings(_loopDepth);
+        _doWhileExits.Push(exits);
+        BoundStatement body = BindEmbeddedStatement(syntax.Body);
+        _doWhileExits.Pop();
+        _loopDepth--;
+
+        ReferenceBindingState? fallthrough = BoundControlFlow.TerminatesSection(body) ? null : CaptureReferenceBindingState();
+        ReferenceBindingState? beforeCondition = MergeReferenceBindingState(fallthrough, exits.Continues);
+        if (beforeCondition is not null) RestoreReferenceBindingState(beforeCondition);
+        _repeatedEvaluationDepth++;
+        BoundExpression condition;
+        try { condition = BindBooleanCondition(syntax.Condition); }
+        finally { _repeatedEvaluationDepth--; }
+        ReferenceBindingState? afterCondition = beforeCondition is null ? null : BooleanFlow(condition).False;
+        if (MergeReferenceBindingState(afterCondition, exits.Breaks) is { } afterLoop)
+            RestoreReferenceBindingState(afterLoop);
+        return new BoundDoWhileStatement(body, condition);
+    }
+
     private BoundForStatement BindForStatement(ForStatementSyntax syntax)
     {
         BoundScope previous = _scope;
@@ -1026,6 +1056,10 @@ internal sealed partial class FunctionBodyBinder
         {
             context.Exits.Add(new HashSet<FieldSymbol>(_boundReferenceFields));
         }
+        else if (_doWhileExits.TryPeek(out var loop) && loop.LoopDepth == _loopDepth)
+        {
+            loop.Breaks = MergeReferenceBindingState(loop.Breaks, CaptureReferenceBindingState());
+        }
         if (_loopDepth == 0 && _switchDepth == 0)
         {
             _diagnostics.Report(syntax.BreakKeyword.Location, "'break' can only be used inside a loop or switch",
@@ -1041,6 +1075,8 @@ internal sealed partial class FunctionBodyBinder
 
     private BoundContinueStatement BindContinueStatement(ContinueStatementSyntax syntax)
     {
+        if (_doWhileExits.TryPeek(out var loop) && loop.LoopDepth == _loopDepth)
+            loop.Continues = MergeReferenceBindingState(loop.Continues, CaptureReferenceBindingState());
         if (_loopDepth == 0)
         {
             _diagnostics.Report(syntax.ContinueKeyword.Location, "'continue' can only be used inside a loop",
@@ -6741,6 +6777,7 @@ internal sealed partial class FunctionBodyBinder
         IfStatementSyntax @if when @if.ElseStatement is not null => GetStatementEnd(@if.ElseStatement),
         IfStatementSyntax @if => GetStatementEnd(@if.ThenStatement),
         WhileStatementSyntax @while => GetStatementEnd(@while.Body),
+        DoWhileStatementSyntax loop => (loop.SemicolonToken.Location.Span.End, loop.SemicolonToken.IsMissing),
         ForStatementSyntax @for => GetStatementEnd(@for.Body),
         BreakStatementSyntax @break => (@break.SemicolonToken.Location.Span.End,@break.SemicolonToken.IsMissing),
         ContinueStatementSyntax @continue => (@continue.SemicolonToken.Location.Span.End,@continue.SemicolonToken.IsMissing),

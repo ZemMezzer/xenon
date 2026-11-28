@@ -19,6 +19,7 @@ internal static class BoundTree
         BoundIfStatement value => new BoundNode?[]
             { value.Condition, value.ThenStatement, value.ElseStatement }.OfType<BoundNode>(),
         BoundWhileStatement value => [value.Condition, value.Body],
+        BoundDoWhileStatement value => [value.Body, value.Condition],
         BoundForStatement value => new BoundNode?[]
             { value.Initializer, value.Condition, value.Increment, value.Body }.OfType<BoundNode>(),
         BoundSwitchStatement value => new[] { value.Expression }.Concat(value.Sections.SelectMany(section =>
